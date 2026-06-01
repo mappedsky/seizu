@@ -13,6 +13,7 @@
 //      `html: true` on the renderer.
 import * as React from 'react';
 import Markdoc, { Tag, nodes } from '@markdoc/markdoc';
+import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Paper from '@mui/material/Paper';
 import Table from '@mui/material/Table';
@@ -21,6 +22,7 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
+import Typography from '@mui/material/Typography';
 
 function MarkdocTable({ children }: { children?: React.ReactNode }) {
   return (
@@ -60,6 +62,67 @@ function MarkdocCell({ children }: { children?: React.ReactNode }) {
   );
 }
 
+function MarkdocDetails({
+  summary = '',
+  children,
+}: {
+  summary?: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <Box
+      component="details"
+      sx={{
+        border: 1,
+        borderColor: 'divider',
+        borderRadius: 1,
+        my: 1.25,
+        px: 1.5,
+      }}
+    >
+      <Typography
+        component="summary"
+        sx={{
+          cursor: 'pointer',
+          fontWeight: 600,
+          fontSize: 'inherit',
+          lineHeight: 'inherit',
+          py: 1,
+          userSelect: 'none',
+          '&:hover': { opacity: 0.8 },
+        }}
+      >
+        {summary}
+      </Typography>
+      <Box sx={{ pb: 0.5 }}>{children}</Box>
+    </Box>
+  );
+}
+
+// Preprocesses LLM-generated <details>/<summary> HTML blocks into Markdoc
+// {% details %} tag syntax so they render as collapsible sections.  Raw HTML
+// is blocked by Markdoc's html:false setting (intentional security constraint),
+// so this conversion is the safe way to support them.
+// eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+const DETAILS_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
+const DETAILS_BLOCK_RE =
+  /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+
+function preprocessDetailsBlocks(source: string): string {
+  return source.replace(
+    DETAILS_BLOCK_RE,
+    (_match, rawSummary: string, body: string) => {
+      const summaryText = rawSummary
+        .replace(/<[^>]+>/g, '')
+        .replace(DETAILS_CONTROL_RE, '')
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .trim();
+      return `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
+    },
+  );
+}
+
 const markdocComponents = {
   MuiLink: Link,
   MuiTable: MarkdocTable,
@@ -68,6 +131,7 @@ const markdocComponents = {
   MuiTableRow: TableRow,
   MuiTableHeadCell: MarkdocHeadCell,
   MuiTableCell: MarkdocCell,
+  MuiDetails: MarkdocDetails,
 };
 
 const headingNode = {
@@ -188,12 +252,22 @@ const URL_CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]/g;
 function safeSubstitutedUrl(url: string): string {
   const normalized = url.replace(URL_CONTROL_CHARS_RE, '').trim();
   if (!normalized) return '#';
+  if (normalized.startsWith('//')) return '#';
   // Relative URLs (no scheme) are always safe — they resolve under the
   // current page's origin.
   if (!SCHEME_RE.test(normalized)) return normalized;
   if (ALLOWED_SUBSTITUTED_PROTO_RE.test(normalized)) return normalized;
   if (SAFE_DATA_IMAGE_RE.test(normalized)) return normalized;
   return '#';
+}
+
+function safeUntrustedUrl(url: string, { image }: { image: boolean }): string {
+  const normalized = url.replace(URL_CONTROL_CHARS_RE, '').trim();
+  if (!normalized) return '#';
+  if (normalized.startsWith('//')) return '#';
+  if (!SCHEME_RE.test(normalized)) return normalized;
+  if (image) return /^https?:/i.test(normalized) ? normalized : '#';
+  return ALLOWED_SUBSTITUTED_PROTO_RE.test(normalized) ? normalized : '#';
 }
 
 function substituteUrlVars(
@@ -226,6 +300,9 @@ const linkNode = {
         config.variables ?? {},
       );
       if (changed) attributes.href = safeSubstitutedUrl(value);
+      else if (config.untrustedUrls) {
+        attributes.href = safeUntrustedUrl(attributes.href, { image: false });
+      }
     }
     return new Tag(
       'MuiLink',
@@ -245,8 +322,15 @@ const imageNode = {
         config.variables ?? {},
       );
       if (changed) attributes.src = safeSubstitutedUrl(value);
+      else if (config.untrustedUrls) {
+        attributes.src = safeUntrustedUrl(attributes.src, { image: true });
+      }
     }
-    return new Tag('img', attributes);
+    return new Tag('img', {
+      loading: 'lazy',
+      referrerPolicy: 'no-referrer',
+      ...attributes,
+    });
   },
 };
 
@@ -264,22 +348,39 @@ const markdocNodes = {
   td: { ...nodes.td, render: 'MuiTableCell' },
 };
 
+const markdocTags = {
+  details: {
+    render: 'MuiDetails',
+    attributes: {
+      summary: { type: String, default: '' },
+    },
+  },
+};
+
 export interface MarkdocRendererProps {
   source: string;
   variables?: Record<string, string>;
+  untrustedUrls?: boolean;
 }
 
-export function MarkdocRenderer({ source, variables }: MarkdocRendererProps) {
+export function MarkdocRenderer({
+  source,
+  variables,
+  untrustedUrls = false,
+}: MarkdocRendererProps) {
   const rendered = React.useMemo(() => {
-    const ast = Markdoc.parse(source ?? '');
+    const processedSource = preprocessDetailsBlocks(source ?? '');
+    const ast = Markdoc.parse(processedSource);
     const content = Markdoc.transform(ast, {
       variables: variables ?? {},
       nodes: markdocNodes,
+      tags: markdocTags,
+      untrustedUrls,
     });
     return Markdoc.renderers.react(content, React, {
       components: markdocComponents,
     });
-  }, [source, variables]);
+  }, [source, variables, untrustedUrls]);
 
   return <>{rendered}</>;
 }

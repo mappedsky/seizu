@@ -2,6 +2,12 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
+from reporting.schema.chat import ChatSessionItem
+from reporting.schema.confirmations import (
+    ActionConfirmation,
+    ConfirmationDecision,
+    ConfirmationSource,
+)
 from reporting.schema.mcp_config import (
     SkillItem,
     SkillsetListItem,
@@ -538,3 +544,91 @@ class ReportStore(ABC):
     @abstractmethod
     async def get_role_version(self, role_id: str, version: int) -> RoleVersion | None:
         """Return a specific version of a role, or None if not found."""
+
+    # ------------------------------------------------------------------
+    # Chat sessions
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_chat_sessions(self, user_id: str, limit: int) -> list[ChatSessionItem]:
+        """Return recent chat sessions for a user, sorted by updated_at descending."""
+
+    @abstractmethod
+    async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
+        """Return a chat session for a user, or None if it does not exist."""
+
+    @abstractmethod
+    async def create_chat_session(self, user_id: str, title: str) -> ChatSessionItem:
+        """Create a new chat session with a store-generated ID."""
+
+    @abstractmethod
+    async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
+        """Update a session's updated_at. Returns None if the session is not found."""
+
+    @abstractmethod
+    async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
+        """Update a session's title and updated_at. Returns None if the session is not found."""
+
+    @abstractmethod
+    async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
+        """Delete a session. Returns False if not found."""
+
+    # ------------------------------------------------------------------
+    # Action confirmations
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def create_action_confirmation(self, confirmation: ActionConfirmation) -> ActionConfirmation:
+        """Persist a pending action confirmation."""
+
+    @abstractmethod
+    async def get_action_confirmation(
+        self, confirmation_id: str, user_id: str | None = None
+    ) -> ActionConfirmation | None:
+        """Return a confirmation by ID, optionally scoped to a user."""
+
+    @abstractmethod
+    async def list_action_confirmations(
+        self,
+        user_id: str,
+        source: ConfirmationSource,
+        session_key: str,
+        status: str | None = None,
+    ) -> list[ActionConfirmation]:
+        """List confirmations for a user session, optionally narrowed by status."""
+
+    @abstractmethod
+    async def list_batch_action_confirmations(self, user_id: str, batch_id: str) -> list[ActionConfirmation]:
+        """List confirmations for a user's batch."""
+
+    @abstractmethod
+    async def decide_action_confirmation(
+        self,
+        confirmation_id: str,
+        user_id: str,
+        decision: ConfirmationDecision,
+    ) -> ActionConfirmation | None:
+        """Approve or deny a pending confirmation."""
+
+    @abstractmethod
+    async def claim_action_confirmation_for_execution(
+        self,
+        confirmation_id: str,
+        user_id: str,
+    ) -> ActionConfirmation | None:
+        """Atomically consume an approved confirmation before executing it."""
+
+    @abstractmethod
+    async def find_action_confirmation_grant(
+        self,
+        user_id: str,
+        source: ConfirmationSource,
+        session_key: str,
+        tool_name: str,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        arguments_hash: str,
+        statuses: tuple[str, ...] = ("approved", "denied"),
+    ) -> ActionConfirmation | None:
+        """Return the newest unexpired match in *statuses* for this action scope."""

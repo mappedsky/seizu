@@ -19,7 +19,9 @@ from starlette.types import Receive, Scope, Send
 
 from reporting import settings
 from reporting.routes import auth as auth_routes
+from reporting.routes import chat as chat_routes
 from reporting.routes import config as config_routes
+from reporting.routes import confirmations as confirmations_routes
 from reporting.routes import graph as graph_routes
 from reporting.routes import me as me_routes
 from reporting.routes import query as query_routes
@@ -33,6 +35,7 @@ from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
 from reporting.services import report_store
+from reporting.services.chat_graph import initialize_chat_checkpoints, validate_chat_llm_config
 
 _CSP_NONCE_PLACEHOLDER = "{{ csp_nonce() }}"
 
@@ -108,12 +111,16 @@ _TIMEOUT_RESPONSE_BODY = b'{"error":"Request timed out"}'
 class _TimeoutMiddleware:
     """Abort HTTP requests that exceed API_REQUEST_TIMEOUT seconds with a 504."""
 
-    def __init__(self, app: StarletteASGIApp, timeout: float) -> None:
+    def __init__(self, app: StarletteASGIApp, timeout: float, exempt_paths: frozenset[str] | None = None) -> None:
         self._app = app
         self._timeout = timeout
+        self._exempt_paths = exempt_paths or frozenset({"/api/v1/chat/stream"})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        if scope.get("path", "") in self._exempt_paths:
             await self._app(scope, receive, send)
             return
 
@@ -149,6 +156,8 @@ class _TimeoutMiddleware:
                         "more_body": False,
                     }
                 )
+            else:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 _CSRF_HEADER_NAME = "x-seizu-csrf"
@@ -253,6 +262,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     should_init = settings.DYNAMODB_CREATE_TABLE or (settings.REPORT_STORE_BACKEND == "sqlmodel")
     if should_init:
         await report_store.initialize()
+    if settings.CHAT_ENABLED:
+        validate_chat_llm_config()
+        await initialize_chat_checkpoints()
     mcp_session_manager = getattr(app.state, "mcp_session_manager", None)
     if mcp_session_manager is not None:
         async with mcp_session_manager.run():
@@ -298,6 +310,7 @@ def create_app() -> FastAPI:
     for router_module in [
         auth_routes,
         config_routes,
+        confirmations_routes,
         graph_routes,
         me_routes,
         query_routes,
@@ -312,6 +325,9 @@ def create_app() -> FastAPI:
         static_routes,
     ]:
         app.include_router(router_module.router)
+
+    if settings.CHAT_ENABLED:
+        app.include_router(chat_routes.router)
 
     # MCP server — wired in as a pure ASGI middleware so it intercepts
     # /api/v1/mcp* before FastAPI's router.  This avoids a Starlette 1.0.0

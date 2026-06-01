@@ -21,6 +21,11 @@ class Permission(StrEnum):
     QUERY_VALIDATE = "query:validate"
     QUERY_HISTORY_READ = "query_history:read"
 
+    # Chat
+    CHAT_USE = "chat:use"
+    CHAT_TOOLS_CALL = "chat:tools:call"
+    CHAT_SKILLS_CALL = "chat:skills:call"
+
     # Toolsets
     TOOLSETS_READ = "toolsets:read"
     TOOLSETS_WRITE = "toolsets:write"
@@ -71,6 +76,7 @@ VIEWER_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLS_READ,
         Permission.SKILLS_RENDER,
         Permission.SCHEDULED_QUERIES_READ,
+        Permission.CHAT_USE,
         Permission.USERS_READ,
         Permission.ROLES_READ,
     }
@@ -101,6 +107,8 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLSETS_DELETE,
         Permission.SKILLS_WRITE,
         Permission.SKILLS_DELETE,
+        Permission.CHAT_TOOLS_CALL,
+        Permission.CHAT_SKILLS_CALL,
         Permission.ROLES_WRITE,
         Permission.ROLES_DELETE,
     }

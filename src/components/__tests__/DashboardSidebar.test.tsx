@@ -4,6 +4,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import DashboardSidebar from 'src/components/DashboardSidebar';
 import * as reportsApiModule from 'src/hooks/useReportsApi';
 import * as usePermissionsModule from 'src/hooks/usePermissions';
+import { FeaturesContext, DEFAULT_FEATURES } from 'src/features.context';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
@@ -19,22 +20,32 @@ const darkTheme = createTheme({ palette: { mode: 'dark' } });
 function Wrapper({
   children,
   theme = lightTheme,
+  chatEnabled = true,
 }: {
   children: React.ReactNode;
   theme?: ReturnType<typeof createTheme>;
+  chatEnabled?: boolean;
 }) {
   return (
     <MemoryRouter>
-      <ThemeProvider theme={theme}>{children}</ThemeProvider>
+      <FeaturesContext.Provider
+        value={{ ...DEFAULT_FEATURES, chat: chatEnabled }}
+      >
+        <ThemeProvider theme={theme}>{children}</ThemeProvider>
+      </FeaturesContext.Provider>
     </MemoryRouter>
   );
 }
 
-function renderSidebar(permissions: string[]) {
+function renderSidebar(permissions: string[], chatEnabled = true) {
   mockUsePermissions.mockReturnValue((permission: string) =>
     permissions.includes(permission),
   );
-  return render(<DashboardSidebar />, { wrapper: Wrapper });
+  return render(<DashboardSidebar />, {
+    wrapper: ({ children }) => (
+      <Wrapper chatEnabled={chatEnabled}>{children}</Wrapper>
+    ),
+  });
 }
 
 describe('DashboardSidebar', () => {
@@ -71,6 +82,23 @@ describe('DashboardSidebar', () => {
       'href',
       '/app/roles',
     );
+  });
+
+  it('shows Chat when chat:use is present', () => {
+    renderSidebar(['chat:use']);
+
+    expect(screen.getByRole('link', { name: 'Chat' })).toHaveAttribute(
+      'href',
+      '/app/chat',
+    );
+  });
+
+  it('hides Chat when the chat feature is disabled', () => {
+    renderSidebar(['chat:use'], false);
+
+    expect(
+      screen.queryByRole('link', { name: 'Chat' }),
+    ).not.toBeInTheDocument();
   });
 
   it('renders the full logo in the expanded sidebar', () => {

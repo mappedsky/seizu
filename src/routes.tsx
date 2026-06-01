@@ -8,6 +8,9 @@ import ReportVersionView from 'src/pages/ReportVersionView';
 import ReportsList from 'src/pages/ReportsList';
 import NotFound from 'src/pages/NotFound';
 import QueryConsole from 'src/pages/QueryConsole';
+import ChatInterface from 'src/pages/ChatInterface';
+import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
+import ConfirmationPage from 'src/pages/ConfirmationPage';
 import ScheduledQueries from 'src/pages/ScheduledQueries';
 import ScheduledQueryHistory from 'src/pages/ScheduledQueryHistory';
 import Toolsets from 'src/pages/Toolsets';
@@ -33,6 +36,13 @@ const routes = [
       { path: 'reports/:id/history', element: <ReportHistory /> },
       { path: 'reports/:id/versions/:version', element: <ReportVersionView /> },
       { path: 'query-console', element: <QueryConsole /> },
+      { path: 'chat', element: <ChatInterface /> },
+      { path: 'chat/:threadId', element: <ChatInterface /> },
+      {
+        path: 'confirmations/batch/:batchId',
+        element: <BatchConfirmationPage />,
+      },
+      { path: 'confirmations/:confirmationId', element: <ConfirmationPage /> },
       { path: 'scheduled-queries', element: <ScheduledQueries /> },
       {
         path: 'scheduled-queries/:id/history',

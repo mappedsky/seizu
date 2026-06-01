@@ -28,6 +28,9 @@ def test_editor_is_subset_of_admin():
 def test_viewer_can_read_but_not_execute_adhoc():
     assert Permission.REPORTS_READ in VIEWER_PERMISSIONS
     assert Permission.TOOLS_CALL in VIEWER_PERMISSIONS
+    assert Permission.CHAT_USE in VIEWER_PERMISSIONS
+    assert Permission.CHAT_TOOLS_CALL not in VIEWER_PERMISSIONS
+    assert Permission.CHAT_SKILLS_CALL not in VIEWER_PERMISSIONS
     assert Permission.QUERY_EXECUTE not in VIEWER_PERMISSIONS
     assert Permission.QUERY_VALIDATE not in VIEWER_PERMISSIONS
     assert Permission.QUERY_HISTORY_READ not in VIEWER_PERMISSIONS
@@ -57,6 +60,8 @@ def test_editor_cannot_manage_toolsets_or_scheduled_queries():
 def test_admin_has_all_admin_permissions():
     assert Permission.TOOLSETS_WRITE in ADMIN_PERMISSIONS
     assert Permission.TOOLSETS_DELETE in ADMIN_PERMISSIONS
+    assert Permission.CHAT_TOOLS_CALL in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SKILLS_CALL in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_WRITE in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_DELETE in ADMIN_PERMISSIONS
     assert Permission.ROLES_WRITE in ADMIN_PERMISSIONS

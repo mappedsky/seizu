@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.mcp_config import CreateToolRequest, CreateToolsetRequest, UpdateToolRequest, UpdateToolsetRequest
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
@@ -24,6 +25,49 @@ def _toolset_id_prop() -> dict[str, Any]:
 
 def _tool_id_prop() -> dict[str, Any]:
     return {"tool_id": {"type": "string"}}
+
+
+def _target(action: str, resource_type: str, resource_id: Any) -> ActionConfirmationTarget:
+    return ActionConfirmationTarget(action=action, resource_type=resource_type, resource_id=str(resource_id))
+
+
+async def _confirm_toolset_create(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("create", "toolset", args.get("toolset_id", "new"))
+
+
+async def _confirm_toolset_update(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("update", "toolset", args["toolset_id"])
+
+
+async def _confirm_toolset_delete(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("delete", "toolset", args["toolset_id"])
+
+
+async def _confirm_tool_create(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("create", "tool", args.get("tool_id", "new"))
+
+
+async def _confirm_tool_update(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("update", "tool", args["tool_id"])
+
+
+async def _confirm_tool_delete(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("delete", "tool", args["tool_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +271,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.TOOLSETS_WRITE.value],
             handler=_create_toolset,
             requires_user=True,
+            confirmation=_confirm_toolset_create,
         ),
         BuiltinTool(
             name="toolsets__update",
@@ -240,6 +285,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.TOOLSETS_WRITE.value],
             handler=_update_toolset,
             requires_user=True,
+            confirmation=_confirm_toolset_update,
         ),
         BuiltinTool(
             name="toolsets__delete",
@@ -252,6 +298,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.TOOLSETS_DELETE.value],
             handler=_delete_toolset,
+            confirmation=_confirm_toolset_delete,
         ),
         BuiltinTool(
             name="toolsets__list_versions",
@@ -318,6 +365,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.TOOLS_WRITE.value],
             handler=_create_tool,
             requires_user=True,
+            confirmation=_confirm_tool_create,
         ),
         BuiltinTool(
             name="toolsets__update_tool",
@@ -331,6 +379,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.TOOLS_WRITE.value],
             handler=_update_tool,
             requires_user=True,
+            confirmation=_confirm_tool_update,
         ),
         BuiltinTool(
             name="toolsets__delete_tool",
@@ -343,6 +392,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.TOOLS_DELETE.value],
             handler=_delete_tool,
+            confirmation=_confirm_tool_delete,
         ),
         BuiltinTool(
             name="toolsets__list_tool_versions",

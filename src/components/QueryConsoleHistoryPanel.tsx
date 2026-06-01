@@ -22,19 +22,24 @@ export default function QueryConsoleHistoryPanel({
   onQuerySelect,
   refreshTrigger,
 }: QueryConsoleHistoryPanelProps) {
-  const { loading, error, data, fetchHistory } = useQueryHistory();
+  const { loading, error, data, authReady, fetchHistory } = useQueryHistory();
   const [page, setPage] = useState(1);
 
   useEffect(() => {
+    if (!authReady) return;
     fetchHistory(page, PER_PAGE);
-  }, [fetchHistory, page]);
+  }, [authReady, fetchHistory, page]);
 
   // Re-fetch from page 1 whenever a new query completes.
   useEffect(() => {
     if (!refreshTrigger) return;
-    setPage(1);
-    fetchHistory(1, PER_PAGE);
-  }, [refreshTrigger]);
+    if (!authReady) return;
+    if (page === 1) {
+      fetchHistory(1, PER_PAGE);
+    } else {
+      setPage(1);
+    }
+  }, [authReady, fetchHistory, page, refreshTrigger]);
 
   const totalPages = data ? Math.ceil(data.total / PER_PAGE) : 0;
 

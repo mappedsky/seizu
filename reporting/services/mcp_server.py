@@ -8,7 +8,6 @@ The session manager lifespan is managed by the FastAPI app's lifespan context.
 """
 
 import contextvars
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -18,17 +17,17 @@ import jwt
 from mcp.server.fastmcp.server import StreamableHTTPASGIApp
 from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
+from mcp.types import GetPromptResult, Prompt, TextContent, Tool
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
-from reporting.routes.query import _serialize_neo4j_value
-from reporting.schema.mcp_config import render_skill_prompt, validate_tool_arguments
-from reporting.services import report_store, reporting_neo4j
-from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
+from reporting.services import mcp_runtime, report_store
+from reporting.services.action_confirmations import bearer_session_key
+
+reporting_neo4j = mcp_runtime.reporting_neo4j
 
 logger = logging.getLogger(__name__)
 
@@ -48,38 +47,7 @@ _mcp_permissions: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 _mcp_current_user: contextvars.ContextVar[CurrentUser | None] = contextvars.ContextVar(
     "_mcp_current_user", default=None
 )
-
-
-# ---------------------------------------------------------------------------
-# Parameter schema conversion
-# ---------------------------------------------------------------------------
-
-_PARAM_TYPE_MAP: dict[str, str] = {
-    "string": "string",
-    "integer": "integer",
-    "float": "number",
-    "boolean": "boolean",
-}
-
-
-def _build_input_schema(parameters: list[Any]) -> dict[str, Any]:
-    """Convert a list of ToolParamDef to a JSON Schema object."""
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for p in parameters:
-        schema_type = _PARAM_TYPE_MAP.get(p.type, "string")
-        prop: dict[str, Any] = {"type": schema_type}
-        if p.description:
-            prop["description"] = p.description
-        if p.default is not None:
-            prop["default"] = p.default
-        properties[p.name] = prop
-        if p.required:
-            required.append(p.name)
-    result: dict[str, Any] = {"type": "object", "properties": properties}
-    if required:
-        result["required"] = required
-    return result
+_mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_mcp_session_key", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -87,184 +55,42 @@ def _build_input_schema(parameters: list[Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _text(payload: Any) -> list[TextContent]:
-    """Serialize *payload* to JSON and wrap it as a single MCP TextContent."""
-    return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
-
-
-def _missing_permissions(required: list[str], granted: frozenset[str]) -> list[str]:
-    return [p for p in required if p not in granted]
-
-
-def _parse_user_defined_name(name: str) -> tuple[str, str] | None:
-    parts = name.split("__", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        return None
-    return parts[0], parts[1]
-
-
 def _build_mcp_server() -> Server:
     server: Server = Server("seizu")
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        tools: list[Tool] = []
-        perms = _mcp_permissions.get()
-
-        # Built-in tools registered by reporting/services/mcp_builtins
-        for builtin in list_builtin_tools():
-            # Only surface tools the caller has permission for; this keeps
-            # Claude from seeing admin-only write tools when logged in as a
-            # viewer.
-            if _missing_permissions(builtin.required_permissions, perms):
-                continue
-            tools.append(
-                Tool(
-                    name=builtin.name,
-                    description=builtin.description,
-                    inputSchema=builtin.input_schema,
-                )
-            )
-
-        # User-defined tools from the store
-        try:
-            enabled_tools = await report_store.list_enabled_tools()
-            for tool in enabled_tools:
-                mcp_name = f"{tool.toolset_id}__{tool.tool_id}"
-                description = tool.description or f"{tool.name} tool"
-                tools.append(
-                    Tool(
-                        name=mcp_name,
-                        description=description,
-                        inputSchema=_build_input_schema(tool.parameters),
-                    )
-                )
-        except Exception:
-            logger.exception("Failed to load tools from store for MCP listing")
-
-        return tools
+        return await mcp_runtime.list_tools_for_user(
+            _mcp_current_user.get(),
+            permissions=_mcp_permissions.get(),
+        )
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        args = arguments or {}
-        perms = _mcp_permissions.get()
-
-        # Built-in tool dispatch
-        builtin = find_builtin(name)
-        if builtin is not None:
-            missing = _missing_permissions(builtin.required_permissions, perms)
-            if missing:
-                return _text({"error": f"Permission denied: {', '.join(missing)}"})
-            try:
-                result = await builtin.handler(args, _mcp_current_user.get())
-                return _text(result)
-            except Exception:
-                logger.exception("Failed to execute built-in MCP tool %s", name)
-                return _text({"error": f"Failed to execute tool '{name}'"})
-
-        # User-defined tool — look up by namespaced name
-        if "tools:call" not in perms:
-            return _text({"error": "Permission denied: tools:call"})
-        try:
-            parsed_name = _parse_user_defined_name(name)
-            target_tool = await report_store.get_enabled_tool(parsed_name[0], parsed_name[1]) if parsed_name else None
-            if target_tool is None:
-                return _text({"error": f"Tool '{name}' not found"})
-
-            arg_errors = validate_tool_arguments(target_tool.parameters, args)
-            if arg_errors:
-                return _text({"errors": arg_errors})
-
-            # Apply parameter defaults so optional params are passed as null
-            # rather than absent — Neo4j raises ParameterMissing if a $param
-            # referenced in the query is not present at all.
-            params_with_defaults = {p.name: p.default for p in target_tool.parameters}
-            params_with_defaults.update(args)
-
-            results = await reporting_neo4j.run_query(target_tool.cypher, parameters=params_with_defaults)
-            serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
-            return _text(serialized)
-        except Exception:
-            logger.exception("Failed to execute MCP tool %s", name)
-            return _text({"error": f"Failed to execute tool '{name}'"})
+        return await mcp_runtime.call_tool_for_user(
+            _mcp_current_user.get(),
+            name,
+            arguments,
+            permissions=_mcp_permissions.get(),
+            confirmation_source="mcp",
+            confirmation_session_key=_mcp_session_key.get(),
+        )
 
     @server.list_prompts()
     async def list_prompts() -> list[Prompt]:
-        perms = _mcp_permissions.get()
-        if "skills:render" not in perms:
-            return []
-        prompts: list[Prompt] = []
-        try:
-            enabled_skills = await report_store.list_enabled_skills()
-            for skill in enabled_skills:
-                prompts.append(
-                    Prompt(
-                        name=f"{skill.skillset_id}__{skill.skill_id}",
-                        title=skill.name,
-                        description=skill.description or f"{skill.name} skill",
-                        arguments=[
-                            PromptArgument(
-                                name=p.name,
-                                description=p.description or None,
-                                required=p.required and p.default is None,
-                            )
-                            for p in skill.parameters
-                        ],
-                    )
-                )
-        except Exception:
-            logger.exception("Failed to load skills from store for MCP prompt listing")
-        return prompts
+        return await mcp_runtime.list_prompts_for_user(
+            _mcp_current_user.get(),
+            permissions=_mcp_permissions.get(),
+        )
 
     @server.get_prompt()
     async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
-        perms = _mcp_permissions.get()
-        if "skills:render" not in perms:
-            return GetPromptResult(
-                description="Permission denied",
-                messages=[
-                    PromptMessage(
-                        role="user",
-                        content=TextContent(type="text", text="Permission denied: skills:render"),
-                    )
-                ],
-            )
-        try:
-            parsed_name = _parse_user_defined_name(name)
-            target_skill = await report_store.get_enabled_skill(parsed_name[0], parsed_name[1]) if parsed_name else None
-            if target_skill is None:
-                return GetPromptResult(
-                    description="Skill not found",
-                    messages=[
-                        PromptMessage(
-                            role="user",
-                            content=TextContent(type="text", text=f"Skill '{name}' not found"),
-                        )
-                    ],
-                )
-            rendered, errors = render_skill_prompt(
-                target_skill.parameters,
-                target_skill.template,
-                arguments or {},
-                target_skill.triggers,
-                target_skill.tools_required,
-            )
-            text = rendered if rendered is not None else json.dumps({"errors": errors}, indent=2)
-            return GetPromptResult(
-                description=target_skill.description or target_skill.name,
-                messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))],
-            )
-        except Exception:
-            logger.exception("Failed to render MCP prompt %s", name)
-            return GetPromptResult(
-                description="Skill render failed",
-                messages=[
-                    PromptMessage(
-                        role="user",
-                        content=TextContent(type="text", text=f"Failed to render skill '{name}'"),
-                    )
-                ],
-            )
+        return await mcp_runtime.get_prompt_for_user(
+            _mcp_current_user.get(),
+            name,
+            arguments,
+            permissions=_mcp_permissions.get(),
+        )
 
     return server
 
@@ -353,11 +179,13 @@ class _MCPAuthMiddleware:
             current_user = await _build_dev_current_user()
             perm_token = _mcp_permissions.set(current_user.permissions)
             user_token = _mcp_current_user.set(current_user)
+            session_token = _mcp_session_key.set("dev")
             try:
                 await self._app(scope, receive, send)
             finally:
                 _mcp_permissions.reset(perm_token)
                 _mcp_current_user.reset(user_token)
+                _mcp_session_key.reset(session_token)
             return
 
         # OAuth metadata endpoints must be reachable before auth — client has no token yet.
@@ -396,11 +224,22 @@ class _MCPAuthMiddleware:
 
         perm_token = _mcp_permissions.set(current_user.permissions)
         user_token = _mcp_current_user.set(current_user)
+        mcp_session_id_bytes: bytes | None = headers.get(b"mcp-session-id")
+        if mcp_session_id_bytes:
+            session_key = bearer_session_key(mcp_session_id_bytes.decode("latin-1"))
+        else:
+            # Use the stable user identity so pending confirmations survive
+            # token rotation.  A client that wants finer-grained session
+            # isolation (e.g. two concurrent connections from the same user)
+            # should send a per-connection mcp-session-id header.
+            session_key = bearer_session_key(current_user.user.user_id)
+        session_token = _mcp_session_key.set(session_key)
         try:
             await self._app(scope, receive, send)
         finally:
             _mcp_permissions.reset(perm_token)
             _mcp_current_user.reset(user_token)
+            _mcp_session_key.reset(session_token)
 
     @staticmethod
     async def _send_401(scope: Scope, receive: Receive, send: Send) -> None:

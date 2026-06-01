@@ -210,12 +210,7 @@ describe('MarkdocRenderer', () => {
         variables={{ url: '//evil.example.com/x' }}
       />,
     );
-    // The substituted URL has no scheme, so it's treated as a relative path and
-    // kept verbatim. Browsers will resolve protocol-relative URLs under the
-    // current origin's protocol, which is intentional and what `/path` does too.
-    expect(container.querySelector('a')?.getAttribute('href')).toBe(
-      '//evil.example.com/x',
-    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
   });
 
   it('allows mailto and tel after substitution', () => {
@@ -246,6 +241,42 @@ describe('MarkdocRenderer', () => {
     expect(container.querySelector('a')?.getAttribute('href')).toBe(
       'slack://channel/T01',
     );
+  });
+
+  it('blocks non-browser static link schemes in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer source="[chat](slack://channel/T01)" untrustedUrls />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
+  });
+
+  it('blocks protocol-relative static links in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer source="[chat](//evil.example.com/x)" untrustedUrls />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
+  });
+
+  it('allows https static links in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source="[home](https://example.com/path)"
+        untrustedUrls
+      />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/path',
+    );
+  });
+
+  it('blocks non-http static image URLs in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source="![pixel](data:image/png;base64,AAAA)"
+        untrustedUrls
+      />,
+    );
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('#');
   });
 
   it('preserves non-substituted link URLs unchanged', () => {

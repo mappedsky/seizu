@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.services.report_store import sql as sql_module
@@ -108,8 +109,84 @@ def test_get_engine_uses_command_timeout_for_postgres(mocker):
 # ---------------------------------------------------------------------------
 
 
+def _action_confirmation(
+    confirmation_id: str,
+    status: str,
+    created_at: str,
+    *,
+    session_key: str = "session-1",
+    expires_at: str = "2099-01-01T00:30:00+00:00",
+) -> ActionConfirmation:
+    return ActionConfirmation.model_validate(
+        {
+            "confirmation_id": confirmation_id,
+            "user_id": "user-1",
+            "source": "mcp",
+            "session_key": session_key,
+            "tool_name": "reports__delete",
+            "action": "delete",
+            "resource_type": "report",
+            "resource_id": "report-1",
+            "arguments": {"report_id": "report-1"},
+            "arguments_hash": "hash-1",
+            "status": status,
+            "created_at": created_at,
+            "expires_at": expires_at,
+        }
+    )
+
+
 async def test_list_reports_empty(store):
     assert await store.list_reports() == []
+
+
+async def test_action_confirmation_session_status_list_returns_pending(store):
+    await store.create_action_confirmation(
+        _action_confirmation(
+            confirmation_id="pending-session",
+            status="pending",
+            created_at="2024-01-01T00:00:00+00:00",
+        )
+    )
+
+    result = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
+
+    assert [item.confirmation_id for item in result] == ["pending-session"]
+
+
+async def test_create_action_confirmation_replaces_expired_pending_dedup(store):
+    await store.create_action_confirmation(
+        _action_confirmation(
+            confirmation_id="expired-pending",
+            status="pending",
+            created_at="2020-01-01T00:00:00+00:00",
+            expires_at="2020-01-01T00:30:00+00:00",
+        )
+    )
+    replacement = _action_confirmation(
+        confirmation_id="replacement-pending",
+        status="pending",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+
+    result = await store.create_action_confirmation(replacement)
+
+    assert result.confirmation_id == "replacement-pending"
+    pending = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
+    assert [item.confirmation_id for item in pending] == ["replacement-pending"]
+    expired = await store.get_action_confirmation("expired-pending", user_id="user-1")
+    assert expired is not None
+    assert expired.status == "expired"
 
 
 async def test_list_reports_returns_created_reports(store, mocker):

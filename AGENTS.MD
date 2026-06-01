@@ -67,6 +67,7 @@ React 19 + TypeScript + Bun + Material-UI + MUI X Charts + `@xyflow/react`.
 - `src/components/ReportView.tsx` — shared report renderer; resolves panel `cypher` against `report.queries`.
 - `src/components/reports/` — panel components (`CypherCount`, `CypherTable`, `CypherBar`, …); `CypherGraph.tsx` is the `@xyflow/react` graph panel (map/path/any format; Graph/Table/Raw tabs).
 - `src/pages/QueryConsole.tsx` — ad-hoc console at `/app/query-console` (Ctrl+Enter runs); `QueryConsoleSchemaPanel.tsx` is the collapsible schema browser.
+- `src/pages/ChatInterface.tsx` — chat assistant at `/app/chat` (`@ai-sdk/react` `useChat` against `POST /api/v1/chat/stream`); gated on the `chat:use` permission. See the Chat backend section.
 
 **User identity:**
 - `src/hooks/useCurrentUser.ts` → `GET /api/v1/me`; `src/hooks/useUser.ts` → `GET /api/v1/users/<id>`.
@@ -126,13 +127,22 @@ Exposed at `/api/v1/mcp` when `MCP_ENABLED=true` (default). LLM agents connect a
 - **Transport:** StreamableHTTP via `_MCPMiddleware` (pure ASGI in `app.py`), intercepting `/api/v1/mcp*` before FastAPI routing (avoids a Starlette 1.0.0 `Mount` trailing-slash issue).
 - **Auth:** `_MCPAuthMiddleware` validates Bearer tokens via shared `authnz.validate_bearer_token()` (JWKS + optional RFC 7662 introspection); passes through unauthenticated in dev (`DEVELOPMENT_ONLY_REQUIRE_AUTH=false`). Sets two `ContextVar`s per request: `_mcp_permissions` (`frozenset[str]`) and `_mcp_current_user` (`CurrentUser`); handlers attributing writes read the latter.
 - **Tool names:** `{group}__{action}` (built-ins) or `{toolset}__{tool}` (user-defined), double underscore.
-- **Listing/dispatch:** `@server.list_tools()` merges `list_builtin_tools(MCP_ENABLED_BUILTINS)` (filtered by caller permissions) with `report_store.list_enabled_tools()`. `@server.call_tool()` tries `find_builtin()` first, else runs user-defined tools via `reporting_neo4j.run_query()`. Built-ins enforce their own `required_permissions`.
+- **Listing/dispatch:** the actual list/call/prompt logic lives in `reporting/services/mcp_runtime.py` (`list_tools_for_user`, `call_tool_for_user`, `list_prompts_for_user`, `get_prompt_for_user`) so the MCP transport and the chat agent share one implementation. `@server.list_tools()` merges `list_builtin_tools(MCP_ENABLED_BUILTINS)` (filtered by caller permissions) with `report_store.list_enabled_tools()`. `@server.call_tool()` tries `find_builtin()` first, else runs user-defined tools via `reporting_neo4j.run_query()`. Built-ins enforce their own `required_permissions`.
 - **Built-ins** live in `reporting/services/mcp_builtins/` (one module per group, registered in `__init__.py`). Each is a `BuiltinTool` dataclass (`base.py`) sharing the REST service layer — no duplicated logic; permissions mirror REST. Groups (all default-on): `graph` (schema, query), `reports`, `scheduled_queries`, `toolsets`, `roles` — full CRUD + version history. To add a group: export `GROUP_DEF: BuiltinGroup` from a new module, append to `_GROUPS` in `__init__.py` and the `settings.MCP_ENABLED_BUILTINS` default.
 - **OAuth metadata:** `GET /api/v1/mcp/.well-known/oauth-authorization-server` (RFC 8414) when `MCP_OAUTH_AUTHORIZATION_ENDPOINT` + `MCP_OAUTH_TOKEN_ENDPOINT` are set (also `MCP_OAUTH_ISSUER`); lets clients like Claude Desktop discover the IDP. `.well-known` passes through unauthenticated.
 
 **Toolsets/Tools** are user-managed Cypher-backed tool groupings in the report store with version history; CRUD via REST; Cypher validated (writes blocked) at create/update.
 
 DynamoDB key space: `TOOLSET#{id}` (`#METADATA`, `VERSION#N`), `TOOLSET_LIST/TOOLSET#{id}`, `TOOL#{id}` (`#METADATA`, `VERSION#N`), `TOOL_LIST#{toolset_id}/TOOL#{id}`. SQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
+
+### Chat (`reporting/services/chat_graph.py`, `reporting/routes/chat.py`)
+
+A LangGraph-backed chat assistant at `POST /api/v1/chat/stream` (frontend `src/pages/ChatInterface.tsx`, route `/app/chat`), gated by the `CHAT_ENABLED` setting (default true). When off, the chat routes aren't registered, checkpoint storage isn't initialized, and the frontend hides the Chat UI — `GET /api/v1/config` returns `features.chat`, consumed via `src/features.context.ts` (`useFeature('chat')`); add new feature flags the same way (`settings.<X>_ENABLED` → `features.<x>` → `useFeature`). `CHAT_LLM_PROVIDER` selects `mock`, `openai`, `anthropic`, `gemini`, or `deepseek`; the mock provider echoes user input, while real providers use LangChain chat models with native structured tool calls.
+
+- **Streaming:** the route consumes `graph.astream(..., stream_mode="custom")` and re-emits tokens as a Vercel AI SDK UI Message Stream (SSE: `start`/`text-*`/`finish`, `data: [DONE]`). The node pushes chunks via `get_stream_writer()` as `{"kind": "token", "content": ...}`. The frontend uses `@ai-sdk/react` `useChat`.
+- **Message tags (`reporting/services/chat_messages.py`):** `MessageTag` is the reusable mechanism for excluding selected messages from history/LLM context. Tags live in `additional_kwargs["seizu_tags"]` (round-trips through the checkpoint serializer), and `load_thread_messages` calls `drop_tagged(..., EPHEMERAL)` at the read boundary. Broken assistant outputs are tagged `BROKEN` and filtered from future model context so failed turns do not poison retries.
+- **Permissions:** `chat:use` (Viewer+) gates the endpoint; `chat:tools:call` and `chat:skills:call` (Admin only) gate tool/skill use. Tool/skill calls also require the *underlying* MCP permission (e.g. `tools:call`, `skills:render`). For chat, `mcp_runtime` is called with `chat_safe_only=True`, which exposes only built-ins whose `required_permissions` are all in `_CHAT_SAFE_PERMISSIONS` (read/inspection only), plus mutating built-ins with an action-confirmation resolver. **Fail-closed:** a new write/delete tool is hidden from chat by default. The only intentional no-confirmation mutating exceptions are `reports__create` and `reports__clone`, because they create new private reports and do not modify existing resources; document any future exception at the tool registration.
+- **State and limits:** thread id is namespaced server-side as `user:{user_id}:thread:{client_thread_id}` (via `chat_graph.namespaced_thread_id`) so clients can't reach another user's thread. History persists via a LangGraph DynamoDB checkpointer (`langgraph-checkpoint-aws`, `CHAT_CHECKPOINT_*` settings; dev points at DynamoDB Local + MinIO for >350KB S3 offload). The frontend persists the thread id in `localStorage` and rehydrates the conversation on mount via `GET /api/v1/chat/history?thread_id=` (`chat_graph.load_thread_messages` → `graph.aget_state`), so a reload resumes the same conversation. Persisted messages are trimmed by `CHAT_MAX_PERSISTED_MESSAGES`; history responses are bounded by `CHAT_HISTORY_LIMIT`; chat MCP tool output is bounded by `CHAT_TOOL_RESULT_MAX_ROWS` and `CHAT_TOOL_RESULT_MAX_BYTES`. `DynamoDBSaver` is sync boto3 but its async methods offload to a threadpool (`run_in_executor`), so it doesn't block the event loop.
 
 ### Configuration System
 
@@ -165,6 +175,7 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 | `seizu-scheduled-queries` | Scheduled query worker |
 | `neo4j` | Graph database |
 | `dynamodb` | DynamoDB Local (default backend) |
+| `minio` (+ `minio-create-bucket`) | S3-compatible store for chat checkpoint offload |
 | `postgres` | PostgreSQL (`sqlmodel` profile) |
 | `sqs` | ElasticMQ (local SQS) |
 | `authentik-*` | OIDC provider (`auth` profile) |

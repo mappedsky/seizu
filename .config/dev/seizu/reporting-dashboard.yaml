@@ -1625,6 +1625,152 @@ skillsets:
           - github_security__identity_access_summary
           - github_security__recommendations
         enabled: true
+  skill_authoring:
+    name: Seizu Skill Authoring
+    description: >-
+      Self-referential workflows for inspecting, designing, and maintaining
+      Seizu skillsets and skills through the skillsets MCP tools.
+    enabled: true
+    skills:
+      skillset_inventory_review:
+        name: Skillset Inventory Review
+        description: >-
+          Inspect existing Seizu skillsets and skills, then recommend concrete
+          improvements to templates, triggers, parameters, and required tools.
+        template: |-
+          Review Seizu's skillset and skill inventory for `{% $focus %}`. Use the skillsets MCP tools as the source of truth; do not infer stored skills from memory.
+
+          Inputs:
+          - focus: `{% $focus %}`
+          - include_versions: `{% $include_versions %}`
+
+          Workflow:
+          1. Call `skillsets__list` to identify available skillsets.
+          2. For every relevant skillset, call `skillsets__get` and `skillsets__list_skills`.
+          3. For every relevant skill, call `skillsets__get_skill` and inspect its name, description, parameters, triggers, tools_required, enabled state, and effective_enabled state.
+          4. If `include_versions` is true, call `skillsets__list_versions` for relevant skillsets and `skillsets__list_skill_versions` for relevant skills to identify recent churn or stale definitions.
+
+          Review criteria:
+          - Skill and skillset IDs are lower_snake_case, specific, and stable.
+          - Descriptions explain when to use the skill, not just what it is named.
+          - Templates include clear workflow steps, output expectations, tool-use order, and evidence/uncertainty rules.
+          - Parameters are minimal, typed correctly, and have defaults only when a safe default exists.
+          - Triggers are natural phrases users are likely to ask.
+          - tools_required contains every tool the rendered skill instructs the agent to call, and no unrelated tools.
+          - Disabled skills or disabled parent skillsets are called out with operational impact.
+
+          Output format:
+          - `Inventory Summary`: count skillsets and skills reviewed; note disabled items.
+          - `High-Value Skills`: skills that are well-structured and why.
+          - `Issues`: ordered findings with skillset_id, skill_id when applicable, impact, and exact recommended change.
+          - `Suggested Edits`: concrete new descriptions, triggers, parameters, tools_required, or template changes.
+          - `Follow-up`: any additional skillsets or skills that should be created.
+          - Keep the response evidence-backed and separate confirmed stored metadata from recommendations.
+        parameters:
+          - name: focus
+            type: string
+            description: Skillset, skill, domain, or review goal to focus on.
+            required: false
+            default: all skillsets
+          - name: include_versions
+            type: boolean
+            description: Include version history checks for relevant skillsets and skills.
+            required: false
+            default: false
+        triggers:
+          - review Seizu skills
+          - audit skillsets
+          - inspect skill definitions
+          - improve skill prompts
+        tools_required:
+          - skillsets__list
+          - skillsets__get
+          - skillsets__list_versions
+          - skillsets__list_skills
+          - skillsets__get_skill
+          - skillsets__list_skill_versions
+        enabled: true
+      skill_authoring_workflow:
+        name: Skill Authoring Workflow
+        description: >-
+          Design, create, or update Seizu skillsets and skills, including the
+          self-referential skill_authoring skillset itself.
+        template: |-
+          Help implement this Seizu skill authoring request:
+
+          `{% $request %}`
+
+          Inputs:
+          - request: `{% $request %}`
+          - target_skillset_id: `{% $target_skillset_id %}`
+          - target_skill_id: `{% $target_skill_id %}`
+          - dry_run: `{% $dry_run %}`
+
+          Operating rules:
+          - Treat `dry_run=true` as plan-only. Do not call create or update tools in dry-run mode; produce the exact proposed payloads instead.
+          - Treat `dry_run=false` as permission to apply create/update operations, but still inspect current state first.
+          - Never delete a skillset or skill from this workflow. If deletion seems necessary, recommend it separately and require explicit user confirmation outside this skill.
+          - Preserve existing enabled state unless the request explicitly says otherwise.
+          - Use lower_snake_case IDs. Do not rename IDs unless the user explicitly requests a migration.
+          - Keep templates actionable: include required tool order, output format, evidence rules, and limits.
+          - Every tool named in a template's workflow must appear in tools_required unless it is only mentioned as an example.
+
+          Workflow:
+          1. Call `skillsets__list` to discover current skillsets.
+          2. If `target_skillset_id` is provided, call `skillsets__get` and `skillsets__list_skills` for that skillset. If it is missing, decide whether the request calls for `skillsets__create`.
+          3. If `target_skill_id` is provided, call `skillsets__get_skill` and inspect the existing template, parameters, triggers, tools_required, enabled state, and version.
+          4. Render or mentally validate any proposed template placeholders against the proposed parameter list. Every template placeholder must have a matching parameter with a supported type.
+          5. For a new skillset, prepare or call `skillsets__create`.
+          6. For skillset metadata changes, prepare or call `skillsets__update`.
+          7. For a new skill, prepare or call `skillsets__create_skill`.
+          8. For an existing skill, prepare or call `skillsets__update_skill`.
+          9. If applying changes, call the relevant get/list tool afterward to verify the stored result.
+
+          Output format:
+          - `Intent`: restate the requested skill authoring change.
+          - `Current State`: summarize discovered existing skillset/skill state.
+          - `Plan`: ordered implementation steps.
+          - `Payloads`: include exact skillset and skill payloads, including parameters, triggers, tools_required, enabled, and template.
+          - `Applied Changes`: if `dry_run=false`, list each tool call made and the resulting IDs/versions.
+          - `Verification`: describe post-write checks or dry-run validation.
+          - `Risks and Follow-up`: note permission limits, blocked tools, missing required data, or manual review needed.
+        parameters:
+          - name: request
+            type: string
+            description: The skillset or skill authoring change to design or apply.
+            required: true
+          - name: target_skillset_id
+            type: string
+            description: Existing or proposed skillset ID, if known.
+            required: false
+            default: ""
+          - name: target_skill_id
+            type: string
+            description: Existing or proposed skill ID, if known.
+            required: false
+            default: ""
+          - name: dry_run
+            type: boolean
+            description: When true, produce payloads without creating or updating anything.
+            required: false
+            default: true
+        triggers:
+          - create a Seizu skill
+          - update a skill prompt
+          - add a skillset
+          - improve this skill
+          - maintain Seizu skills
+        tools_required:
+          - skillsets__list
+          - skillsets__get
+          - skillsets__create
+          - skillsets__update
+          - skillsets__list_skills
+          - skillsets__get_skill
+          - skillsets__create_skill
+          - skillsets__update_skill
+          - skillsets__render_skill
+        enabled: true
 
 scheduled_queries:
   - name: Recently published HIGH/CRITICAL CVEs
