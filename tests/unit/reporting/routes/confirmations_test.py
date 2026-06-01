@@ -67,6 +67,37 @@ async def test_get_confirmation_returns_public_shape(mocker):
     assert "user_id" not in body
 
 
+async def test_list_confirmations_requires_thread_id(mocker):
+    list_confirmations = mocker.patch("reporting.routes.confirmations.report_store.list_action_confirmations")
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/confirmations")
+
+    assert response.status_code == 422
+    list_confirmations.assert_not_called()
+
+
+async def test_list_confirmations_uses_chat_thread_session(mocker):
+    list_confirmations = mocker.patch(
+        "reporting.routes.confirmations.report_store.list_action_confirmations",
+        return_value=[_confirmation()],
+    )
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/confirmations?thread_id=123")
+
+    assert response.status_code == 200
+    assert len(response.json()["confirmations"]) == 1
+    list_confirmations.assert_awaited_once_with(
+        user_id="user-1",
+        source="chat",
+        session_key="123",
+        status="pending",
+    )
+
+
 async def test_batch_confirmation_lookup_uses_batch_store_method(mocker):
     list_batch = mocker.patch(
         "reporting.routes.confirmations.report_store.list_batch_action_confirmations",

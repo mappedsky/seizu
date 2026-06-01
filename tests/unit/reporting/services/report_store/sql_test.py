@@ -140,26 +140,23 @@ async def test_list_reports_empty(store):
     assert await store.list_reports() == []
 
 
-async def test_action_confirmation_status_list_returns_pending_beyond_newest_history(store):
-    for index in range(520):
-        await store.create_action_confirmation(
-            _action_confirmation(
-                confirmation_id=f"denied-{index}",
-                status="denied",
-                created_at=f"2024-01-01T00:{index // 60:02d}:{index % 60:02d}+00:00",
-            )
-        )
+async def test_action_confirmation_session_status_list_returns_pending(store):
     await store.create_action_confirmation(
         _action_confirmation(
-            confirmation_id="pending-old",
+            confirmation_id="pending-session",
             status="pending",
-            created_at="2023-12-31T23:59:00+00:00",
+            created_at="2024-01-01T00:00:00+00:00",
         )
     )
 
-    result = await store.list_action_confirmations(user_id="user-1", status="pending")
+    result = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
 
-    assert [item.confirmation_id for item in result] == ["pending-old"]
+    assert [item.confirmation_id for item in result] == ["pending-session"]
 
 
 async def test_create_action_confirmation_replaces_expired_pending_dedup(store):
@@ -180,7 +177,12 @@ async def test_create_action_confirmation_replaces_expired_pending_dedup(store):
     result = await store.create_action_confirmation(replacement)
 
     assert result.confirmation_id == "replacement-pending"
-    pending = await store.list_action_confirmations(user_id="user-1", status="pending")
+    pending = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
     assert [item.confirmation_id for item in pending] == ["replacement-pending"]
     expired = await store.get_action_confirmation("expired-pending", user_id="user-1")
     assert expired is not None

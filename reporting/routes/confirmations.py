@@ -17,12 +17,12 @@ _CONFIRMATION_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 @router.get("/api/v1/confirmations", response_model=ConfirmationListResponse)
 async def list_confirmations(
-    thread_id: str | None = Query(default=None, min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    thread_id: str = Query(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(get_current_user),
 ) -> ConfirmationListResponse:
     confirmations = await report_store.list_action_confirmations(
         user_id=current.user.user_id,
-        source="chat" if thread_id is not None else None,
+        source="chat",
         session_key=thread_id,
         status="pending",
     )

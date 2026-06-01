@@ -668,8 +668,8 @@ async def get_action_confirmation(
 
 async def list_action_confirmations(
     user_id: str,
-    source: ConfirmationSource | None = None,
-    session_key: str | None = None,
+    source: ConfirmationSource,
+    session_key: str,
     status: str | None = None,
 ) -> list[ActionConfirmation]:
     return await get_store().list_action_confirmations(

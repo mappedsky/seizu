@@ -289,14 +289,6 @@ class ActionConfirmationRecord(SQLModel, table=True):  # type: ignore
             "arguments_hash",
             "status",
         ),
-        # Covers user-wide pending/approved confirmation lists without
-        # filtering a newest-N history page in application code.
-        Index(
-            "ix_action_conf_user_status_list",
-            "user_id",
-            "status",
-            "created_at",
-        ),
         # Covers list_action_confirmations (session + status filter).
         Index(
             "ix_action_conf_session_list",
@@ -517,13 +509,7 @@ class SQLModelReportStore(ReportStore):
                         await conn.execute(
                             text("ALTER TABLE action_confirmations ADD COLUMN arguments_hash VARCHAR DEFAULT ''")
                         )
-                # Runs for both dialects — IF NOT EXISTS makes it idempotent.
-                await conn.execute(
-                    text(
-                        "CREATE INDEX IF NOT EXISTS ix_action_conf_user_status_list "
-                        "ON action_confirmations (user_id, status, created_at)"
-                    )
-                )
+                await conn.execute(text("DROP INDEX IF EXISTS ix_action_conf_user_status_list"))
                 await conn.execute(
                     text(
                         "CREATE UNIQUE INDEX IF NOT EXISTS ix_action_conf_pending_dedup "
@@ -2593,8 +2579,8 @@ class SQLModelReportStore(ReportStore):
     async def list_action_confirmations(
         self,
         user_id: str,
-        source: ConfirmationSource | None = None,
-        session_key: str | None = None,
+        source: ConfirmationSource,
+        session_key: str,
         status: str | None = None,
     ) -> list[ActionConfirmation]:
         async with AsyncSession(_get_engine()) as session:

@@ -69,7 +69,6 @@ _PK_ROLE_LIST = "ROLE_LIST"
 _PK_CHAT_SESSION_METADATA_PREFIX = "CHAT_SESSION#"
 _PK_CHAT_SESSION_LIST_PREFIX = "CHAT_SESSION_LIST#"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
-_PK_ACTION_CONFIRMATION_LIST_PREFIX = "ACTION_CONFIRMATION_LIST#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
 _SK_QUERY_HISTORY_PREFIX = "HISTORY#"
@@ -77,7 +76,7 @@ _SK_QUERY_HISTORY_PREFIX = "HISTORY#"
 _QUERY_HISTORY_MAX = 500
 _CHAT_SESSION_LIST_MAX = 500
 _CHAT_SESSION_TRANSACTION_RETRIES = 3
-_ACTION_CONFIRMATION_LIST_MAX = 500
+_ACTION_CONFIRMATION_SESSION_QUERY_MAX = 500
 _T = TypeVar("_T")
 
 
@@ -165,16 +164,8 @@ def _action_confirmation_pk(confirmation_id: str) -> str:
     return f"{_PK_ACTION_CONFIRMATION_PREFIX}{confirmation_id}"
 
 
-def _action_confirmation_list_pk(user_id: str) -> str:
-    return f"{_PK_ACTION_CONFIRMATION_LIST_PREFIX}{user_id}"
-
-
 def _action_confirmation_list_sk(created_at: str, confirmation_id: str) -> str:
     return f"CREATED#{created_at}#CONFIRMATION#{confirmation_id}"
-
-
-def _action_confirmation_status_list_pk(user_id: str, status: str) -> str:
-    return f"ACTION_CONFIRMATION_STATUS_LIST#{user_id}#STATUS#{status}"
 
 
 def _action_confirmation_session_list_pk(user_id: str, source: str, session_key: str) -> str:
@@ -219,22 +210,6 @@ def _action_confirmation_metadata_item(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _action_confirmation_user_list_item(data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "PK": _action_confirmation_list_pk(str(data["user_id"])),
-        "SK": _action_confirmation_list_sk(str(data["created_at"]), str(data["confirmation_id"])),
-        "confirmation_id": str(data["confirmation_id"]),
-    }
-
-
-def _action_confirmation_status_list_item(data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "PK": _action_confirmation_status_list_pk(str(data["user_id"]), str(data["status"])),
-        "SK": _action_confirmation_list_sk(str(data["created_at"]), str(data["confirmation_id"])),
-        "confirmation_id": str(data["confirmation_id"]),
-    }
-
-
 def _action_confirmation_session_list_item(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "PK": _action_confirmation_session_list_pk(
@@ -273,8 +248,6 @@ def _action_confirmation_dedup_sentinel_item(data: dict[str, Any]) -> dict[str, 
 def _action_confirmation_put_items(data: dict[str, Any]) -> list[dict[str, Any]]:
     items = [
         _action_confirmation_metadata_item(data),
-        _action_confirmation_user_list_item(data),
-        _action_confirmation_status_list_item(data),
         _action_confirmation_session_list_item(data),
     ]
     batch_item = _action_confirmation_batch_list_item(data)
@@ -3089,7 +3062,7 @@ class DynamoDBReportStore(ReportStore):
                         ":status_prefix": "STATUS#pending#",
                     },
                     "ScanIndexForward": False,
-                    "Limit": _ACTION_CONFIRMATION_LIST_MAX,
+                    "Limit": _ACTION_CONFIRMATION_SESSION_QUERY_MAX,
                 }
                 if last_key is not None:
                     kwargs["ExclusiveStartKey"] = last_key
@@ -3134,21 +3107,6 @@ class DynamoDBReportStore(ReportStore):
                             "Delete": {
                                 "TableName": settings.DYNAMODB_TABLE_NAME,
                                 "Key": {
-                                    "PK": _action_confirmation_status_list_pk(confirmation.user_id, "pending"),
-                                    "SK": _action_confirmation_list_sk(str(data["created_at"]), cid),
-                                },
-                            },
-                        },
-                        {
-                            "Put": {
-                                "TableName": settings.DYNAMODB_TABLE_NAME,
-                                "Item": _action_confirmation_status_list_item(updated),
-                            },
-                        },
-                        {
-                            "Delete": {
-                                "TableName": settings.DYNAMODB_TABLE_NAME,
-                                "Key": {
                                     "PK": pk,
                                     "SK": _action_confirmation_session_list_sk(
                                         "pending",
@@ -3171,16 +3129,6 @@ class DynamoDBReportStore(ReportStore):
                             },
                         },
                     ]
-                    batch_item = _action_confirmation_batch_list_item(updated)
-                    if batch_item is not None:
-                        transact_items.append(
-                            {
-                                "Put": {
-                                    "TableName": settings.DYNAMODB_TABLE_NAME,
-                                    "Item": batch_item,
-                                },
-                            }
-                        )
                     try:
                         table.meta.client.transact_write_items(TransactItems=transact_items)
                         return True
@@ -3212,40 +3160,23 @@ class DynamoDBReportStore(ReportStore):
     async def list_action_confirmations(
         self,
         user_id: str,
-        source: ConfirmationSource | None = None,
-        session_key: str | None = None,
+        source: ConfirmationSource,
+        session_key: str,
         status: str | None = None,
     ) -> list[ActionConfirmation]:
         def _op() -> list[str]:
             table = _get_table()
-            if source is not None and session_key is not None:
-                values = {":pk": _action_confirmation_session_list_pk(user_id, source, session_key)}
-                key_expression = "PK = :pk"
-                if status is not None:
-                    values[":status_prefix"] = f"STATUS#{status}#"
-                    key_expression = "PK = :pk AND begins_with(SK, :status_prefix)"
-                resp = table.query(
-                    KeyConditionExpression=key_expression,
-                    ExpressionAttributeValues=values,
-                    ScanIndexForward=False,
-                    Limit=_ACTION_CONFIRMATION_LIST_MAX,
-                )
-            elif status is not None:
-                resp = table.query(
-                    KeyConditionExpression="PK = :pk",
-                    ExpressionAttributeValues={
-                        ":pk": _action_confirmation_status_list_pk(user_id, status),
-                    },
-                    ScanIndexForward=False,
-                    Limit=_ACTION_CONFIRMATION_LIST_MAX,
-                )
-            else:
-                resp = table.query(
-                    KeyConditionExpression="PK = :pk",
-                    ExpressionAttributeValues={":pk": _action_confirmation_list_pk(user_id)},
-                    ScanIndexForward=False,
-                    Limit=_ACTION_CONFIRMATION_LIST_MAX,
-                )
+            values = {":pk": _action_confirmation_session_list_pk(user_id, source, session_key)}
+            key_expression = "PK = :pk"
+            if status is not None:
+                values[":status_prefix"] = f"STATUS#{status}#"
+                key_expression = "PK = :pk AND begins_with(SK, :status_prefix)"
+            resp = table.query(
+                KeyConditionExpression=key_expression,
+                ExpressionAttributeValues=values,
+                ScanIndexForward=False,
+                Limit=_ACTION_CONFIRMATION_SESSION_QUERY_MAX,
+            )
             return [
                 str(item["confirmation_id"])
                 for item in resp.get("Items", [])
@@ -3265,7 +3196,7 @@ class DynamoDBReportStore(ReportStore):
                 KeyConditionExpression="PK = :pk",
                 ExpressionAttributeValues={":pk": _action_confirmation_batch_pk(user_id, batch_id)},
                 ScanIndexForward=True,
-                Limit=_ACTION_CONFIRMATION_LIST_MAX,
+                Limit=_ACTION_CONFIRMATION_SESSION_QUERY_MAX,
             )
             return [
                 str(item["confirmation_id"])
@@ -3322,27 +3253,6 @@ class DynamoDBReportStore(ReportStore):
                     }
                 },
                 {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": _action_confirmation_user_list_item(updated),
-                    },
-                },
-                {
-                    "Delete": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Key": {
-                            "PK": _action_confirmation_status_list_pk(user_id, "pending"),
-                            "SK": _action_confirmation_list_sk(str(data["created_at"]), confirmation_id),
-                        },
-                    },
-                },
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": _action_confirmation_status_list_item(updated),
-                    },
-                },
-                {
                     "Delete": {
                         "TableName": settings.DYNAMODB_TABLE_NAME,
                         "Key": {
@@ -3373,16 +3283,6 @@ class DynamoDBReportStore(ReportStore):
                     },
                 },
             ]
-            batch_item = _action_confirmation_batch_list_item(updated)
-            if batch_item is not None:
-                transact_items.append(
-                    {
-                        "Put": {
-                            "TableName": settings.DYNAMODB_TABLE_NAME,
-                            "Item": batch_item,
-                        },
-                    }
-                )
             try:
                 table.meta.client.transact_write_items(TransactItems=transact_items)
             except botocore.exceptions.ClientError as exc:
@@ -3429,27 +3329,6 @@ class DynamoDBReportStore(ReportStore):
                     }
                 },
                 {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": _action_confirmation_user_list_item(updated),
-                    },
-                },
-                {
-                    "Delete": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Key": {
-                            "PK": _action_confirmation_status_list_pk(user_id, "approved"),
-                            "SK": _action_confirmation_list_sk(str(data["created_at"]), confirmation_id),
-                        },
-                    },
-                },
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": _action_confirmation_status_list_item(updated),
-                    },
-                },
-                {
                     "Delete": {
                         "TableName": settings.DYNAMODB_TABLE_NAME,
                         "Key": {
@@ -3485,16 +3364,6 @@ class DynamoDBReportStore(ReportStore):
                     },
                 }
             )
-            batch_item = _action_confirmation_batch_list_item(updated)
-            if batch_item is not None:
-                transact_items.append(
-                    {
-                        "Put": {
-                            "TableName": settings.DYNAMODB_TABLE_NAME,
-                            "Item": batch_item,
-                        },
-                    }
-                )
             try:
                 table.meta.client.transact_write_items(TransactItems=transact_items)
             except botocore.exceptions.ClientError as exc:
@@ -3533,7 +3402,7 @@ class DynamoDBReportStore(ReportStore):
                             ":status_prefix": f"STATUS#{status}#",
                         },
                         "ScanIndexForward": False,
-                        "Limit": _ACTION_CONFIRMATION_LIST_MAX,
+                        "Limit": _ACTION_CONFIRMATION_SESSION_QUERY_MAX,
                     }
                     if last_key is not None:
                         kwargs["ExclusiveStartKey"] = last_key

@@ -1950,20 +1950,16 @@ async def test_get_role_version_not_found(patch_table, store):
     assert result is None
 
 
-async def test_create_action_confirmation_writes_all_confirmation_indexes(patch_table, store):
+async def test_create_action_confirmation_writes_session_confirmation_indexes(patch_table, store):
     item = _action_confirmation_item()
     confirmation = ActionConfirmation.model_validate(item)
 
     await store.create_action_confirmation(confirmation)
 
     transact_items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    assert len(transact_items) == 3
     put_keys = {(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in transact_items if "Put" in item}
     assert ("ACTION_CONFIRMATION#confirm-1", "#METADATA") in put_keys
-    assert ("ACTION_CONFIRMATION_LIST#user-1", "CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1") in put_keys
-    assert (
-        "ACTION_CONFIRMATION_STATUS_LIST#user-1#STATUS#pending",
-        "CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
-    ) in put_keys
     assert (
         "ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1",
         "STATUS#pending#CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
@@ -2006,6 +2002,7 @@ async def test_create_action_confirmation_expires_stale_pending_dedup_before_ret
     assert result.confirmation_id == "replacement-confirm"
     assert patch_table.meta.client.transact_write_items.call_count == 3
     expire_transact_items = patch_table.meta.client.transact_write_items.call_args_list[1].kwargs["TransactItems"]
+    assert len(expire_transact_items) == 4
     delete_keys = {
         (item["Delete"]["Key"]["PK"], item["Delete"]["Key"]["SK"]) for item in expire_transact_items if "Delete" in item
     }
@@ -2013,41 +2010,60 @@ async def test_create_action_confirmation_expires_stale_pending_dedup_before_ret
     assert ("ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1", stale_dedup_sk) in delete_keys
 
 
-async def test_list_action_confirmations_uses_user_status_index_for_status_only(patch_table, store):
-    patch_table.query.return_value = {"Items": [{"confirmation_id": "confirm-1"}]}
-    patch_table.get_item.return_value = {"Item": _action_confirmation_item()}
-
-    result = await store.list_action_confirmations(user_id="user-1", status="pending")
-
-    assert len(result) == 1
-    assert patch_table.query.call_args.kwargs["ExpressionAttributeValues"] == {
-        ":pk": "ACTION_CONFIRMATION_STATUS_LIST#user-1#STATUS#pending"
-    }
-
-
-async def test_decide_action_confirmation_moves_status_indexes(patch_table, store):
+async def test_decide_action_confirmation_moves_session_status_pointer(patch_table, store):
     item = _action_confirmation_item()
+    item["batch_id"] = "batch-1"
     patch_table.get_item.return_value = {"Item": item}
     confirmation = ActionConfirmation.model_validate(item)
 
     await store.decide_action_confirmation("confirm-1", "user-1", "approved")
 
     transact_items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    assert len(transact_items) == 4
+    delete_keys = {
+        (item["Delete"]["Key"]["PK"], item["Delete"]["Key"]["SK"]) for item in transact_items if "Delete" in item
+    }
+    put_keys = {(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in transact_items if "Put" in item}
+    # Dedup sentinel is deleted when a confirmation is decided.
+    dedup_sk = _action_confirmation_dedup_sk(confirmation.model_dump())
+    assert (
+        "ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1",
+        "STATUS#pending#CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
+    ) in delete_keys
+    assert (
+        "ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1",
+        "STATUS#approved#CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
+    ) in put_keys
+    assert ("ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1", dedup_sk) in delete_keys
+    assert not any(pk == "ACTION_CONFIRMATION_LIST#user-1" for pk, _sk in put_keys)
+    assert not any(pk == "ACTION_CONFIRMATION_BATCH#user-1#BATCH#batch-1" for pk, _sk in put_keys)
+
+
+async def test_claim_action_confirmation_moves_session_status_pointer_without_rewriting_static_pointers(
+    patch_table, store
+):
+    item = _action_confirmation_item(status="approved")
+    item["batch_id"] = "batch-1"
+    patch_table.get_item.return_value = {"Item": item}
+
+    await store.claim_action_confirmation_for_execution("confirm-1", "user-1")
+
+    transact_items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    assert len(transact_items) == 4
     delete_keys = {
         (item["Delete"]["Key"]["PK"], item["Delete"]["Key"]["SK"]) for item in transact_items if "Delete" in item
     }
     put_keys = {(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in transact_items if "Put" in item}
     assert (
-        "ACTION_CONFIRMATION_STATUS_LIST#user-1#STATUS#pending",
-        "CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
+        "ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1",
+        "STATUS#approved#CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
     ) in delete_keys
     assert (
-        "ACTION_CONFIRMATION_STATUS_LIST#user-1#STATUS#approved",
-        "CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
+        "ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1",
+        "STATUS#executed#CREATED#2024-01-01T00:00:00+00:00#CONFIRMATION#confirm-1",
     ) in put_keys
-    # Dedup sentinel is deleted when a confirmation is decided.
-    dedup_sk = _action_confirmation_dedup_sk(confirmation.model_dump())
-    assert ("ACTION_CONFIRMATION_SESSION_LIST#user-1#SOURCE#mcp#SESSION#session-1", dedup_sk) in delete_keys
+    assert not any(pk == "ACTION_CONFIRMATION_LIST#user-1" for pk, _sk in put_keys)
+    assert not any(pk == "ACTION_CONFIRMATION_BATCH#user-1#BATCH#batch-1" for pk, _sk in put_keys)
 
 
 async def test_find_action_confirmation_grant_hydrates_from_metadata(patch_table, store):

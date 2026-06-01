@@ -591,11 +591,11 @@ class ReportStore(ABC):
     async def list_action_confirmations(
         self,
         user_id: str,
-        source: ConfirmationSource | None = None,
-        session_key: str | None = None,
+        source: ConfirmationSource,
+        session_key: str,
         status: str | None = None,
     ) -> list[ActionConfirmation]:
-        """List confirmations for the user, optionally narrowed by source/session/status."""
+        """List confirmations for a user session, optionally narrowed by status."""
 
     @abstractmethod
     async def list_batch_action_confirmations(self, user_id: str, batch_id: str) -> list[ActionConfirmation]:
