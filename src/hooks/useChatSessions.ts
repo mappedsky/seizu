@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 
 export interface ChatSession {
@@ -38,6 +38,8 @@ export function useChatSessions(enabled: boolean): {
 } {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,7 +117,9 @@ export function useChatSessions(enabled: boolean): {
   const updateSession = useCallback(
     async (threadId: string, title: string): Promise<void> => {
       const optimisticUpdatedAt = new Date().toISOString();
-      const previousSession = sessions.find((s) => s.thread_id === threadId);
+      const previousSession = sessionsRef.current.find(
+        (s) => s.thread_id === threadId,
+      );
       setSessions((prev) =>
         sortSessions(
           prev.map((s) =>
@@ -156,7 +160,7 @@ export function useChatSessions(enabled: boolean): {
         throw err;
       }
     },
-    [authHeaders, sessions],
+    [authHeaders],
   );
 
   const deleteSession = useCallback(

@@ -25,6 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
 from reporting.services import mcp_runtime, report_store
+from reporting.services.action_confirmations import bearer_session_key
 
 reporting_neo4j = mcp_runtime.reporting_neo4j
 
@@ -46,6 +47,7 @@ _mcp_permissions: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 _mcp_current_user: contextvars.ContextVar[CurrentUser | None] = contextvars.ContextVar(
     "_mcp_current_user", default=None
 )
+_mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_mcp_session_key", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,8 @@ def _build_mcp_server() -> Server:
             name,
             arguments,
             permissions=_mcp_permissions.get(),
+            confirmation_source="mcp",
+            confirmation_session_key=_mcp_session_key.get(),
         )
 
     @server.list_prompts()
@@ -175,11 +179,13 @@ class _MCPAuthMiddleware:
             current_user = await _build_dev_current_user()
             perm_token = _mcp_permissions.set(current_user.permissions)
             user_token = _mcp_current_user.set(current_user)
+            session_token = _mcp_session_key.set("dev")
             try:
                 await self._app(scope, receive, send)
             finally:
                 _mcp_permissions.reset(perm_token)
                 _mcp_current_user.reset(user_token)
+                _mcp_session_key.reset(session_token)
             return
 
         # OAuth metadata endpoints must be reachable before auth — client has no token yet.
@@ -218,11 +224,22 @@ class _MCPAuthMiddleware:
 
         perm_token = _mcp_permissions.set(current_user.permissions)
         user_token = _mcp_current_user.set(current_user)
+        mcp_session_id_bytes: bytes | None = headers.get(b"mcp-session-id")
+        if mcp_session_id_bytes:
+            session_key = bearer_session_key(mcp_session_id_bytes.decode("latin-1"))
+        else:
+            # Use the stable user identity so pending confirmations survive
+            # token rotation.  A client that wants finer-grained session
+            # isolation (e.g. two concurrent connections from the same user)
+            # should send a per-connection mcp-session-id header.
+            session_key = bearer_session_key(current_user.user.user_id)
+        session_token = _mcp_session_key.set(session_key)
         try:
             await self._app(scope, receive, send)
         finally:
             _mcp_permissions.reset(perm_token)
             _mcp_current_user.reset(user_token)
+            _mcp_session_key.reset(session_token)
 
     @staticmethod
     async def _send_401(scope: Scope, receive: Receive, send: Send) -> None:

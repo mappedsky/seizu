@@ -9,7 +9,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import User
-from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions
+from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
 
 _NOW = "2024-01-01T00:00:00+00:00"
 
@@ -38,11 +38,18 @@ async def _call(server, name, arguments, permissions=None):
     )
     perm_tok = _mcp_permissions.set(permissions if permissions is not None else ALL_PERMISSIONS)
     user_tok = _mcp_current_user.set(_current_user())
+    session_tok = _mcp_session_key.set("test-session")
     try:
-        result = await handler(req)
+        with patch(
+            "reporting.services.mcp_runtime.action_confirmations.ensure_confirmation",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await handler(req)
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
+        _mcp_session_key.reset(session_tok)
     return result.root.content
 
 

@@ -1,6 +1,4 @@
 import {
-  type ChangeEvent,
-  type FormEvent,
   useCallback,
   useContext,
   useEffect,
@@ -8,23 +6,22 @@ import {
   useRef,
   useState,
 } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport, type UIMessage } from 'ai';
+import {
+  DefaultChatTransport,
+  type ChatOnFinishCallback,
+  type UIMessage,
+} from 'ai';
 import {
   Alert,
   Box,
-  Button,
   Card,
-  CardContent,
   CircularProgress,
   IconButton,
-  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
-import Send from '@mui/icons-material/Send';
-import Stop from '@mui/icons-material/Stop';
 import SmartToy from '@mui/icons-material/SmartToy';
 import Person from '@mui/icons-material/Person';
 import Check from '@mui/icons-material/Check';
@@ -35,9 +32,15 @@ import { usePermissionState } from 'src/hooks/usePermissions';
 import { useChatHistory } from 'src/hooks/useChatHistory';
 import { useChatLocalStorage } from 'src/hooks/useChatLocalStorage';
 import { useChatSessions } from 'src/hooks/useChatSessions';
+import {
+  type ActionConfirmation,
+  useConfirmationsApi,
+} from 'src/hooks/useConfirmationsApi';
 import { useFeature } from 'src/features.context';
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
+import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
+import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import { pageContentSx } from 'src/theme/layout';
 
 const CHAT_MESSAGE_THROTTLE_MS = 50;
@@ -64,6 +67,7 @@ function latestUserText(messages: UIMessage[]): string {
 export default function ChatInterface() {
   const navigate = useNavigate();
   const { threadId: routeThreadId } = useParams<{ threadId?: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
   const { hasPermission, loading: permissionsLoading } = usePermissionState();
@@ -94,17 +98,19 @@ export default function ChatInterface() {
     setPanelOpen,
     setStoredActiveSessionId,
   } = useChatLocalStorage();
-  const [input, setInput] = useState('');
-  const [inputHeight, setInputHeight] = useState(140);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
+  const [confirmationsOpen, setConfirmationsOpen] = useState(false);
+  const [decidingConfirmationId, setDecidingConfirmationId] = useState<
+    string | null
+  >(null);
+  const [confirmationError, setConfirmationError] = useState<string | null>(
+    null,
+  );
 
   const creatingInitialSessionRef = useRef(false);
   const autoTitleAttemptRef = useRef<string | null>(null);
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
-  const inputHeightRef = useRef(inputHeight);
   const messagesRef = useRef<UIMessage[]>([]);
   const setMessagesRef = useRef<
     (messages: UIMessage[] | ((messages: UIMessage[]) => UIMessage[])) => void
@@ -112,13 +118,15 @@ export default function ChatInterface() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
+  const resumeConfirmationIdRef = useRef<string | null>(null);
+  const consumedResumeParamRef = useRef<string | null>(null);
 
   // Keep the selected session in sync with the URL.
   useEffect(() => {
     if (sessionsLoading || !sessionsFeedEnabled) return;
     if (sessionsError) return;
     let cancelled = false;
-    setSessionNotFound(false);
+    setSessionNotFound((current) => (current ? false : current));
 
     if (routeThreadId) {
       const knownSession = sessions.find((s) => s.thread_id === routeThreadId);
@@ -126,9 +134,9 @@ export default function ChatInterface() {
         if (activeThreadId !== knownSession.thread_id) {
           setMessagesRef.current([]);
           setHistoryLoading(true);
+          setActiveThreadId(knownSession.thread_id);
+          setStoredActiveSessionId(knownSession.thread_id);
         }
-        setActiveThreadId(knownSession.thread_id);
-        setStoredActiveSessionId(knownSession.thread_id);
       } else {
         void getSession(routeThreadId)
           .then((session) => {
@@ -137,21 +145,25 @@ export default function ChatInterface() {
               if (activeThreadId !== session.thread_id) {
                 setMessagesRef.current([]);
                 setHistoryLoading(true);
+                setActiveThreadId(session.thread_id);
+                setStoredActiveSessionId(session.thread_id);
               }
-              setActiveThreadId(session.thread_id);
-              setStoredActiveSessionId(session.thread_id);
             } else {
-              setActiveThreadId(null);
-              setMessagesRef.current([]);
-              setHistoryLoading(false);
+              if (activeThreadId !== null) {
+                setActiveThreadId(null);
+                setMessagesRef.current([]);
+              }
+              setHistoryLoading((current) => (current ? false : current));
               setSessionNotFound(true);
             }
           })
           .catch(() => {
             if (cancelled) return;
-            setActiveThreadId(null);
-            setMessagesRef.current([]);
-            setHistoryLoading(false);
+            if (activeThreadId !== null) {
+              setActiveThreadId(null);
+              setMessagesRef.current([]);
+            }
+            setHistoryLoading((current) => (current ? false : current));
             setSessionNotFound(true);
           });
       }
@@ -238,8 +250,13 @@ export default function ChatInterface() {
       new DefaultChatTransport<UIMessage>({
         api: '/api/v1/chat/stream',
         headers: { 'X-Seizu-Csrf': '1' },
-        prepareSendMessagesRequest: ({ messages, headers }) => {
+        prepareSendMessagesRequest: ({ messages, headers, body }) => {
           const currentToken = accessTokenRef.current;
+          const resumeConfirmationId =
+            typeof body?.resume_confirmation_id === 'string'
+              ? body.resume_confirmation_id
+              : resumeConfirmationIdRef.current;
+          resumeConfirmationIdRef.current = null;
           return {
             headers: {
               ...headers,
@@ -248,8 +265,11 @@ export default function ChatInterface() {
                 : {}),
             },
             body: {
-              message: latestUserText(messages),
+              message: resumeConfirmationId ? '' : latestUserText(messages),
               thread_id: chatIdRef.current,
+              ...(resumeConfirmationId
+                ? { resume_confirmation_id: resumeConfirmationId }
+                : {}),
             },
           };
         },
@@ -257,10 +277,26 @@ export default function ChatInterface() {
     [],
   );
 
+  const {
+    confirmations,
+    loading: confirmationsLoading,
+    error: confirmationsError,
+    fetchConfirmations,
+    decideConfirmation,
+  } = useConfirmationsApi(activeThreadId);
+
+  const handleChatFinish = useCallback<ChatOnFinishCallback<UIMessage>>(() => {
+    if (!activeThreadId) return;
+    window.setTimeout(() => {
+      void fetchConfirmations();
+    }, 0);
+  }, [activeThreadId, fetchConfirmations]);
+
   const { messages, sendMessage, setMessages, status, stop, error } =
     useChat<UIMessage>({
       id: chatId,
       experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
+      onFinish: handleChatFinish,
       transport,
     });
 
@@ -274,27 +310,29 @@ export default function ChatInterface() {
     () => sessions.find((s) => s.thread_id === activeThreadId),
     [activeThreadId, sessions],
   );
+  const firstUserMessageText = useMemo(() => {
+    const firstUserMessage = messages.find((m) => m.role === 'user');
+    return firstUserMessage ? messageText(firstUserMessage).trim() : '';
+  }, [messages]);
   useEffect(() => {
     if (!activeSession || activeSession.title || !activeThreadId) return;
     if (autoTitleAttemptRef.current === activeThreadId) return;
-    const firstUserMessage = messages.find((m) => m.role === 'user');
-    if (!firstUserMessage) return;
-    const text = messageText(firstUserMessage).trim();
-    if (!text) return;
-    const title = text.length > 40 ? `${text.slice(0, 40).trimEnd()}…` : text;
+    if (!firstUserMessageText) return;
+    const title =
+      firstUserMessageText.length > 40
+        ? `${firstUserMessageText.slice(0, 40).trimEnd()}…`
+        : firstUserMessageText;
     autoTitleAttemptRef.current = activeThreadId;
     setAutoTitleError(null);
     void updateSession(activeThreadId, title).catch(() => {
       autoTitleAttemptRef.current = null;
       setAutoTitleError('Failed to name this session automatically.');
     });
-  }, [messages, activeSession, activeThreadId, updateSession]);
+  }, [firstUserMessageText, activeSession, activeThreadId, updateSession]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ block: 'end' });
   }, [messages]);
-
-  inputHeightRef.current = inputHeight;
 
   const handleSelectSession = useCallback(
     (threadId: string) => {
@@ -356,45 +394,84 @@ export default function ChatInterface() {
     ],
   );
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed || busy || !activeThreadId) return;
-    setInput('');
+  const handleSubmit = useCallback(
+    (text: string) => {
+      if (!activeThreadId) return;
+      touchSession(activeThreadId);
+      void sendMessage({ text });
+    },
+    [activeThreadId, touchSession, sendMessage],
+  );
+
+  const handleConfirmationDecision = useCallback(
+    async (
+      confirmation: ActionConfirmation,
+      decision: 'approved' | 'denied',
+    ) => {
+      const pendingCount = confirmations.filter(
+        (c) => c.status === 'pending',
+      ).length;
+      const wasLastPending = pendingCount === 1;
+      setDecidingConfirmationId(confirmation.confirmation_id);
+      setConfirmationError(null);
+      try {
+        await decideConfirmation(confirmation.confirmation_id, decision);
+        await fetchConfirmations();
+        if (decision === 'approved' && activeThreadId && wasLastPending) {
+          resumeConfirmationIdRef.current = confirmation.confirmation_id;
+          touchSession(activeThreadId);
+          await Promise.resolve(
+            sendMessage(undefined, {
+              body: { resume_confirmation_id: confirmation.confirmation_id },
+            }),
+          );
+        }
+      } catch {
+        setConfirmationError('Failed to approve or resume this confirmation.');
+      } finally {
+        setDecidingConfirmationId(null);
+      }
+    },
+    [
+      activeThreadId,
+      confirmations,
+      decideConfirmation,
+      fetchConfirmations,
+      sendMessage,
+      touchSession,
+    ],
+  );
+
+  useEffect(() => {
+    if (!activeThreadId || busy) return;
+    const resumeConfirmationId = searchParams.get('resume_confirmation_id');
+    if (!resumeConfirmationId) return;
+    if (consumedResumeParamRef.current === resumeConfirmationId) return;
+    consumedResumeParamRef.current = resumeConfirmationId;
+    resumeConfirmationIdRef.current = resumeConfirmationId;
     touchSession(activeThreadId);
-    void sendMessage({ text: trimmed });
-  };
-
-  const handleInputChange = (
-    event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-  ) => {
-    setInput(event.target.value);
-  };
-
-  const handleInputDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    dragStartY.current = e.clientY;
-    dragStartHeight.current = inputHeightRef.current;
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-
-    const handleMouseMove = (ev: MouseEvent) => {
-      const delta = dragStartY.current - ev.clientY;
-      setInputHeight(
-        Math.max(100, Math.min(420, dragStartHeight.current + delta)),
-      );
-    };
-
-    const handleMouseUp = () => {
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  }, []);
+    try {
+      void Promise.resolve(
+        sendMessage(undefined, {
+          body: { resume_confirmation_id: resumeConfirmationId },
+        }),
+      ).catch(() => {
+        setConfirmationError('Failed to resume the approved confirmation.');
+      });
+    } catch {
+      setConfirmationError('Failed to resume the approved confirmation.');
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('resume_confirmation_id');
+    setSearchParams(next, { replace: true });
+  }, [
+    activeThreadId,
+    busy,
+    searchParams,
+    sendMessage,
+    setSearchParams,
+    touchSession,
+  ]);
 
   const handleCopyAssistantResponse = async (message: UIMessage) => {
     const text = messageText(message);
@@ -771,95 +848,34 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
-        <Box
-          onMouseDown={handleInputDragStart}
-          sx={{
-            alignItems: 'center',
-            cursor: 'ns-resize',
-            display: 'flex',
-            flexShrink: 0,
-            height: 8,
-            justifyContent: 'center',
-            my: 0.5,
-            '&::after': {
-              bgcolor: 'divider',
-              borderRadius: 2,
-              content: '""',
-              display: 'block',
-              height: 4,
-              transition: 'background-color 0.15s',
-              width: 48,
-            },
-            '&:hover::after': { bgcolor: 'primary.main' },
-          }}
-        />
+        {confirmationError ? (
+          <Alert
+            severity="error"
+            onClose={() => setConfirmationError(null)}
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {confirmationError}
+          </Alert>
+        ) : null}
 
-        <Box sx={{ flexShrink: 0, height: inputHeight }}>
-          <Card sx={{ height: '100%' }}>
-            <CardContent
-              component="form"
-              onSubmit={handleSubmit}
-              sx={{
-                display: 'flex',
-                flexDirection: 'column',
-                height: '100%',
-                '&:last-child': { pb: 2 },
-              }}
-            >
-              <TextField
-                multiline
-                fullWidth
-                value={input}
-                onChange={handleInputChange}
-                placeholder="Ask about your security graph..."
-                disabled={busy}
-                variant="outlined"
-                sx={{
-                  flex: 1,
-                  minHeight: 0,
-                  '& .MuiInputBase-root': {
-                    alignItems: 'flex-start',
-                    height: '100%',
-                  },
-                  '& .MuiInputBase-input': {
-                    boxSizing: 'border-box',
-                    height: '100% !important',
-                    overflow: 'auto !important',
-                  },
-                }}
-              />
-              <Box
-                sx={{
-                  display: 'flex',
-                  flexShrink: 0,
-                  justifyContent: 'flex-end',
-                  mt: 1,
-                }}
-              >
-                {busy ? (
-                  <Button
-                    type="button"
-                    variant="contained"
-                    startIcon={<Stop />}
-                    onClick={stop}
-                  >
-                    Stop
-                  </Button>
-                ) : (
-                  <Button
-                    type="submit"
-                    variant="contained"
-                    startIcon={<Send />}
-                    disabled={!input.trim() || busy || disabled}
-                  >
-                    Send
-                  </Button>
-                )}
-              </Box>
-            </CardContent>
-          </Card>
-        </Box>
+        <ChatInput
+          busy={busy}
+          disabled={disabled}
+          onSubmit={handleSubmit}
+          onStop={stop}
+        />
       </Box>
+      <ChatConfirmationsPanel
+        confirmations={confirmations}
+        loading={confirmationsLoading}
+        error={confirmationsError}
+        open={confirmationsOpen}
+        decidingId={decidingConfirmationId}
+        onToggle={() => setConfirmationsOpen((v) => !v)}
+        onDecision={(confirmation, decision) => {
+          void handleConfirmationDecision(confirmation, decision);
+        }}
+      />
     </Box>
   );
 }

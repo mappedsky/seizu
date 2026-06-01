@@ -36,6 +36,19 @@ class FakeChatGraph:
         yield {"kind": "token", "content": " there"}
 
 
+class FakeCutoffChatGraph(FakeChatGraph):
+    async def astream(
+        self,
+        input: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        stream_mode: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.calls.append((input, config, stream_mode))
+        yield {"kind": "token", "content": "Partial answer"}
+        yield {"kind": "finish_reason", "finish_reason": "length"}
+
+
 def _current_user(permissions: frozenset[str] = ALL_PERMISSIONS) -> CurrentUser:
     return CurrentUser(user=_FAKE_USER, jwt_claims={}, permissions=permissions)
 
@@ -139,6 +152,25 @@ async def test_chat_stream_success(mocker):
     assert config["configurable"]["current_user"].user.user_id == "test-user-id"
     assert stream_mode == "custom"
     assert graph_input["messages"][0].content == "Hi"
+
+
+async def test_chat_stream_surfaces_output_limit_finish_reason(mocker):
+    fake_graph = FakeCutoffChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"delta":"Partial answer"' in body
+    assert '"finishReason":"length"' in body
+    assert '"response_cut_off":true' in body
 
 
 async def test_chat_stream_with_real_graph_emits_tokens(mocker):

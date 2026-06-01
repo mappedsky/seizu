@@ -359,6 +359,13 @@ CHAT_TOOL_RESULT_MAX_ROWS = int_env("CHAT_TOOL_RESULT_MAX_ROWS", 100)
 # Maximum serialized bytes returned to chat from a single MCP tool call.
 CHAT_TOOL_RESULT_MAX_BYTES = int_env("CHAT_TOOL_RESULT_MAX_BYTES", 200_000)
 
+# Maximum lifetime for an approved or denied mutating-action confirmation.
+ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
+
+# Optional public browser origin used when MCP clients need to show a user an
+# approval URL. When unset, Seizu derives the origin from MCP_RESOURCE_URL.
+SEIZU_PUBLIC_URL = str_env("SEIZU_PUBLIC_URL", "")
+
 # The JWT claim that contains the user's Seizu role name.
 # Configure your OIDC provider to embed the role (e.g. "seizu-admin") directly
 # as a claim in the token. Common claim names: "seizu_role", "role".

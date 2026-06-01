@@ -21,6 +21,7 @@ from reporting import settings
 from reporting.routes import auth as auth_routes
 from reporting.routes import chat as chat_routes
 from reporting.routes import config as config_routes
+from reporting.routes import confirmations as confirmations_routes
 from reporting.routes import graph as graph_routes
 from reporting.routes import me as me_routes
 from reporting.routes import query as query_routes
@@ -309,6 +310,7 @@ def create_app() -> FastAPI:
     for router_module in [
         auth_routes,
         config_routes,
+        confirmations_routes,
         graph_routes,
         me_routes,
         query_routes,

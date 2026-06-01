@@ -2,11 +2,13 @@ import json
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
-from reporting.schema.report_config import User
-from reporting.services import mcp_runtime
+from reporting.schema.report_config import ReportAccess, ReportListItem, User
+from reporting.services import action_confirmations, mcp_runtime
 
 _NOW = "2024-01-01T00:00:00+00:00"
+_LATER = "2099-01-01T00:30:00+00:00"
 
 
 def _user(permissions: frozenset[str]) -> CurrentUser:
@@ -64,6 +66,39 @@ def _skill() -> SkillItem:
     )
 
 
+def _report_list_item() -> ReportListItem:
+    return ReportListItem(
+        report_id="report-1",
+        name="My Report",
+        current_version=1,
+        created_at=_NOW,
+        updated_at=_NOW,
+        created_by="user-1",
+        updated_by="user-1",
+        access=ReportAccess(scope="private"),
+    )
+
+
+def _confirmation(status: str = "pending") -> ActionConfirmation:
+    return ActionConfirmation.model_validate(
+        {
+            "confirmation_id": "confirm-1",
+            "user_id": "user-1",
+            "source": "mcp",
+            "session_key": "session-1",
+            "tool_name": "reports__delete",
+            "action": "delete",
+            "resource_type": "report",
+            "resource_id": "r1",
+            "arguments": {"report_id": "r1"},
+            "arguments_hash": action_confirmations.arguments_hash({"report_id": "r1"}),
+            "status": status,
+            "created_at": _NOW,
+            "expires_at": _LATER,
+        }
+    )
+
+
 async def test_chat_tool_gate_blocks_listing_before_store_lookup(mocker):
     list_enabled_tools = mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools")
     current = _user(frozenset({Permission.TOOLS_CALL.value}))
@@ -105,6 +140,19 @@ async def test_tool_call_still_requires_underlying_mcp_permission(mocker):
 
     assert json.loads(result[0].text) == {"error": "Permission denied: tools:call"}
     get_enabled_tool.assert_not_called()
+
+
+async def test_user_defined_tool_listing_requires_tools_call_permission(mocker):
+    list_enabled_tools = mocker.patch(
+        "reporting.services.mcp_runtime.report_store.list_enabled_tools",
+        return_value=[_tool()],
+    )
+    current = _user(frozenset({Permission.TOOLSETS_READ.value}))
+
+    tools = await mcp_runtime.list_tools_for_user(current)
+
+    assert "security__lookup" not in {tool.name for tool in tools}
+    list_enabled_tools.assert_not_called()
 
 
 async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker):
@@ -197,7 +245,8 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
     assert len(result[0].text.encode("utf-8")) <= 500
 
 
-async def test_chat_safe_tool_listing_hides_mutating_builtins(mocker):
+async def test_chat_safe_tool_listing_includes_create_write_builtins(mocker):
+    """reports__create/clone are always private so they are safe without confirmation."""
     mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools", return_value=[])
     current = _user(
         frozenset(
@@ -217,10 +266,15 @@ async def test_chat_safe_tool_listing_hides_mutating_builtins(mocker):
 
     names = {tool.name for tool in tools}
     assert "reports__list" in names
-    assert "reports__create" not in names
+    assert "reports__create" in names
+    assert "reports__clone" in names
 
 
-async def test_chat_safe_tool_call_rejects_mutating_builtin_before_handler():
+async def test_chat_safe_tool_call_allows_create_write_builtin_without_confirmation(mocker):
+    mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.create_report",
+        return_value=_report_list_item(),
+    )
     current = _user(
         frozenset(
             {
@@ -233,12 +287,218 @@ async def test_chat_safe_tool_call_rejects_mutating_builtin_before_handler():
     result = await mcp_runtime.call_tool_for_user(
         current,
         "reports__create",
-        {},
+        {"name": "My Report"},
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
     )
 
-    assert json.loads(result[0].text) == {"error": "Tool 'reports__create' is not available to chat"}
+    data = json.loads(result[0].text)
+    assert "error" not in data
+
+
+async def test_chat_safe_tool_listing_includes_confirmation_gated_builtins(mocker):
+    """Builtins with a confirmation callback are listed in chat (confirmation is the safety gate)."""
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools", return_value=[])
+    current = _user(
+        frozenset(
+            {
+                Permission.CHAT_TOOLS_CALL.value,
+                Permission.REPORTS_READ.value,
+                Permission.REPORTS_DELETE.value,
+            }
+        )
+    )
+
+    tools = await mcp_runtime.list_tools_for_user(
+        current,
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+    )
+
+    names = {tool.name for tool in tools}
+    assert "reports__list" in names
+    assert "reports__delete" in names
+    assert "reports__create" not in names  # no confirmation callback → still blocked
+
+
+async def test_chat_safe_confirmation_gated_builtin_triggers_confirmation_not_blocked(mocker):
+    """A builtin with a confirmation callback goes through the confirmation flow in chat, not NOT_AVAILABLE."""
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="session-1",
+    )
+
+    data = json.loads(outcome.text)
+    assert data["confirmation_required"] is True
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+
+
+async def test_unapproved_mutating_builtin_returns_confirmation_without_handler(mocker):
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    data = json.loads(result[0].text)
+    assert data["confirmation_required"] is True
+    assert data["confirmation_id"] == "confirm-1"
+    delete_report.assert_not_called()
+
+
+async def test_repeated_pending_mutating_builtin_reuses_confirmation_without_handler(mocker):
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    # First call: no approved/denied grant. Second call (pending dedup): existing pending found.
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        side_effect=[None, _confirmation()],
+    )
+    create_confirmation = mocker.patch("reporting.services.mcp_runtime.report_store.create_action_confirmation")
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    data = json.loads(result[0].text)
+    assert data["confirmation_required"] is True
+    assert data["confirmation_id"] == "confirm-1"
+    delete_report.assert_not_called()
+    create_confirmation.assert_not_called()
+
+
+async def test_approved_mutating_builtin_executes_handler(mocker):
+    delete_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report",
+        return_value=True,
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        return_value=_confirmation("approved"),
+    )
+    claim_confirmation = mocker.patch(
+        "reporting.services.mcp_runtime.report_store.claim_action_confirmation_for_execution",
+        return_value=_confirmation("executed"),
+    )
+    create_confirmation = mocker.patch("reporting.services.mcp_runtime.report_store.create_action_confirmation")
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    assert json.loads(result[0].text) == {"report_id": "r1"}
+    delete_report.assert_awaited_once_with("r1", user_id="user-1")
+    claim_confirmation.assert_awaited_once_with("confirm-1", "user-1")
+    create_confirmation.assert_not_called()
+
+
+async def test_concurrent_claim_race_returns_notice_not_confirmation_required(mocker):
+    """When another caller already claimed the approval, the response is a notice (not
+    CONFIRMATION_REQUIRED) so the LLM does not retry and trigger a second execution."""
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        return_value=_confirmation("approved"),
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.claim_action_confirmation_for_execution",
+        return_value=None,
+    )
+    # Re-fetch shows "executed" — the concurrent caller won and ran the tool.
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.get_action_confirmation",
+        return_value=_confirmation("executed"),
+    )
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    assert result.blocked is None
+    data = json.loads(result.text)
+    assert "notice" in data
+    assert "confirmation_required" not in data
+    delete_report.assert_not_called()
+
+
+async def test_missing_session_key_fails_closed_for_mutating_builtin(mocker):
+    """Omitting confirmation_session_key while providing confirmation_source must block,
+    not silently bypass the confirmation gate."""
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    create_confirmation = mocker.patch("reporting.services.mcp_runtime.report_store.create_action_confirmation")
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key=None,
+    )
+
+    assert result.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+    delete_report.assert_not_called()
+    create_confirmation.assert_not_called()
+
+
+async def test_denied_mutating_builtin_blocks_handler(mocker):
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        return_value=_confirmation("denied"),
+    )
+    current = _user(frozenset({Permission.REPORTS_DELETE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    data = json.loads(result[0].text)
+    assert data["confirmation_required"] is True
+    assert data["status"] == "denied"
+    delete_report.assert_not_called()
 
 
 async def test_builtin_call_validates_required_arguments_before_handler(mocker):
@@ -266,6 +526,34 @@ async def test_chat_skill_gate_blocks_listing_before_store_lookup(mocker):
 
     assert prompts == []
     list_enabled_skills.assert_not_called()
+
+
+async def test_chat_skill_listing_includes_triggers_in_description(mocker):
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.list_enabled_skills",
+        return_value=[
+            _skill().model_copy(
+                update={
+                    "triggers": [
+                        "Investigate a GitHub organization",
+                        "Investigate a specific GitHub repository",
+                    ]
+                }
+            )
+        ],
+    )
+    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+
+    prompts = await mcp_runtime.list_prompts_for_user(
+        current,
+        gate_permission=Permission.CHAT_SKILLS_CALL,
+    )
+
+    assert prompts[0].description is not None
+    assert "Summarize a topic" in prompts[0].description
+    assert "trigger phrases" in prompts[0].description
+    assert "Investigate a GitHub organization" in prompts[0].description
+    assert "Investigate a specific GitHub repository" in prompts[0].description
 
 
 async def test_skill_render_still_requires_underlying_mcp_permission(mocker):

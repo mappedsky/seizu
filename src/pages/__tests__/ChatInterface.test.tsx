@@ -16,7 +16,11 @@ import * as usePermissionsModule from 'src/hooks/usePermissions';
 import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport } from 'ai';
+import {
+  DefaultChatTransport,
+  type ChatOnFinishCallback,
+  type UIMessage,
+} from 'ai';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissionState: jest.fn(),
@@ -317,6 +321,134 @@ describe('ChatInterface', () => {
     );
   });
 
+  it('resumes a confirmation from the linked chat URL once', async () => {
+    const sendMessage = jest.fn();
+    const touchSession = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession: jest.fn(),
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession,
+    });
+
+    renderChat({
+      initialPath: '/app/chat/thread-1?resume_confirmation_id=confirm-1',
+    });
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith(undefined, {
+        body: { resume_confirmation_id: 'confirm-1' },
+      });
+    });
+    expect(touchSession).toHaveBeenCalledWith('thread-1');
+  });
+
+  it('shows an error when resuming an approved confirmation fails', async () => {
+    const sendMessage = jest.fn().mockRejectedValue(new Error('resume failed'));
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({
+      initialPath: '/app/chat/thread-1?resume_confirmation_id=confirm-1',
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Failed to resume the approved confirmation.'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('refreshes confirmations once when an approval-required response finishes', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ confirmations: [] }),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      renderChat({ initialPath: '/app/chat/thread-1' });
+
+      await waitFor(() => {
+        expect(mockUseChat).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'thread-1' }),
+        );
+      });
+      fetchMock.mockClear();
+
+      const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+        | { onFinish?: ChatOnFinishCallback<UIMessage> }
+        | undefined;
+      chatOptions?.onFinish?.({
+        message: {
+          id: 'approval-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'text',
+              text: 'Seizu needs your approval before running this action.',
+            },
+          ],
+        },
+        messages: [],
+        isAbort: false,
+        isDisconnect: false,
+        isError: false,
+        finishReason: 'stop',
+      });
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/v1/confirmations?thread_id=thread-1',
+        expect.any(Object),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('shows a not-found state for a missing linked session', async () => {
     renderChat({ initialPath: '/app/chat/missing-session' });
 
@@ -427,6 +559,43 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Assistant')).toBeInTheDocument();
     expect(screen.getByText('Streaming response')).toBeInTheDocument();
     expect(screen.getByText('Assistant is working...')).toBeInTheDocument();
+  });
+
+  it('renders streaming Markdown in token batches and leaves the live tail as text', async () => {
+    const streamedText = [
+      '# Findings',
+      '',
+      Array.from({ length: 54 }, (_, index) => `word${index}`).join(' '),
+    ].join('\n');
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [{ type: 'text', text: streamedText }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(
+      screen.getByRole('heading', { name: 'Findings', level: 2 }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/word52 word53/)).toBeInTheDocument();
   });
 
   it('renders assistant responses with Markdoc in untrusted URL mode', async () => {

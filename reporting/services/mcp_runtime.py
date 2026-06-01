@@ -11,9 +11,11 @@ from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, Te
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
+from reporting.schema.confirmations import ConfirmationSource
 from reporting.schema.mcp_config import render_skill_prompt, validate_tool_arguments
-from reporting.services import report_store, reporting_neo4j
+from reporting.services import action_confirmations, report_store, reporting_neo4j
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
+from reporting.services.mcp_builtins.base import BuiltinTool
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ class ChatBlockReason(StrEnum):
 
     PERMISSION_DENIED = "permission_denied"
     NOT_AVAILABLE = "not_available"
+    CONFIRMATION_REQUIRED = "confirmation_required"
 
 
 @dataclass(frozen=True)
@@ -121,8 +124,17 @@ def parse_user_defined_name(name: str) -> tuple[str, str] | None:
     return parts[0], parts[1]
 
 
-def _is_chat_safe_builtin(required_permissions: list[str]) -> bool:
-    return bool(required_permissions) and set(required_permissions) <= _CHAT_SAFE_PERMISSIONS
+def _is_chat_safe_builtin(builtin: BuiltinTool) -> bool:
+    # Read-only builtins pass through directly. Mutating builtins with a
+    # confirmation callback are also safe — the confirmation IS the safety gate.
+    if builtin.confirmation is not None:
+        return True
+    # Explicit exceptions are rare and must be documented on the tool
+    # registration. Today this is limited to reports__create/reports__clone:
+    # new reports are private by default and do not modify existing resources.
+    if builtin.chat_safe_without_confirmation:
+        return True
+    return bool(builtin.required_permissions) and set(builtin.required_permissions) <= _CHAT_SAFE_PERMISSIONS
 
 
 def _permissions(current_user: CurrentUser | None, permissions: frozenset[str] | None) -> frozenset[str]:
@@ -151,7 +163,7 @@ async def list_tools_for_user(
 
     tools: list[Tool] = []
     for builtin in list_builtin_tools():
-        if chat_safe_only and not _is_chat_safe_builtin(builtin.required_permissions):
+        if chat_safe_only and not _is_chat_safe_builtin(builtin):
             continue
         if missing_permissions(builtin.required_permissions, perms):
             continue
@@ -163,18 +175,19 @@ async def list_tools_for_user(
             )
         )
 
-    try:
-        enabled_tools = await report_store.list_enabled_tools()
-        for tool in enabled_tools:
-            tools.append(
-                Tool(
-                    name=f"{tool.toolset_id}__{tool.tool_id}",
-                    description=tool.description or f"{tool.name} tool",
-                    inputSchema=build_input_schema(tool.parameters),
+    if Permission.TOOLS_CALL.value in perms:
+        try:
+            enabled_tools = await report_store.list_enabled_tools()
+            for tool in enabled_tools:
+                tools.append(
+                    Tool(
+                        name=f"{tool.toolset_id}__{tool.tool_id}",
+                        description=tool.description or f"{tool.name} tool",
+                        inputSchema=build_input_schema(tool.parameters),
+                    )
                 )
-            )
-    except Exception:
-        logger.exception("Failed to load tools from store for MCP listing")
+        except Exception:
+            logger.exception("Failed to load tools from store for MCP listing")
 
     return tools
 
@@ -189,6 +202,8 @@ async def call_tool_for_user(
     chat_safe_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
+    confirmation_source: ConfirmationSource | None = None,
+    confirmation_session_key: str | None = None,
 ) -> list[TextContent]:
     """MCP-shaped tool call. Use ``call_tool_for_chat`` from the chat agent."""
     content, _blocked = await _call_tool_core(
@@ -200,6 +215,8 @@ async def call_tool_for_user(
         chat_safe_only=chat_safe_only,
         result_max_rows=result_max_rows,
         result_max_bytes=result_max_bytes,
+        confirmation_source=confirmation_source,
+        confirmation_session_key=confirmation_session_key,
     )
     return content
 
@@ -214,6 +231,9 @@ async def call_tool_for_chat(
     chat_safe_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
+    confirmation_source: ConfirmationSource | None = None,
+    confirmation_session_key: str | None = None,
+    confirmation_batch_id: str | None = None,
 ) -> ChatActionOutcome:
     """Chat-oriented tool call returning the body together with a block reason.
 
@@ -231,6 +251,9 @@ async def call_tool_for_chat(
         chat_safe_only=chat_safe_only,
         result_max_rows=result_max_rows,
         result_max_bytes=result_max_bytes,
+        confirmation_source=confirmation_source,
+        confirmation_session_key=confirmation_session_key,
+        confirmation_batch_id=confirmation_batch_id,
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
 
@@ -245,6 +268,9 @@ async def _call_tool_core(
     chat_safe_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
+    confirmation_source: ConfirmationSource | None = None,
+    confirmation_session_key: str | None = None,
+    confirmation_batch_id: str | None = None,
 ) -> tuple[list[TextContent], ChatBlockReason | None]:
     args = arguments or {}
     perms = _permissions(current_user, permissions)
@@ -256,7 +282,7 @@ async def _call_tool_core(
 
     builtin = find_builtin(name)
     if builtin is not None:
-        if chat_safe_only and not _is_chat_safe_builtin(builtin.required_permissions):
+        if chat_safe_only and not _is_chat_safe_builtin(builtin):
             return (
                 text_response({"error": f"Tool '{name}' is not available to chat"}),
                 ChatBlockReason.NOT_AVAILABLE,
@@ -270,6 +296,39 @@ async def _call_tool_core(
         missing_args = _missing_required_arguments(builtin.input_schema, args)
         if missing_args:
             return text_response({"error": f"Missing required argument(s): {', '.join(missing_args)}"}), None
+        if builtin.confirmation is not None and confirmation_source is not None:
+            # Fail-closed: a mutating tool was reached via a source that requires
+            # confirmation but no session key is available to scope the record.
+            if confirmation_session_key is None:
+                return text_response(
+                    {"error": f"Tool '{name}' requires a session key for confirmation"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            if current_user is None:
+                return text_response(
+                    {"error": "Confirmation requires an authenticated user"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            target = await builtin.confirmation(args, current_user)
+            if target is not None:
+                confirmation = await action_confirmations.ensure_confirmation(
+                    user_id=current_user.user.user_id,
+                    source=confirmation_source,
+                    session_key=confirmation_session_key,
+                    tool_name=name,
+                    target=target,
+                    arguments=args,
+                    batch_id=confirmation_batch_id,
+                )
+                if confirmation is not None:
+                    if confirmation.status == "executed":
+                        # A concurrent caller already claimed this approval; treat as
+                        # completed so the LLM does not retry and create a duplicate.
+                        return text_response(
+                            {"notice": f"Tool '{name}' was already executed by a concurrent request."}
+                        ), None
+                    payload = action_confirmations.confirmation_required_payload(confirmation)
+                    if confirmation.status == "denied":
+                        payload["error"] = "Action was denied for this confirmation window"
+                    return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
         try:
             result = await builtin.handler(args, current_user)
             return (
@@ -333,7 +392,7 @@ async def list_prompts_for_user(
                 Prompt(
                     name=f"{skill.skillset_id}__{skill.skill_id}",
                     title=skill.name,
-                    description=skill.description or f"{skill.name} skill",
+                    description=_skill_prompt_description(skill),
                     arguments=[
                         PromptArgument(
                             name=p.name,
@@ -347,6 +406,18 @@ async def list_prompts_for_user(
     except Exception:
         logger.exception("Failed to load skills from store for MCP prompt listing")
     return prompts
+
+
+def _skill_prompt_description(skill: Any) -> str:
+    description = skill.description or f"{skill.name} skill"
+    triggers = [trigger for trigger in getattr(skill, "triggers", []) if isinstance(trigger, str) and trigger]
+    if not triggers:
+        return description
+    rendered_triggers = "; ".join(triggers[:8])
+    suffix = f" Use when the request matches these trigger phrases: {rendered_triggers}."
+    if len(triggers) > 8:
+        suffix = f"{suffix[:-1]}; and {len(triggers) - 8} more."
+    return f"{description}{suffix}"
 
 
 async def get_prompt_for_user(

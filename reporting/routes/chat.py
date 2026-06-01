@@ -30,7 +30,7 @@ from reporting.services.chat_graph import (
     load_thread_messages,
     namespaced_thread_id,
 )
-from reporting.services.chat_messages import message_text
+from reporting.services.chat_messages import MessageTag, message_text, tag_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,6 +74,7 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
     message_id = f"msg_{uuid.uuid4().hex}"
     text_id = f"text_{uuid.uuid4().hex}"
     text_started = False
+    finish_reason = "stop"
 
     try:
         session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
@@ -86,9 +87,13 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
         yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True
-        async for delta in _token_source(body, current):
-            if delta:
-                yield _sse_data({"type": "text-delta", "id": text_id, "delta": delta})
+        async for event in _token_source(body, current):
+            if event["type"] == "token":
+                delta = event["content"]
+                if delta:
+                    yield _sse_data({"type": "text-delta", "id": text_id, "delta": delta})
+            elif event["type"] == "finish_reason":
+                finish_reason = event["finish_reason"]
     except Exception:
         logger.exception("Chat stream failed")
         if text_started:
@@ -99,24 +104,44 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
         return
 
     yield _sse_data({"type": "text-end", "id": text_id})
-    yield _sse_data({"type": "finish", "finishReason": "stop"})
+    finish_payload: dict[str, Any] = {"type": "finish", "finishReason": finish_reason}
+    if finish_reason == "length":
+        finish_payload["messageMetadata"] = {
+            "finish_reason": "length",
+            "response_cut_off": True,
+        }
+    yield _sse_data(finish_payload)
     yield "data: [DONE]\n\n"
 
 
-async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[str]:
+async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[dict[str, str]]:
     graph = get_chat_graph()
-    graph_input: ChatState = {"messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")]}
+    if body.resume_confirmation_id:
+        resume_message = HumanMessage(
+            content=f"Resume approved confirmation {body.resume_confirmation_id}",
+            id=f"msg_{uuid.uuid4().hex}",
+            additional_kwargs={"resume_confirmation_id": body.resume_confirmation_id},
+        )
+        tag_message(resume_message, MessageTag.EPHEMERAL)
+        graph_input: ChatState = {"messages": [resume_message]}
+    else:
+        graph_input = {"messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")]}
     config = {
         "configurable": {
             "current_user": current,
             "thread_id": namespaced_thread_id(current, body.thread_id),
+            "client_thread_id": body.thread_id,
         }
     }
     async for chunk in graph.astream(graph_input, config, stream_mode="custom"):
         if isinstance(chunk, dict) and chunk.get("kind") == "token":
             delta = chunk.get("content")
             if isinstance(delta, str):
-                yield delta
+                yield {"type": "token", "content": delta}
+        elif isinstance(chunk, dict) and chunk.get("kind") == "finish_reason":
+            finish_reason = chunk.get("finish_reason")
+            if finish_reason == "length":
+                yield {"type": "finish_reason", "finish_reason": "length"}
 
 
 def _sse_data(payload: dict[str, Any]) -> str:

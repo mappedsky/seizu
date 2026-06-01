@@ -551,11 +551,25 @@ class RenderSkillResponse(BaseModel):
     text: str
 
 
-_SKILL_VAR_RE = re.compile(r"\{%\s*\$([a-z][a-z0-9_]*)\s*%\}")
+# Matches {% $param_name %} variable references.  A preceding backslash
+# (\{% $name %}) marks a literal/escaped tag that must not be validated or
+# substituted; the negative lookbehind skips those, and _unescape_skill_vars
+# strips the backslash after substitution is complete.
+_SKILL_VAR_RE = re.compile(r"(?<!\\)\{%\s*\$([a-z][a-z0-9_]*)\s*%\}")
+_SKILL_VAR_ESCAPED_RE = re.compile(r"\\(\{%\s*\$[a-z][a-z0-9_]*\s*%\})")
+
+
+def _unescape_skill_vars(text: str) -> str:
+    """Strip the leading backslash from escaped variable tags after substitution."""
+    return _SKILL_VAR_ESCAPED_RE.sub(r"\1", text)
 
 
 def template_placeholders(template: str) -> set[str]:
-    """Return ``{% $param_name %}`` placeholders used by a skill template."""
+    """Return ``{% $param_name %}`` placeholders used by a skill template.
+
+    Escaped tags (``\\{% $name %}``) are excluded — they are literal text,
+    not variable references.
+    """
     return {m.group(1) for m in _SKILL_VAR_RE.finditer(template)}
 
 
@@ -596,6 +610,7 @@ def render_skill_template(
         return None, errors
 
     rendered = _SKILL_VAR_RE.sub(lambda m: str(values.get(m.group(1), "")), template)
+    rendered = _unescape_skill_vars(rendered)
     return rendered, []
 
 

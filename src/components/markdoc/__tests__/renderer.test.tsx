@@ -210,12 +210,7 @@ describe('MarkdocRenderer', () => {
         variables={{ url: '//evil.example.com/x' }}
       />,
     );
-    // The substituted URL has no scheme, so it's treated as a relative path and
-    // kept verbatim. Browsers will resolve protocol-relative URLs under the
-    // current origin's protocol, which is intentional and what `/path` does too.
-    expect(container.querySelector('a')?.getAttribute('href')).toBe(
-      '//evil.example.com/x',
-    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
   });
 
   it('allows mailto and tel after substitution', () => {

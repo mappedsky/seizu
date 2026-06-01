@@ -7,10 +7,29 @@ from mcp import types as mcp_types
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS
+from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import ReportListItem, ReportVersion, User
-from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions
+from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
 
 _NOW = "2024-01-01T00:00:00+00:00"
+_EXPIRES = "2099-01-01T00:00:00+00:00"
+
+
+def _approved_confirmation(confirmation_id: str = "c1") -> ActionConfirmation:
+    return ActionConfirmation(
+        confirmation_id=confirmation_id,
+        user_id="u1",
+        source="mcp",
+        session_key="test-session",
+        tool_name="reports__pin",
+        action="pin",
+        resource_type="report",
+        resource_id="r1",
+        arguments_hash="h1",
+        status="approved",
+        created_at=_NOW,
+        expires_at=_EXPIRES,
+    )
 
 
 def _report_list_item(report_id: str = "r1", name: str = "n") -> ReportListItem:
@@ -42,7 +61,13 @@ def _current_user(user_id: str = "u1") -> CurrentUser:
     )
 
 
-async def _call(server, name, arguments, current_user: CurrentUser | None = None):
+async def _call(
+    server,
+    name,
+    arguments,
+    current_user: CurrentUser | None = None,
+    bypass_confirmation: bool = True,
+):
     handler = server.request_handlers[mcp_types.CallToolRequest]
     req = mcp_types.CallToolRequest(
         method="tools/call",
@@ -50,11 +75,25 @@ async def _call(server, name, arguments, current_user: CurrentUser | None = None
     )
     perm_tok = _mcp_permissions.set(ALL_PERMISSIONS)
     user_tok = _mcp_current_user.set(current_user or _current_user())
+    # Simulate what _MCPAuthMiddleware sets before dispatching.
+    session_tok = _mcp_session_key.set("test-session")
     try:
-        result = await handler(req)
+        if bypass_confirmation:
+            # Most builtin tests exercise handler logic, not the confirmation
+            # flow (tested separately in mcp_runtime_test.py). Patching
+            # ensure_confirmation to return None lets the handler run directly.
+            with patch(
+                "reporting.services.mcp_runtime.action_confirmations.ensure_confirmation",
+                new_callable=AsyncMock,
+                return_value=None,
+            ):
+                result = await handler(req)
+        else:
+            result = await handler(req)
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
+        _mcp_session_key.reset(session_tok)
     return result.root.content
 
 
@@ -90,13 +129,26 @@ async def test_reports_list_returns_reports():
 
 
 async def test_reports_pin_calls_store():
-    with patch(
-        "reporting.services.mcp_builtins.reports.report_store.pin_report",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as mock_pin:
+    approved = _approved_confirmation()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.pin_report",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_pin,
+        patch(
+            "reporting.services.action_confirmations.report_store.find_action_confirmation_grant",
+            new_callable=AsyncMock,
+            return_value=approved,
+        ),
+        patch(
+            "reporting.services.action_confirmations.report_store.claim_action_confirmation_for_execution",
+            new_callable=AsyncMock,
+            return_value=approved.model_copy(update={"status": "executed"}),
+        ),
+    ):
         server = _build_mcp_server()
-        result = await _call(server, "reports__pin", {"report_id": "r1", "pinned": True})
+        result = await _call(server, "reports__pin", {"report_id": "r1", "pinned": True}, bypass_confirmation=False)
         data = json.loads(result[0].text)
 
     assert data == {"report_id": "r1", "pinned": True}

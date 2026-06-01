@@ -30,7 +30,8 @@ from typing_extensions import TypedDict
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import mcp_runtime
+from reporting.schema.confirmations import ActionConfirmation
+from reporting.services import action_confirmations, mcp_runtime, report_store
 from reporting.services.chat_messages import MessageTag, drop_tagged, has_tag, message_text, tag_message
 from reporting.services.mcp_runtime import ChatBlockReason
 
@@ -83,6 +84,13 @@ class ToolCallResult:
     content: str
     blocked: ChatBlockReason | None = None
     tools_required: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LLMTurnResult:
+    message: AIMessage
+    streamed: str
+    finish_reason: str | None = None
 
 
 class SeizuChatDeepSeekMixin:
@@ -200,10 +208,13 @@ async def mock_agent_node(state: ChatState, _config: RunnableConfig) -> ChatStat
 
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
     provider = _chat_provider()
+    current_user = _current_user_from_config(config)
+    resume_confirmation_id = _resume_confirmation_id(state["messages"])
+    if resume_confirmation_id:
+        return await _resume_confirmed_tool_turn(state, config, current_user, resume_confirmation_id)
     if provider == "mock":
         return await mock_agent_node(state, config)
 
-    current_user = _current_user_from_config(config)
     messages = _llm_context_messages(state["messages"])
     model = get_chat_model()
     writer = get_stream_writer()
@@ -233,6 +244,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     empty_retry_used = False
     repeated_action_retry_used = False
     response_is_broken = False
+    response_hit_output_limit = False
     streamed_response = ""
     # Retry guidance for the *next* LLM call is appended to the system prompt
     # so it never appears as a mid-conversation SystemMessage (which several
@@ -245,7 +257,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         turn_system_prompt = _combined_system_prompt(base_system_prompt, pending_system_addendum)
         pending_system_addendum = ""
         available_specs = _with_provider_tool_names([*skill_specs, *tool_specs])
-        ai_message, streamed_in_last_turn = await _run_llm_tool_turn(
+        turn_result = await _run_llm_tool_turn(
             model,
             turn_system_prompt,
             messages,
@@ -253,6 +265,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             config,
             writer,
         )
+        ai_message = turn_result.message
+        streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
         if unavailable:
@@ -264,6 +278,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         if not requested:
             response = message_text(ai_message.content)
             if response:
+                response, response_hit_output_limit = _append_output_limit_notice(
+                    response, turn_result.finish_reason, action_summaries
+                )
                 break
             if action_summaries:
                 break
@@ -292,7 +309,13 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
         writer({"kind": "token", "content": _tool_call_start_status(batch)})
-        results = await _run_tool_call_batch(batch, current_user)
+        batch_id = uuid.uuid4().hex
+        results = await _run_tool_call_batch(
+            batch,
+            current_user,
+            session_key=_client_thread_id_from_config(config),
+            batch_id=batch_id,
+        )
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
         messages = [
@@ -327,11 +350,14 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         synthesis_system_prompt = _combined_system_prompt(
             base_system_prompt, _final_synthesis_retry_message(action_summaries)
         )
-        final_message, streamed_in_last_turn = await _run_llm_tool_turn(
-            model, synthesis_system_prompt, messages, [], config, writer
-        )
+        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, writer)
+        final_message = turn_result.message
+        streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         response = message_text(final_message.content)
+        response, response_hit_output_limit = _append_output_limit_notice(
+            response, turn_result.finish_reason, action_summaries
+        )
 
     if not response:
         response = _empty_response_fallback(action_summaries)
@@ -347,6 +373,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             writer({"kind": "token", "content": response[len(streamed_response) :]})
         else:
             writer({"kind": "token", "content": f"\n\n{response}"})
+    if response_hit_output_limit:
+        writer({"kind": "finish_reason", "finish_reason": "length"})
 
     ai_message = AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}")
     if response_is_broken:
@@ -360,6 +388,175 @@ def _combined_system_prompt(base: str, addendum: str) -> str:
     return f"{base}\n\n{addendum}"
 
 
+async def _resume_confirmed_tool_turn(
+    state: ChatState,
+    config: RunnableConfig,
+    current_user: CurrentUser | None,
+    confirmation_id: str,
+) -> ChatState:
+    writer = get_stream_writer()
+    if current_user is None:
+        response = "Seizu could not resume the action because the current user is not authenticated."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    # Capture as a non-optional type for use inside nested closures below.
+    authed_user: CurrentUser = current_user
+    confirmation = await report_store.get_action_confirmation(confirmation_id, user_id=authed_user.user.user_id)
+    if confirmation is None:
+        response = "Seizu could not find that action confirmation."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+    client_thread_id = _client_thread_id_from_config(config)
+    if confirmation.source != "chat" or confirmation.session_key != client_thread_id:
+        response = "That action confirmation does not belong to this chat thread, so Seizu did not run it."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+    if action_confirmations.is_expired(confirmation) and confirmation.status != "executed":
+        response = "That action confirmation has expired, so Seizu did not run it."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+    if confirmation.status not in ("approved", "executed"):
+        response = "That action is not approved, so Seizu did not run it."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    # Collect the full batch — all confirmations that share the same batch_id.
+    # If this is a legacy confirmation with no batch_id, run only it.
+    batch_id = confirmation.batch_id
+    if batch_id:
+        batch = await report_store.list_batch_action_confirmations(
+            user_id=authed_user.user.user_id,
+            batch_id=batch_id,
+        )
+        batch = [c for c in batch if c.source == "chat" and c.session_key == client_thread_id]
+        pending = [c for c in batch if c.status == "pending" and not action_confirmations.is_expired(c)]
+        if pending:
+            n = len(pending)
+            noun = "approval" if n == 1 else "approvals"
+            response = (
+                f"Waiting for {n} more {noun} before proceeding. "
+                "Use the confirmation panel or URLs to approve the remaining actions."
+            )
+            writer({"kind": "token", "content": response})
+            return _chat_state_with_ai_response(state, response)
+        denied = [c for c in batch if c.status == "denied"]
+        # Only count a confirmation as blocking-expired when it still needed a
+        # decision — executed items have already run and must not abort the batch.
+        expired = [c for c in batch if c.status in ("pending", "approved") and action_confirmations.is_expired(c)]
+        if denied or expired:
+            reason = "denied" if denied else "expired"
+            response = f"One or more actions in this approval batch were {reason}, so Seizu did not run the batch."
+            writer({"kind": "token", "content": response})
+            return _chat_state_with_ai_response(state, response)
+        to_run = [c for c in batch if c.status == "approved"]
+    else:
+        to_run = [confirmation] if confirmation.status == "approved" else []
+
+    if not to_run:
+        response = "All actions in this batch have already been executed."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    if len(to_run) == 1:
+        writer({"kind": "token", "content": f"Running approved tool `{to_run[0].tool_name}`...\n\n"})
+    else:
+        names = ", ".join(f"`{c.tool_name}`" for c in to_run)
+        writer({"kind": "token", "content": f"Running {len(to_run)} approved tools: {names}...\n\n"})
+
+    outcomes: list[tuple[str, str]] = []  # (tool_name, result_text)
+    errors: list[str] = []
+
+    async def _run_one(c: ActionConfirmation) -> None:
+        claimed = await report_store.claim_action_confirmation_for_execution(
+            c.confirmation_id,
+            authed_user.user.user_id,
+        )
+        if claimed is None:
+            errors.append(f"`{c.tool_name}`: action was already executed or is no longer approved")
+            return
+        outcome = await mcp_runtime.call_tool_for_chat(
+            authed_user,
+            c.tool_name,
+            c.arguments,
+            gate_permission=Permission.CHAT_TOOLS_CALL,
+            chat_safe_only=True,
+            result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
+            result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+        )
+        if outcome.blocked is not None:
+            errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
+        else:
+            outcomes.append((c.tool_name, outcome.text))
+
+    max_parallel = settings.CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
+    semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
+
+    async def _run_one_limited(c: ActionConfirmation) -> None:
+        if semaphore is None:
+            await _run_one(c)
+            return
+        async with semaphore:
+            await _run_one(c)
+
+    await asyncio.gather(*(_run_one_limited(c) for c in to_run))
+
+    if errors and not outcomes:
+        response = "The approved action(s) could not be executed:\n" + "\n".join(f"- {e}" for e in errors)
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    provider = _chat_provider()
+    combined_results = "\n\n".join(f"`{name}`:\n{_truncate_text(text, 6000)}" for name, text in outcomes)
+    if errors:
+        combined_results += "\n\nThe following actions could not be executed:\n" + "\n".join(f"- {e}" for e in errors)
+
+    if provider == "mock":
+        response = f"Approved action(s) completed.\n\nResult:\n{_truncate_text(combined_results, 4000)}"
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    model = get_chat_model()
+    n_ran = len(outcomes)
+    summary_note = (
+        "The user approved the pending Seizu actions. Summarize the completed tool results concisely."
+        if n_ran > 1
+        else "The user approved the pending Seizu action. Summarize the completed tool result concisely."
+    )
+    system_prompt = _combined_system_prompt(
+        build_system_prompt(provider, current_user),
+        f"{summary_note} Do not call additional tools in this resume turn.",
+    )
+    context = [
+        *_llm_context_messages(state["messages"]),
+        HumanMessage(
+            content=f"Approved Seizu tool(s) ran with result(s):\n\n{_truncate_text(combined_results, 12000)}",
+            id=f"msg_{uuid.uuid4().hex}",
+        ),
+    ]
+    turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer)
+    response = message_text(turn_result.message.content) or (
+        f"Approved action(s) completed.\n\nResult:\n{_truncate_text(combined_results, 4000)}"
+    )
+    response, hit_output_limit = _append_output_limit_notice(response, turn_result.finish_reason)
+    streamed = turn_result.streamed
+    if response and response != streamed:
+        if not streamed:
+            writer({"kind": "token", "content": response})
+        elif response.startswith(streamed):
+            writer({"kind": "token", "content": response[len(streamed) :]})
+        else:
+            writer({"kind": "token", "content": f"\n\n{response}"})
+    if hit_output_limit:
+        writer({"kind": "finish_reason", "finish_reason": "length"})
+    return _chat_state_with_ai_response(state, response)
+
+
+def _chat_state_with_ai_response(state: ChatState, response: str) -> ChatState:
+    ai_message = AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}")
+    return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+
+
 async def _run_llm_tool_turn(
     model: ChatModel,
     system_prompt: str,
@@ -367,7 +564,7 @@ async def _run_llm_tool_turn(
     tools: list[ChatToolSpec],
     config: RunnableConfig,
     writer: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[AIMessage, str]:
+) -> LLMTurnResult:
     """Run one LLM turn, streaming text deltas via *writer* as they arrive.
 
     Streaming policy: text deltas are emitted live *until* a chunk in this
@@ -377,9 +574,9 @@ async def _run_llm_tool_turn(
     message but not shown to the user — they would otherwise see "Let me
     check…" preambles that are about to be invalidated by a tool run.
 
-    Returns ``(ai_message, streamed_text)``. ``streamed_text`` is the
-    concatenation of deltas the caller has already shipped, so it can avoid
-    re-emitting the final response if it matches.
+    Returns the merged message, the concatenation of deltas already shipped,
+    and any provider finish reason observed while streaming. The streamed text
+    lets the caller avoid re-emitting the final response when it matches.
     """
     runnable = model
     bind_tools = getattr(model, "bind_tools", None)
@@ -388,11 +585,13 @@ async def _run_llm_tool_turn(
 
     merged: Any | None = None
     streamed = ""
+    finish_reason: str | None = None
     stream_text = writer is not None
     async for chunk in runnable.astream(
         [SystemMessage(content=system_prompt), *messages],
         config=config,
     ):
+        finish_reason = _chunk_finish_reason(chunk) or finish_reason
         if stream_text and _chunk_signals_tool_call(chunk):
             stream_text = False
         if stream_text and writer is not None:
@@ -403,14 +602,22 @@ async def _run_llm_tool_turn(
         merged = chunk if merged is None else merged + chunk
 
     if isinstance(merged, AIMessage):
-        return merged, streamed
+        return LLMTurnResult(
+            message=merged,
+            streamed=streamed,
+            finish_reason=finish_reason or _chunk_finish_reason(merged),
+        )
     fallback = AIMessage(
         content=message_text(getattr(merged, "content", "")) if merged is not None else "",
         tool_calls=list(getattr(merged, "tool_calls", []) or []),
         invalid_tool_calls=list(getattr(merged, "invalid_tool_calls", []) or []),
         id=getattr(merged, "id", None),
     )
-    return fallback, streamed
+    return LLMTurnResult(
+        message=fallback,
+        streamed=streamed,
+        finish_reason=finish_reason or _chunk_finish_reason(merged),
+    )
 
 
 def _chunk_signals_tool_call(chunk: Any) -> bool:
@@ -430,6 +637,69 @@ def _chunk_signals_tool_call(chunk: Any) -> bool:
             if isinstance(item, dict) and item.get("type") in ("tool_use", "tool_call"):
                 return True
     return False
+
+
+_OUTPUT_LIMIT_NOTICE = (
+    "\n\n> Response stopped because the model hit its output limit. Ask me to continue from here if you need the rest."
+)
+
+
+def _append_output_limit_notice(
+    response: str,
+    finish_reason: str | None,
+    action_summaries: list[str] | None = None,
+) -> tuple[str, bool]:
+    if not _is_output_limit_finish_reason(finish_reason):
+        return response, False
+    if _OUTPUT_LIMIT_NOTICE in response:
+        return response, True
+    summary_notice = ""
+    if action_summaries:
+        summary_notice = f"\n\nCompleted before the cutoff:\n{_truncate_text(action_summaries[-1], 4000)}"
+    return f"{response.rstrip()}{_OUTPUT_LIMIT_NOTICE}{summary_notice}", True
+
+
+def _is_output_limit_finish_reason(finish_reason: str | None) -> bool:
+    if not finish_reason:
+        return False
+    normalized = finish_reason.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "model_length",
+        "output_limit",
+        "token_limit",
+    }
+
+
+def _chunk_finish_reason(chunk: Any) -> str | None:
+    if chunk is None:
+        return None
+    if isinstance(chunk, dict):
+        return _finish_reason_from_mapping(chunk)
+    for attr in ("response_metadata", "generation_info", "additional_kwargs"):
+        metadata = getattr(chunk, attr, None)
+        if isinstance(metadata, dict):
+            finish_reason = _finish_reason_from_mapping(metadata)
+            if finish_reason:
+                return finish_reason
+    direct = getattr(chunk, "finish_reason", None) or getattr(chunk, "finishReason", None)
+    return direct if isinstance(direct, str) and direct else None
+
+
+def _finish_reason_from_mapping(mapping: dict[str, Any]) -> str | None:
+    for key in (
+        "finish_reason",
+        "finishReason",
+        "stop_reason",
+        "completion_reason",
+        "done_reason",
+    ):
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) -> list[BaseMessage]:
@@ -601,7 +871,7 @@ def _add_reasoning_content_to_payload(payload: dict[str, Any], messages: list[Ba
 
 def _uses_deepseek_compatible_endpoint(model_name: str) -> bool:
     base_url_host = _hostname(settings.CHAT_LLM_BASE_URL).lower()
-    if base_url_host.endswith("deepseek.com") or base_url_host.endswith(".deepseek.com"):
+    if base_url_host == "deepseek.com" or base_url_host.endswith(".deepseek.com"):
         return True
     return model_name.lower().startswith("deepseek-")
 
@@ -730,21 +1000,30 @@ def _tool_request_key(request: ToolCallRequest) -> str:
 
 
 async def _run_tool_call_batch(
-    requests: list[ToolCallRequest], current_user: CurrentUser | None
+    requests: list[ToolCallRequest],
+    current_user: CurrentUser | None,
+    session_key: str | None = None,
+    batch_id: str | None = None,
 ) -> list[ToolCallResult]:
     max_parallel = settings.CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
 
     async def run_one(request: ToolCallRequest) -> ToolCallResult:
         if semaphore is None:
-            return await _run_tool_call(request, current_user)
+            return await _run_tool_call(request, current_user, session_key=session_key, batch_id=batch_id)
         async with semaphore:
-            return await _run_tool_call(request, current_user)
+            return await _run_tool_call(request, current_user, session_key=session_key, batch_id=batch_id)
 
     return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
 
-async def _run_tool_call(request: ToolCallRequest, current_user: CurrentUser | None) -> ToolCallResult:
+async def _run_tool_call(
+    request: ToolCallRequest,
+    current_user: CurrentUser | None,
+    *,
+    session_key: str | None = None,
+    batch_id: str | None = None,
+) -> ToolCallResult:
     if request.spec.kind == "skill":
         string_arguments = {key: str(value) for key, value in request.arguments.items()}
         outcome = await mcp_runtime.render_prompt_for_chat(
@@ -753,9 +1032,10 @@ async def _run_tool_call(request: ToolCallRequest, current_user: CurrentUser | N
             string_arguments,
             gate_permission=Permission.CHAT_SKILLS_CALL,
         )
+        content = _idempotent_success_content(request, outcome.text)
         return ToolCallResult(
             request=request,
-            content=outcome.text,
+            content=content,
             blocked=outcome.blocked,
             tools_required=outcome.tools_required,
         )
@@ -768,8 +1048,15 @@ async def _run_tool_call(request: ToolCallRequest, current_user: CurrentUser | N
         chat_safe_only=True,
         result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
         result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+        confirmation_source="chat",
+        confirmation_session_key=session_key,
+        confirmation_batch_id=batch_id,
     )
-    return ToolCallResult(request=request, content=outcome.text, blocked=outcome.blocked)
+    return ToolCallResult(
+        request=request,
+        content=_idempotent_success_content(request, outcome.text),
+        blocked=outcome.blocked,
+    )
 
 
 def build_system_prompt(provider: str | None = None, current_user: CurrentUser | None = None) -> str:
@@ -807,7 +1094,16 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "calling any skill or tool, check its schema and include every required parameter. Never call a skill or tool "
         "with missing required arguments; if you do not know a required identifier such as a toolset_id, first call an "
         "available listing/discovery tool, then call the specific tool with that identifier. Do not mention internal "
-        "tool-call syntax to the user. Do not pretend to have executed a tool unless the conversation contains its "
+        "tool-call syntax to the user. You are the Seizu agent that can run listed skills and tools directly; never "
+        "tell the user to ask another Seizu agent, re-enter the same request, or use the dashboard to trigger a "
+        "listed skill. If the user asks to run, investigate, or validate something and a listed skill's name, "
+        "description, or trigger phrases match the request, call that skill in this turn. If a prior turn created or "
+        "updated a skill and the user now asks to run or validate it, use this turn's live skill listing and call the "
+        "matching skill; do not call skillsets__update_skill again unless the user explicitly asks for another edit. "
+        "If a repeated create action reports that the resource already exists, treat it as idempotent evidence that "
+        "the resource is already available and continue the workflow by reading, updating, or using that resource "
+        "instead of stopping as a failure. "
+        "Do not pretend to have executed a tool unless the conversation contains its "
         f"result.{user_context}{provider_note}"
     )
 
@@ -861,6 +1157,37 @@ def _blocked_tool_call_results(results: list[ToolCallResult]) -> list[ToolCallRe
     return [result for result in results if result.blocked is not None]
 
 
+def _idempotent_success_content(request: ToolCallRequest, content: str) -> str:
+    if not _is_create_action(request):
+        return content
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if not isinstance(data, dict):
+        return content
+    error = data.get("error")
+    if not isinstance(error, str) or "already exists" not in error.lower():
+        return content
+    return _json_dump(
+        {
+            "ok": True,
+            "idempotent": True,
+            "message": (
+                f"{error}. Treating this as already completed, likely from an earlier "
+                "successful attempt before the response was cut off."
+            ),
+            "original_result": data,
+        }
+    )
+
+
+def _is_create_action(request: ToolCallRequest) -> bool:
+    name = request.name.lower()
+    action = name.split("__", 1)[1] if "__" in name else name
+    return action == "create" or action.startswith("create_")
+
+
 def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> set[str]:
     disclosed: set[str] = set()
     for result in results:
@@ -869,7 +1196,44 @@ def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> s
     return disclosed
 
 
+def _common_batch_url(results: list[ToolCallResult]) -> str | None:
+    """Return the shared batch_url if all results share the same non-None batch_id."""
+    batch_url: str | None = None
+    for result in results:
+        try:
+            data = json.loads(result.content)
+        except json.JSONDecodeError:
+            return None
+        url = data.get("batch_url") if isinstance(data, dict) else None
+        if not isinstance(url, str):
+            return None
+        if batch_url is None:
+            batch_url = url
+        elif batch_url != url:
+            return None
+    return batch_url
+
+
 def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
+    if any(result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED for result in results):
+        pending = [result for result in results if _confirmation_status(result.content) == "pending"]
+        if not pending:
+            return (
+                "This action needed approval, but the confirmation has already been decided or has expired. "
+                "Nothing was executed."
+            )
+        batch_url = _common_batch_url(pending)
+        if batch_url:
+            n = len(pending)
+            noun = "action" if n == 1 else f"{n} actions"
+            return (
+                f"Approval needed for {noun}. Visit the confirmation page to allow or deny, "
+                f"then the conversation will resume automatically: {batch_url}"
+            )
+        lines = ["Approval needed. Open the confirmation URL to allow or deny, then resume the conversation."]
+        for result in pending:
+            lines.append(f"- {_blocked_tool_call_body(result.content)}")
+        return "\n".join(lines)
     lines = [
         "Seizu blocked the requested action because the tool or skill is not available to this chat session, "
         "or the current user/agent permissions do not allow it."
@@ -888,7 +1252,20 @@ def _blocked_tool_call_reason_label(reason: ChatBlockReason | None) -> str:
         return "permission denied"
     if reason == ChatBlockReason.NOT_AVAILABLE:
         return "not available in this chat session"
+    if reason == ChatBlockReason.CONFIRMATION_REQUIRED:
+        return "confirmation required"
     return "blocked"
+
+
+def _confirmation_status(content: str) -> str | None:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or data.get("confirmation_required") is not True:
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
 
 
 def _blocked_tool_call_body(content: str) -> str:
@@ -905,6 +1282,12 @@ def _blocked_tool_call_body(content: str) -> str:
         return content.strip() or "blocked"
     if isinstance(data, dict) and isinstance(data.get("error"), str):
         return data["error"]
+    if isinstance(data, dict) and data.get("confirmation_required") is True:
+        status = data.get("status")
+        if status == "denied":
+            return "Action was denied for this confirmation window."
+        url = data.get("confirmation_url")
+        return f"Approval required at {url}" if isinstance(url, str) else "Approval required."
     return content.strip() or "blocked"
 
 
@@ -995,7 +1378,8 @@ def _progressive_capability_context(skills: list[Prompt]) -> str:
         "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
         "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
         "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill or by prior "
-        "conversation context.\n\n"
+        "conversation context. Skill descriptions can include trigger phrases; if the current user request matches a "
+        "trigger phrase, call that skill now instead of describing how to trigger it.\n\n"
         f"Available skills:\n{_format_skills(skills)}"
     )
 
@@ -1004,7 +1388,9 @@ def _full_capability_context(skills: list[Prompt], tools: list[Tool]) -> str:
     sections: list[str] = [
         "Capability discovery mode: progressive disclosure is disabled. You are given both chat-safe tools and "
         "skills up front, similar to a normal MCP listing. Use native structured tool calls and include every "
-        "required argument shown for the selected skill or tool."
+        "required argument shown for the selected skill or tool. Skill descriptions can include trigger phrases; "
+        "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
+        "trigger it."
     ]
     if skills:
         sections.append(f"Available skills:\n{_format_skills(skills)}")
@@ -1074,6 +1460,31 @@ def _current_user_from_config(config: RunnableConfig) -> CurrentUser | None:
         return None
     current_user = configurable.get("current_user")
     return current_user if isinstance(current_user, CurrentUser) else None
+
+
+def _client_thread_id_from_config(config: RunnableConfig) -> str | None:
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    thread_id = configurable.get("client_thread_id")
+    return thread_id if isinstance(thread_id, str) else None
+
+
+def _resume_confirmation_id(messages: list[Any]) -> str | None:
+    # Only inspect the most recent HumanMessage — it is always the one that
+    # triggered this graph turn.  Stopping at the first HumanMessage prevents
+    # a persisted ephemeral resume message from a prior turn being picked up
+    # again and re-executing an already-completed confirmation.
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict):
+            confirmation_id = additional_kwargs.get("resume_confirmation_id")
+            if isinstance(confirmation_id, str) and confirmation_id:
+                return confirmation_id
+        return None
+    return None
 
 
 def _last_user_text(messages: list[Any]) -> str:
