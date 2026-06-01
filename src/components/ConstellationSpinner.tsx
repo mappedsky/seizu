@@ -108,8 +108,10 @@ export default function ConstellationSpinner({
 
   useEffect(() => {
     t0Ref.current = null; // reset on mount/remount
+    let cancelled = false;
 
     function tick(now: number) {
+      if (cancelled) return;
       if (!t0Ref.current) t0Ref.current = now;
       const tsec = (now - t0Ref.current) / 1000;
 
@@ -157,6 +159,7 @@ export default function ConstellationSpinner({
 
     rafRef.current = requestAnimationFrame(tick);
     return () => {
+      cancelled = true;
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
