@@ -323,3 +323,16 @@ async def test_get_role_version_not_found(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get("/api/v1/roles/role1/versions/99")
     assert ret.status_code == 404
+
+
+def test_role_version_coerces_none_version_to_zero():
+    from reporting.schema.rbac import RoleVersion
+
+    rv = RoleVersion(
+        role_id="r1",
+        name="Test",
+        version=None,  # type: ignore[arg-type]
+        created_at="2024-01-01T00:00:00+00:00",
+        created_by="u1",
+    )
+    assert rv.version == 0

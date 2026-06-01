@@ -483,3 +483,16 @@ async def test_chat_history_requires_chat_permission(mocker):
         response = await client.get("/api/v1/chat/history", params={"thread_id": "1001"})
 
     assert response.status_code == 403
+
+
+async def test_update_chat_session_title_returns_404_when_not_found(mocker):
+    _patch_chat_sessions(mocker)  # no sessions seeded → update returns None
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.patch(
+            "/api/v1/chat/sessions/99999",
+            json={"title": "New name"},
+        )
+
+    assert response.status_code == 404
