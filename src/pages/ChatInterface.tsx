@@ -41,6 +41,7 @@ import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
 const CHAT_MESSAGE_THROTTLE_MS = 50;
@@ -618,7 +619,7 @@ export default function ChatInterface() {
                     justifyContent: 'center',
                   }}
                 >
-                  <CircularProgress />
+                  <ConstellationSpinner size={64} />
                 </Box>
               ) : messages.length === 0 ? (
                 <Box
@@ -819,7 +820,7 @@ export default function ChatInterface() {
                         mb: 1.5,
                       }}
                     >
-                      <CircularProgress size={14} />
+                      <ConstellationSpinner size={28} />
                       <Typography variant="body2">
                         Assistant is working...
                       </Typography>

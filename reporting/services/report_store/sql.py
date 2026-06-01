@@ -2630,8 +2630,9 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
+            confirmation = _action_confirmation_from_record(row) if row else None
             await session.commit()
-            return _action_confirmation_from_record(row) if row else None
+            return confirmation
 
     async def claim_action_confirmation_for_execution(
         self,
@@ -2652,8 +2653,9 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
+            confirmation = _action_confirmation_from_record(row) if row else None
             await session.commit()
-            return _action_confirmation_from_record(row) if row else None
+            return confirmation
 
     async def find_action_confirmation_grant(
         self,

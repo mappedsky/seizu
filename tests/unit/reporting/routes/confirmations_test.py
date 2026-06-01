@@ -138,3 +138,36 @@ async def test_batch_confirmation_filters_expired_pending_only(mocker):
 
     assert response.status_code == 200
     assert len(response.json()["confirmations"]) == 2
+
+
+async def test_decide_confirmation_returns_404_when_not_found(mocker):
+    mocker.patch(
+        "reporting.routes.confirmations.action_confirmations.decide_confirmation",
+        return_value=None,
+    )
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/confirmations/{_CONFIRMATION_ID}/decision",
+            json={"decision": "approved"},
+        )
+
+    assert response.status_code == 404
+
+
+async def test_decide_confirmation_returns_result_when_found(mocker):
+    mocker.patch(
+        "reporting.routes.confirmations.action_confirmations.decide_confirmation",
+        return_value=_confirmation(),
+    )
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/confirmations/{_CONFIRMATION_ID}/decision",
+            json={"decision": "approved"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["confirmation"]["status"] == "pending"

@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import neo4j.exceptions
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -82,6 +83,34 @@ async def test_get_graph_schema_requires_query_execute_permission():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get("/api/v1/graph/schema")
     assert ret.status_code == 403
+
+
+async def test_get_graph_schema_returns_500_on_neo4j_error(mocker):
+    mocker.patch(
+        "reporting.routes.graph.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=neo4j.exceptions.ServiceUnavailable("down")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/graph/schema")
+
+    assert ret.status_code == 500
+    assert "error" in ret.json()
+
+
+async def test_get_graph_schema_returns_500_on_generic_error(mocker):
+    mocker.patch(
+        "reporting.routes.graph.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=RuntimeError("unexpected")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/graph/schema")
+
+    assert ret.status_code == 500
+    assert "error" in ret.json()
 
 
 async def test_get_graph_schema_does_not_save_history(mocker):

@@ -1,6 +1,30 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
-from reporting.services.chat_messages import MessageTag, drop_tagged, has_tag, tag_message
+from reporting.services.chat_messages import MessageTag, drop_tagged, has_tag, message_text, tag_message
+
+
+def test_message_text_plain_string():
+    assert message_text("hello") == "hello"
+
+
+def test_message_text_list_of_strings():
+    assert message_text(["foo", "bar"]) == "foobar"
+
+
+def test_message_text_list_of_text_dicts():
+    assert message_text([{"type": "text", "text": "hi"}, {"type": "text", "text": " there"}]) == "hi there"
+
+
+def test_message_text_list_mixed_drops_non_text_blocks():
+    assert message_text([{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "answer"}]) == "answer"
+
+
+def test_message_text_empty_list():
+    assert message_text([]) == ""
+
+
+def test_message_text_unexpected_type_returns_empty():
+    assert message_text(42) == ""
 
 
 def test_tag_message_is_idempotent_and_detectable():
