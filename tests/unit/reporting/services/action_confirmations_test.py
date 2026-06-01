@@ -157,3 +157,35 @@ async def test_expired_approved_confirmation_returns_expired_not_executed(mocker
 
     assert result is not None
     assert result.status == "expired"
+
+
+# ---------------------------------------------------------------------------
+# _public_ui_origin
+# ---------------------------------------------------------------------------
+
+
+def test_public_ui_origin_uses_seizu_public_url(mocker):
+    mocker.patch("reporting.services.action_confirmations.settings.SEIZU_PUBLIC_URL", "https://seizu.example.com")
+    url = action_confirmations.public_confirmation_url("abc123")
+    assert url == "https://seizu.example.com/app/confirmations/abc123"
+
+
+def test_public_ui_origin_derives_from_mcp_resource_url(mocker):
+    mocker.patch("reporting.services.action_confirmations.settings.SEIZU_PUBLIC_URL", "")
+    mocker.patch("reporting.services.action_confirmations.settings.MCP_RESOURCE_URL", "https://api.example.com/mcp")
+    url = action_confirmations.public_confirmation_url("abc123")
+    assert url.startswith("https://api.example.com/app/confirmations/")
+
+
+def test_public_ui_origin_returns_path_only_when_no_base_url(mocker):
+    mocker.patch("reporting.services.action_confirmations.settings.SEIZU_PUBLIC_URL", "")
+    mocker.patch("reporting.services.action_confirmations.settings.MCP_RESOURCE_URL", "")
+    url = action_confirmations.public_confirmation_url("abc123")
+    assert url == "/app/confirmations/abc123"
+
+
+def test_public_ui_origin_returns_path_only_when_resource_url_has_no_scheme(mocker):
+    mocker.patch("reporting.services.action_confirmations.settings.SEIZU_PUBLIC_URL", "")
+    mocker.patch("reporting.services.action_confirmations.settings.MCP_RESOURCE_URL", "not-a-url")
+    url = action_confirmations.public_confirmation_url("abc123")
+    assert url == "/app/confirmations/abc123"

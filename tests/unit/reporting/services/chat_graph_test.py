@@ -1663,3 +1663,15 @@ def test_trim_messages_keeps_window_starting_at_user_turn(mocker):
     removals = chat_graph._trim_messages(existing, new_message)
 
     assert [r.id for r in removals] == ["h1", "a1"]
+
+
+def test_aws_config_default_uses_virtual_hosted_style(mocker):
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "")
+    config = chat_graph._aws_config()
+    assert config.s3 is None
+
+
+def test_aws_config_with_s3_endpoint_uses_path_style(mocker):
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://localhost:9000")
+    config = chat_graph._aws_config()
+    assert config.s3 == {"addressing_style": "path"}
