@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, NotRequired, Protocol
 
 import botocore.config
 from botocore.exceptions import ClientError
@@ -46,6 +46,16 @@ from reporting.services.mcp_runtime import ChatBlockReason
 
 class ChatState(TypedDict):
     messages: Annotated[list[Any], add_messages]
+    # Orchestration state (plan -> dispatch -> verify). All optional so the
+    # simple single-agent path never has to populate them; they round-trip
+    # through the checkpointer so an orchestrated turn can resume mid-plan.
+    # Each uses the default overwrite reducer: the dispatcher is the sole writer
+    # of ``plan``/``step_results`` per super-step (worker parallelism happens
+    # inside the node via asyncio), so no concurrent-write reducer is needed.
+    route: NotRequired[str]  # "simple" | "orchestrate"
+    plan: NotRequired[list[dict[str, Any]]]  # serialized PlanStep dicts
+    step_results: NotRequired[list[dict[str, Any]]]  # per-step worker outputs
+    iteration: NotRequired[int]  # verify-driven retry cycles consumed
 
 
 class ChatGraph(Protocol):
@@ -1722,10 +1732,38 @@ def _chunk_text(text: str, chunk_size: int = 8) -> list[str]:
 
 
 def build_chat_graph(checkpointer: Any) -> ChatGraph:
+    # Local import breaks the import cycle: chat_orchestrator imports the shared
+    # turn/tool helpers from this module at import time, while this module only
+    # needs the orchestrator nodes here, at graph-build time.
+    from reporting.services import chat_orchestrator as orchestrator
+
     graph = StateGraph(ChatState)
+    graph.add_node("router", orchestrator.router_node)
     graph.add_node("chat_agent", chat_agent_node)
-    graph.add_edge(START, "chat_agent")
+    graph.add_node("planner", orchestrator.planner_node)
+    graph.add_node("dispatcher", orchestrator.dispatcher_node)
+    graph.add_node("verifier", orchestrator.verifier_node)
+    graph.add_node("synthesizer", orchestrator.synthesizer_node)
+
+    graph.add_edge(START, "router")
+    graph.add_conditional_edges(
+        "router",
+        orchestrator.route_from_router,
+        {"planner": "planner", "chat_agent": "chat_agent"},
+    )
     graph.add_edge("chat_agent", END)
+    graph.add_edge("planner", "dispatcher")
+    graph.add_conditional_edges(
+        "dispatcher",
+        orchestrator.route_from_dispatcher,
+        {"verifier": "verifier", "synthesizer": "synthesizer"},
+    )
+    graph.add_conditional_edges(
+        "verifier",
+        orchestrator.route_from_verifier,
+        {"dispatcher": "dispatcher", "synthesizer": "synthesizer"},
+    )
+    graph.add_edge("synthesizer", END)
     return graph.compile(checkpointer=checkpointer)
 
 

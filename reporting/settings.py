@@ -326,6 +326,22 @@ CHAT_LLM_MAX_AUTO_ACTIONS = int_env("CHAT_LLM_MAX_AUTO_ACTIONS", 12)
 # a threadpool for the normal Neo4j/store I/O path.
 CHAT_LLM_MAX_PARALLEL_TOOL_CALLS = int_env("CHAT_LLM_MAX_PARALLEL_TOOL_CALLS", 4)
 
+# Plan -> dispatch -> verify orchestration for complex chat requests. When off,
+# every turn takes the existing single-agent (gather -> act) path; the router
+# node short-circuits to "simple" with no extra LLM call, so behavior is
+# unchanged. When on, a cheap router classifies each turn and routes multi-step
+# requests through a planner, a dispatcher that runs scoped sub-agent workers
+# (parallel when steps are independent), and a verify gate with bounded retry.
+CHAT_ORCHESTRATOR_ENABLED = bool_env("CHAT_ORCHESTRATOR_ENABLED", False)
+# Maximum number of steps the planner may emit for one orchestrated turn.
+CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
+# Maximum verify-driven retry cycles before the orchestrator synthesizes an
+# answer from whatever steps passed. Bounds self-correction so a persistently
+# failing step cannot loop forever.
+CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+# Maximum independent steps the dispatcher runs concurrently in one batch.
+CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+
 # Standard provider API key env vars. These are intentionally not exposed via
 # GET /api/v1/config.
 OPENAI_API_KEY = str_env("OPENAI_API_KEY", "")
