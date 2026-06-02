@@ -23,6 +23,7 @@ import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
+import { brand } from 'src/theme/brand';
 
 function MarkdocTable({ children }: { children?: React.ReactNode }) {
   return (
@@ -99,6 +100,41 @@ function MarkdocDetails({
   );
 }
 
+function MarkdocContinuation() {
+  return (
+    <Box
+      aria-hidden="true"
+      sx={{
+        alignItems: 'center',
+        color: (theme) =>
+          theme.palette.mode === 'dark' ? brand.starlight : brand.starlightDark,
+        display: 'flex',
+        gap: 1,
+        my: 1.5,
+        '&::before, &::after': {
+          borderTop: 2,
+          borderColor: 'currentColor',
+          content: '""',
+          flex: 1,
+        },
+      }}
+    >
+      <Typography
+        component="span"
+        sx={{
+          color: 'inherit',
+          fontFamily: '"JetBrains Mono", monospace',
+          fontSize: '0.8em',
+          fontWeight: 700,
+          lineHeight: 1,
+        }}
+      >
+        ...
+      </Typography>
+    </Box>
+  );
+}
+
 // Preprocesses LLM-generated <details>/<summary> HTML blocks into Markdoc
 // {% details %} tag syntax so they render as collapsible sections.  Raw HTML
 // is blocked by Markdoc's html:false setting (intentional security constraint),
@@ -132,6 +168,7 @@ const markdocComponents = {
   MuiTableHeadCell: MarkdocHeadCell,
   MuiTableCell: MarkdocCell,
   MuiDetails: MarkdocDetails,
+  MuiContinuation: MarkdocContinuation,
 };
 
 const headingNode = {
@@ -349,6 +386,10 @@ const markdocNodes = {
 };
 
 const markdocTags = {
+  continuation: {
+    render: 'MuiContinuation',
+    selfClosing: true,
+  },
   details: {
     render: 'MuiDetails',
     attributes: {

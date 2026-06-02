@@ -83,37 +83,38 @@ def test_deepseek_reasoning_content_is_added_to_streamed_chunks():
     assert generation_chunk.message.additional_kwargs["reasoning_content"] == "checked tools"
 
 
-def test_deepseek_reasoning_content_is_round_tripped_in_tool_call_payload():
-    payload: dict = {
-        "messages": [
-            {"role": "user", "content": "Run overview"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "security__overview", "arguments": "{}"},
-                    }
-                ],
+async def test_run_llm_tool_turn_streams_reasoning_as_detail_and_strips_context():
+    class _FakeModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "checking graph"})
+            yield AIMessageChunk(content="Final answer.")
+
+    events = []
+
+    result = await chat_graph._run_llm_tool_turn(
+        _FakeModel(),
+        "system",
+        [HumanMessage(content="Run overview")],
+        [],
+        {},
+        events.append,
+    )
+
+    detail_events = [event for event in events if event["kind"] == "detail"]
+    assert detail_events == [
+        {
+            "kind": "detail",
+            "id": detail_events[0]["id"],
+            "data": {
+                "kind": "thinking",
+                "title": "Thinking",
+                "status": "running",
+                "body": "checking graph",
             },
-            {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
-        ]
-    }
-    messages = [
-        HumanMessage(content="Run overview"),
-        AIMessage(
-            content="",
-            additional_kwargs={"reasoning_content": "reasoned before tool"},
-            tool_calls=[_tool_call("security__overview", {})],
-        ),
-        ToolMessage(content="{}", tool_call_id="call_1"),
+        }
     ]
-
-    chat_graph._add_reasoning_content_to_payload(payload, messages)
-
-    assert payload["messages"][1]["reasoning_content"] == "reasoned before tool"
+    assert result.streamed == "Final answer."
+    assert "reasoning_content" not in result.message.additional_kwargs
 
 
 def test_deepseek_endpoint_detection_matches_exact_host_or_subdomain(mocker):
@@ -198,7 +199,7 @@ async def test_chat_graph_marks_output_limit_cutoff(mocker):
     assert "hit its output limit" in persisted.content
 
 
-async def test_output_limit_notice_keeps_completed_action_summary():
+async def test_output_limit_notice_keeps_tool_details_out_of_user_text():
     response, hit_limit = chat_graph._append_output_limit_notice(
         "partial synthesis",
         "length",
@@ -207,11 +208,12 @@ async def test_output_limit_notice_keeps_completed_action_summary():
 
     assert hit_limit is True
     assert "hit its output limit" in response
-    assert "Completed before the cutoff" in response
-    assert "toolsets__create_tool" in response
+    assert "completed tool work before the cutoff" in response
+    assert "toolsets__create_tool" not in response
+    assert "created" not in response
 
 
-async def test_chat_graph_buffers_tool_enabled_text_until_final_response(mocker):
+async def test_chat_graph_streams_tool_enabled_text_as_it_arrives(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
     fake_model = _ToolCallingFakeModel(
@@ -243,19 +245,19 @@ async def test_chat_graph_buffers_tool_enabled_text_until_final_response(mocker)
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert "Inspecting now" not in streamed
-    assert "Running tool `security__one`..." in streamed
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Inspecting now" in streamed
+    assert "Running tool `security__one`..." not in streamed
     assert "Final answer." in streamed
+    details = [chunk for chunk in chunks if chunk.get("kind") == "detail"]
+    assert len(details) == 1
+    assert details[0]["data"]["title"] == "Tool: security__one"
+    assert details[0]["data"]["arguments"] == '{"org":"mappedsky"}'
+    assert details[0]["data"]["body"] == '{"ok": true}'
 
 
-async def test_run_llm_tool_turn_streams_until_tool_call_chunk_arrives():
-    """Live-streams early text; switches to buffer once a tool-call chunk lands.
-
-    Mirrors how Anthropic-style providers stream a short preamble then a
-    ``tool_use`` block — the preamble reaches the user, but text after the
-    tool signal is pre-tool reasoning that the loop will discard.
-    """
+async def test_run_llm_tool_turn_streams_text_before_and_after_tool_call_chunk():
+    """Streams text chunks even when a later tool-call chunk arrives."""
 
     class _PeekModel:
         async def astream(self, input, config=None, **kwargs):
@@ -280,11 +282,48 @@ async def test_run_llm_tool_turn_streams_until_tool_call_chunk_arrives():
         writer,
     )
 
-    assert streamed_deltas == ["Let me check "]
-    assert result.streamed == "Let me check "
-    # The buffered merged message still reflects the full LLM response
-    # (so the loop can read the tool call and any post-signal text).
+    assert streamed_deltas == ["Let me check ", " — actually wait"]
+    assert result.streamed == "Let me check  — actually wait"
     assert "— actually wait" in message_text_of(result.message)
+
+
+async def test_run_llm_tool_turn_streams_text_when_tools_are_available():
+    class _PeekModel:
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(content="Let me pull a focused investigation.")
+            yield AIMessageChunk(
+                content="",
+                tool_call_chunks=[{"name": "security__one", "args": "{}", "id": "call_1", "index": 0}],
+            )
+
+    streamed_deltas: list[str] = []
+
+    def writer(item: dict) -> None:
+        if item["kind"] == "token":
+            streamed_deltas.append(item["content"])
+
+    result = await chat_graph._run_llm_tool_turn(
+        _PeekModel(),
+        "system",
+        [HumanMessage(content="hi")],
+        [
+            chat_graph.ChatToolSpec(
+                name="security__one",
+                kind="tool",
+                description="Security overview",
+                input_schema={"type": "object"},
+            )
+        ],
+        {},
+        writer,
+    )
+
+    assert streamed_deltas == ["Let me pull a focused investigation."]
+    assert result.streamed == "Let me pull a focused investigation."
+    assert "Let me pull" in message_text_of(result.message)
 
 
 def test_provider_tool_name_mapping_keeps_seizu_execution_name():
@@ -401,8 +440,8 @@ async def test_chat_graph_auto_runs_model_requested_skill(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert "Loading skill `investigation__triage`..." in streamed
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Loading skill `investigation__triage`..." not in streamed
     assert "Mappedsky overview is ready." in streamed
     assert "/skill investigation__triage" not in streamed
     render_skill.assert_awaited_once_with(
@@ -461,7 +500,7 @@ async def test_progressive_disclosure_exposes_only_skill_required_tools(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert "Mappedsky overview is summarized." in streamed
     assert fake_model.bound_tools[0][0]["function"]["name"] == "investigation__triage"
     second_turn_names = {tool["function"]["name"] for tool in fake_model.bound_tools[1]}
@@ -525,8 +564,8 @@ async def test_chat_graph_runs_model_requested_tools_in_parallel(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert "Running 2 tools in parallel" in streamed
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running 2 tools in parallel" not in streamed
     assert "Both tool results are summarized." in streamed
     assert call_tool.await_count == 2
     assert set(started) == {"security__one", "security__two"}
@@ -566,8 +605,8 @@ async def test_chat_graph_retries_empty_response_after_action_result(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert "Running tool `security__one`..." in streamed
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running tool `security__one`..." not in streamed
     assert "Final answer after retry." in streamed
     assert fake_model.calls == 3
     # Retry guidance is appended to the system prompt for the next turn,
@@ -622,8 +661,8 @@ async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert streamed.count("Running tool `toolsets__list_tools`...") == 1
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running tool `toolsets__list_tools`..." not in streamed
     assert "Final synthesis from the existing tool list." in streamed
     assert call_tool.await_count == 1
     assert "already run in this turn" in fake_model.inputs[2][0].content
@@ -663,11 +702,11 @@ async def test_chat_graph_repeated_tool_fallback_does_not_rerun_or_dump_internal
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert streamed.count("Running tool `skillsets__list`...") == 1
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running tool `skillsets__list`..." not in streamed
     assert "repeatedly requested the same internal action" in streamed
     assert "Use this result as evidence" not in streamed
-    assert '{"skillsets": []}' in streamed
+    assert '{"skillsets": []}' not in streamed
     assert call_tool.await_count == 1
     state = await graph.aget_state(config)
     assert has_tag(state.values["messages"][-1], MessageTag.BROKEN)
@@ -703,7 +742,7 @@ async def test_chat_graph_retries_initial_empty_response(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert streamed == "Retry produced a useful answer."
     assert fake_model.calls == 2
     assert "previous response was empty before Seizu could run" in fake_model.inputs[1][0].content
@@ -731,7 +770,7 @@ async def test_chat_graph_initial_empty_response_fallback_is_specific(mocker):
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert "after retrying" in streamed
     assert "did not run any skill or tool" in streamed
 
@@ -769,10 +808,10 @@ async def test_chat_graph_empty_response_fallback_preserves_last_action_result(m
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert "did not return a final synthesis" in streamed
-    assert "security__one" in streamed
-    assert "missing toolset_id" in streamed
+    assert "security__one" not in streamed
+    assert "missing toolset_id" not in streamed
     assert "Use this result as evidence" not in streamed
     assert fake_model.calls == 3
 
@@ -1269,7 +1308,10 @@ async def test_resume_batch_confirmation_respects_parallel_tool_limit(mocker):
     ]
 
     streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
-    assert "Running 3 approved tools" in streamed
+    assert "Running approved actions" in streamed
+    assert "reports__delete" not in streamed
+    assert "reports__pin" not in streamed
+    assert "reports__set_dashboard" not in streamed
     assert claim.await_count == 3
     assert call_tool.await_count == 3
     assert max_seen == 1
@@ -1307,7 +1349,7 @@ async def test_chat_graph_reports_unavailable_tool_call_and_persists_notice(mock
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert "Seizu blocked the requested action" in streamed
     assert "toolsets__update_tool" in streamed
     assert "No blocked action was executed." in streamed
@@ -1351,8 +1393,8 @@ async def test_chat_graph_reports_permission_denied_tool_result_and_persists_not
         )
     ]
 
-    streamed = "".join(chunk["content"] for chunk in chunks)
-    assert "Running tool `security__one`..." in streamed
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running tool `security__one`..." not in streamed
     assert "Seizu blocked the requested action" in streamed
     assert "Permission denied: tools:call" in streamed
     state = await graph.aget_state(config)
@@ -1411,9 +1453,44 @@ def test_build_system_prompt_is_seizu_specific():
     assert "Cypher" in prompt
     assert "include every required parameter" in prompt
     assert "native structured tool calling" in prompt
+    assert "configured output budget" in prompt
+    assert "under about 600 words" in prompt
+    assert "at most 8 bullets" in prompt
     assert "You are the Seizu agent" in prompt
     assert "never tell the user to ask another Seizu agent" in prompt
     assert "call the matching skill" in prompt
+
+
+def test_answer_budget_scales_with_configured_output_limit():
+    assert chat_graph._answer_budget(1024) == chat_graph.AnswerBudget(
+        min_words=150,
+        max_words=300,
+        max_bullets=4,
+        max_tables=1,
+    )
+    assert chat_graph._answer_budget(2048) == chat_graph.AnswerBudget(
+        min_words=300,
+        max_words=600,
+        max_bullets=8,
+        max_tables=1,
+    )
+    assert chat_graph._answer_budget(4096) == chat_graph.AnswerBudget(
+        min_words=625,
+        max_words=1250,
+        max_bullets=16,
+        max_tables=2,
+    )
+
+
+def test_final_synthesis_retry_message_uses_configured_answer_budget(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 1024)
+
+    prompt = chat_graph._final_synthesis_retry_message(["Seizu ran tool `graph__query`.\n\nResult:\n{}"])
+
+    assert "Be selective" in prompt
+    assert "150-300 words" in prompt
+    assert "at most 4 bullets" in prompt
+    assert "at most one compact table" in prompt
 
 
 def test_llm_context_messages_applies_message_and_character_limits(mocker):
@@ -1432,7 +1509,7 @@ def test_llm_context_messages_applies_message_and_character_limits(mocker):
     assert [message.content for message in context] == ["67890", "abcde"]
 
 
-def test_trim_inner_loop_messages_counts_reasoning_content_and_tool_calls():
+def test_trim_inner_loop_messages_ignores_reasoning_content_but_counts_tool_calls():
     messages = [
         HumanMessage(content="q"),
         AIMessage(
@@ -1444,10 +1521,19 @@ def test_trim_inner_loop_messages_counts_reasoning_content_and_tool_calls():
         AIMessage(content="recent", tool_calls=[_tool_call("security__two", {}, "call_2")]),
         ToolMessage(content="fresh result", tool_call_id="call_2", name="security__two"),
     ]
+    without_reasoning = [
+        messages[0],
+        AIMessage(content="", tool_calls=[_tool_call("security__one", {"org": "mappedsky"}, "call_1")]),
+        messages[2],
+        messages[3],
+        messages[4],
+    ]
 
     retained = chat_graph._trim_inner_loop_messages(messages, max_chars=140)
+    retained_without_reasoning = chat_graph._trim_inner_loop_messages(without_reasoning, max_chars=140)
 
     assert retained == [messages[0], messages[3], messages[4]]
+    assert [message.content for message in retained] == [message.content for message in retained_without_reasoning]
 
 
 def test_llm_context_messages_drops_broken_ai_output_but_keeps_good_context():
@@ -1596,11 +1682,16 @@ async def test_chat_agent_lists_skills_and_tools_once_per_turn(mocker):
 
 
 async def test_load_thread_messages_drops_ephemeral(mocker):
+    continue_marker = HumanMessage(content="")
+    continue_marker.additional_kwargs["seizu_tags"] = [MessageTag.EPHEMERAL.value]
+    continue_marker.additional_kwargs["continue_response"] = True
     ephemeral = HumanMessage(content="/tools")
     ephemeral.additional_kwargs["seizu_tags"] = [MessageTag.EPHEMERAL.value]
     persisted = [
         HumanMessage(content="Hi"),
         AIMessage(content="Hello"),
+        continue_marker,
+        AIMessage(content="continued"),
         ephemeral,
     ]
 
@@ -1612,7 +1703,12 @@ async def test_load_thread_messages_drops_ephemeral(mocker):
 
     messages = await chat_graph.load_thread_messages(_user(), "thread-1", limit=10)
 
-    assert [m.content for m in messages] == ["Hi", "Hello"]
+    assert [m.content for m in messages] == ["Hi", "Hello\n\n{% continuation /%}\n\ncontinued"]
+    assert messages[1].response_metadata == {}
+
+
+def test_strip_chat_ui_markers_removes_markdoc_continuation():
+    assert chat_graph.strip_chat_ui_markers("Hello\n\n{% continuation /%}\n\nworld") == "Hello\n\nworld"
 
 
 async def test_load_thread_messages_limits_returned_messages(mocker):

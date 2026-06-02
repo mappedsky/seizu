@@ -83,6 +83,17 @@ describe('MarkdocRenderer', () => {
     expect(a?.className).toContain('MuiLink-underlineHover');
   });
 
+  it('renders the continuation tag as a divider', () => {
+    render(
+      <MarkdocRenderer source={'Before\n\n{% continuation /%}\n\nAfter'} />,
+    );
+
+    expect(screen.getByText('Before')).toBeInTheDocument();
+    expect(screen.getByText('After')).toBeInTheDocument();
+    expect(screen.getByText('...')).toBeInTheDocument();
+    expect(screen.queryByText('{% continuation /%}')).not.toBeInTheDocument();
+  });
+
   it('does not render nested paragraphs when conditionals return block content', () => {
     const { container } = render(
       <MarkdocRenderer

@@ -30,10 +30,14 @@ from reporting.services.chat_graph import (
     load_thread_messages,
     namespaced_thread_id,
 )
-from reporting.services.chat_messages import MessageTag, message_text, tag_message
+from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, message_text, tag_message
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_CONTINUE_RESPONSE_PROMPT = (
+    "Continue the previous assistant response from where it stopped because of the output limit. "
+    "Do not repeat earlier content."
+)
 
 
 async def _touch_chat_session_later(user_id: str, thread_id: str) -> None:
@@ -71,7 +75,9 @@ async def stream_chat(
 
 
 async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[str]:
-    message_id = f"msg_{uuid.uuid4().hex}"
+    message_id = (
+        body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
+    )
     text_id = f"text_{uuid.uuid4().hex}"
     text_started = False
     finish_reason = "stop"
@@ -87,6 +93,8 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
         yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True
+        if body.continue_response:
+            yield _sse_data({"type": "text-delta", "id": text_id, "delta": CONTINUATION_MARKDOC})
         async for event in _token_source(body, current):
             if event["type"] == "token":
                 delta = event["content"]
@@ -94,6 +102,11 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
                     yield _sse_data({"type": "text-delta", "id": text_id, "delta": delta})
             elif event["type"] == "finish_reason":
                 finish_reason = event["finish_reason"]
+            elif event["type"] == "detail":
+                detail_id = event["id"]
+                detail_data = event["data"]
+                if isinstance(detail_id, str) and isinstance(detail_data, dict):
+                    yield _sse_data({"type": "data-seizu-detail", "id": detail_id, "data": detail_data})
     except Exception:
         logger.exception("Chat stream failed")
         if text_started:
@@ -104,17 +117,19 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
         return
 
     yield _sse_data({"type": "text-end", "id": text_id})
-    finish_payload: dict[str, Any] = {"type": "finish", "finishReason": finish_reason}
-    if finish_reason == "length":
-        finish_payload["messageMetadata"] = {
-            "finish_reason": "length",
-            "response_cut_off": True,
-        }
+    finish_payload: dict[str, Any] = {
+        "type": "finish",
+        "finishReason": finish_reason,
+        "messageMetadata": {
+            "finish_reason": finish_reason,
+            "response_cut_off": finish_reason == "length",
+        },
+    }
     yield _sse_data(finish_payload)
     yield "data: [DONE]\n\n"
 
 
-async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[dict[str, str]]:
+async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[dict[str, Any]]:
     graph = get_chat_graph()
     if body.resume_confirmation_id:
         resume_message = HumanMessage(
@@ -124,6 +139,14 @@ async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncI
         )
         tag_message(resume_message, MessageTag.EPHEMERAL)
         graph_input: ChatState = {"messages": [resume_message]}
+    elif body.continue_response:
+        continue_message = HumanMessage(
+            content=_CONTINUE_RESPONSE_PROMPT,
+            id=f"msg_{uuid.uuid4().hex}",
+            additional_kwargs={"continue_response": True},
+        )
+        tag_message(continue_message, MessageTag.EPHEMERAL)
+        graph_input = {"messages": [continue_message]}
     else:
         graph_input = {"messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")]}
     config = {
@@ -142,6 +165,11 @@ async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncI
             finish_reason = chunk.get("finish_reason")
             if finish_reason == "length":
                 yield {"type": "finish_reason", "finish_reason": "length"}
+        elif isinstance(chunk, dict) and chunk.get("kind") == "detail":
+            detail_id = chunk.get("id")
+            detail_data = chunk.get("data")
+            if isinstance(detail_id, str) and isinstance(detail_data, dict):
+                yield {"type": "detail", "id": detail_id, "data": detail_data}
 
 
 def _sse_data(payload: dict[str, Any]) -> str:
@@ -180,7 +208,37 @@ def _to_history_message(message: Any, index: int) -> ChatHistoryMessage | None:
     if not text:
         return None
     message_id = str(message.id) if message.id else f"{role}-{index}"
-    return ChatHistoryMessage(id=message_id, role=role, text=text)
+    metadata = _history_message_metadata(message, role, text)
+    return ChatHistoryMessage(id=message_id, role=role, text=text, metadata=metadata)
+
+
+def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, object] | None:
+    metadata: dict[str, object] = {}
+    if role == "assistant" and "Response stopped because the model hit its output limit" in text:
+        metadata.update({"finish_reason": "length", "response_cut_off": True})
+
+    response_metadata = getattr(message, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        details = response_metadata.get("seizu_details")
+        if isinstance(details, list):
+            safe_details: list[dict[str, object]] = []
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                title = detail.get("title")
+                kind = detail.get("kind")
+                if not isinstance(title, str) or kind not in {"thinking", "skill", "tool"}:
+                    continue
+                safe_detail: dict[str, object] = {"kind": kind, "title": title}
+                for key in ("status", "arguments", "body"):
+                    value = detail.get(key)
+                    if isinstance(value, str):
+                        safe_detail[key] = value
+                safe_details.append(safe_detail)
+            if safe_details:
+                metadata["details"] = safe_details
+
+    return metadata or None
 
 
 @router.get("/api/v1/chat/sessions", response_model=ChatSessionsResponse)
