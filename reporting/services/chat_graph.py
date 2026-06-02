@@ -480,38 +480,37 @@ def _combined_system_prompt(base: str, addendum: str) -> str:
     return f"{base}\n\n{addendum}"
 
 
-async def _resume_confirmed_tool_turn(
-    state: ChatState,
-    config: RunnableConfig,
-    current_user: CurrentUser | None,
-    confirmation_id: str,
-) -> ChatState:
-    writer = get_stream_writer()
-    if current_user is None:
-        response = "Seizu could not resume the action because the current user is not authenticated."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+@dataclass(frozen=True)
+class _ConfirmResolution:
+    # "run": ``to_run`` holds approved confirmations to execute now.
+    # "wait": still pending approvals in the batch — surface message, don't run.
+    # "abort": denied/expired/not-found/already-executed — surface message, don't run.
+    kind: Literal["run", "wait", "abort"]
+    message: str = ""
 
-    # Capture as a non-optional type for use inside nested closures below.
-    authed_user: CurrentUser = current_user
+
+async def _collect_confirmations_to_run(
+    confirmation_id: str,
+    authed_user: CurrentUser,
+    client_thread_id: str | None,
+) -> tuple[list[ActionConfirmation], _ConfirmResolution]:
+    """Validate a confirmation and collect the approved batch to execute.
+
+    Centralizes the security-sensitive checks (ownership, expiry, approval,
+    batch completeness) shared by the single-agent resume path and the
+    orchestrated mid-plan resume path, so the rules cannot drift between them.
+    """
     confirmation = await report_store.get_action_confirmation(confirmation_id, user_id=authed_user.user.user_id)
     if confirmation is None:
-        response = "Seizu could not find that action confirmation."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
-    client_thread_id = _client_thread_id_from_config(config)
+        return [], _ConfirmResolution("abort", "Seizu could not find that action confirmation.")
     if confirmation.source != "chat" or confirmation.session_key != client_thread_id:
-        response = "That action confirmation does not belong to this chat thread, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution(
+            "abort", "That action confirmation does not belong to this chat thread, so Seizu did not run it."
+        )
     if action_confirmations.is_expired(confirmation) and confirmation.status != "executed":
-        response = "That action confirmation has expired, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "That action confirmation has expired, so Seizu did not run it.")
     if confirmation.status not in ("approved", "executed"):
-        response = "That action is not approved, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "That action is not approved, so Seizu did not run it.")
 
     # Collect the full batch — all confirmations that share the same batch_id.
     # If this is a legacy confirmation with no batch_id, run only it.
@@ -526,33 +525,39 @@ async def _resume_confirmed_tool_turn(
         if pending:
             n = len(pending)
             noun = "approval" if n == 1 else "approvals"
-            response = (
+            return [], _ConfirmResolution(
+                "wait",
                 f"Waiting for {n} more {noun} before proceeding. "
-                "Use the confirmation panel or URLs to approve the remaining actions."
+                "Use the confirmation panel or URLs to approve the remaining actions.",
             )
-            writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response)
         denied = [c for c in batch if c.status == "denied"]
         # Only count a confirmation as blocking-expired when it still needed a
         # decision — executed items have already run and must not abort the batch.
         expired = [c for c in batch if c.status in ("pending", "approved") and action_confirmations.is_expired(c)]
         if denied or expired:
             reason = "denied" if denied else "expired"
-            response = f"One or more actions in this approval batch were {reason}, so Seizu did not run the batch."
-            writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response)
+            return [], _ConfirmResolution(
+                "abort", f"One or more actions in this approval batch were {reason}, so Seizu did not run the batch."
+            )
         to_run = [c for c in batch if c.status == "approved"]
     else:
         to_run = [confirmation] if confirmation.status == "approved" else []
 
     if not to_run:
-        response = "All actions in this batch have already been executed."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "All actions in this batch have already been executed.")
+    return to_run, _ConfirmResolution("run")
 
-    action_word = "action" if len(to_run) == 1 else "actions"
-    writer({"kind": "token", "content": f"Running approved {action_word}...\n\n"})
 
+async def _execute_confirmations(
+    to_run: list[ActionConfirmation],
+    authed_user: CurrentUser,
+) -> tuple[list[tuple[str, str]], list[str], list[dict[str, Any]]]:
+    """Atomically claim and execute approved confirmations.
+
+    Returns ``(outcomes, errors, detail_events)`` where ``outcomes`` are
+    ``(tool_name, result_text)`` pairs. The claim step ensures each approved
+    action runs at most once even under concurrent resumes.
+    """
     outcomes: list[tuple[str, str]] = []  # (tool_name, result_text)
     errors: list[str] = []
     detail_events: list[dict[str, Any]] = []
@@ -592,6 +597,33 @@ async def _resume_confirmed_tool_turn(
             await _run_one(c)
 
     await asyncio.gather(*(_run_one_limited(c) for c in to_run))
+    return outcomes, errors, detail_events
+
+
+async def _resume_confirmed_tool_turn(
+    state: ChatState,
+    config: RunnableConfig,
+    current_user: CurrentUser | None,
+    confirmation_id: str,
+) -> ChatState:
+    writer = get_stream_writer()
+    if current_user is None:
+        response = "Seizu could not resume the action because the current user is not authenticated."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    # Capture as a non-optional type for the shared helpers below.
+    authed_user: CurrentUser = current_user
+    client_thread_id = _client_thread_id_from_config(config)
+    to_run, resolution = await _collect_confirmations_to_run(confirmation_id, authed_user, client_thread_id)
+    if resolution.kind != "run":
+        writer({"kind": "token", "content": resolution.message})
+        return _chat_state_with_ai_response(state, resolution.message)
+
+    action_word = "action" if len(to_run) == 1 else "actions"
+    writer({"kind": "token", "content": f"Running approved {action_word}...\n\n"})
+
+    outcomes, errors, detail_events = await _execute_confirmations(to_run, authed_user)
     for detail_data in detail_events:
         writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
 
@@ -1744,6 +1776,7 @@ def build_chat_graph(checkpointer: Any) -> ChatGraph:
     graph.add_node("dispatcher", orchestrator.dispatcher_node)
     graph.add_node("verifier", orchestrator.verifier_node)
     graph.add_node("synthesizer", orchestrator.synthesizer_node)
+    graph.add_node("confirmation_pause", orchestrator.confirmation_pause_node)
 
     graph.add_edge(START, "router")
     graph.add_conditional_edges(
@@ -1756,8 +1789,13 @@ def build_chat_graph(checkpointer: Any) -> ChatGraph:
     graph.add_conditional_edges(
         "dispatcher",
         orchestrator.route_from_dispatcher,
-        {"verifier": "verifier", "synthesizer": "synthesizer"},
+        {
+            "verifier": "verifier",
+            "synthesizer": "synthesizer",
+            "confirmation_pause": "confirmation_pause",
+        },
     )
+    graph.add_edge("confirmation_pause", END)
     graph.add_conditional_edges(
         "verifier",
         orchestrator.route_from_verifier,

@@ -1,4 +1,5 @@
 from typing import Any
+from unittest.mock import AsyncMock
 
 from langchain_core.messages import AIMessageChunk, HumanMessage
 
@@ -6,6 +7,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.report_config import User
 from reporting.services import chat_graph, chat_orchestrator
+from reporting.services.chat_graph import _ConfirmResolution
 from reporting.services.chat_orchestrator import _Plan, _PlannedStep, _RouteDecision, _Verdict
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -260,6 +262,133 @@ async def test_persistently_failing_step_terminates_within_iteration_budget(mock
     assert "best effort summary" in streamed
     verify_details = [c for c in chunks if c["kind"] == "detail" and c["data"]["kind"] == "verify"]
     assert len(verify_details) == 3  # initial + 2 retries, all failing
+
+
+# --- Confirmation pause / resume (Phase 4) ------------------------------------
+
+
+def test_confirmation_id_from_content():
+    assert chat_orchestrator._confirmation_id_from_content('{"confirmation_id": "c1"}') == "c1"
+    assert chat_orchestrator._confirmation_id_from_content('{"other": 1}') is None
+    assert chat_orchestrator._confirmation_id_from_content("not json") is None
+
+
+def test_route_from_dispatcher_pauses_on_awaiting_step():
+    state = {"plan": [_step("s1", "awaiting"), _step("s2", "ran")], "messages": []}
+    assert chat_orchestrator.route_from_dispatcher(state) == "confirmation_pause"
+
+
+def test_has_pending_plan_includes_awaiting():
+    assert chat_orchestrator._has_pending_plan({"plan": [_step("s1", "awaiting")], "messages": []})
+
+
+async def test_resume_awaiting_steps_runs_approved_action(mocker):
+    mocker.patch(
+        "reporting.services.chat_orchestrator._collect_confirmations_to_run",
+        new_callable=AsyncMock,
+        return_value=([object()], _ConfirmResolution("run")),
+    )
+    mocker.patch(
+        "reporting.services.chat_orchestrator._execute_confirmations",
+        new_callable=AsyncMock,
+        return_value=([("mutate_tool", "mutated ok")], [], []),
+    )
+    plan = [_step("s1", "awaiting")]
+    results = [{"step_id": "s1", "confirmation_id": "c1", "awaiting_confirmation": True}]
+
+    out = await chat_orchestrator._resume_awaiting_steps(plan, results, 0, _user(), "thread", lambda _d: None)
+
+    assert out["plan"][0]["status"] == "ran"
+    result = {r["step_id"]: r for r in out["step_results"]}["s1"]
+    assert "mutated ok" in result["output"]
+    assert not result.get("awaiting_confirmation")
+
+
+async def test_resume_awaiting_steps_keeps_waiting(mocker):
+    mocker.patch(
+        "reporting.services.chat_orchestrator._collect_confirmations_to_run",
+        new_callable=AsyncMock,
+        return_value=([], _ConfirmResolution("wait", "Waiting for 1 more approval")),
+    )
+    plan = [_step("s1", "awaiting")]
+    results = [{"step_id": "s1", "confirmation_id": "c1", "awaiting_confirmation": True}]
+
+    out = await chat_orchestrator._resume_awaiting_steps(plan, results, 0, _user(), "thread", lambda _d: None)
+
+    assert out["plan"][0]["status"] == "awaiting"  # still parked
+
+
+async def test_resume_awaiting_steps_aborts_on_denied(mocker):
+    mocker.patch(
+        "reporting.services.chat_orchestrator._collect_confirmations_to_run",
+        new_callable=AsyncMock,
+        return_value=([], _ConfirmResolution("abort", "That action is not approved, so Seizu did not run it.")),
+    )
+    plan = [_step("s1", "awaiting")]
+    results = [{"step_id": "s1", "confirmation_id": "c1", "awaiting_confirmation": True}]
+
+    out = await chat_orchestrator._resume_awaiting_steps(plan, results, 0, _user(), "thread", lambda _d: None)
+
+    step = out["plan"][0]
+    assert step["status"] == "failed"
+    assert step["no_retry"] is True  # denied actions are terminal; never re-prompt
+
+
+async def test_confirmation_pause_then_resume_completes(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    model = _OrchestratorFakeModel(stream_text="done after approval")
+    _patch_common(mocker, model)
+    awaiting_result = {
+        "step_id": "s1",
+        "goal": "do it",
+        "success_criteria": "done",
+        "output": "needs approval",
+        "tools_used": ["mutate_tool"],
+        "awaiting_confirmation": True,
+        "confirmation_id": "c1",
+        "confirmation_message": "Approval needed: http://confirm/c1",
+    }
+    worker = mocker.patch(
+        "reporting.services.chat_orchestrator._run_worker_step",
+        new_callable=AsyncMock,
+        return_value=awaiting_result,
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+    config = {"configurable": {"thread_id": "t-pause", "client_thread_id": "t-pause", "current_user": _user()}}
+
+    # Turn 1: the worker parks on an action confirmation; the plan pauses.
+    chunks1 = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="please mutate something")]}, config, stream_mode="custom"
+        )
+    ]
+    streamed1 = "".join(chunk["content"] for chunk in chunks1 if chunk["kind"] == "token")
+    assert "Approval needed" in streamed1
+    state1 = await graph.aget_state({"configurable": {"thread_id": "t-pause"}})
+    assert state1.values["plan"][0]["status"] == "awaiting"  # persisted, not cleared
+
+    # Turn 2: the user approves; resume runs the action and finishes the plan.
+    mocker.patch(
+        "reporting.services.chat_orchestrator._collect_confirmations_to_run",
+        new_callable=AsyncMock,
+        return_value=([object()], _ConfirmResolution("run")),
+    )
+    mocker.patch(
+        "reporting.services.chat_orchestrator._execute_confirmations",
+        new_callable=AsyncMock,
+        return_value=([("mutate_tool", "mutated ok")], [], []),
+    )
+    worker.reset_mock()
+    resume_msg = HumanMessage(content="approved", additional_kwargs={"resume_confirmation_id": "c1"})
+    chunks2 = [chunk async for chunk in graph.astream({"messages": [resume_msg]}, config, stream_mode="custom")]
+
+    streamed2 = "".join(chunk["content"] for chunk in chunks2 if chunk["kind"] == "token")
+    assert "done after approval" in streamed2
+    worker.assert_not_called()  # the resumed step is not re-run by a worker
+    state2 = await graph.aget_state({"configurable": {"thread_id": "t-pause"}})
+    assert state2.values.get("plan") == []  # cleared after synthesis
 
 
 async def test_disabled_orchestrator_uses_simple_path(mocker):

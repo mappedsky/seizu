@@ -29,6 +29,7 @@ Design notes:
 """
 
 import asyncio
+import json
 import uuid
 from typing import Any, Literal, cast
 
@@ -43,14 +44,19 @@ from reporting.services import chat_graph
 from reporting.services.chat_graph import (
     ChatState,
     ChatToolSpec,
+    ToolCallResult,
+    _blocked_tool_call_response,
     _chat_provider,
     _client_thread_id_from_config,
+    _collect_confirmations_to_run,
     _current_user_from_config,
+    _execute_confirmations,
     _last_user_text,
     _list_chat_prompts,
     _list_chat_tools,
     _llm_tool_name,
     _mcp_tool_specs,
+    _resume_confirmation_id,
     _run_llm_tool_turn,
     _run_tool_call_batch,
     _skill_tool_specs,
@@ -290,15 +296,26 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     plan = [dict(step) for step in state.get("plan") or []]
     results = list(state.get("step_results") or [])
     iteration = int(state.get("iteration") or 0)
+    current_user = _current_user_from_config(config)
+    session_key = _client_thread_id_from_config(config)
+    writer = get_stream_writer()
 
-    # Retry path: if the verifier failed steps and budget remains, reset them to
-    # pending (carrying the failure reason as guidance) and consume one cycle.
-    failed = [step for step in plan if step["status"] == "failed"]
+    # Resume path: a prior turn paused this plan on an action confirmation inside
+    # a step. Execute the now-approved action(s) and fold the result back in.
+    resume_id = _resume_confirmation_id(state["messages"])
+    if resume_id and any(step["status"] == "awaiting" for step in plan):
+        return await _resume_awaiting_steps(plan, results, iteration, current_user, session_key, writer)
+
+    # Retry path: if the verifier failed retryable steps and budget remains,
+    # reset them to pending (carrying the failure reason) and consume one cycle.
+    # Steps flagged ``no_retry`` (denied/expired confirmations) are terminal so
+    # we never re-prompt the user for an action they already declined.
+    failed = [step for step in plan if step["status"] == "failed" and not step.get("no_retry")]
     if failed and iteration < settings.CHAT_ORCHESTRATOR_MAX_ITERATIONS:
         iteration += 1
         results_by_id = {result["step_id"]: result for result in results}
         for step in plan:
-            if step["status"] == "failed":
+            if step["status"] == "failed" and not step.get("no_retry"):
                 reason = (results_by_id.get(step["id"], {}) or {}).get("verify_reason", "")
                 if reason:
                     step["retry_guidance"] = reason
@@ -312,11 +329,8 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     for step in batch:
         step["status"] = "ran"
 
-    current_user = _current_user_from_config(config)
-    session_key = _client_thread_id_from_config(config)
     model = get_chat_model()
     tool_specs = await _worker_tool_specs(current_user)
-    writer = get_stream_writer()
 
     new_results = await asyncio.gather(
         *(
@@ -335,14 +349,90 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
         )
     )
     merged = _merge_results(results, list(new_results))
+
+    # A step whose worker hit a confirmation gate is parked as "awaiting" so the
+    # plan pauses (rather than verifying/retrying) until the user approves.
+    merged_by_id = {result["step_id"]: result for result in merged}
+    for step in batch:
+        if merged_by_id.get(step["id"], {}).get("awaiting_confirmation"):
+            step["status"] = "awaiting"
     return {"plan": plan, "step_results": merged, "iteration": iteration}
 
 
 def route_from_dispatcher(state: ChatState) -> str:
-    # If steps just executed, verify them; otherwise nothing runnable remains
-    # (all passed, or a dependency could not be satisfied) -> synthesize.
     plan = state.get("plan") or []
-    return "verifier" if any(step["status"] == "ran" for step in plan) else "synthesizer"
+    if any(step["status"] == "awaiting" for step in plan):
+        return "confirmation_pause"  # halt until the user approves the action
+    if any(step["status"] == "ran" for step in plan):
+        return "verifier"
+    # Nothing runnable remains (all passed, terminal failures, or unsatisfiable
+    # dependency) -> synthesize an answer from what completed.
+    return "synthesizer"
+
+
+async def _resume_awaiting_steps(
+    plan: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    iteration: int,
+    current_user: CurrentUser | None,
+    session_key: str | None,
+    writer: Any,
+) -> dict[str, Any]:
+    """Execute approved confirmations for parked steps and re-enter the plan.
+
+    Each awaiting step is resolved independently against its own confirmation:
+    approved -> run it and mark the step ``ran`` (the verifier judges the
+    result); denied/expired -> terminal failure (no re-prompt); still pending ->
+    stays ``awaiting`` so the plan pauses again. Reuses the shared, security-
+    checked confirmation helpers from ``chat_graph`` so resume rules cannot drift.
+    """
+    results_by_id = {result["step_id"]: result for result in results}
+    for step in plan:
+        if step["status"] != "awaiting":
+            continue
+        result = results_by_id.setdefault(step["id"], {"step_id": step["id"]})
+        confirmation_id = result.get("confirmation_id")
+        if current_user is None or not confirmation_id:
+            step["status"] = "failed"
+            step["no_retry"] = True
+            result["verify_reason"] = "Could not resume the confirmed action (missing user or confirmation id)."
+            continue
+
+        to_run, resolution = await _collect_confirmations_to_run(confirmation_id, current_user, session_key)
+        if resolution.kind == "run":
+            outcomes, errors, detail_events = await _execute_confirmations(to_run, current_user)
+            for detail_data in detail_events:
+                _emit(writer, detail_data)
+            if outcomes:
+                combined = "\n\n".join(f"{name}:\n{_truncate_text(text, 4000)}" for name, text in outcomes)
+                result["output"] = combined
+                result["blocked"] = None
+                result.pop("awaiting_confirmation", None)
+                step["status"] = "ran"
+            else:
+                step["status"] = "failed"
+                step["no_retry"] = True
+                result["verify_reason"] = "Approved action(s) could not be executed: " + "; ".join(errors)
+        elif resolution.kind == "wait":
+            # Other approvals in the batch are still outstanding; keep pausing.
+            result["confirmation_message"] = resolution.message
+        else:  # abort: denied / expired / not found
+            step["status"] = "failed"
+            step["no_retry"] = True
+            result["verify_reason"] = resolution.message
+
+    return {"plan": plan, "step_results": list(results_by_id.values()), "iteration": iteration}
+
+
+def _confirmation_id_from_content(content: str) -> str | None:
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if isinstance(data, dict):
+        confirmation_id = data.get("confirmation_id")
+        return confirmation_id if isinstance(confirmation_id, str) else None
+    return None
 
 
 def _runnable_steps(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -409,6 +499,7 @@ async def _run_worker_step(
     output_text = ""
     blocked: ChatBlockReason | None = None
     tools_used: list[str] = []
+    confirmation_blocked: list[ToolCallResult] = []
     while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
@@ -443,6 +534,8 @@ async def _run_worker_step(
             if result.blocked is not None:
                 blocked = result.blocked
                 output_text = output_text or result.content
+                if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
+                    confirmation_blocked.append(result)
         if blocked is not None:
             break
 
@@ -454,6 +547,12 @@ async def _run_worker_step(
         "tools_used": tools_used,
         "blocked": blocked.value if blocked is not None else None,
     }
+    if confirmation_blocked:
+        # The mutating tool created an ActionConfirmation; record what we need to
+        # surface the approval prompt now and resume this step once approved.
+        step_result["awaiting_confirmation"] = True
+        step_result["confirmation_id"] = _confirmation_id_from_content(confirmation_blocked[0].content)
+        step_result["confirmation_message"] = _blocked_tool_call_response(confirmation_blocked)
     _emit(
         writer,
         {
@@ -578,6 +677,36 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
     }
 
 
+async def confirmation_pause_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+    """Halt the plan and surface the pending action approval to the user.
+
+    Deliberately does NOT clear ``plan``/``step_results``: they persist in the
+    checkpoint so the next turn (carrying ``resume_confirmation_id``) resumes the
+    parked steps via the dispatcher.
+    """
+    plan = state.get("plan") or []
+    results = state.get("step_results") or []
+    writer = get_stream_writer()
+    results_by_id = {result["step_id"]: result for result in results}
+
+    messages: list[str] = []
+    for step in plan:
+        if step["status"] == "awaiting":
+            message = results_by_id.get(step["id"], {}).get("confirmation_message")
+            if message:
+                messages.append(message)
+    # dict.fromkeys dedupes a shared batch URL surfaced by multiple steps.
+    response = "\n\n".join(dict.fromkeys(messages)) or "Approval is needed before I can continue this plan."
+    writer({"kind": "token", "content": response})
+
+    ai_message = AIMessage(
+        content=response,
+        id=f"msg_{uuid.uuid4().hex}",
+        response_metadata={"seizu_details": _orchestration_details(plan, results)},
+    )
+    return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+
+
 def _synthesis_context(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     results_by_id = {result["step_id"]: result for result in results}
     blocks: list[str] = []
@@ -636,4 +765,4 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
 
 def _has_pending_plan(state: ChatState) -> bool:
     plan = state.get("plan") or []
-    return any(step.get("status") in ("pending", "ran", "failed") for step in plan)
+    return any(step.get("status") in ("pending", "ran", "failed", "awaiting") for step in plan)
