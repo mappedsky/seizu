@@ -83,7 +83,6 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
     finish_reason = "stop"
 
     try:
-        yield _sse_data({"type": "start", "messageId": message_id})
         session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
         if session is None:
             yield _sse_data({"type": "error", "errorText": "Session not found"})
@@ -91,6 +90,7 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
             yield "data: [DONE]\n\n"
             return
         asyncio.create_task(_touch_chat_session_later(current.user.user_id, body.thread_id))
+        yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True
         if body.continue_response:

@@ -389,7 +389,7 @@ async def test_chat_stream_rejects_missing_session_before_graph_write(mocker):
         )
 
     assert response.status_code == 200
-    assert '"type":"start"' in response.text
+    assert '"type":"start"' not in response.text
     assert '"errorText":"Session not found"' in response.text
     assert '"finishReason":"error"' in response.text
     assert '"type":"text-start"' not in response.text
