@@ -30,6 +30,10 @@ import {
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import KeyboardDoubleArrowDown from '@mui/icons-material/KeyboardDoubleArrowDown';
 import Psychology from '@mui/icons-material/Psychology';
+import AltRoute from '@mui/icons-material/AltRoute';
+import Checklist from '@mui/icons-material/Checklist';
+import PlayArrow from '@mui/icons-material/PlayArrow';
+import FactCheck from '@mui/icons-material/FactCheck';
 import SmartToy from '@mui/icons-material/SmartToy';
 import Person from '@mui/icons-material/Person';
 import Check from '@mui/icons-material/Check';
@@ -60,13 +64,41 @@ const OUTPUT_LIMIT_NOTICE =
 const OUTPUT_LIMIT_TOOL_NOTICE =
   '\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete.';
 
+// 'routing' | 'plan' | 'step' | 'verify' are emitted by the chat orchestrator
+// (plan->dispatch->verify); the rest come from the single-agent path.
 type SeizuChatDetail = {
-  kind: 'thinking' | 'skill' | 'tool';
+  kind: 'thinking' | 'skill' | 'tool' | 'routing' | 'plan' | 'step' | 'verify';
   title: string;
   status?: string;
   arguments?: string;
   body?: string;
 };
+
+const KNOWN_DETAIL_KINDS = [
+  'thinking',
+  'skill',
+  'tool',
+  'routing',
+  'plan',
+  'step',
+  'verify',
+] as const;
+
+function detailKindIcon(kind: SeizuChatDetail['kind']) {
+  const sx = { color: 'text.secondary', fontSize: 14, flexShrink: 0 };
+  switch (kind) {
+    case 'routing':
+      return <AltRoute sx={sx} />;
+    case 'plan':
+      return <Checklist sx={sx} />;
+    case 'step':
+      return <PlayArrow sx={sx} />;
+    case 'verify':
+      return <FactCheck sx={sx} />;
+    default:
+      return null;
+  }
+}
 
 type SeizuChatMessage = UIMessage<
   {
@@ -104,7 +136,7 @@ function shouldPollChatHistory(messages: SeizuChatMessage[]): boolean {
 
 function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
   return message.parts
-    .map((part) => {
+    .map((part): SeizuChatDetail | null => {
       if (!part.type.startsWith('data-') || !('data' in part)) return null;
       const detail = part.data;
       if (
@@ -117,10 +149,9 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
       }
       const kind =
         'kind' in detail &&
-        (detail.kind === 'thinking' ||
-          detail.kind === 'skill' ||
-          detail.kind === 'tool')
-          ? detail.kind
+        typeof detail.kind === 'string' &&
+        (KNOWN_DETAIL_KINDS as readonly string[]).includes(detail.kind)
+          ? (detail.kind as SeizuChatDetail['kind'])
           : 'tool';
       return {
         kind,
@@ -247,6 +278,7 @@ function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
                   },
                 }}
               >
+                {detailKindIcon(detail.kind)}
                 <Typography
                   sx={{
                     fontWeight: 600,

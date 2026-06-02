@@ -683,6 +683,73 @@ describe('ChatInterface', () => {
     expect(screen.getByText('{"labels":["CVE"]}')).toBeVisible();
   });
 
+  it('renders orchestration detail parts (plan/step/verify) in the details block', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-routing',
+              data: { kind: 'routing', title: 'Routing', status: 'completed' },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-plan',
+              data: { kind: 'plan', title: 'Plan', status: 'completed' },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-step',
+              data: {
+                kind: 'step',
+                title: 'Step: gather data',
+                status: 'completed',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-verify',
+              data: {
+                kind: 'verify',
+                title: 'Verify: gather data',
+                status: 'completed',
+              },
+            },
+            { type: 'text', text: 'Synthesized answer.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // All four orchestration kinds are surfaced (count chip = 4).
+    expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
+    });
+    expect(screen.getByText('Routing')).toBeVisible();
+    expect(screen.getByText('Plan')).toBeVisible();
+    expect(screen.getByText('Step: gather data')).toBeVisible();
+    expect(screen.getByText('Verify: gather data')).toBeVisible();
+  });
+
   it('renders streaming Markdown in token batches and leaves the live tail as text', async () => {
     const streamedText = [
       '# Findings',
