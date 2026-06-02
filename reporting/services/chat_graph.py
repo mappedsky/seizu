@@ -184,7 +184,10 @@ def _collapse_ephemeral_continuations(messages: list[Any]) -> list[Any]:
             merge_next_ai = False
             if visible and isinstance(visible[-1], AIMessage):
                 visible[-1] = _merge_ai_continuation(visible[-1], message)
-                continue
+            # When the merge target is absent (e.g. trimmed by the message cap),
+            # discard the orphaned continuation rather than appending it as a
+            # confusing standalone message.
+            continue
         else:
             merge_next_ai = False
         visible.append(message)
@@ -223,8 +226,7 @@ def _merge_ai_continuation(previous: AIMessage, continuation: AIMessage) -> AIMe
 
 
 def _strip_output_limit_notice(response: str) -> str:
-    summary_notice = "\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete."
-    return response.replace(_OUTPUT_LIMIT_NOTICE, "").replace(summary_notice, "").rstrip()
+    return response.replace(_OUTPUT_LIMIT_NOTICE, "").replace(_OUTPUT_LIMIT_SUMMARY_NOTICE, "").rstrip()
 
 
 async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> None:
@@ -416,9 +418,12 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         streamed_response = streamed_in_last_turn
         detail_events.extend(turn_result.details)
         response = message_text(final_message.content)
-        response, response_hit_output_limit = _append_output_limit_notice(
-            response, turn_result.finish_reason, action_summaries
-        )
+        if response:
+            response, response_hit_output_limit = _append_output_limit_notice(
+                response, turn_result.finish_reason, action_summaries
+            )
+        else:
+            response_is_broken = True
 
     if not response:
         response = _empty_response_fallback(action_summaries)
@@ -433,14 +438,26 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         elif response.startswith(streamed_response):
             writer({"kind": "token", "content": response[len(streamed_response) :]})
         else:
-            writer({"kind": "token", "content": f"\n\n{response}"})
+            tail = f"\n\n{response}"
+            writer({"kind": "token", "content": tail})
+            # Sync the persisted content with what was sent on the wire so that
+            # history replay matches the user-visible conversation. This matters
+            # when an earlier turn already streamed text (e.g. "Let me check…")
+            # before a blocked or fallback response was generated.
+            if streamed_response:
+                response = f"{streamed_response}{tail}"
     if response_hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
 
+    response_metadata: dict[str, Any] = {}
+    if detail_events:
+        response_metadata["seizu_details"] = detail_events
+    if response_hit_output_limit:
+        response_metadata["seizu_output_limit"] = True
     ai_message = AIMessage(
         content=response,
         id=f"msg_{uuid.uuid4().hex}",
-        response_metadata={"seizu_details": detail_events} if detail_events else {},
+        response_metadata=response_metadata,
     )
     if response_is_broken:
         tag_message(ai_message, MessageTag.BROKEN)
@@ -619,7 +636,7 @@ async def _resume_confirmed_tool_turn(
             writer({"kind": "token", "content": f"\n\n{response}"})
     if hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
-    return _chat_state_with_ai_response(state, response, details=detail_events)
+    return _chat_state_with_ai_response(state, response, details=detail_events, output_limit=hit_output_limit)
 
 
 def _chat_state_with_ai_response(
@@ -627,11 +644,17 @@ def _chat_state_with_ai_response(
     response: str,
     *,
     details: list[dict[str, Any]] | None = None,
+    output_limit: bool = False,
 ) -> ChatState:
+    response_metadata: dict[str, Any] = {}
+    if details:
+        response_metadata["seizu_details"] = details
+    if output_limit:
+        response_metadata["seizu_output_limit"] = True
     ai_message = AIMessage(
         content=response,
         id=f"msg_{uuid.uuid4().hex}",
-        response_metadata={"seizu_details": details} if details else {},
+        response_metadata=response_metadata,
     )
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
 
@@ -750,6 +773,9 @@ def _chunk_reasoning_delta(chunk: Any) -> str:
 _OUTPUT_LIMIT_NOTICE = (
     "\n\n> Response stopped because the model hit its output limit. Ask me to continue from here if you need the rest."
 )
+_OUTPUT_LIMIT_SUMMARY_NOTICE = (
+    "\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete."
+)
 
 
 def _append_output_limit_notice(
@@ -761,9 +787,7 @@ def _append_output_limit_notice(
         return response, False
     if _OUTPUT_LIMIT_NOTICE in response:
         return response, True
-    summary_notice = ""
-    if action_summaries:
-        summary_notice = "\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete."
+    summary_notice = _OUTPUT_LIMIT_SUMMARY_NOTICE if action_summaries else ""
     return f"{response.rstrip()}{_OUTPUT_LIMIT_NOTICE}{summary_notice}", True
 
 

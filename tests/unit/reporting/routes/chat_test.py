@@ -269,6 +269,35 @@ def test_history_message_metadata_marks_output_limit_notice():
     )
 
 
+def test_history_message_metadata_prefers_seizu_output_limit_over_text():
+    """seizu_output_limit in response_metadata takes precedence over text matching."""
+    message = type(
+        "Message",
+        (),
+        {"response_metadata": {"seizu_output_limit": True}},
+    )()
+    metadata = chat._history_message_metadata(message, "assistant", "No notice phrase here.")
+    assert metadata is not None
+    assert metadata["finish_reason"] == "length"
+    assert metadata["response_cut_off"] is True
+
+
+def test_history_message_metadata_falls_back_to_text_when_no_signal():
+    """Text-based fallback still works for messages persisted before seizu_output_limit."""
+    message = type("Message", (), {"response_metadata": {}})()
+    text = "partial\n\n> Response stopped because the model hit its output limit. Ask me to continue."
+    metadata = chat._history_message_metadata(message, "assistant", text)
+    assert metadata is not None
+    assert metadata["finish_reason"] == "length"
+
+
+def test_history_message_metadata_no_false_positive_from_seizu_output_limit_absent():
+    """Message with no output_limit signal and no notice phrase has no finish_reason."""
+    message = type("Message", (), {"response_metadata": {}})()
+    metadata = chat._history_message_metadata(message, "assistant", "Normal response.")
+    assert metadata is None
+
+
 async def test_chat_stream_emits_detail_data_parts(mocker):
     fake_graph = FakeDetailChatGraph()
     mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
@@ -360,6 +389,7 @@ async def test_chat_stream_rejects_missing_session_before_graph_write(mocker):
         )
 
     assert response.status_code == 200
+    assert '"type":"start"' in response.text
     assert '"errorText":"Session not found"' in response.text
     assert '"finishReason":"error"' in response.text
     assert '"type":"text-start"' not in response.text

@@ -141,22 +141,74 @@ function MarkdocContinuation() {
 // so this conversion is the safe way to support them.
 // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
 const DETAILS_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
-const DETAILS_BLOCK_RE =
-  /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+// Strips HTML tags including those whose attributes contain ">", which the
+// simpler [^>]+ form would mis-handle (e.g. <b onclick="a>b">).
+const HTML_TAG_RE = /<(?:[^"'>]|"[^"]*"|'[^']*')*>/g;
+// Matches the <details> opener through </summary>; body is extracted separately
+// with depth-counting so a literal "</details>" inside body text does not stop
+// the lazy quantifier too early.
+const DETAILS_OPEN_RE = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>/i;
 
 function preprocessDetailsBlocks(source: string): string {
-  return source.replace(
-    DETAILS_BLOCK_RE,
-    (_match, rawSummary: string, body: string) => {
+  let result = '';
+  let remaining = source;
+
+  for (;;) {
+    const match = DETAILS_OPEN_RE.exec(remaining);
+    if (!match) {
+      result += remaining;
+      break;
+    }
+
+    const afterSummary = remaining.slice(match.index + match[0].length);
+
+    // Walk afterSummary counting <details> open/close pairs to find the
+    // closing tag that actually terminates this block, not one embedded in
+    // body text (which would stop a lazy quantifier too early).
+    let depth = 1;
+    let pos = 0;
+    let bodyEnd = -1;
+    while (pos < afterSummary.length && depth > 0) {
+      const openIdx = afterSummary.indexOf('<details', pos);
+      const closeIdx = afterSummary.indexOf('</details>', pos);
+      if (closeIdx === -1) break;
+      if (openIdx !== -1 && openIdx < closeIdx) {
+        depth += 1;
+        pos = openIdx + 8;
+      } else {
+        depth -= 1;
+        if (depth === 0) {
+          bodyEnd = closeIdx;
+          break;
+        }
+        pos = closeIdx + 10;
+      }
+    }
+
+    result += remaining.slice(0, match.index);
+
+    if (bodyEnd === -1) {
+      // No matching closing tag — leave this occurrence unchanged.
+      result += match[0];
+      remaining = afterSummary;
+    } else {
+      const rawSummary = match[1];
       const summaryText = rawSummary
-        .replace(/<[^>]+>/g, '')
+        .replace(HTML_TAG_RE, '')
         .replace(DETAILS_CONTROL_RE, '')
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
         .trim();
-      return `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
-    },
-  );
+      // Escape Markdoc tag openers in the body so LLM content cannot inject
+      // registered tags (e.g. {% /details %} to escape the block, or
+      // {% continuation /%} to insert a spurious divider).
+      const body = afterSummary.slice(0, bodyEnd).replace(/\{%/g, '\\{%');
+      result += `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
+      remaining = afterSummary.slice(bodyEnd + 10); // 10 = '</details>'.length
+    }
+  }
+
+  return result;
 }
 
 const markdocComponents = {

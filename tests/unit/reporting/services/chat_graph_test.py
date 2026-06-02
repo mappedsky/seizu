@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
@@ -1771,3 +1772,132 @@ def test_aws_config_with_s3_endpoint_uses_path_style(mocker):
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://localhost:9000")
     config = chat_graph._aws_config()
     assert config.s3 == {"addressing_style": "path"}
+
+
+def test_collapse_ephemeral_continuations_discards_orphaned_continuation():
+    """Continuation is discarded when the preceding cut-off AIMessage is absent."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from reporting.services.chat_graph import _collapse_ephemeral_continuations
+    from reporting.services.chat_messages import MessageTag, tag_message
+
+    human = HumanMessage(content="hi", id="h1")
+    ephemeral = HumanMessage(content="[continue]", id="e1")
+    tag_message(ephemeral, MessageTag.EPHEMERAL)
+    ephemeral.additional_kwargs["continue_response"] = True
+    continuation = AIMessage(content="continuation text", id="a2")
+
+    # Simulates a checkpoint where the original cut-off AIMessage was trimmed,
+    # leaving only the ephemeral continue-request and the continuation.
+    result = _collapse_ephemeral_continuations([human, ephemeral, continuation])
+
+    assert len(result) == 1
+    assert result[0].id == "h1"
+
+
+def test_collapse_ephemeral_continuations_merges_when_preceding_ai_present():
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from reporting.services.chat_graph import _collapse_ephemeral_continuations
+    from reporting.services.chat_messages import MessageTag, tag_message
+
+    human = HumanMessage(content="hi", id="h1")
+    original = AIMessage(content="partial", id="a1")
+    ephemeral = HumanMessage(content="[continue]", id="e1")
+    tag_message(ephemeral, MessageTag.EPHEMERAL)
+    ephemeral.additional_kwargs["continue_response"] = True
+    continuation = AIMessage(content="rest", id="a2")
+
+    result = _collapse_ephemeral_continuations([human, original, ephemeral, continuation])
+
+    assert len(result) == 2
+    assert result[-1].id == "a1"
+    assert "partial" in result[-1].content
+    assert "rest" in result[-1].content
+
+
+def test_output_limit_notice_uses_shared_constant():
+    """_strip_output_limit_notice removes the same text _append_output_limit_notice adds."""
+    original = "Some partial response."
+    appended, hit = chat_graph._append_output_limit_notice(original, "length", ["tool ran"])
+    assert hit is True
+    stripped = chat_graph._strip_output_limit_notice(appended)
+    assert stripped == original
+
+
+async def test_chat_graph_persists_seizu_output_limit_in_metadata(mocker):
+    """output_limit responses store seizu_output_limit=True in response_metadata."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _LimitModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(
+                content="partial",
+                response_metadata={"finish_reason": "length"},
+            )
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=_LimitModel())
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content="go")]},
+        {"configurable": {"thread_id": "thread-meta-limit", "current_user": _user()}},
+        stream_mode="custom",
+    ):
+        pass
+
+    state = await graph.aget_state({"configurable": {"thread_id": "thread-meta-limit"}})
+    last = state.values["messages"][-1]
+    assert last.response_metadata.get("seizu_output_limit") is True
+
+
+async def test_empty_synthesis_response_marked_broken(mocker):
+    """Empty synthesis turn with finish_reason=length goes to _empty_response_fallback."""
+    from langgraph.checkpoint.memory import MemorySaver
+
+    call_count = 0
+
+    class _ToolThenEmptyModel:
+        async def astream(self, input, config=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First turn: return a tool call
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": "no_such_tool",
+                            "args": "{}",
+                            "id": "tc1",
+                            "index": 0,
+                        }
+                    ],
+                )
+            else:
+                # Synthesis turn: hit output limit before any text
+                yield AIMessageChunk(
+                    content="",
+                    response_metadata={"finish_reason": "length"},
+                )
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=_ToolThenEmptyModel())
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks: list[dict[str, Any]] = []
+    async for chunk in graph.astream(
+        {"messages": [HumanMessage(content="do something")]},
+        {"configurable": {"thread_id": "thread-empty-synth", "current_user": _user()}},
+        stream_mode="custom",
+    ):
+        chunks.append(chunk)
+
+    # Broken synthesis should not emit finish_reason:length (no spurious Continue button).
+    finish_reason_events = [c for c in chunks if c.get("kind") == "finish_reason"]
+    assert not finish_reason_events

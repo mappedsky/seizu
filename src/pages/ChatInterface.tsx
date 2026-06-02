@@ -799,7 +799,11 @@ export default function ChatInterface() {
   const handleCopyAssistantResponse = async (message: SeizuChatMessage) => {
     const text = messageText(message);
     if (!text || !navigator.clipboard) return;
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
     setCopiedMessageId(message.id);
     window.setTimeout(() => {
       setCopiedMessageId((current) =>

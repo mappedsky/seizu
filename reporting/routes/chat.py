@@ -83,6 +83,7 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
     finish_reason = "stop"
 
     try:
+        yield _sse_data({"type": "start", "messageId": message_id})
         session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
         if session is None:
             yield _sse_data({"type": "error", "errorText": "Session not found"})
@@ -90,7 +91,6 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
             yield "data: [DONE]\n\n"
             return
         asyncio.create_task(_touch_chat_session_later(current.user.user_id, body.thread_id))
-        yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True
         if body.continue_response:
@@ -214,11 +214,12 @@ def _to_history_message(message: Any, index: int) -> ChatHistoryMessage | None:
 
 def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, object] | None:
     metadata: dict[str, object] = {}
-    if role == "assistant" and "Response stopped because the model hit its output limit" in text:
-        metadata.update({"finish_reason": "length", "response_cut_off": True})
 
     response_metadata = getattr(message, "response_metadata", None)
     if isinstance(response_metadata, dict):
+        # Prefer the authoritative persisted signal set at write time.
+        if response_metadata.get("seizu_output_limit"):
+            metadata.update({"finish_reason": "length", "response_cut_off": True})
         details = response_metadata.get("seizu_details")
         if isinstance(details, list):
             safe_details: list[dict[str, object]] = []
@@ -237,6 +238,14 @@ def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, o
                 safe_details.append(safe_detail)
             if safe_details:
                 metadata["details"] = safe_details
+
+    # Fallback for messages persisted before seizu_output_limit was added: infer
+    # from text content. This is intentionally a fallback — the text check is
+    # brittle (an LLM quoting the notice phrase would trigger it), so new
+    # messages write the authoritative seizu_output_limit field instead.
+    if "finish_reason" not in metadata and role == "assistant":
+        if "Response stopped because the model hit its output limit" in text:
+            metadata.update({"finish_reason": "length", "response_cut_off": True})
 
     return metadata or None
 
