@@ -46,6 +46,7 @@ from reporting.services.chat_graph import (
     ChatToolSpec,
     ToolCallResult,
     _append_output_limit_notice,
+    _auto_continue_answer,
     _blocked_tool_call_response,
     _chat_provider,
     _client_thread_id_from_config,
@@ -681,20 +682,27 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
     messages: list[BaseMessage] = [HumanMessage(content=f"User request: {user_text}\n\n{context}")]
     turn = await _run_llm_tool_turn(model, _SYNTHESIZER_PROMPT, messages, [], config, writer)
     response = message_text(turn.message.content)
+    streamed = turn.streamed
     output_limit = False
+    details = _orchestration_details(plan, results)
     if response:
-        # Mirror the single-agent path: append the cut-off notice and surface the
-        # finish_reason so a synthesis truncated by the output limit also offers
-        # "Continue response".
-        response, output_limit = _append_output_limit_notice(response, turn.finish_reason)
+        # Mirror the single-agent path: auto-continue a synthesis truncated by the
+        # output limit, then only surface the cut-off notice if it is still
+        # truncated after the continuation budget.
+        response, appended, still_truncated, cont_details = await _auto_continue_answer(
+            model, messages, _SYNTHESIZER_PROMPT, response, turn.finish_reason, config, writer
+        )
+        streamed += appended
+        details = [*details, *cont_details]
+        response, output_limit = _append_output_limit_notice(response, "length" if still_truncated else None)
     else:
         response = _synthesis_fallback(plan, results)
 
     ai_message = finalize_assistant_message(
         response=response,
-        streamed=turn.streamed,
+        streamed=streamed,
         writer=writer,
-        details=_orchestration_details(plan, results),
+        details=details,
         output_limit=output_limit,
     )
     # Clear transient orchestration state so completed runs don't bloat the

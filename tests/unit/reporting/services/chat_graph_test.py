@@ -289,6 +289,105 @@ async def test_chat_graph_degrades_when_tool_markup_leaks_twice(mocker):
     assert has_tag(persisted, MessageTag.BROKEN)
 
 
+def test_trim_overlap_removes_repeated_seam():
+    assert chat_graph._trim_overlap("alpha beta gamma", "beta gamma delta") == " delta"
+    assert chat_graph._trim_overlap("alpha", "totally new text") == "totally new text"
+
+
+class _CutoffModel:
+    """Yields scripted (content, finish_reason) per astream call, for testing
+    auto-continuation of output-limit-truncated answers."""
+
+    def __init__(self, turns: list[tuple[str, str | None]]) -> None:
+        self.turns = turns
+        self.calls = 0
+
+    def bind_tools(self, _tools: Any) -> "_CutoffModel":
+        return self
+
+    async def astream(self, input, config=None, **kwargs):
+        index = min(self.calls, len(self.turns) - 1)
+        self.calls += 1
+        content, finish_reason = self.turns[index]
+        metadata = {"finish_reason": finish_reason} if finish_reason else {}
+        yield AIMessageChunk(content=content, response_metadata=metadata)
+
+
+async def _run_cutoff_graph(mocker, model: _CutoffModel, thread_id: str) -> list[dict]:
+    from langgraph.checkpoint.memory import MemorySaver
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+    return [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="write a long answer")]},
+            {"configurable": {"thread_id": thread_id, "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+
+async def test_auto_continuation_stitches_truncated_answer(mocker):
+    # First turn is cut off; the continuation repeats the seam, which is trimmed,
+    # and the stitched answer streams seamlessly with no cut-off notice.
+    model = _CutoffModel(
+        [
+            ("Hello world, this is the start", "length"),
+            ("this is the start and the rest.", "stop"),
+        ]
+    )
+    chunks = await _run_cutoff_graph(mocker, model, "thread-cont-stitch")
+
+    streamed = "".join(c["content"] for c in chunks if c["kind"] == "token")
+    assert streamed == "Hello world, this is the start and the rest."
+    assert "hit its output limit" not in streamed
+    assert {"kind": "finish_reason", "finish_reason": "length"} not in chunks
+    assert model.calls == 2
+
+
+async def test_auto_continuation_stops_on_no_progress(mocker):
+    # A continuation that only repeats prior text adds nothing once trimmed, so
+    # the loop stops immediately and falls back to the cut-off notice.
+    model = _CutoffModel(
+        [
+            ("Partial answer", "length"),
+            ("Partial answer", "length"),
+        ]
+    )
+    chunks = await _run_cutoff_graph(mocker, model, "thread-cont-noprogress")
+
+    streamed = "".join(c["content"] for c in chunks if c["kind"] == "token")
+    # "Partial answer" appears once (no duplicated seam), then the notice.
+    assert streamed.count("Partial answer") == 1
+    assert "hit its output limit" in streamed
+    assert model.calls == 2
+
+
+async def test_auto_continuation_respects_max_loops(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_CONTINUATIONS", 2)
+    # The model never finishes; continuation stops after the loop budget and shows
+    # the cut-off notice rather than looping forever.
+    model = _CutoffModel(
+        [
+            ("chunk0 ", "length"),
+            ("chunk1 ", "length"),
+            ("chunk2 ", "length"),
+            ("chunk3 ", "length"),
+        ]
+    )
+    chunks = await _run_cutoff_graph(mocker, model, "thread-cont-maxloops")
+
+    streamed = "".join(c["content"] for c in chunks if c["kind"] == "token")
+    assert "chunk0 chunk1 chunk2" in streamed
+    assert "chunk3" not in streamed
+    assert "hit its output limit" in streamed
+    assert model.calls == 3  # initial + 2 continuations
+
+
 async def test_chat_graph_marks_output_limit_cutoff(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -1642,7 +1741,10 @@ async def test_chat_graph_does_not_persist_internal_command_attempt(mocker):
     assert all("/skill investigation__triage" not in str(message.content) for message in persisted)
 
 
-def test_build_system_prompt_is_seizu_specific():
+def test_build_system_prompt_is_seizu_specific(mocker):
+    # Pin the output budget so this content test is independent of the default
+    # CHAT_LLM_MAX_TOKENS (budget scaling is covered separately).
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 2048)
     prompt = chat_graph.build_system_prompt("gemini", _user())
 
     assert "Seizu's AI investigation assistant" in prompt

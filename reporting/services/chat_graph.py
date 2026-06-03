@@ -383,8 +383,13 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         if not requested:
             response = message_text(ai_message.content)
             if response:
+                response, appended, still_truncated, cont_details = await _auto_continue_answer(
+                    model, messages, turn_system_prompt, response, turn_result.finish_reason, config, writer
+                )
+                streamed_response += appended
+                detail_events.extend(cont_details)
                 response, response_hit_output_limit = _append_output_limit_notice(
-                    response, turn_result.finish_reason, action_summaries
+                    response, "length" if still_truncated else None, action_summaries
                 )
                 break
             if action_summaries:
@@ -462,8 +467,13 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         detail_events.extend(turn_result.details)
         response = message_text(final_message.content)
         if response:
+            response, appended, still_truncated, cont_details = await _auto_continue_answer(
+                model, messages, synthesis_system_prompt, response, turn_result.finish_reason, config, writer
+            )
+            streamed_response += appended
+            detail_events.extend(cont_details)
             response, response_hit_output_limit = _append_output_limit_notice(
-                response, turn_result.finish_reason, action_summaries
+                response, "length" if still_truncated else None, action_summaries
             )
         else:
             response_is_broken = True
@@ -541,6 +551,141 @@ def _combined_system_prompt(base: str, addendum: str) -> str:
     if not addendum:
         return base
     return f"{base}\n\n{addendum}"
+
+
+# --- Auto-continuation of length-truncated answers ----------------------------
+
+# How much of the prior answer's tail to quote back as the exact continuation
+# point, and how many leading continuation chars to buffer while trimming any
+# text the model repeats from that tail.
+_CONTINUATION_CONTEXT_CHARS = 600
+_CONTINUATION_OVERLAP_CAP = 400
+
+
+def _trim_overlap(prior: str, continuation: str) -> str:
+    """Drop the longest prefix of *continuation* that repeats the tail of *prior*.
+
+    Models often re-emit the last sentence or two when asked to continue; trimming
+    the verbatim overlap makes the stitched seam invisible. Exact-match only, so
+    genuinely new content is never deleted.
+    """
+    limit = min(len(prior), len(continuation), _CONTINUATION_OVERLAP_CAP)
+    for size in range(limit, 0, -1):
+        if prior.endswith(continuation[:size]):
+            return continuation[size:]
+    return continuation
+
+
+class _ContinuationStitcher:
+    """Wraps a continuation turn's token stream: holds back the leading window
+    until the overlap with the prior answer is trimmed, then passes tokens through
+    live. ``emitted`` is the (trimmed) text actually sent to the user."""
+
+    def __init__(self, prior: str, writer: Callable[[dict[str, Any]], None]) -> None:
+        self._prior = prior
+        self._writer = writer
+        self._buffer = ""
+        self._resolved = False
+        self.emitted = ""
+
+    def feed_token(self, delta: str) -> None:
+        if self._resolved:
+            self._emit(delta)
+            return
+        self._buffer += delta
+        if len(self._buffer) >= _CONTINUATION_OVERLAP_CAP:
+            self._resolve()
+
+    def _resolve(self) -> None:
+        self._resolved = True
+        trimmed = _trim_overlap(self._prior, self._buffer)
+        self._buffer = ""
+        self._emit(trimmed)
+
+    def _emit(self, text: str) -> None:
+        if text:
+            self._writer({"kind": "token", "content": text})
+            self.emitted += text
+
+    def flush(self) -> str:
+        if not self._resolved:
+            self._resolve()
+        return self.emitted
+
+
+def _stitch_writer(
+    real_writer: Callable[[dict[str, Any]], None], prior: str
+) -> tuple[Callable[[dict[str, Any]], None], _ContinuationStitcher]:
+    stitcher = _ContinuationStitcher(prior, real_writer)
+
+    def wrapped(chunk: dict[str, Any]) -> None:
+        if isinstance(chunk, dict) and chunk.get("kind") == "token":
+            stitcher.feed_token(str(chunk.get("content", "")))
+        else:
+            real_writer(chunk)
+
+    return wrapped, stitcher
+
+
+def _continuation_prompt(prior_tail: str) -> str:
+    return (
+        "Your previous message was cut off by the output limit. Continue it from exactly where it stopped — "
+        "resume mid-sentence or mid-structure if needed. Do not repeat any text you already wrote, do not add a "
+        "preamble, recap, or closing remark, and do not restate headings or list markers already shown. If you were "
+        "inside a code block, table, or list, continue it seamlessly.\n\n"
+        f"The end of what you have written so far (continue immediately after this):\n{prior_tail}"
+    )
+
+
+async def _auto_continue_answer(
+    model: ChatModel,
+    context_messages: list[BaseMessage],
+    system_prompt: str,
+    response: str,
+    finish_reason: str | None,
+    config: RunnableConfig,
+    writer: Callable[[dict[str, Any]], None] | None,
+) -> tuple[str, str, bool, tuple[dict[str, Any], ...]]:
+    """Auto-continue an output-limit-truncated answer, stitching the pieces.
+
+    Loops up to ``CHAT_LLM_MAX_CONTINUATIONS`` while the model keeps hitting the
+    length limit, trims the repeated overlap at each seam, and stops early if a
+    continuation adds no new text (the no-progress / anti-loop guard) or the
+    stitched response would exceed ``CHAT_LLM_MAX_RESPONSE_CHARS``. Returns the
+    full response, the text appended (so the caller can extend ``streamed``),
+    whether it is *still* truncated after the budget, and any reasoning details.
+    Only runs when streaming (``writer`` set); sub-agent/worker turns skip it.
+    """
+    max_loops = settings.CHAT_LLM_MAX_CONTINUATIONS
+    max_chars = settings.CHAT_LLM_MAX_RESPONSE_CHARS
+    details: list[dict[str, Any]] = []
+    appended = ""
+    loops = 0
+    while (
+        writer is not None
+        and max_loops > 0
+        and _is_output_limit_finish_reason(finish_reason)
+        and loops < max_loops
+        and (max_chars <= 0 or len(response) < max_chars)
+    ):
+        loops += 1
+        prior_tail = response[-_CONTINUATION_CONTEXT_CHARS:]
+        continuation_messages: list[BaseMessage] = [
+            *context_messages,
+            AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}"),
+            HumanMessage(content=_continuation_prompt(prior_tail), id=f"msg_{uuid.uuid4().hex}"),
+        ]
+        stitch_writer, stitcher = _stitch_writer(writer, response)
+        turn = await _run_llm_tool_turn(model, system_prompt, continuation_messages, [], config, stitch_writer)
+        added = stitcher.flush()
+        details.extend(turn.details)
+        finish_reason = turn.finish_reason
+        if not added.strip():
+            break  # no progress -> stop rather than loop
+        response += added
+        appended += added
+    still_truncated = _is_output_limit_finish_reason(finish_reason)
+    return response, appended, still_truncated, tuple(details)
 
 
 @dataclass(frozen=True)

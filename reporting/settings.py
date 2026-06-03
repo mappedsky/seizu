@@ -302,9 +302,19 @@ CHAT_LLM_API_KEY = str_env("CHAT_LLM_API_KEY", "")
 CHAT_LLM_BASE_URL = str_env("CHAT_LLM_BASE_URL", "")
 # Generation controls for real chat providers.
 CHAT_LLM_TEMPERATURE = float_env("CHAT_LLM_TEMPERATURE", 0.2)
-CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 2048)
+# Per-call output token cap. Kept generous so most answers finish in one shot;
+# replies still truncated by it are auto-continued server-side (see below).
+CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 4096)
 CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
 CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
+# When a final answer is cut off by the output-token limit (finish_reason
+# "length"), Seizu transparently asks the model to continue and stitches the
+# pieces into one seamless response. These bound that loop. Set MAX_CONTINUATIONS
+# to 0 to disable auto-continuation (falling back to the manual "Continue
+# response" button). MAX_RESPONSE_CHARS is a hard ceiling on the stitched length
+# (0 disables it); the loop also stops as soon as a continuation adds no new text.
+CHAT_LLM_MAX_CONTINUATIONS = int_env("CHAT_LLM_MAX_CONTINUATIONS", 2)
+CHAT_LLM_MAX_RESPONSE_CHARS = int_env("CHAT_LLM_MAX_RESPONSE_CHARS", 60_000)
 # Maximum prior messages/characters sent to the LLM. Checkpoints may retain
 # more messages for UI history; this separate cap controls model cost, latency,
 # and provider context pressure.
