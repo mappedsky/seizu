@@ -299,6 +299,79 @@ async def test_worker_step_fails_when_required_action_is_not_called():
     assert "required structured action" in reason
 
 
+async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
+    # A skill step starts with only the skill spec; rendering the skill discloses
+    # its sub-tools, which must then become callable within the same step.
+    skill = chat_graph.ChatToolSpec(
+        name="github_security", kind="skill", description="overview", input_schema={"type": "object"}
+    )
+    sub_tool = chat_graph.ChatToolSpec(
+        name="github_security__org_overview", kind="tool", description="org overview", input_schema={"type": "object"}
+    )
+    tool_specs = [skill, sub_tool]
+    step = _step("s1", action_kind="skill", required_action="github_security", success_criteria="findings")
+
+    class _ScriptedToolModel:
+        def __init__(self, responses: list) -> None:
+            self.responses = responses
+            self.calls = 0
+
+        def bind_tools(self, _tools: Any) -> "_ScriptedToolModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            index = min(self.calls, len(self.responses) - 1)
+            self.calls += 1
+            yield self.responses[index]
+
+    from langchain_core.messages import AIMessage
+
+    model = _ScriptedToolModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "github_security", "args": {}, "id": "c1"}]),
+            AIMessage(content="", tool_calls=[{"name": "github_security__org_overview", "args": {}, "id": "c2"}]),
+            AIMessage(content="Found 2 critical CVEs: CVE-1, CVE-2."),
+        ]
+    )
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+        out = []
+        for req in batch:
+            if req.name == "github_security":
+                out.append(
+                    chat_graph.ToolCallResult(
+                        request=req,
+                        content='{"workflow": "call org_overview"}',
+                        tools_required=("github_security__org_overview",),
+                    )
+                )
+            else:
+                out.append(chat_graph.ToolCallResult(request=req, content='{"critical": 2}'))
+        return out
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=model,
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=tool_specs,
+        writer=lambda event: None,
+    )
+
+    # The disclosed sub-tool was reachable, so the step produced real findings
+    # instead of stalling on an uncallable tool.
+    assert result.get("execution_error") in (None, "")
+    assert result["blocked"] is None
+    assert "github_security" in result["tools_used"]
+    assert "github_security__org_overview" in result["tools_used"]
+    assert result["output"] == "Found 2 critical CVEs: CVE-1, CVE-2."
+
+
 # --- Router short-circuits (no LLM call) --------------------------------------
 
 

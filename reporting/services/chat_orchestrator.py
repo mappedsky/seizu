@@ -57,6 +57,7 @@ from reporting.services.chat_graph import (
     _collect_confirmations_to_run,
     _confirmation_batch_id_for_requests,
     _current_user_from_config,
+    _disclosed_tool_names_from_skill_results,
     _execute_confirmations,
     _internal_action_transcript_leaked,
     _invoke_structured_output,
@@ -576,7 +577,14 @@ async def _run_worker_step(
             },
         )
         return contract_result
-    available = _with_provider_tool_names(specs)
+    # Progressive disclosure inside the worker: a skill step starts with only the
+    # skill spec, but rendering a skill discloses the tools it declares. Those must
+    # become callable for the rest of this step, or a meta-skill (e.g. one whose
+    # workflow says "call these sub-tools") can never reach its data — the skill
+    # renders, the sub-tools stay invisible, and the step produces no findings.
+    active_specs = list(specs)
+    active_names = {spec.name for spec in active_specs}
+    available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)
     if step.get("retry_guidance"):
         system_prompt += f"\n\nA previous attempt was rejected: {step['retry_guidance']}. Address that this time."
@@ -640,6 +648,14 @@ async def _run_worker_step(
                     confirmation_blocked.append(result)
         if blocked is not None:
             break
+        # Surface any tools a rendered skill just disclosed so the next turn can
+        # call them. Looked up from the full worker tool list, not re-fetched.
+        newly_disclosed = _disclosed_tool_names_from_skill_results(batch_results)
+        added = [spec for spec in tool_specs if spec.name in newly_disclosed and spec.name not in active_names]
+        if added:
+            active_specs.extend(added)
+            active_names.update(spec.name for spec in added)
+            available = _with_provider_tool_names(active_specs)
 
     if not execution_error and _step_requires_action(step) and required_action not in tools_used and blocked is None:
         execution_error = f"Step required structured action `{required_action}`, but the worker did not call it."
