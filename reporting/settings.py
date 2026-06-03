@@ -286,19 +286,27 @@ SQL_DATABASE_URL = str_env("SQL_DATABASE_URL", "")
 # Chat UI (surfaced via GET /api/v1/config -> features.chat).
 CHAT_ENABLED = bool_env("CHAT_ENABLED", True)
 
-# LLM provider for the chat assistant. "mock" keeps local/dev chat deterministic
-# and keyless; set to "openai", "anthropic", "gemini", or "deepseek" to call a
-# real model through the LangGraph chat node.
+# LLM provider sentinel for the chat assistant. "mock" keeps local/dev chat
+# deterministic and keyless; any other value routes through LiteLLM, so the
+# supported provider/model surface is whatever LiteLLM supports rather than a
+# fixed allowlist. Legacy values ("openai", "anthropic", "gemini", "deepseek")
+# still work and namespace a bare CHAT_LLM_MODEL; new deployments can leave this
+# at "litellm" and set a fully-qualified CHAT_LLM_MODEL instead.
 CHAT_LLM_PROVIDER = str_env("CHAT_LLM_PROVIDER", "mock")
-# Model identifier for the selected provider. Required whenever
-# CHAT_LLM_PROVIDER is not "mock"; Seizu fails fast at startup if a real
-# provider is selected without an explicit model.
+# LiteLLM model identifier for the chat assistant. Required whenever
+# CHAT_LLM_PROVIDER is not "mock"; Seizu fails fast at startup if a real provider
+# is selected without one. Prefer a provider-namespaced string
+# (e.g. "openai/gpt-4o", "anthropic/claude-3-5-sonnet-latest",
+# "gemini/gemini-2.0-flash", "deepseek/deepseek-reasoner"). A bare model name is
+# namespaced using the legacy CHAT_LLM_PROVIDER value.
 CHAT_LLM_MODEL = str_env("CHAT_LLM_MODEL", "")
-# Optional provider API key override. If empty, provider-specific env vars below
-# are used, then the underlying SDK's normal environment lookup applies.
+# Optional API key override passed to LiteLLM. If empty, the legacy
+# provider-specific env vars below are used, then LiteLLM's own per-provider
+# environment lookup applies (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
 CHAT_LLM_API_KEY = str_env("CHAT_LLM_API_KEY", "")
-# Optional provider base URL override. Useful for provider gateways and private
-# endpoints when the selected LangChain integration supports it.
+# Optional OpenAI-compatible base URL (LiteLLM api_base). Set this to point chat
+# at a self-hosted LiteLLM proxy or other gateway/private endpoint; it now
+# applies regardless of which model/provider is selected.
 CHAT_LLM_BASE_URL = str_env("CHAT_LLM_BASE_URL", "")
 # Generation controls for real chat providers.
 CHAT_LLM_TEMPERATURE = float_env("CHAT_LLM_TEMPERATURE", 0.2)

@@ -31,6 +31,7 @@ Design notes:
 import asyncio
 import json
 import uuid
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -45,14 +46,19 @@ from reporting.services.chat_graph import (
     ChatState,
     ChatToolSpec,
     ToolCallResult,
+    _action_transcript_retry_message,
+    _ai_message_for_tool_results,
     _append_output_limit_notice,
     _auto_continue_answer,
     _blocked_tool_call_response,
     _chat_provider,
     _client_thread_id_from_config,
     _collect_confirmations_to_run,
+    _confirmation_batch_id_for_requests,
     _current_user_from_config,
     _execute_confirmations,
+    _internal_action_transcript_leaked,
+    _invoke_structured_output,
     _is_continuation_turn,
     _last_user_text,
     _list_chat_prompts,
@@ -92,6 +98,9 @@ class _PlannedStep(BaseModel):
     goal: str
     depends_on: list[str] = Field(default_factory=list)
     suggested_tools: list[str] = Field(default_factory=list)
+    action_kind: Literal["auto", "answer", "skill", "tool"] = "auto"
+    required_action: str = ""
+    required_arguments: dict[str, Any] = Field(default_factory=dict)
     success_criteria: str = ""
 
 
@@ -112,9 +121,12 @@ _ROUTER_PROMPT = (
     " latest message needs multi-step orchestration.\n"
     'Choose "orchestrate" when the request is multi-step, spans several'
     " resources, or chains work (e.g. 'find X, then summarize Y', 'investigate"
-    " and report', 'audit across the org'). Choose \"simple\" for greetings,"
-    " single lookups, clarifications, or anything answerable in one focused"
-    ' step. Prefer "simple" when unsure — orchestration costs more.'
+    " and report', 'audit across the org', 'review GitHub security, choose the"
+    " highest-risk remotely exploitable CVE, then trace attack paths'). Route to"
+    ' "orchestrate" when later work depends on facts discovered by earlier'
+    ' work. Choose "simple" for greetings, single lookups, clarifications, or'
+    ' anything answerable in one focused step. Prefer "simple" only when the'
+    " user is not asking for a chained workflow."
 )
 
 _PLANNER_PROMPT = (
@@ -122,10 +134,16 @@ _PLANNER_PROMPT = (
     " ordered plan of independent-where-possible steps that, executed by"
     " sub-agents with the available tools/skills, fully answer the user's"
     " request. Each step needs a stable short id (e.g. 's1'), a concrete goal,"
-    " a success_criteria the result will be checked against, optional"
-    " suggested_tools (exact tool/skill names), and depends_on listing the ids"
-    " of steps whose output it needs. Keep steps independent unless a real data"
-    " dependency exists, so they can run in parallel. Do not invent tools."
+    " depends_on listing the ids of steps whose output it needs, action_kind,"
+    " required_action, optional required_arguments, and success_criteria. Use"
+    ' action_kind="skill" when the step must render/run a skill, "tool" when'
+    ' it must call a specific tool, and "answer" only for a synthesis/selection'
+    " step that needs no live action. For skill/tool steps, required_action must"
+    " be the exact listed skill/tool name; required_arguments should include"
+    " known static arguments and may omit values that must be derived from"
+    " dependency results. Put the same exact name in suggested_tools. Keep steps"
+    " independent unless a real data dependency exists, so they can run in"
+    " parallel. Do not invent tools or mark a live-data step as answer."
 )
 
 _SYNTHESIZER_PROMPT = (
@@ -133,7 +151,9 @@ _SYNTHESIZER_PROMPT = (
     " step-by-step; you are given each step's goal and result. Integrate them"
     " into one clear, well-structured answer to the user's original request."
     " Use only the step results as evidence; call out any step that failed or"
-    " was incomplete. Do not call tools."
+    " was incomplete. Do not call tools. Do not copy internal execution"
+    " transcripts, tool names, tool arguments, or raw returned JSON; translate"
+    " the evidence into conclusions, impact, and next actions."
 )
 
 
@@ -143,10 +163,24 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
     extra = f"\n\nYou are a sub-agent completing exactly ONE step of a larger plan. Step goal: {step.get('goal', '')}."
     if criteria:
         extra += f" Success criteria: {criteria}."
+    action_kind = step.get("action_kind") or "auto"
+    required_action = step.get("required_action") or ""
+    required_arguments = step.get("required_arguments") or {}
+    if action_kind in ("skill", "tool") and required_action:
+        extra += (
+            f" This step has a required {action_kind} action: `{required_action}`. You must call that exact"
+            " structured action before returning a step result."
+        )
+        if required_arguments:
+            extra += f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
+    elif action_kind == "answer":
+        extra += " This is an answer-only step: do not call tools; use the dependency context and return the result."
     extra += (
         " Use the available tools/skills to accomplish the goal, then return a"
-        " concise factual result for this step only. Do not attempt other"
-        " steps or restate the whole conversation."
+        " concise factual result for this step only. Do not list internal action"
+        " transcripts, tool names, arguments, or raw JSON unless the step goal"
+        " explicitly requires raw data. Do not attempt other steps or restate"
+        " the whole conversation."
     )
     return f"{base}{extra}"
 
@@ -165,10 +199,12 @@ def _emit(writer: Any, data: dict[str, Any]) -> None:
     writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": data})
 
 
-def _structured_model(schema: type[BaseModel]) -> Any:
-    # get_chat_model() is typed as the minimal ChatModel protocol (astream only);
-    # structured output lives on the concrete LangChain model, hence the cast.
-    return cast(Any, get_chat_model()).with_structured_output(schema)
+async def _structured_invoke(
+    schema: type[BaseModel],
+    messages: list[BaseMessage],
+    config: RunnableConfig,
+) -> BaseModel:
+    return await _invoke_structured_output(get_chat_model(), schema, messages, config)
 
 
 # --- Router --------------------------------------------------------------------
@@ -216,9 +252,10 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
     try:
         decision = cast(
             _RouteDecision,
-            await _structured_model(_RouteDecision).ainvoke(
+            await _structured_invoke(
+                _RouteDecision,
                 [SystemMessage(content=_ROUTER_PROMPT), HumanMessage(content=user_text)],
-                config=config,
+                config,
             ),
         )
     except Exception:
@@ -263,9 +300,10 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     try:
         plan_result = cast(
             _Plan,
-            await _structured_model(_Plan).ainvoke(
+            await _structured_invoke(
+                _Plan,
                 [SystemMessage(content=planner_system), HumanMessage(content=user_text)],
-                config=config,
+                config,
             ),
         )
         planned = plan_result.steps[: settings.CHAT_ORCHESTRATOR_MAX_STEPS]
@@ -302,6 +340,9 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
                 # the runnable-step selection.
                 "depends_on": [dep for dep in step.depends_on if dep in ids and dep != step.id],
                 "suggested_tools": list(step.suggested_tools),
+                "action_kind": step.action_kind,
+                "required_action": step.required_action,
+                "required_arguments": dict(step.required_arguments),
                 "success_criteria": step.success_criteria,
                 "status": "pending",
             }
@@ -509,7 +550,19 @@ async def _run_worker_step(
     writer: Any,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict."""
-    specs = _scoped_tool_specs(tool_specs, step.get("suggested_tools") or [])
+    specs, contract_error = _step_tool_specs(tool_specs, step)
+    if contract_error:
+        contract_result = _step_contract_error_result(step, contract_error)
+        _emit(
+            writer,
+            {
+                "kind": "step",
+                "title": f"Step: {step['goal']}",
+                "status": "blocked",
+                "body": contract_error,
+            },
+        )
+        return contract_result
     available = _with_provider_tool_names(specs)
     system_prompt = _worker_system_prompt(step)
     if step.get("retry_guidance"):
@@ -525,6 +578,8 @@ async def _run_worker_step(
     blocked: ChatBlockReason | None = None
     tools_used: list[str] = []
     confirmation_blocked: list[ToolCallResult] = []
+    required_action = str(step.get("required_action") or "")
+    execution_error = ""
     while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
@@ -536,13 +591,22 @@ async def _run_worker_step(
             break
         remaining = settings.CHAT_LLM_MAX_AUTO_ACTIONS - action_count
         batch = requested[:remaining]
+        batch, argument_error = _enforce_required_arguments(step, batch)
+        if argument_error:
+            execution_error = argument_error
+            output_text = ""
+            break
         action_count += len(batch)
         batch_results = await _run_tool_call_batch(
-            batch, current_user, session_key=session_key, batch_id=uuid.uuid4().hex
+            batch,
+            current_user,
+            session_key=session_key,
+            batch_id=_confirmation_batch_id_for_requests(batch),
         )
+        tool_ai_message = _ai_message_for_tool_results(ai_message, batch_results)
         messages = [
             *messages,
-            ai_message,
+            tool_ai_message,
             *[
                 ToolMessage(
                     content=result.content,
@@ -564,6 +628,10 @@ async def _run_worker_step(
         if blocked is not None:
             break
 
+    if not execution_error and _step_requires_action(step) and required_action not in tools_used and blocked is None:
+        execution_error = f"Step required structured action `{required_action}`, but the worker did not call it."
+        output_text = ""
+
     step_result: dict[str, Any] = {
         "step_id": step["id"],
         "goal": step["goal"],
@@ -572,6 +640,8 @@ async def _run_worker_step(
         "tools_used": tools_used,
         "blocked": blocked.value if blocked is not None else None,
     }
+    if execution_error:
+        step_result["execution_error"] = execution_error
     if confirmation_blocked:
         # The mutating tool created an ActionConfirmation; record what we need to
         # surface the approval prompt now and resume this step once approved.
@@ -583,11 +653,68 @@ async def _run_worker_step(
         {
             "kind": "step",
             "title": f"Step: {step['goal']}",
-            "status": "blocked" if blocked is not None else "completed",
-            "body": _truncate_text(output_text, 6000),
+            "status": "blocked" if blocked is not None or execution_error else "completed",
+            "body": _truncate_text(execution_error or output_text, 6000),
         },
     )
     return step_result
+
+
+def _step_tool_specs(tool_specs: list[ChatToolSpec], step: dict[str, Any]) -> tuple[list[ChatToolSpec], str | None]:
+    action_kind = step.get("action_kind") or "auto"
+    required_action = str(step.get("required_action") or "")
+    if action_kind == "answer":
+        return [], None
+    if action_kind in ("skill", "tool") and required_action:
+        matching = [spec for spec in tool_specs if spec.name == required_action and spec.kind == action_kind]
+        if not matching:
+            return [], f"Required {action_kind} action `{required_action}` is not available to this chat session."
+        return matching, None
+    if action_kind in ("skill", "tool") and not required_action:
+        return [], f"Planner marked this as a {action_kind} step but did not provide required_action."
+    return _scoped_tool_specs(tool_specs, step.get("suggested_tools") or []), None
+
+
+def _step_requires_action(step: dict[str, Any]) -> bool:
+    return (step.get("action_kind") in ("skill", "tool")) and bool(step.get("required_action"))
+
+
+def _step_contract_error_result(step: dict[str, Any], error: str) -> dict[str, Any]:
+    return {
+        "step_id": step["id"],
+        "goal": step["goal"],
+        "success_criteria": step.get("success_criteria", ""),
+        "output": "",
+        "tools_used": [],
+        "blocked": None,
+        "execution_error": error,
+    }
+
+
+def _enforce_required_arguments(
+    step: dict[str, Any], requests: list[chat_graph.ToolCallRequest]
+) -> tuple[list[chat_graph.ToolCallRequest], str | None]:
+    required_action = str(step.get("required_action") or "")
+    required_arguments = step.get("required_arguments") or {}
+    if not required_action or not isinstance(required_arguments, dict) or not required_arguments:
+        return requests, None
+
+    enforced: list[chat_graph.ToolCallRequest] = []
+    for request in requests:
+        if request.name != required_action:
+            enforced.append(request)
+            continue
+        merged = dict(request.arguments)
+        for key, value in required_arguments.items():
+            if key in merged and merged[key] != value:
+                return (
+                    requests,
+                    f"Step required `{required_action}` argument `{key}` to be `{value}`, "
+                    f"but the worker used `{merged[key]}`.",
+                )
+            merged[key] = value
+        enforced.append(replace(request, arguments=merged))
+    return enforced, None
 
 
 def _scoped_tool_specs(tool_specs: list[ChatToolSpec], suggested: list[str]) -> list[ChatToolSpec]:
@@ -634,6 +761,8 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
     # A blocked step (e.g. needs confirmation, permission denied) is never a pass.
     if result.get("blocked"):
         return False, f"Step was blocked: {result.get('blocked')}"
+    if result.get("execution_error"):
+        return False, str(result["execution_error"])
     output = result.get("output") or ""
     if not output.strip():
         return False, "Step produced no output."
@@ -645,10 +774,7 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
         f"Result:\n{_truncate_text(output, 4000)}"
     )
     try:
-        verdict = cast(
-            _Verdict,
-            await _structured_model(_Verdict).ainvoke([HumanMessage(content=prompt)], config=config),
-        )
+        verdict = cast(_Verdict, await _structured_invoke(_Verdict, [HumanMessage(content=prompt)], config))
     except Exception:
         # If verification itself fails, accept the step rather than loop.
         return True, "Verification unavailable; accepted."
@@ -680,12 +806,21 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
 
     context = _synthesis_context(plan, results)
     messages: list[BaseMessage] = [HumanMessage(content=f"User request: {user_text}\n\n{context}")]
-    turn = await _run_llm_tool_turn(model, _SYNTHESIZER_PROMPT, messages, [], config, writer)
+    turn = await _run_llm_tool_turn(model, _SYNTHESIZER_PROMPT, messages, [], config, None)
     response = message_text(turn.message.content)
     streamed = turn.streamed
     output_limit = False
     details = _orchestration_details(plan, results)
+    if response and _internal_action_transcript_leaked(response):
+        retry_prompt = f"{_SYNTHESIZER_PROMPT}\n\n{_action_transcript_retry_message()}"
+        turn = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+        response = message_text(turn.message.content)
+        streamed = turn.streamed
+        details = [*details, *turn.details]
     if response:
+        if writer is not None and not streamed:
+            writer({"kind": "token", "content": response})
+            streamed = response
         # Mirror the single-agent path: auto-continue a synthesis truncated by the
         # output limit, then only surface the cut-off notice if it is still
         # truncated after the continuation budget.

@@ -2,6 +2,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -104,6 +105,7 @@ type SeizuChatMessage = UIMessage<
   {
     finish_reason?: string;
     response_cut_off?: boolean;
+    seizu_hidden?: boolean;
   },
   {
     'seizu-detail': SeizuChatDetail;
@@ -190,6 +192,15 @@ function stripOutputLimitNotice(text: string): string {
     .trimEnd();
 }
 
+function hiddenResumeMessage(confirmationId: string): SeizuChatMessage {
+  return {
+    id: `resume-${confirmationId}`,
+    role: 'user',
+    metadata: { seizu_hidden: true },
+    parts: [],
+  };
+}
+
 // Split a streaming response into completed blocks (separated by blank lines)
 // and the still-growing final block. Each completed block has a fixed source, so
 // rendering them through their own <MarkdocRenderer> lets Markdoc parse each one
@@ -254,134 +265,154 @@ function StreamingMarkdown({ text }: { text: string }) {
   );
 }
 
-function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
-  if (details.length === 0) return null;
-  return (
-    <Accordion
-      disableGutters
-      elevation={0}
-      square
-      slotProps={{ transition: { timeout: 0 } }}
-      sx={{
-        bgcolor: 'background.paper',
-        border: 1,
-        borderColor: 'divider',
-        borderRadius: 1,
-        mb: 1,
-        mt: 0,
-        width: '100%',
-        boxSizing: 'border-box',
-        zIndex: 1,
-        borderTopLeftRadius: 0,
-        borderTopRightRadius: 0,
-        '&:before': { display: 'none' },
-      }}
-    >
-      <AccordionSummary
-        expandIcon={<ExpandMore fontSize="small" />}
+function detailsEqual(
+  previous: readonly SeizuChatDetail[],
+  next: readonly SeizuChatDetail[],
+): boolean {
+  if (previous.length !== next.length) return false;
+  return previous.every((detail, index) => {
+    const candidate = next[index];
+    return (
+      detail.kind === candidate.kind &&
+      detail.title === candidate.title &&
+      detail.status === candidate.status &&
+      detail.arguments === candidate.arguments &&
+      detail.body === candidate.body
+    );
+  });
+}
+
+const ChatMessageDetails = memo(
+  function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
+    if (details.length === 0) return null;
+    return (
+      <Accordion
+        disableGutters
+        elevation={0}
+        square
+        slotProps={{ transition: { timeout: 0 } }}
         sx={{
-          minHeight: 32,
-          px: 1,
-          py: 0,
-          '& .MuiAccordionSummary-content': {
-            alignItems: 'center',
-            gap: 0.75,
-            my: 0.5,
-          },
+          bgcolor: 'background.paper',
+          border: 1,
+          borderColor: 'divider',
+          borderRadius: 1,
+          mb: 1,
+          mt: 0,
+          width: '100%',
+          boxSizing: 'border-box',
+          zIndex: 1,
+          borderTopLeftRadius: 0,
+          borderTopRightRadius: 0,
+          '&:before': { display: 'none' },
         }}
       >
-        <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
-        <Typography color="text.secondary" variant="caption">
-          Details
-        </Typography>
-        <Chip
-          label={details.length}
-          size="small"
-          sx={{ height: 18, minWidth: 18 }}
-        />
-      </AccordionSummary>
-      <AccordionDetails
-        sx={{
-          maxHeight: { xs: 220, md: 300 },
-          overflowY: 'auto',
-          px: 1,
-          pt: 0,
-          pb: 1,
-        }}
-      >
-        {details.map((detail, index) => (
-          <Box
-            key={`${detail.title}-${index}`}
-            sx={{
-              pt: index === 0 ? 0 : 0.75,
-              mt: index === 0 ? 0 : 0.75,
-            }}
-          >
-            <Accordion
-              disableGutters
-              elevation={0}
-              square
-              slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
+        <AccordionSummary
+          expandIcon={<ExpandMore fontSize="small" />}
+          sx={{
+            minHeight: 32,
+            px: 1,
+            py: 0,
+            '& .MuiAccordionSummary-content': {
+              alignItems: 'center',
+              gap: 0.75,
+              my: 0.5,
+            },
+          }}
+        >
+          <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
+          <Typography color="text.secondary" variant="caption">
+            Details
+          </Typography>
+          <Chip
+            label={details.length}
+            size="small"
+            sx={{ height: 18, minWidth: 18 }}
+          />
+        </AccordionSummary>
+        <AccordionDetails
+          sx={{
+            maxHeight: { xs: 220, md: 300 },
+            overflowY: 'auto',
+            px: 1,
+            pt: 0,
+            pb: 1,
+          }}
+        >
+          {details.map((detail, index) => (
+            <Box
+              key={`${detail.title}-${index}`}
               sx={{
-                border: 1,
-                borderColor: 'divider',
-                borderRadius: 1,
-                '&:before': { display: 'none' },
+                pt: index === 0 ? 0 : 0.75,
+                mt: index === 0 ? 0 : 0.75,
               }}
             >
-              <AccordionSummary
-                expandIcon={<ExpandMore fontSize="small" />}
+              <Accordion
+                disableGutters
+                elevation={0}
+                square
+                slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
                 sx={{
-                  minHeight: 30,
-                  px: 1,
-                  py: 0,
-                  '& .MuiAccordionSummary-content': {
-                    alignItems: 'center',
-                    gap: 0.75,
-                    my: 0.5,
-                  },
+                  border: 1,
+                  borderColor: 'divider',
+                  borderRadius: 1,
+                  '&:before': { display: 'none' },
                 }}
               >
-                {detailKindIcon(detail.kind)}
-                <Typography
+                <AccordionSummary
+                  expandIcon={<ExpandMore fontSize="small" />}
                   sx={{
-                    fontWeight: 600,
-                    minWidth: 0,
-                    wordBreak: 'break-word',
+                    minHeight: 30,
+                    px: 1,
+                    py: 0,
+                    '& .MuiAccordionSummary-content': {
+                      alignItems: 'center',
+                      gap: 0.75,
+                      my: 0.5,
+                    },
                   }}
-                  variant="caption"
                 >
-                  {detail.title}
-                </Typography>
-                {detail.status ? (
-                  <Chip
-                    label={detail.status}
-                    size="small"
-                    sx={{ height: 18 }}
-                  />
-                ) : null}
-              </AccordionSummary>
-              <AccordionDetails
-                sx={{
-                  px: 1,
-                  pt: 0,
-                  pb: 1,
-                }}
-              >
-                {detail.arguments ? (
-                  <DetailPre label="Arguments" value={detail.arguments} />
-                ) : null}
-                {detail.body ? (
-                  <DetailPre label="Output" value={detail.body} />
-                ) : null}
-              </AccordionDetails>
-            </Accordion>
-          </Box>
-        ))}
-      </AccordionDetails>
-    </Accordion>
-  );
-}
+                  {detailKindIcon(detail.kind)}
+                  <Typography
+                    sx={{
+                      fontWeight: 600,
+                      minWidth: 0,
+                      wordBreak: 'break-word',
+                    }}
+                    variant="caption"
+                  >
+                    {detail.title}
+                  </Typography>
+                  {detail.status ? (
+                    <Chip
+                      label={detail.status}
+                      size="small"
+                      sx={{ height: 18 }}
+                    />
+                  ) : null}
+                </AccordionSummary>
+                <AccordionDetails
+                  sx={{
+                    px: 1,
+                    pt: 0,
+                    pb: 1,
+                  }}
+                >
+                  {detail.arguments ? (
+                    <DetailPre label="Arguments" value={detail.arguments} />
+                  ) : null}
+                  {detail.body ? (
+                    <DetailPre label="Output" value={detail.body} />
+                  ) : null}
+                </AccordionDetails>
+              </Accordion>
+            </Box>
+          ))}
+        </AccordionDetails>
+      </Accordion>
+    );
+  },
+  (previous, next) => detailsEqual(previous.details, next.details),
+);
 
 function DetailPre({ label, value }: { label: string; value: string }) {
   return (
@@ -719,6 +750,10 @@ export default function ChatInterface() {
   setMessagesRef.current = setMessages;
 
   const busy = status === 'submitted' || status === 'streaming';
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
+    [messages],
+  );
   // Id of the assistant message currently being streamed. It renders through
   // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
   // rather than feeding the whole growing response to Markdoc every token.
@@ -845,7 +880,7 @@ export default function ChatInterface() {
           resumeConfirmationIdRef.current = confirmation.confirmation_id;
           touchSession(activeThreadId);
           await Promise.resolve(
-            sendMessage(undefined, {
+            sendMessage(hiddenResumeMessage(confirmation.confirmation_id), {
               body: { resume_confirmation_id: confirmation.confirmation_id },
             }),
           );
@@ -876,7 +911,7 @@ export default function ChatInterface() {
     touchSession(activeThreadId);
     try {
       void Promise.resolve(
-        sendMessage(undefined, {
+        sendMessage(hiddenResumeMessage(resumeConfirmationId), {
           body: { resume_confirmation_id: resumeConfirmationId },
         }),
       ).catch(() => {
@@ -1058,7 +1093,8 @@ export default function ChatInterface() {
                 py: 1.5,
               }}
             >
-              {sessionsLoading || (historyLoading && messages.length === 0) ? (
+              {sessionsLoading ||
+              (historyLoading && visibleMessages.length === 0) ? (
                 <Box
                   sx={{
                     alignItems: 'center',
@@ -1069,7 +1105,7 @@ export default function ChatInterface() {
                 >
                   <ConstellationSpinner size={64} />
                 </Box>
-              ) : messages.length === 0 ? (
+              ) : visibleMessages.length === 0 ? (
                 <Box
                   sx={{
                     alignItems: 'center',
@@ -1086,7 +1122,7 @@ export default function ChatInterface() {
                 </Box>
               ) : (
                 <>
-                  {messages.map((message) => {
+                  {visibleMessages.map((message) => {
                     const text = messageText(message);
                     const details = messageDetails(message);
                     const copied = copiedMessageId === message.id;

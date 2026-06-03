@@ -365,9 +365,17 @@ describe('ChatInterface', () => {
     });
 
     await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith(undefined, {
-        body: { resume_confirmation_id: 'confirm-1' },
-      });
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'resume-confirm-1',
+          role: 'user',
+          metadata: { seizu_hidden: true },
+          parts: [],
+        }),
+        {
+          body: { resume_confirmation_id: 'confirm-1' },
+        },
+      );
     });
     expect(touchSession).toHaveBeenCalledWith('thread-1');
   });

@@ -43,6 +43,14 @@ def _tool_call(name: str, args: dict, call_id: str = "call_1") -> dict:
     return {"name": name, "args": args, "id": call_id}
 
 
+class _Structured:
+    def __init__(self, result: Any) -> None:
+        self.result = result
+
+    async def ainvoke(self, _messages: Any, config: Any = None) -> Any:
+        return self.result
+
+
 class _ToolCallingFakeModel:
     def __init__(self, responses: list[AIMessage | AIMessageChunk]) -> None:
         self.responses = responses
@@ -54,6 +62,11 @@ class _ToolCallingFakeModel:
         self.bound_tools.append(tools)
         return self
 
+    def with_structured_output(self, schema):
+        if schema is chat_graph._TerminalResponseDecision:
+            return _Structured(chat_graph._TerminalResponseDecision(complete=True, reason="complete"))
+        raise AssertionError(f"unexpected schema {schema!r}")
+
     async def astream(self, input, config=None, **kwargs):
         self.inputs.append(input)
         index = min(self.calls, len(self.responses) - 1)
@@ -61,33 +74,132 @@ class _ToolCallingFakeModel:
         yield self.responses[index]
 
 
-def test_deepseek_reasoning_content_is_added_to_streamed_chunks():
-    class _BaseModel:
-        def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
-            return type("GenerationChunk", (), {"message": AIMessageChunk(content="")})()
+def test_chunk_reasoning_delta_reads_both_litellm_reasoning_shapes():
+    # LiteLLM surfaces DeepSeek/OpenAI-shape reasoning in additional_kwargs...
+    kwargs_chunk = AIMessageChunk(content="", additional_kwargs={"reasoning_content": "checked tools"})
+    assert chat_graph._chunk_reasoning_delta(kwargs_chunk) == "checked tools"
 
-    class _Model(chat_graph.SeizuChatDeepSeekMixin, _BaseModel):
-        pass
+    # ...and Anthropic-shape reasoning as an injected thinking content block.
+    thinking_chunk = AIMessageChunk(content=[{"type": "thinking", "thinking": "weighing options"}])
+    assert chat_graph._chunk_reasoning_delta(thinking_chunk) == "weighing options"
 
-    chunk = {
-        "choices": [
-            {
-                "delta": {"role": "assistant", "reasoning_content": "checked tools"},
-                "finish_reason": None,
-            }
-        ]
-    }
-    model = _Model()
 
-    generation_chunk = model._convert_chunk_to_generation_chunk(chunk, AIMessageChunk, None)
+def test_litellm_model_id_namespaces_legacy_provider(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "claude-3-5-sonnet-latest")
+    assert chat_graph._litellm_model_id("anthropic") == "anthropic/claude-3-5-sonnet-latest"
 
-    assert generation_chunk.message.additional_kwargs["reasoning_content"] == "checked tools"
+
+def test_litellm_model_id_passes_through_qualified_and_sentinel(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "anthropic/claude-3-5-sonnet-latest")
+    assert chat_graph._litellm_model_id("anthropic") == "anthropic/claude-3-5-sonnet-latest"
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "gpt-4o")
+    assert chat_graph._litellm_model_id("litellm") == "gpt-4o"
+
+
+def test_strip_reasoning_context_flattens_mixed_list_content_to_text():
+    # Mirrors LiteLLM's streamed+merged shape: thinking dicts concatenated with a
+    # bare answer-text string in one list. This is the shape that crashed
+    # DeepSeek's content-list-to-str conversion when re-sent in the tool loop.
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "hidden"}, "Answer."],
+        additional_kwargs={"reasoning_content": "hidden"},
+    )
+    stripped = chat_graph._strip_reasoning_context(message)
+    assert "reasoning_content" not in stripped.additional_kwargs
+    assert stripped.content == "Answer."
+
+
+def test_strip_reasoning_context_preserves_tool_call_reasoning_for_deepseek():
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "hidden"}, ""],
+        additional_kwargs={"reasoning_content": "hidden"},
+        tool_calls=[_tool_call("graph__schema", {}, "call_1")],
+    )
+
+    stripped = chat_graph._strip_reasoning_context(message)
+
+    assert stripped.additional_kwargs["reasoning_content"] == "hidden"
+    assert stripped.content == ""
+    assert [call["id"] for call in stripped.tool_calls] == ["call_1"]
+
+
+def test_ai_message_for_tool_results_preserves_reasoning_while_filtering_tool_calls():
+    message = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": "hidden"},
+        tool_calls=[
+            _tool_call("graph__schema", {}, "call_1"),
+            _tool_call("toolsets__list", {}, "call_2"),
+        ],
+    )
+    request = chat_graph.ToolCallRequest(
+        id="call_1",
+        name="graph__schema",
+        arguments={},
+        spec=chat_graph.ChatToolSpec(
+            name="graph__schema",
+            kind="tool",
+            description="Graph schema",
+            input_schema={"type": "object"},
+        ),
+    )
+
+    filtered = chat_graph._ai_message_for_tool_results(
+        message,
+        [chat_graph.ToolCallResult(request=request, content="{}")],
+    )
+
+    assert filtered.additional_kwargs["reasoning_content"] == "hidden"
+    assert [call["id"] for call in filtered.tool_calls] == ["call_1"]
+
+
+async def test_invoke_structured_output_falls_back_to_json_text():
+    class _BrokenStructured:
+        async def ainvoke(self, _messages, config=None):
+            raise RuntimeError("structured output unavailable")
+
+    class _JsonModel:
+        def with_structured_output(self, _schema):
+            return _BrokenStructured()
+
+        async def astream(self, _input, config=None, **kwargs):
+            yield AIMessageChunk(content='{"complete": false, "reason": "more evidence is needed"}')
+
+    result = await chat_graph._invoke_structured_output(
+        _JsonModel(),
+        chat_graph._TerminalResponseDecision,
+        [HumanMessage(content="decide")],
+        {},
+    )
+
+    assert isinstance(result, chat_graph._TerminalResponseDecision)
+    assert result.complete is False
+    assert result.reason == "more evidence is needed"
+
+
+async def test_terminal_response_completion_fails_closed_when_decision_unavailable():
+    class _BadModel:
+        async def astream(self, _input, config=None, **kwargs):
+            yield AIMessageChunk(content="not json")
+
+    complete, reason = await chat_graph._terminal_response_complete(
+        _BadModel(),
+        user_text="Run a multi-step workflow",
+        response="I'll gather more evidence next.",
+        action_summaries=["Seizu ran tool `security__one`.\n\nResult:\n{}"],
+        available_specs=[],
+        config={},
+    )
+
+    assert complete is False
+    assert "Could not verify" in reason
 
 
 async def test_run_llm_tool_turn_streams_reasoning_as_detail_and_strips_context():
     class _FakeModel:
         async def astream(self, input, config=None, **kwargs):
-            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "checking graph"})
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "checking "})
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "graph"})
             yield AIMessageChunk(content="Final answer.")
 
     events = []
@@ -110,26 +222,21 @@ async def test_run_llm_tool_turn_streams_reasoning_as_detail_and_strips_context(
                 "kind": "thinking",
                 "title": "Thinking",
                 "status": "running",
+            },
+        },
+        {
+            "kind": "detail",
+            "id": detail_events[0]["id"],
+            "data": {
+                "kind": "thinking",
+                "title": "Thinking",
+                "status": "completed",
                 "body": "checking graph",
             },
-        }
+        },
     ]
     assert result.streamed == "Final answer."
     assert "reasoning_content" not in result.message.additional_kwargs
-
-
-def test_deepseek_endpoint_detection_matches_exact_host_or_subdomain(mocker):
-    mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://api.deepseek.com/v1")
-    assert chat_graph._uses_deepseek_compatible_endpoint("gateway-model") is True
-
-    mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://deepseek.com/v1")
-    assert chat_graph._uses_deepseek_compatible_endpoint("gateway-model") is True
-
-    mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://notdeepseek.com/v1")
-    assert chat_graph._uses_deepseek_compatible_endpoint("gateway-model") is False
-
-    mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "")
-    assert chat_graph._uses_deepseek_compatible_endpoint("deepseek-chat") is True
 
 
 async def test_chat_graph_streams_final_no_tool_text_deltas_as_they_arrive(mocker):
@@ -250,6 +357,69 @@ async def test_chat_graph_withholds_leaked_tool_markup_and_retries_once(mocker):
     assert "first call the skill that provides it" in retry_system_prompt
 
 
+async def test_chat_graph_filters_unexecuted_tool_calls_from_next_context(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _TwoToolModel:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.calls = 0
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def astream(self, input, config=None, **kwargs):
+            self.inputs.append(input)
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessageChunk(
+                    content="",
+                    tool_calls=[
+                        _tool_call("skillsets__list", {}, "call_1"),
+                        _tool_call("toolsets__list", {}, "call_2"),
+                    ],
+                )
+            else:
+                yield AIMessageChunk(content="Final synthesis.")
+
+    model = _TwoToolModel()
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", False)
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_AUTO_ACTIONS", 1)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[
+            Tool(name="skillsets__list", description="List skillsets", inputSchema={"type": "object"}),
+            Tool(name="toolsets__list", description="List toolsets", inputSchema={"type": "object"}),
+        ],
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"ok": true}'),
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="run both")]},
+            {"configurable": {"thread_id": "thread-filter-tool-calls", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    assert "Final synthesis." in "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert len(model.inputs) == 2
+    second_input = model.inputs[1]
+    tool_call_messages = [message for message in second_input if isinstance(message, AIMessage) and message.tool_calls]
+    tool_messages = [message for message in second_input if isinstance(message, ToolMessage)]
+    assert len(tool_call_messages) == 1
+    assert [call["id"] for call in tool_call_messages[0].tool_calls] == ["call_1"]
+    assert [message.tool_call_id for message in tool_messages] == ["call_1"]
+
+
 async def test_chat_graph_degrades_when_tool_markup_leaks_twice(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -292,6 +462,13 @@ async def test_chat_graph_degrades_when_tool_markup_leaks_twice(mocker):
 def test_trim_overlap_removes_repeated_seam():
     assert chat_graph._trim_overlap("alpha beta gamma", "beta gamma delta") == " delta"
     assert chat_graph._trim_overlap("alpha", "totally new text") == "totally new text"
+
+
+def test_stream_tail_inserts_separator_when_segments_would_jam():
+    assert chat_graph._stream_tail("old", "new") == " new"
+    assert chat_graph._stream_tail("old", "new", separator="\n\n") == "\n\nnew"
+    assert chat_graph._stream_tail("old ", "new") == "new"
+    assert chat_graph._stream_tail("old", ".") == "."
 
 
 class _CutoffModel:
@@ -914,6 +1091,63 @@ async def test_chat_graph_retries_empty_response_after_action_result(mocker):
     assert "security__one" in retry_context
 
 
+async def test_chat_graph_retries_nonterminal_post_action_text_without_streaming_it(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    fake_model = _ToolCallingFakeModel(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("security__one", {"org": "mappedsky"}, "call_1")]),
+            AIMessage(content="Let me pull the high-severity findings next."),
+            AIMessage(content="", tool_calls=[_tool_call("security__two", {"repo": "mappedsky/omnibot"}, "call_2")]),
+            AIMessage(content="Final answer using both tool results."),
+        ]
+    )
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", False)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=fake_model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[
+            Tool(name="security__one", description="One", inputSchema={"type": "object"}),
+            Tool(name="security__two", description="Two", inputSchema={"type": "object"}),
+        ],
+    )
+    call_tool = mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        side_effect=[
+            ChatActionOutcome(text='{"critical": 1}'),
+            ChatActionOutcome(text='{"high": 26}'),
+        ],
+    )
+    completion_gate = mocker.patch(
+        "reporting.services.chat_graph._terminal_response_complete",
+        side_effect=[
+            (False, "The response says another evidence-gathering step remains."),
+            (True, "Final answer is complete."),
+        ],
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="Run the multi-step investigation")]},
+            {"configurable": {"thread_id": "thread-nonterminal-post-action", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Let me pull the high-severity findings next." not in streamed
+    assert "Final answer using both tool results." in streamed
+    assert call_tool.await_count == 2
+    assert [call.args[1] for call in call_tool.await_args_list] == ["security__one", "security__two"]
+    assert completion_gate.await_count == 2
+    assert "not accepted as final" in fake_model.inputs[2][0].content
+    assert "structured skill/tool call" in fake_model.inputs[2][0].content
+
+
 async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -964,6 +1198,8 @@ async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):
     assert "Final synthesis from the existing tool list." in streamed
     assert call_tool.await_count == 1
     assert "already run in this turn" in fake_model.inputs[2][0].content
+    assert "All completed action summaries so far" in fake_model.inputs[2][0].content
+    assert "using data from the completed result" in fake_model.inputs[2][0].content
 
 
 async def test_chat_graph_repeated_tool_fallback_does_not_rerun_or_dump_internal_prompt(mocker):
@@ -1140,7 +1376,26 @@ async def test_chat_tool_create_already_exists_is_idempotent_success(mocker):
     assert "already completed" in data["message"]
 
 
-async def test_pending_confirmation_response_includes_url():
+def test_confirmation_batch_id_only_for_multiple_requests():
+    request = chat_graph.ToolCallRequest(
+        id="call_1",
+        name="reports__delete",
+        arguments={"report_id": "r1"},
+        spec=chat_graph.ChatToolSpec(
+            name="reports__delete",
+            kind="tool",
+            description="Delete report",
+            input_schema={"type": "object"},
+        ),
+    )
+
+    assert chat_graph._confirmation_batch_id_for_requests([request]) is None
+    batch_id = chat_graph._confirmation_batch_id_for_requests([request, request])
+    assert isinstance(batch_id, str)
+    assert len(batch_id) == 32
+
+
+async def test_pending_confirmation_response_uses_chat_panel_not_url():
     request = chat_graph.ToolCallRequest(
         id="call_1",
         name="reports__delete",
@@ -1167,8 +1422,40 @@ async def test_pending_confirmation_response_includes_url():
     response = chat_graph._blocked_tool_call_response([result])
 
     assert "Approval needed" in response
-    assert "https://seizu.example.com/app/confirmations/abc123" in response
-    assert "panel" not in response.lower()
+    assert "confirmations panel" in response.lower()
+    assert "https://seizu.example.com/app/confirmations/abc123" not in response
+
+
+async def test_batch_confirmation_response_uses_chat_panel_not_batch_url():
+    request = chat_graph.ToolCallRequest(
+        id="call_1",
+        name="reports__delete",
+        arguments={"report_id": "r1"},
+        spec=chat_graph.ChatToolSpec(
+            name="reports__delete",
+            kind="tool",
+            description="Delete report",
+            input_schema={"type": "object"},
+        ),
+    )
+    result_1 = chat_graph.ToolCallResult(
+        request=request,
+        blocked=ChatBlockReason.CONFIRMATION_REQUIRED,
+        content=json.dumps(
+            {
+                "confirmation_required": True,
+                "status": "pending",
+                "batch_url": "https://seizu.example.com/app/confirmations/batch/batch123",
+            }
+        ),
+    )
+    result_2 = result_1
+
+    response = chat_graph._blocked_tool_call_response([result_1, result_2])
+
+    assert "Approval needed for 2 actions" in response
+    assert "confirmations panel" in response.lower()
+    assert "https://seizu.example.com/app/confirmations/batch/batch123" not in response
 
 
 async def test_decided_confirmation_response_does_not_include_url():
@@ -1377,6 +1664,68 @@ async def test_resume_batch_confirmation_uses_batch_lookup(mocker):
     list_batch.assert_awaited_once_with(user_id="user-1", batch_id="batch-1")
     list_session.assert_not_called()
     claim.assert_not_called()
+
+
+async def test_resume_confirmation_tool_error_does_not_ask_model_to_reapply(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    approved = ActionConfirmation.model_validate(
+        {
+            "confirmation_id": "confirm-approved",
+            "user_id": "user-1",
+            "source": "chat",
+            "session_key": "thread-tool-error",
+            "tool_name": "skillsets__create_skill",
+            "action": "create_skill",
+            "resource_type": "skill",
+            "resource_id": "attack_path_tracing/demo",
+            "arguments": {"skillset_id": "attack_path_tracing", "skill_id": "demo"},
+            "arguments_hash": "hash-1",
+            "status": "approved",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:30:00+00:00",
+        }
+    )
+    mocker.patch("reporting.services.chat_graph.report_store.get_action_confirmation", return_value=approved)
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.claim_action_confirmation_for_execution",
+        return_value=approved.model_copy(update={"status": "executed"}),
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"error":"tools_required must use toolset_id__tool_id"}'),
+    )
+    get_model = mocker.patch("reporting.services.chat_graph.get_chat_model")
+    graph = chat_graph.build_chat_graph(MemorySaver())
+    config = {
+        "configurable": {
+            "thread_id": "thread-tool-error",
+            "client_thread_id": "thread-tool-error",
+            "current_user": _user(),
+        }
+    }
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {
+                "messages": [
+                    HumanMessage(
+                        content="Resume approved confirmation confirm-approved",
+                        additional_kwargs={"resume_confirmation_id": "confirm-approved"},
+                    )
+                ]
+            },
+            config,
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Running approved action" in streamed
+    assert "tools_required must use toolset_id__tool_id" in streamed
+    assert "reapply" not in streamed.lower()
+    get_model.assert_not_called()
 
 
 async def test_resume_batch_confirmation_does_not_run_after_denial(mocker):
@@ -1792,6 +2141,53 @@ def test_final_synthesis_retry_message_uses_configured_answer_budget(mocker):
     assert "150-300 words" in prompt
     assert "at most 4 bullets" in prompt
     assert "at most one compact table" in prompt
+
+
+def test_internal_action_transcript_leak_detection():
+    assert chat_graph._internal_action_transcript_leaked("Seizu ran 1 action:\n\n`tool__x` with arguments {}")
+    assert chat_graph._internal_action_transcript_leaked("- `attack_paths__entry` with arguments `{}` returned:")
+    assert not chat_graph._internal_action_transcript_leaked("The attack path enters through public DNS.")
+
+
+async def test_final_synthesis_retries_internal_action_transcript(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    fake_model = _ToolCallingFakeModel(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("security__one", {"org": "mappedsky"})]),
+            AIMessage(content=""),
+            AIMessage(content="Seizu ran 1 action:\n\n`security__one` with arguments `{}` returned: []"),
+            AIMessage(content="The highest-risk path is public DNS to the vulnerable service."),
+        ]
+    )
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", False)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=fake_model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"path": "public DNS to vulnerable service"}'),
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="Find the attack path")]},
+            {"configurable": {"thread_id": "thread-synth-transcript-retry", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert "Seizu ran 1 action" not in streamed
+    assert "The highest-risk path is public DNS" in streamed
+    assert "_action_transcript_retry" not in streamed
+    assert fake_model.calls == 4
 
 
 def test_llm_context_messages_applies_message_and_character_limits(mocker):

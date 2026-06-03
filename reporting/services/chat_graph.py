@@ -12,7 +12,6 @@ import botocore.config
 from botocore.exceptions import ClientError
 from langchain_core.messages import (
     AIMessage,
-    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
@@ -25,6 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph_checkpoint_aws import DynamoDBSaver
 from mcp.types import Prompt, Tool
+from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from reporting import settings
@@ -134,38 +134,17 @@ class AnswerBudget:
     max_tables: int
 
 
-class SeizuChatDeepSeekMixin:
-    """Expose DeepSeek's OpenAI-API-shape ``reasoning_content`` field.
-
-    DeepSeek emits its hidden chain-of-thought in the OpenAI Chat Completions
-    streaming shape under ``choices[0].delta.reasoning_content``. The current
-    ``langchain-deepseek`` adapter pulls that into ``AIMessageChunk.additional_kwargs``
-    on the way down. We keep it available long enough to render UI diagnostics,
-    but strip it before the message is reused as model context.
-
-    Scope: DeepSeek only (and OpenAI-shape gateways routed to DeepSeek). It does
-    not handle Anthropic ``ThinkingBlock`` or Gemini reasoning parts, which use
-    different transport shapes.
-    """
-
-    def _convert_chunk_to_generation_chunk(
-        self,
-        chunk: dict[str, Any],
-        default_chunk_class: type,
-        base_generation_info: dict[str, Any] | None,
-    ) -> Any:
-        generation_chunk = super()._convert_chunk_to_generation_chunk(  # type: ignore[misc]
-            chunk,
-            default_chunk_class,
-            base_generation_info,
-        )
-        reasoning_content = _deepseek_reasoning_content_delta(chunk)
-        if reasoning_content and generation_chunk is not None and isinstance(generation_chunk.message, AIMessageChunk):
-            generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning_content
-        return generation_chunk
+class _TerminalResponseDecision(BaseModel):
+    complete: bool
+    reason: str = ""
 
 
-_VALID_CHAT_PROVIDERS = frozenset({"mock", "openai", "anthropic", "gemini", "deepseek"})
+# Provider sentinel. "mock" keeps chat deterministic and keyless; every other
+# value routes through LiteLLM, so the supported provider/model surface is
+# whatever LiteLLM supports rather than a fixed in-code allowlist. LiteLLM owns
+# the cross-provider quirks (base_url/api_key handling, DeepSeek-shape endpoints,
+# reasoning_content normalization) that Seizu used to special-case here.
+_MOCK_PROVIDER = "mock"
 
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
@@ -336,6 +315,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     empty_retry_used = False
     repeated_action_retry_used = False
     tool_markup_retry_used = False
+    terminal_response_retry_used = False
     response_is_broken = False
     response_hit_output_limit = False
     streamed_response = ""
@@ -347,17 +327,23 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
 
     response = ""
     streamed_in_last_turn = ""
+    user_text = _last_user_text(state["messages"])
     while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
         turn_system_prompt = _combined_system_prompt(base_system_prompt, pending_system_addendum)
         pending_system_addendum = ""
         available_specs = _with_provider_tool_names([*skill_specs, *tool_specs])
+        # After Seizu has run actions, candidate prose must not be streamed until
+        # it is validated as a terminal answer. Otherwise a model can say "I'll
+        # run the next tool" without making a structured call, and the UI cannot
+        # retract that text when we correctly retry.
+        turn_writer = None if action_summaries else writer
         turn_result = await _run_llm_tool_turn(
             model,
             turn_system_prompt,
             messages,
             available_specs,
             config,
-            writer,
+            turn_writer,
         )
         ai_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
@@ -383,6 +369,31 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         if not requested:
             response = message_text(ai_message.content)
             if response:
+                if action_summaries:
+                    complete, reason = await _terminal_response_complete(
+                        model,
+                        user_text=user_text,
+                        response=response,
+                        action_summaries=action_summaries,
+                        available_specs=available_specs,
+                        config=config,
+                    )
+                    if not complete:
+                        if not terminal_response_retry_used:
+                            terminal_response_retry_used = True
+                            pending_system_addendum = _terminal_response_retry_message(
+                                response=response,
+                                reason=reason,
+                                action_summaries=action_summaries,
+                            )
+                            response = ""
+                            continue
+                        response = _empty_response_fallback(action_summaries)
+                        response_is_broken = True
+                        break
+                    if not streamed_response and writer is not None:
+                        writer({"kind": "token", "content": response})
+                        streamed_response = response
                 response, appended, still_truncated, cont_details = await _auto_continue_answer(
                     model, messages, turn_system_prompt, response, turn_result.finish_reason, config, writer
                 )
@@ -408,7 +419,6 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             if repeated:
                 if not repeated_action_retry_used:
                     repeated_action_retry_used = True
-                    messages = [*messages, ai_message]
                     pending_system_addendum = _repeated_tool_call_retry_message(repeated, action_summaries)
                     continue
                 response = _repeated_tool_call_fallback(repeated, action_summaries)
@@ -418,7 +428,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
 
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
-        batch_id = uuid.uuid4().hex
+        batch_id = _confirmation_batch_id_for_requests(batch)
         results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -431,9 +441,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
+        tool_ai_message = _ai_message_for_tool_results(ai_message, results)
         messages = [
             *messages,
-            ai_message,
+            tool_ai_message,
             *[
                 ToolMessage(
                     content=result.content,
@@ -460,13 +471,27 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         synthesis_system_prompt = _combined_system_prompt(
             base_system_prompt, _final_synthesis_retry_message(action_summaries)
         )
-        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, writer)
+        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, None)
         final_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         detail_events.extend(turn_result.details)
         response = message_text(final_message.content)
+        if response and _internal_action_transcript_leaked(response):
+            retry_prompt = _combined_system_prompt(
+                synthesis_system_prompt,
+                _action_transcript_retry_message(),
+            )
+            turn_result = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+            final_message = turn_result.message
+            streamed_in_last_turn = turn_result.streamed
+            streamed_response = streamed_in_last_turn
+            detail_events.extend(turn_result.details)
+            response = message_text(final_message.content)
         if response:
+            if writer is not None and not streamed_response:
+                writer({"kind": "token", "content": response})
+                streamed_response = response
             response, appended, still_truncated, cont_details = await _auto_continue_answer(
                 model, messages, synthesis_system_prompt, response, turn_result.finish_reason, config, writer
             )
@@ -524,9 +549,11 @@ def finalize_assistant_message(
         if not streamed:
             writer({"kind": "token", "content": response})
         elif response.startswith(streamed):
-            writer({"kind": "token", "content": response[len(streamed) :]})
+            tail = _stream_tail(streamed, response[len(streamed) :])
+            writer({"kind": "token", "content": tail})
+            response = f"{streamed}{tail}"
         else:
-            tail = f"\n\n{response}"
+            tail = _stream_tail(streamed, response, separator="\n\n")
             writer({"kind": "token", "content": tail})
             response = f"{streamed}{tail}"
     if output_limit and writer is not None:
@@ -545,6 +572,17 @@ def finalize_assistant_message(
     if broken:
         tag_message(ai_message, MessageTag.BROKEN)
     return ai_message
+
+
+def _stream_tail(streamed: str, tail: str, *, separator: str = " ") -> str:
+    """Return a stream delta that does not jam two text segments together."""
+    if not streamed or not tail:
+        return tail
+    if streamed[-1].isspace() or tail[0].isspace():
+        return tail
+    if streamed[-1] in "([{/" or tail[0] in ".,;:!?)]}/":
+        return tail
+    return f"{separator}{tail}"
 
 
 def _combined_system_prompt(base: str, addendum: str) -> str:
@@ -790,6 +828,9 @@ async def _execute_confirmations(
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
             detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
+        elif error_text := _tool_result_error_text(outcome.text):
+            errors.append(f"`{c.tool_name}`: {error_text}")
+            detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
         else:
             outcomes.append((c.tool_name, outcome.text))
             detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="completed"))
@@ -881,9 +922,9 @@ async def _resume_confirmed_tool_turn(
         if not streamed:
             writer({"kind": "token", "content": response})
         elif response.startswith(streamed):
-            writer({"kind": "token", "content": response[len(streamed) :]})
+            writer({"kind": "token", "content": _stream_tail(streamed, response[len(streamed) :])})
         else:
-            writer({"kind": "token", "content": f"\n\n{response}"})
+            writer({"kind": "token", "content": _stream_tail(streamed, response, separator="\n\n")})
     if hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
     return _chat_state_with_ai_response(state, response, details=detail_events, output_limit=hit_output_limit)
@@ -1008,6 +1049,7 @@ async def _run_llm_tool_turn(
     reasoning_detail_id = f"detail_{uuid.uuid4().hex}"
     reasoning_text = ""
     reasoning_detail_data: dict[str, Any] | None = None
+    reasoning_detail_started = False
     streamed = ""
     finish_reason: str | None = None
     stream_text = writer is not None
@@ -1026,13 +1068,19 @@ async def _run_llm_tool_turn(
                 "status": "completed",
                 "body": reasoning_text,
             }
-            writer(
-                {
-                    "kind": "detail",
-                    "id": reasoning_detail_id,
-                    "data": {**reasoning_detail_data, "status": "running"},
-                }
-            )
+            if not reasoning_detail_started:
+                reasoning_detail_started = True
+                writer(
+                    {
+                        "kind": "detail",
+                        "id": reasoning_detail_id,
+                        "data": {
+                            "kind": "thinking",
+                            "title": "Thinking",
+                            "status": "running",
+                        },
+                    }
+                )
         if stream_text and writer is not None:
             delta = message_text(getattr(chunk, "content", ""))
             if delta:
@@ -1046,6 +1094,8 @@ async def _run_llm_tool_turn(
         if tail:
             writer({"kind": "token", "content": tail})
             streamed += tail
+    if reasoning_detail_started and reasoning_detail_data is not None and writer is not None:
+        writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
 
     merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
@@ -1079,12 +1129,34 @@ async def _run_llm_tool_turn(
 
 
 def _strip_reasoning_context(message: AIMessage) -> AIMessage:
-    """Remove provider thinking fields before message reuse in LLM context."""
-    if "reasoning_content" not in message.additional_kwargs:
-        return message
-    message.additional_kwargs = {
-        key: value for key, value in message.additional_kwargs.items() if key != "reasoning_content"
-    }
+    """Normalize an assistant message before it is reused as model context.
+
+    LiteLLM surfaces reasoning two ways: ``additional_kwargs["reasoning_content"]``
+    (DeepSeek/OpenAI shape) and injected ``{"type": "thinking"}`` blocks in list
+    content (Anthropic shape). During streaming, chunk-merge concatenates the
+    list-shaped reasoning with the plain-string answer delta into a *mixed* list
+    (thinking dicts plus bare answer-text strings). Some providers reject that
+    when it is re-sent in the tool loop — e.g. DeepSeek's content-list-to-str
+    conversion calls ``.get("text")`` on every element and crashes on a bare str.
+
+    Reasoning is normally a UI-only diagnostic (streamed separately as a thinking
+    detail), but DeepSeek thinking mode requires an assistant message that
+    performed a tool call to be replayed with its original ``reasoning_content``.
+    Therefore: flatten list content back to the plain answer text for every
+    provider, strip reasoning from normal assistant messages, and preserve or
+    reconstruct ``reasoning_content`` only on assistant tool-call messages.
+    """
+    has_tool_calls = bool(message.tool_calls or message.additional_kwargs.get("tool_calls"))
+    reasoning_content = _chunk_reasoning_delta(message)
+    additional_kwargs = dict(message.additional_kwargs)
+    if has_tool_calls:
+        if reasoning_content:
+            additional_kwargs["reasoning_content"] = reasoning_content
+    else:
+        additional_kwargs.pop("reasoning_content", None)
+    message.additional_kwargs = additional_kwargs
+    if isinstance(message.content, list):
+        message.content = message_text(message.content)
     return message
 
 
@@ -1306,38 +1378,6 @@ def _json_schema_object(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _deepseek_reasoning_content_delta(chunk: dict[str, Any]) -> str:
-    choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
-    if not choices:
-        return ""
-    first = choices[0]
-    if not isinstance(first, dict):
-        return ""
-    delta = first.get("delta")
-    if not isinstance(delta, dict):
-        return ""
-    reasoning_content = delta.get("reasoning_content")
-    return reasoning_content if isinstance(reasoning_content, str) else ""
-
-
-def _uses_deepseek_compatible_endpoint(model_name: str) -> bool:
-    base_url_host = _hostname(settings.CHAT_LLM_BASE_URL).lower()
-    if base_url_host == "deepseek.com" or base_url_host.endswith(".deepseek.com"):
-        return True
-    return model_name.lower().startswith("deepseek-")
-
-
-def _hostname(url: str) -> str:
-    if not url:
-        return ""
-    from urllib.parse import urlparse
-
-    try:
-        return urlparse(url).hostname or ""
-    except ValueError:
-        return ""
-
-
 def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
     return [
         ChatToolSpec(
@@ -1468,6 +1508,44 @@ async def _run_tool_call_batch(
     return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
 
+def _ai_message_for_tool_results(message: AIMessage, results: list[ToolCallResult]) -> AIMessage:
+    """Return an assistant message whose tool calls match the ToolMessages emitted.
+
+    Providers require every assistant ``tool_call_id`` to be followed by exactly
+    one tool response. Seizu may execute only a subset of the model's requested
+    calls (auto-action limit, repeated-call filtering), so never pass through the
+    original full ``tool_calls`` list when building the next in-turn context.
+    """
+    result_ids = {result.request.id for result in results}
+    tool_calls = [
+        call for call in (message.tool_calls or []) if isinstance(call, dict) and str(call.get("id", "")) in result_ids
+    ]
+    additional_kwargs = {key: value for key, value in message.additional_kwargs.items() if key != "tool_calls"}
+    raw_tool_calls = message.additional_kwargs.get("tool_calls")
+    if isinstance(raw_tool_calls, list):
+        filtered_raw = [
+            call for call in raw_tool_calls if isinstance(call, dict) and str(call.get("id", "")) in result_ids
+        ]
+        if filtered_raw:
+            additional_kwargs["tool_calls"] = filtered_raw
+    return AIMessage(
+        content=message.content,
+        id=message.id,
+        additional_kwargs=additional_kwargs,
+        response_metadata=message.response_metadata,
+        tool_calls=tool_calls,
+    )
+
+
+def _confirmation_batch_id_for_requests(requests: list[ToolCallRequest]) -> str | None:
+    """Only group true multi-action approvals into a confirmation batch.
+
+    A one-action "batch" creates stale/confusing batch links after execution,
+    while adding no value over the confirmation panel's single-item approval.
+    """
+    return uuid.uuid4().hex if len(requests) > 1 else None
+
+
 async def _run_tool_call(
     request: ToolCallRequest,
     current_user: CurrentUser | None,
@@ -1562,13 +1640,17 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
 
 
 def _provider_prompt_note(provider: str) -> str:
-    if provider == "anthropic":
+    # provider may be the generic "litellm" sentinel now, so fold the configured
+    # model string into the match (e.g. "anthropic/claude-...") and key the
+    # family-specific note off whichever signal is present.
+    hint = f"{provider} {settings.CHAT_LLM_MODEL}".lower()
+    if "anthropic" in hint or "claude" in hint:
         return "\nFor Claude, keep the final answer direct and avoid prefilling or hidden chain-of-thought."
-    if provider == "gemini":
+    if "gemini" in hint or "vertex" in hint:
         return "\nFor Gemini, preserve structured report suggestions as compact headings and bullet lists."
-    if provider == "deepseek":
+    if "deepseek" in hint:
         return "\nFor DeepSeek, keep reasoning concise and surface only the conclusion, evidence, and next action."
-    if provider == "openai":
+    if "openai" in hint or "gpt" in hint or "/o1" in hint or "/o3" in hint:
         return (
             "\nFor OpenAI, use a developer-instruction style: follow these Seizu constraints "
             "over generic assistant behavior."
@@ -1692,24 +1774,6 @@ def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatTo
     return _mcp_tool_specs([tool for tool in tools if tool.name in disclosed])
 
 
-def _common_batch_url(results: list[ToolCallResult]) -> str | None:
-    """Return the shared batch_url if all results share the same non-None batch_id."""
-    batch_url: str | None = None
-    for result in results:
-        try:
-            data = json.loads(result.content)
-        except json.JSONDecodeError:
-            return None
-        url = data.get("batch_url") if isinstance(data, dict) else None
-        if not isinstance(url, str):
-            return None
-        if batch_url is None:
-            batch_url = url
-        elif batch_url != url:
-            return None
-    return batch_url
-
-
 def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
     if any(result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED for result in results):
         pending = [result for result in results if _confirmation_status(result.content) == "pending"]
@@ -1718,15 +1782,12 @@ def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
                 "This action needed approval, but the confirmation has already been decided or has expired. "
                 "Nothing was executed."
             )
-        batch_url = _common_batch_url(pending)
-        if batch_url:
-            n = len(pending)
-            noun = "action" if n == 1 else f"{n} actions"
-            return (
-                f"Approval needed for {noun}. Visit the confirmation page to allow or deny, "
-                f"then the conversation will resume automatically: {batch_url}"
-            )
-        lines = ["Approval needed. Open the confirmation URL to allow or deny, then resume the conversation."]
+        n = len(pending)
+        noun = "action" if n == 1 else f"{n} actions"
+        lines = [
+            f"Approval needed for {noun}. Use the confirmations panel in this chat to allow or deny. "
+            "After all pending approvals are allowed, the conversation will resume automatically."
+        ]
         for result in pending:
             lines.append(f"- {_blocked_tool_call_body(result.content)}")
         return "\n".join(lines)
@@ -1782,9 +1843,130 @@ def _blocked_tool_call_body(content: str) -> str:
         status = data.get("status")
         if status == "denied":
             return "Action was denied for this confirmation window."
-        url = data.get("confirmation_url")
-        return f"Approval required at {url}" if isinstance(url, str) else "Approval required."
+        return "Approval required."
     return content.strip() or "blocked"
+
+
+def _tool_result_error_text(content: str) -> str | None:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    return error if isinstance(error, str) and error.strip() else None
+
+
+async def _invoke_structured_output(
+    model: Any,
+    schema: type[BaseModel],
+    messages: list[BaseMessage],
+    config: RunnableConfig,
+) -> BaseModel:
+    """Invoke *model* for a structured decision with a JSON fallback.
+
+    Some LiteLLM/provider combinations are inconsistent with LangChain's
+    ``with_structured_output`` wrapper. The fallback still delegates the
+    semantic decision to the LLM; code only validates and parses the JSON object.
+    """
+    structured = getattr(model, "with_structured_output", None)
+    if callable(structured):
+        try:
+            result = await structured(schema).ainvoke(messages, config=config)
+            if isinstance(result, schema):
+                return result
+            if isinstance(result, dict):
+                return schema.model_validate(result)
+        except Exception:
+            pass
+
+    schema_json = _json_dump(schema.model_json_schema())
+    system_prompt = (
+        "Return only a valid JSON object matching this JSON schema. Do not include markdown, prose, or code fences.\n\n"
+        f"JSON schema:\n{schema_json}"
+    )
+    turn = await _run_llm_tool_turn(model, system_prompt, messages, [], config, None)
+    data = _json_object_from_text(message_text(turn.message.content))
+    if data is None:
+        raise ValueError(f"Model did not return a JSON object for {schema.__name__}")
+    return schema.model_validate(data)
+
+
+def _json_object_from_text(text: str) -> dict[str, Any] | None:
+    text = text.strip()
+    if not text:
+        return None
+    candidates = [text]
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+async def _terminal_response_complete(
+    model: Any,
+    *,
+    user_text: str,
+    response: str,
+    action_summaries: list[str],
+    available_specs: list[ChatToolSpec],
+    config: RunnableConfig,
+) -> tuple[bool, str]:
+    """Ask the model whether a post-action no-tool response completes the turn.
+
+    This is intentionally semantic rather than regex-based. The code only
+    enforces state: once Seizu has completed actions, plain assistant text is a
+    terminal answer only if the model judges that it satisfies the user's
+    request using the completed action results. If more live data is needed, the
+    next retry keeps tools available so the model can make a structured call.
+    """
+    tools = ", ".join(spec.name for spec in available_specs[:50]) or "(none)"
+    summaries = _truncate_text("\n\n".join(action_summaries), 10000)
+    prompt = (
+        "Judge whether the assistant candidate is a terminal answer to the user's request.\n\n"
+        "Return complete=false if the candidate does not actually answer the request, omits a requested step, "
+        "needs more live data, or should have made another structured skill/tool call. Return complete=true only "
+        "when the candidate can be shown to the user as the final answer for this turn.\n\n"
+        f"User request:\n{_truncate_text(user_text, 3000)}\n\n"
+        f"Available structured skills/tools for a retry:\n{tools}\n\n"
+        f"Completed action summaries:\n{summaries}\n\n"
+        f"Assistant candidate:\n{_truncate_text(response, 4000)}"
+    )
+    try:
+        decision = await _invoke_structured_output(
+            model,
+            _TerminalResponseDecision,
+            [HumanMessage(content=prompt)],
+            config,
+        )
+    except Exception:
+        return False, "Could not verify that the candidate response completes the requested workflow."
+    if not isinstance(decision, _TerminalResponseDecision):
+        return False, "Could not verify that the candidate response completes the requested workflow."
+    return decision.complete, decision.reason
+
+
+def _terminal_response_retry_message(*, response: str, reason: str, action_summaries: list[str]) -> str:
+    reason_text = reason.strip() or "The candidate response did not fully satisfy the user's requested workflow."
+    return (
+        "Your previous candidate response was not accepted as final for this turn. "
+        f"Reason: {reason_text}\n\n"
+        "Do not describe future tool work in plain text. Either make the next required structured skill/tool call "
+        "now, or provide a final answer that fully satisfies the user's request using the completed action results. "
+        "If a skill result disclosed tools required for the next step, call one of those tools with the structured "
+        "tool-calling mechanism.\n\n"
+        f"Rejected candidate response:\n{_truncate_text(response, 3000)}\n\n"
+        f"Completed action summaries so far:\n{_truncate_text(chr(10).join(action_summaries), 10000)}"
+    )
 
 
 def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_summaries: list[str]) -> str:
@@ -1792,11 +1974,17 @@ def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_su
     prior = (
         "\n\nMost recent completed action:\n" + _truncate_text(action_summaries[-1], 5000) if action_summaries else ""
     )
+    all_results = (
+        "\n\nAll completed action summaries so far:\n" + _truncate_text("\n\n".join(action_summaries), 10000)
+        if action_summaries
+        else ""
+    )
     return (
         "You requested an action Seizu has already run in this turn: "
         f"{repeated}. Do not repeat the same skill or tool call. Use the existing result to answer the user, or call "
-        "a different tool only if it adds new required evidence. If you have enough evidence, provide the final "
-        f"synthesis now.{prior}"
+        "a different tool only if it adds new required evidence. If the user's request has another step, continue "
+        "with that different step using data from the completed result. If you have enough evidence, provide the "
+        f"final synthesis now.{prior}{all_results}"
     )
 
 
@@ -1841,6 +2029,30 @@ def _tool_markup_fallback() -> str:
     )
 
 
+_INTERNAL_ACTION_TRANSCRIPT_RE = re.compile(
+    r"(^|\n)\s*(?:"
+    r"Seizu ran \d+ actions?(?: in parallel)?[:.]|"
+    r"Seizu (?:ran tool|rendered skill) `[^`]+`|"
+    r"-?\s*`[a-z][a-z0-9_]*__[a-z0-9_]+` with arguments "
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _internal_action_transcript_leaked(text: str) -> bool:
+    """True when a final draft copied Seizu's internal action transcript."""
+    return bool(_INTERNAL_ACTION_TRANSCRIPT_RE.search(text))
+
+
+def _action_transcript_retry_message() -> str:
+    return (
+        "Your previous draft copied Seizu's internal action transcript instead of answering the user. Rewrite it as "
+        "a user-facing answer. Do not say 'Seizu ran', do not list tool names, do not show tool arguments, and do not "
+        "paste raw returned JSON. Use the tool results only as evidence. Lead with the conclusion, then summarize the "
+        "most important evidence, impact, and recommended next actions."
+    )
+
+
 def _final_synthesis_retry_message(action_summaries: list[str]) -> str:
     joined_summaries = "\n".join(action_summaries)
     budget = _answer_budget()
@@ -1849,7 +2061,8 @@ def _final_synthesis_retry_message(action_summaries: list[str]) -> str:
     return (
         "Seizu has finished running the requested tool calls for this turn. Do not call any more tools. Provide the "
         "final answer to the user using the action results below. Be selective: lead with the direct answer, include "
-        "only the most decision-relevant evidence, and avoid dumping full tables or exhaustive breakdowns. Target "
+        "only the most decision-relevant evidence, and avoid dumping full tables, exhaustive breakdowns, tool names, "
+        "tool arguments, or raw returned JSON. Target "
         f"{budget.min_words}-{budget.max_words} words, at most {budget.max_bullets} bullets, and at most "
         f"{table_count} compact {table_noun}. Note uncertainty or truncation only when it "
         f"changes the conclusion or next action.\n\n{_truncate_text(joined_summaries, 12000)}"
@@ -2153,108 +2366,98 @@ def get_chat_graph() -> ChatGraph:
 @lru_cache(maxsize=1)
 def get_chat_model() -> ChatModel:
     provider = _chat_provider()
-    if provider == "mock":
+    if provider == _MOCK_PROVIDER:
         raise RuntimeError("CHAT_LLM_PROVIDER=mock does not use a real chat model")
-    model_name = _chat_model_name(provider)
-    max_tokens = settings.CHAT_LLM_MAX_TOKENS if settings.CHAT_LLM_MAX_TOKENS > 0 else None
+    from langchain_litellm import ChatLiteLLM
 
-    if provider == "openai":
-        kwargs = _chat_model_kwargs(settings.OPENAI_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        cls = _openai_chat_class(deepseek_compatible=_uses_deepseek_compatible_endpoint(model_name))
-        return cls(model=model_name, **kwargs)
-
-    if provider == "deepseek":
-        kwargs = _chat_model_kwargs(settings.DEEPSEEK_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        return _deepseek_chat_class()(model=model_name, **kwargs)
-
-    if provider == "anthropic":
-        kwargs = _chat_model_kwargs(settings.ANTHROPIC_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        from langchain_anthropic import ChatAnthropic
-
-        return ChatAnthropic(model=model_name, **kwargs)
-
-    # gemini — ChatGoogleGenerativeAI does not accept a base_url kwarg, so the
-    # operator-set CHAT_LLM_BASE_URL is intentionally not forwarded here.
-    kwargs = _chat_model_kwargs(settings.GEMINI_API_KEY or settings.GOOGLE_API_KEY, include_base_url=False)
-    if max_tokens is not None:
-        kwargs["max_output_tokens"] = max_tokens
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(model=model_name, **kwargs)
-
-
-@lru_cache(maxsize=2)
-def _openai_chat_class(deepseek_compatible: bool) -> type:
-    from langchain_openai import ChatOpenAI
-
-    if not deepseek_compatible:
-        return ChatOpenAI
-
-    class SeizuChatOpenAI(SeizuChatDeepSeekMixin, ChatOpenAI):
-        pass
-
-    return SeizuChatOpenAI
-
-
-@lru_cache(maxsize=1)
-def _deepseek_chat_class() -> type:
-    from langchain_deepseek import ChatDeepSeek
-
-    class SeizuChatDeepSeek(SeizuChatDeepSeekMixin, ChatDeepSeek):
-        pass
-
-    return SeizuChatDeepSeek
+    kwargs: dict[str, Any] = {
+        "model": _litellm_model_id(provider),
+        "temperature": settings.CHAT_LLM_TEMPERATURE,
+        "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
+        "max_retries": settings.CHAT_LLM_MAX_RETRIES,
+        # Seizu always consumes the model through .astream(); make the streaming
+        # intent explicit so LiteLLM emits stream=true on the wire.
+        "streaming": True,
+    }
+    if settings.CHAT_LLM_MAX_TOKENS > 0:
+        kwargs["max_tokens"] = settings.CHAT_LLM_MAX_TOKENS
+    api_key = settings.CHAT_LLM_API_KEY or _legacy_provider_api_key(provider)
+    if api_key:
+        kwargs["api_key"] = api_key
+    # base_url applies to every provider now: LiteLLM routes any model through an
+    # OpenAI-compatible gateway (e.g. a self-hosted LiteLLM proxy) when api_base
+    # is set, so the proxy is an opt-in deployment rather than a hard dependency.
+    if settings.CHAT_LLM_BASE_URL:
+        kwargs["api_base"] = settings.CHAT_LLM_BASE_URL
+    return ChatLiteLLM(**kwargs)
 
 
 def _chat_provider() -> str:
-    provider = settings.CHAT_LLM_PROVIDER.strip().lower()
-    if provider not in _VALID_CHAT_PROVIDERS:
-        raise ValueError("CHAT_LLM_PROVIDER must be one of: " + ", ".join(sorted(_VALID_CHAT_PROVIDERS)))
-    return provider
+    """Resolve the configured provider sentinel.
+
+    "mock" is the only special value; any other (including the explicit
+    "litellm") routes through LiteLLM. The provider is no longer constrained to a
+    fixed allowlist — provider/model choice is delegated to LiteLLM via the
+    CHAT_LLM_MODEL string.
+    """
+    return settings.CHAT_LLM_PROVIDER.strip().lower() or "litellm"
 
 
-def _chat_model_name(provider: str) -> str:
+# Legacy single-provider names map onto LiteLLM's provider namespace so existing
+# CHAT_LLM_PROVIDER=<name> + bare CHAT_LLM_MODEL deployments keep working without
+# config changes. New deployments can instead set a fully-qualified model string
+# (e.g. "anthropic/claude-3-5-sonnet-latest") and leave CHAT_LLM_PROVIDER unset.
+_LEGACY_PROVIDER_NAMESPACE = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "gemini",
+    "deepseek": "deepseek",
+}
+
+
+def _litellm_model_id(provider: str) -> str:
     model = settings.CHAT_LLM_MODEL.strip()
     if not model:
         raise ValueError(
-            f"CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER={provider!r}. Set it to a model identifier "
-            "supported by the provider (e.g. an OpenAI/Anthropic/Gemini/DeepSeek model name). The mock provider "
-            "is the only one that runs without a model."
+            "CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER is not 'mock'. Set it to a LiteLLM model "
+            "identifier, optionally namespaced by provider (e.g. 'openai/gpt-4o', "
+            "'anthropic/claude-3-5-sonnet-latest', 'gemini/gemini-2.0-flash', 'deepseek/deepseek-reasoner'). "
+            "The mock provider is the only one that runs without a model."
         )
-    return model
+    # Already provider-qualified, or the operator opted into fully-qualified
+    # model strings by leaving the provider as the generic sentinel.
+    if "/" in model or provider in ("", "litellm", _MOCK_PROVIDER):
+        return model
+    namespace = _LEGACY_PROVIDER_NAMESPACE.get(provider, provider)
+    return f"{namespace}/{model}"
 
 
-def _chat_model_kwargs(provider_api_key: str, *, include_base_url: bool) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "temperature": settings.CHAT_LLM_TEMPERATURE,
-        "timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
-        "max_retries": settings.CHAT_LLM_MAX_RETRIES,
-    }
-    api_key = settings.CHAT_LLM_API_KEY or provider_api_key
-    if api_key:
-        kwargs["api_key"] = api_key
-    if include_base_url and settings.CHAT_LLM_BASE_URL:
-        kwargs["base_url"] = settings.CHAT_LLM_BASE_URL
-    return kwargs
+def _legacy_provider_api_key(provider: str) -> str:
+    """Best-effort map of legacy per-provider key settings.
+
+    When CHAT_LLM_API_KEY is unset and a legacy provider name is used, forward
+    the matching provider key. For the generic "litellm" sentinel this returns
+    "" and LiteLLM falls back to its own provider-specific env var lookup
+    (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, ...).
+    """
+    return {
+        "openai": settings.OPENAI_API_KEY,
+        "anthropic": settings.ANTHROPIC_API_KEY,
+        "gemini": settings.GEMINI_API_KEY or settings.GOOGLE_API_KEY,
+        "deepseek": settings.DEEPSEEK_API_KEY,
+    }.get(provider, "")
 
 
 def validate_chat_llm_config() -> None:
     """Fail-fast validation called at startup when chat is enabled.
 
-    Raises ``ValueError`` if ``CHAT_LLM_PROVIDER`` is unknown or, for a real
-    provider, ``CHAT_LLM_MODEL`` is missing. Catches typos that previously
-    surfaced only on the first user request.
+    Raises ``ValueError`` if a real provider is selected without CHAT_LLM_MODEL,
+    catching a missing model that previously surfaced only on the first request.
     """
     provider = _chat_provider()
-    if provider == "mock":
+    if provider == _MOCK_PROVIDER:
         return
-    _chat_model_name(provider)
+    _litellm_model_id(provider)
 
 
 def _build_checkpointer() -> DynamoDBSaver:

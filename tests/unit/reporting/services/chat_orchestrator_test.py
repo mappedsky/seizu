@@ -41,6 +41,9 @@ def _step(step_id: str, status: str = "pending", depends_on: list[str] | None = 
         "goal": f"goal {step_id}",
         "depends_on": depends_on or [],
         "suggested_tools": [],
+        "action_kind": "auto",
+        "required_action": "",
+        "required_arguments": {},
         "success_criteria": "",
         "status": status,
         **extra,
@@ -64,7 +67,7 @@ class _OrchestratorFakeModel:
         route: str = "orchestrate",
         plan_steps: list[_PlannedStep] | None = None,
         verdict_passed: bool = True,
-        stream_text: str = "final answer",
+        stream_text: str | list[str] = "final answer",
         finish_reason: str | None = None,
     ) -> None:
         self.route = route
@@ -90,7 +93,12 @@ class _OrchestratorFakeModel:
     async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
         self.astream_calls += 1
         metadata = {"finish_reason": self.finish_reason} if self.finish_reason else {}
-        yield AIMessageChunk(content=self.stream_text, response_metadata=metadata)
+        if isinstance(self.stream_text, list):
+            index = min(self.astream_calls - 1, len(self.stream_text) - 1)
+            content = self.stream_text[index]
+        else:
+            content = self.stream_text
+        yield AIMessageChunk(content=content, response_metadata=metadata)
 
 
 def _patch_common(mocker: Any, model: _OrchestratorFakeModel) -> None:
@@ -149,12 +157,23 @@ def test_runnable_steps_respects_dependencies():
 def test_init_plan_drops_dangling_and_self_dependencies():
     plan = chat_orchestrator._init_plan(
         [
-            _PlannedStep(id="s1", goal="a", depends_on=["s1", "ghost"]),
-            _PlannedStep(id="s2", goal="b", depends_on=["s1"]),
+            _PlannedStep(
+                id="s1",
+                goal="a",
+                depends_on=["s1", "ghost"],
+                action_kind="skill",
+                required_action="investigation__triage",
+                required_arguments={"org": "mappedsky"},
+            ),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"], action_kind="answer"),
         ]
     )
     assert plan[0]["depends_on"] == []
     assert plan[1]["depends_on"] == ["s1"]
+    assert plan[0]["action_kind"] == "skill"
+    assert plan[0]["required_action"] == "investigation__triage"
+    assert plan[0]["required_arguments"] == {"org": "mappedsky"}
+    assert plan[1]["action_kind"] == "answer"
     assert all(step["status"] == "pending" for step in plan)
 
 
@@ -172,6 +191,112 @@ def test_has_pending_plan():
     assert chat_orchestrator._has_pending_plan({"plan": [_step("s1", "ran")], "messages": []})
     assert not chat_orchestrator._has_pending_plan({"plan": [_step("s1", "passed")], "messages": []})
     assert not chat_orchestrator._has_pending_plan({"messages": []})
+
+
+def test_step_tool_specs_enforces_required_action_contract():
+    specs = [
+        chat_graph.ChatToolSpec(
+            name="investigation__triage",
+            kind="skill",
+            description="Triage",
+            input_schema={"type": "object"},
+        ),
+        chat_graph.ChatToolSpec(
+            name="github_security__org_overview",
+            kind="tool",
+            description="Overview",
+            input_schema={"type": "object"},
+        ),
+    ]
+
+    selected, error = chat_orchestrator._step_tool_specs(
+        specs,
+        _step("s1", action_kind="skill", required_action="investigation__triage"),
+    )
+    assert error is None
+    assert [spec.name for spec in selected] == ["investigation__triage"]
+
+    selected, error = chat_orchestrator._step_tool_specs(
+        specs,
+        _step("s2", action_kind="answer", suggested_tools=["github_security__org_overview"]),
+    )
+    assert error is None
+    assert selected == []
+
+    selected, error = chat_orchestrator._step_tool_specs(
+        specs,
+        _step("s3", action_kind="tool", required_action="investigation__triage"),
+    )
+    assert selected == []
+    assert "not available" in str(error)
+
+
+def test_enforce_required_arguments_merges_static_args_and_rejects_conflicts():
+    spec = chat_graph.ChatToolSpec(
+        name="github_security__repo_risk_summary",
+        kind="tool",
+        description="Repo risks",
+        input_schema={"type": "object"},
+    )
+    request = chat_graph.ToolCallRequest(
+        id="call_1",
+        name="github_security__repo_risk_summary",
+        arguments={},
+        spec=spec,
+    )
+    step = _step(
+        "s1",
+        action_kind="tool",
+        required_action="github_security__repo_risk_summary",
+        required_arguments={"org": "mappedsky"},
+    )
+
+    enforced, error = chat_orchestrator._enforce_required_arguments(step, [request])
+    assert error is None
+    assert enforced[0].arguments == {"org": "mappedsky"}
+
+    _, error = chat_orchestrator._enforce_required_arguments(
+        step,
+        [chat_graph.ToolCallRequest(id="call_1", name=request.name, arguments={"org": "other"}, spec=spec)],
+    )
+    assert "worker used" in str(error)
+
+
+async def test_worker_step_fails_when_required_action_is_not_called():
+    model = _OrchestratorFakeModel(stream_text="I will pull the repo risk snapshot next.")
+    details: list[dict[str, Any]] = []
+    step = _step(
+        "s1",
+        action_kind="tool",
+        required_action="github_security__repo_risk_summary",
+        success_criteria="Repo risk summary was retrieved.",
+    )
+    tool_specs = [
+        chat_graph.ChatToolSpec(
+            name="github_security__repo_risk_summary",
+            kind="tool",
+            description="Repo risks",
+            input_schema={"type": "object"},
+        )
+    ]
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=model,
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=tool_specs,
+        writer=lambda event: details.append(event),
+    )
+
+    assert result["output"] == ""
+    assert "required structured action" in result["execution_error"]
+    passed, reason = await chat_orchestrator._verify_step(step, result, {"configurable": {}})
+    assert passed is False
+    assert "required structured action" in reason
 
 
 # --- Router short-circuits (no LLM call) --------------------------------------
@@ -195,6 +320,31 @@ async def test_router_resumes_in_flight_plan(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
     state = {"messages": [HumanMessage(content="continue")], "plan": [_step("s2", "pending")]}
     result = await chat_orchestrator.router_node(state, {"configurable": {}})
+    assert result == {"route": "orchestrate"}
+
+
+async def test_router_uses_json_fallback_when_structured_output_fails(mocker):
+    class _BrokenStructured:
+        async def ainvoke(self, _messages, config=None):
+            raise RuntimeError("structured output unavailable")
+
+    class _JsonRouteModel:
+        def with_structured_output(self, _schema):
+            return _BrokenStructured()
+
+        async def astream(self, _input, config=None, **kwargs):
+            yield AIMessageChunk(content='{"route": "orchestrate", "reason": "multi-step"}')
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=_JsonRouteModel())
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+
+    result = await chat_orchestrator.router_node(
+        {"messages": [HumanMessage(content="find a vuln, then trace attack paths")]},
+        {"configurable": {}},
+    )
+
     assert result == {"route": "orchestrate"}
 
 
@@ -259,6 +409,24 @@ async def test_orchestrated_synthesis_cutoff_emits_continue_signal(mocker):
     assert {"kind": "finish_reason", "finish_reason": "length"} in chunks
     streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
     assert "hit its output limit" in streamed
+
+
+async def test_orchestrated_synthesis_retries_internal_action_transcript(mocker):
+    model = _OrchestratorFakeModel(
+        plan_steps=[_PlannedStep(id="s1", goal="trace attack path", success_criteria="has path")],
+        stream_text=[
+            "Entry path: public DNS to vulnerable Lambda.",
+            "Seizu ran 1 action:\n\n`attack_paths__entry_paths_backward` with arguments `{}` returned: []",
+            "CVE-2024-34069 is remotely exploitable through public DNS to the vulnerable Lambda.",
+        ],
+    )
+    _patch_common(mocker, model)
+
+    chunks = await _run_graph(model, "thread-orch-transcript-retry", text="trace attack paths")
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "Seizu ran 1 action" not in streamed
+    assert "CVE-2024-34069 is remotely exploitable" in streamed
 
 
 async def test_orchestrated_turn_persists_trace_and_clears_state(mocker):
