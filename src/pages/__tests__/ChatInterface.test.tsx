@@ -141,7 +141,10 @@ describe('ChatInterface', () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    jest.useRealTimers();
+  });
 
   it('persists the active session id and configures the chat stream request body', async () => {
     renderChat();
@@ -750,12 +753,11 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Verify: gather data')).toBeVisible();
   });
 
-  it('renders streaming Markdown in token batches and leaves the live tail as text', async () => {
-    const streamedText = [
-      '# Findings',
-      '',
-      Array.from({ length: 54 }, (_, index) => `word${index}`).join(' '),
-    ].join('\n');
+  it('formats settled blocks as Markdown and leaves the in-progress block plain', async () => {
+    // A block followed by a blank line is settled and parsed once; the still-
+    // growing final block stays plain text (raw markup) until it settles. This is
+    // what keeps streaming incremental — settled blocks never re-parse or flicker.
+    const streamedText = ['# Findings', '', '**bold** in progress'].join('\n');
     mockUseChat.mockReturnValue({
       id: 'chat-id',
       messages: [
@@ -781,10 +783,49 @@ describe('ChatInterface', () => {
     renderChat();
     await act(async () => {});
 
+    // Settled block parsed into Markdown.
     expect(
-      screen.getByRole('heading', { name: 'Findings', level: 2 }),
+      screen.getByRole('heading', { name: 'Findings' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/word52 word53/)).toBeInTheDocument();
+    // In-progress block stays plain (raw markup visible, no <strong>).
+    expect(screen.getByText(/\*\*bold\*\* in progress/)).toBeInTheDocument();
+  });
+
+  it('keeps an open code fence in the plain-text tail without mis-parsing it', async () => {
+    // A fenced code block that straddles a blank line is still open, so it must
+    // stay in the in-progress tail rather than being split into broken blocks.
+    const streamedText = ['Intro paragraph.', '', '```python', 'x = 1'].join(
+      '\n',
+    );
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [{ type: 'text', text: streamedText }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // The settled prose block renders as Markdown.
+    expect(screen.getByText('Intro paragraph.')).toBeInTheDocument();
+    // The open fence streams verbatim in the tail (backticks visible).
+    expect(screen.getByText(/```python/)).toBeInTheDocument();
   });
 
   it('renders assistant responses with Markdoc in untrusted URL mode', async () => {

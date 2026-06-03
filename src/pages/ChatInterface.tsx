@@ -190,6 +190,70 @@ function stripOutputLimitNotice(text: string): string {
     .trimEnd();
 }
 
+// Split a streaming response into completed blocks (separated by blank lines)
+// and the still-growing final block. Each completed block has a fixed source, so
+// rendering them through their own <MarkdocRenderer> lets Markdoc parse each one
+// exactly once and memoize it — only new text is ever parsed, old blocks never
+// re-parse or flicker. An open fenced code block keeps accumulating into the tail
+// (its blank lines must not split it) until the closing fence arrives.
+function splitIntoBlocks(text: string): { blocks: string[]; tail: string } {
+  const merged: string[] = [];
+  let buffer = '';
+  for (const segment of text.split('\n\n')) {
+    buffer = buffer === '' ? segment : `${buffer}\n\n${segment}`;
+    const fenceOpen = ((buffer.match(/```/g)?.length ?? 0) & 1) === 1;
+    if (!fenceOpen) {
+      merged.push(buffer);
+      buffer = '';
+    }
+  }
+  if (buffer !== '') merged.push(buffer);
+  // The last entry is still in progress (no trailing blank line / open fence);
+  // everything before it is settled and safe to parse once.
+  return { blocks: merged.slice(0, -1), tail: merged.at(-1) ?? '' };
+}
+
+// Live-rendered assistant message: settled blocks as memoized Markdown, plus the
+// in-progress block as plain text. Parsing Markdoc on the whole growing response
+// every token is O(n^2) and freezes the tab; here only newly-settled blocks are
+// ever parsed. Pure (no state/timer), so it can neither loop nor flicker old
+// text. The parent renders completed messages through Markdoc directly, so this
+// only ever handles the single in-flight message.
+function StreamingMarkdown({ text }: { text: string }) {
+  const { blocks, tail } = useMemo(() => splitIntoBlocks(text), [text]);
+  const tailText = tail.replace(/^\n+/, '');
+  // Settled blocks are append-only, so their identity is pinned by index; the
+  // memo keeps their element subtrees stable across tokens (re-created only when
+  // a new block settles). blocks.length is the stable key for that set.
+  const renderedBlocks = useMemo(
+    () =>
+      blocks.map((block, index) => (
+        <MarkdocRenderer key={index} source={block} untrustedUrls />
+      )),
+
+    [blocks.length],
+  );
+  return (
+    <>
+      {renderedBlocks}
+      {tailText || blocks.length === 0 ? (
+        <Typography
+          component="div"
+          sx={{
+            fontSize: 'inherit',
+            lineHeight: 'inherit',
+            mt: blocks.length > 0 ? 1 : 0,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {tailText || '...'}
+        </Typography>
+      ) : null}
+    </>
+  );
+}
+
 function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
   if (details.length === 0) return null;
   return (
@@ -655,6 +719,11 @@ export default function ChatInterface() {
   setMessagesRef.current = setMessages;
 
   const busy = status === 'submitted' || status === 'streaming';
+  // Id of the assistant message currently being streamed. It renders through
+  // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
+  // rather than feeding the whole growing response to Markdoc every token.
+  const streamingMessageId =
+    status === 'streaming' ? (messages.at(-1)?.id ?? null) : null;
   const continuableMessage = useMemo(() => {
     const lastMessage = messages.at(-1);
     return lastMessage && canLoadMore(lastMessage) ? lastMessage : null;
@@ -1172,13 +1241,19 @@ export default function ChatInterface() {
                                   },
                                 })}
                               >
-                                <MarkdocRenderer
-                                  source={
-                                    stripOutputLimitNotice(text) ||
-                                    (busy ? '...' : '')
-                                  }
-                                  untrustedUrls
-                                />
+                                {message.id === streamingMessageId ? (
+                                  <StreamingMarkdown
+                                    text={stripOutputLimitNotice(text)}
+                                  />
+                                ) : (
+                                  <MarkdocRenderer
+                                    source={
+                                      stripOutputLimitNotice(text) ||
+                                      (busy ? '...' : '')
+                                    }
+                                    untrustedUrls
+                                  />
+                                )}
                                 {loadMore && !isContinuationSource ? (
                                   <Box sx={{ mt: 1 }}>
                                     <Button
