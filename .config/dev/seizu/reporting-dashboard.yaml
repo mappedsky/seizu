@@ -1700,11 +1700,31 @@ skillsets:
 
           `{% $request %}`
 
-          Inputs:
+          Workflow inputs (these are inputs to THIS skill, not arguments to any tool):
           - request: `{% $request %}`
           - target_skillset_id: `{% $target_skillset_id %}`
           - target_skill_id: `{% $target_skill_id %}`
           - dry_run: `{% $dry_run %}`
+
+          Never pass `request`, `target_skillset_id`, `target_skill_id`, or `dry_run` as
+          parameters to a `skillsets__*` tool — they are not recognized tool fields. When you
+          call a tool, map `target_skillset_id` to the tool's `skillset_id` and
+          `target_skill_id` to the tool's `skill_id`. Use `dry_run` only to decide whether to
+          call a write tool at all; never send it as a tool argument.
+
+          Tool arguments — use exactly these field names and no others:
+          - skillsets__create: skillset_id, name, description, enabled
+          - skillsets__update: skillset_id, name, description, enabled, comment
+          - skillsets__create_skill: skillset_id, skill_id, name, template, description, parameters, triggers, tools_required, enabled
+          - skillsets__update_skill: skillset_id, skill_id, name, template, description, parameters, triggers, tools_required, enabled, comment
+          `name` and `template` are required on every create_skill and update_skill call.
+          `parameters` is a list of objects shaped {name, type, description, required, default}.
+
+          Full-object writes: skillsets__update and skillsets__update_skill REPLACE the stored
+          record. Any optional field you omit resets to its default (enabled -> true,
+          parameters / triggers / tools_required -> empty). Always call the matching get tool
+          first (`skillsets__get` / `skillsets__get_skill`) and resend the complete merged
+          object, keeping every existing field you are not deliberately changing.
 
           Operating rules:
           - Treat `dry_run=true` as plan-only. Do not call create or update tools in dry-run mode; produce the exact proposed payloads instead.
@@ -1718,7 +1738,7 @@ skillsets:
           Workflow:
           1. Call `skillsets__list` to discover current skillsets.
           2. If `target_skillset_id` is provided, call `skillsets__get` and `skillsets__list_skills` for that skillset. If it is missing, decide whether the request calls for `skillsets__create`.
-          3. If `target_skill_id` is provided, call `skillsets__get_skill` and inspect the existing template, parameters, triggers, tools_required, enabled state, and version.
+          3. If `target_skill_id` is provided, call `skillsets__get_skill` and inspect the existing template, parameters, triggers, tools_required, and enabled state. To review version history before editing, call `skillsets__list_skill_versions` (or `skillsets__list_versions` for the parent skillset).
           4. Render or mentally validate any proposed template placeholders against the proposed parameter list. Every template placeholder must have a matching parameter with a supported type.
           5. For a new skillset, prepare or call `skillsets__create`.
           6. For skillset metadata changes, prepare or call `skillsets__update`.
@@ -1765,8 +1785,10 @@ skillsets:
           - skillsets__get
           - skillsets__create
           - skillsets__update
+          - skillsets__list_versions
           - skillsets__list_skills
           - skillsets__get_skill
+          - skillsets__list_skill_versions
           - skillsets__create_skill
           - skillsets__update_skill
           - skillsets__render_skill
