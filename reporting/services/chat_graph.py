@@ -1916,6 +1916,25 @@ def _tool_result_error_text(content: str) -> str | None:
     return error if isinstance(error, str) and error.strip() else None
 
 
+# Providers disagree on native structured output (the OpenAI ``response_format``
+# shape). DeepSeek, for one, rejects it with 400 "response_format type is
+# unavailable". We try the native path once per model; on a definitive rejection
+# we remember it and route every later decision straight to the JSON-prompt
+# fallback, so an unsupported provider pays one failing round-trip per process
+# instead of one on every router/planner/verifier call.
+_structured_output_native_ok: dict[int, bool] = {}
+
+
+def _structured_output_unsupported(exc: Exception) -> bool:
+    """True when a provider definitively rejects native structured output.
+
+    Distinguished from a transient error (timeout, 5xx) so we only disable the
+    native path for a real capability gap, not a blip.
+    """
+    text = str(exc).lower()
+    return "response_format" in text or exc.__class__.__name__ in ("BadRequestError", "UnsupportedParamsError")
+
+
 async def _invoke_structured_output(
     model: Any,
     schema: type[BaseModel],
@@ -1929,19 +1948,27 @@ async def _invoke_structured_output(
     semantic decision to the LLM; code only validates and parses the JSON object.
     """
     structured = getattr(model, "with_structured_output", None)
-    if callable(structured):
+    if callable(structured) and _structured_output_native_ok.get(id(model), True):
         try:
             result = await structured(schema).ainvoke(messages, config=config)
+            _structured_output_native_ok[id(model)] = True
             if isinstance(result, schema):
                 return result
             if isinstance(result, dict):
                 return schema.model_validate(result)
-        except Exception:
-            logger.info(
-                "with_structured_output failed for %s; falling back to JSON parsing",
-                schema.__name__,
-                exc_info=True,
-            )
+        except Exception as exc:
+            if _structured_output_unsupported(exc):
+                # Expected capability gap: log once, concisely, and stop trying
+                # the native path for this model.
+                if _structured_output_native_ok.get(id(model), True):
+                    logger.info("Native structured output unavailable for this provider; using JSON-prompt fallback")
+                _structured_output_native_ok[id(model)] = False
+            else:
+                logger.info(
+                    "with_structured_output failed for %s; falling back to JSON parsing",
+                    schema.__name__,
+                    exc_info=True,
+                )
 
     schema_json = _json_dump(schema.model_json_schema())
     system_prompt = (

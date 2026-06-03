@@ -2,6 +2,7 @@ import asyncio
 import json
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from mcp.types import Prompt, PromptArgument, Tool
@@ -16,6 +17,18 @@ from reporting.services.chat_messages import MessageTag, has_tag
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _single_agent_path(mocker):
+    """Pin the orchestrator off for the single-agent test module.
+
+    These tests target chat_agent_node directly; the orchestrated path has its
+    own suite. Without this, an ambient CHAT_ORCHESTRATOR_ENABLED=true in the
+    environment makes the router run (and consume the mocked model turns these
+    tests assert on), so the suite would be non-hermetic.
+    """
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", False)
 
 
 def _user() -> CurrentUser:
@@ -180,6 +193,37 @@ async def test_invoke_structured_output_falls_back_to_json_text():
     assert isinstance(result, _Decision)
     assert result.complete is False
     assert result.reason == "more evidence is needed"
+
+
+async def test_invoke_structured_output_stops_retrying_native_after_unsupported_error():
+    class _Decision(BaseModel):
+        ok: bool
+
+    class _UnsupportedStructured:
+        async def ainvoke(self, _messages, config=None):
+            # Mirror the DeepSeek 400 that langchain-litellm surfaces.
+            raise RuntimeError('{"error":{"message":"This response_format type is unavailable now"}}')
+
+    class _Model:
+        def __init__(self) -> None:
+            self.structured_calls = 0
+
+        def with_structured_output(self, _schema):
+            self.structured_calls += 1
+            return _UnsupportedStructured()
+
+        async def astream(self, _input, config=None, **kwargs):
+            yield AIMessageChunk(content='{"ok": true}')
+
+    model = _Model()
+    chat_graph._structured_output_native_ok.pop(id(model), None)
+
+    first = await chat_graph._invoke_structured_output(model, _Decision, [HumanMessage(content="x")], {})
+    second = await chat_graph._invoke_structured_output(model, _Decision, [HumanMessage(content="y")], {})
+
+    assert first.ok is True and second.ok is True
+    # The unsupported native path is attempted once, then skipped for this model.
+    assert model.structured_calls == 1
 
 
 def test_terminal_specs_exposed_only_after_an_action_has_run():
