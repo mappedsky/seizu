@@ -65,11 +65,13 @@ class _OrchestratorFakeModel:
         plan_steps: list[_PlannedStep] | None = None,
         verdict_passed: bool = True,
         stream_text: str = "final answer",
+        finish_reason: str | None = None,
     ) -> None:
         self.route = route
         self.plan_steps = plan_steps
         self.verdict_passed = verdict_passed
         self.stream_text = stream_text
+        self.finish_reason = finish_reason
         self.astream_calls = 0
 
     def with_structured_output(self, schema: type) -> _Structured:
@@ -87,7 +89,8 @@ class _OrchestratorFakeModel:
 
     async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
         self.astream_calls += 1
-        yield AIMessageChunk(content=self.stream_text)
+        metadata = {"finish_reason": self.finish_reason} if self.finish_reason else {}
+        yield AIMessageChunk(content=self.stream_text, response_metadata=metadata)
 
 
 def _patch_common(mocker: Any, model: _OrchestratorFakeModel) -> None:
@@ -195,6 +198,28 @@ async def test_router_resumes_in_flight_plan(mocker):
     assert result == {"route": "orchestrate"}
 
 
+async def test_router_pins_continuation_turn_to_simple(mocker):
+    # The structured router is scripted to say "orchestrate"; the continuation
+    # short-circuit must win, so the planner never runs and the single-agent path
+    # keeps extending the prior answer (and emits the cut-off / Continue signal).
+    model = _OrchestratorFakeModel(route="orchestrate")
+    _patch_common(mocker, model)
+    msg = HumanMessage(content="continue", additional_kwargs={"continue_response": True})
+    result = await chat_orchestrator.router_node({"messages": [msg]}, {"configurable": {}})
+    assert result == {"route": "simple"}
+
+
+async def test_router_pins_simple_confirmation_resume_to_simple(mocker):
+    # A confirmation resume with no in-flight plan belongs to the single-agent
+    # resume path, not the orchestrator — even though the router is told to
+    # orchestrate.
+    model = _OrchestratorFakeModel(route="orchestrate")
+    _patch_common(mocker, model)
+    msg = HumanMessage(content="approved", additional_kwargs={"resume_confirmation_id": "c1"})
+    result = await chat_orchestrator.router_node({"messages": [msg]}, {"configurable": {}})
+    assert result == {"route": "simple"}
+
+
 # --- Full graph integration ---------------------------------------------------
 
 
@@ -221,6 +246,19 @@ async def test_orchestrated_turn_plans_dispatches_verifies_and_synthesizes(mocke
 
     streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
     assert "final synthesized answer" in streamed
+
+
+async def test_orchestrated_synthesis_cutoff_emits_continue_signal(mocker):
+    # A synthesis truncated by the output limit must emit the same finish_reason
+    # and cut-off notice as the single-agent path, so "Continue response" appears.
+    model = _OrchestratorFakeModel(stream_text="partial synthesis", finish_reason="length")
+    _patch_common(mocker, model)
+
+    chunks = await _run_graph(model, "thread-orch-cutoff")
+
+    assert {"kind": "finish_reason", "finish_reason": "length"} in chunks
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "hit its output limit" in streamed
 
 
 async def test_orchestrated_turn_persists_trace_and_clears_state(mocker):

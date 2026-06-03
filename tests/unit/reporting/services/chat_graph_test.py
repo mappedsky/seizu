@@ -165,6 +165,130 @@ async def test_chat_graph_streams_final_no_tool_text_deltas_as_they_arrive(mocke
     assert deltas == ["alpha ", "beta ", "gamma"]
 
 
+# Leaked DeepSeek tool-call markup uses the fullwidth bar U+FF5C ("｜").
+_LEAK = (
+    '<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="graph__schema"></｜｜DSML｜｜invoke> </｜｜DSML｜｜tool_calls>'
+)
+
+
+def test_tool_markup_filter_suppresses_marker_split_across_chunks():
+    f = chat_graph._ToolMarkupFilter()
+    assert f.feed("hello ") == "hello "
+    # A lone '<' is held back in case it begins a marker.
+    assert f.feed("<") == ""
+    # The fullwidth bar completes the marker: detected, and suppressed.
+    assert f.feed("｜tool_calls>") == ""
+    assert f.detected is True
+    assert f.feed(" trailing junk") == ""
+    assert f.flush() == ""
+
+
+def test_tool_markup_filter_passes_through_normal_anglebracket_text():
+    f = chat_graph._ToolMarkupFilter()
+    assert f.feed("see <details> here") == "see <details> here"
+    assert f.flush() == ""
+    assert f.detected is False
+
+
+def test_strip_tool_markup_cuts_at_first_marker():
+    assert chat_graph._strip_tool_markup(f"answer\n\n{_LEAK}") == "answer\n\n"
+    assert chat_graph._strip_tool_markup("clean text") == "clean text"
+
+
+def test_leaked_tool_names_extracts_group_action_names_from_markup():
+    assert chat_graph._leaked_tool_names(f"thinking...\n\n{_LEAK}") == ("graph__schema",)
+    # Ordinary prose with no leaked tool reference yields nothing.
+    assert chat_graph._leaked_tool_names("a normal sentence with no tools") == ()
+
+
+async def test_chat_graph_withholds_leaked_tool_markup_and_retries_once(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _LeakThenAnswerModel:
+        def __init__(self):
+            self.calls = 0
+            self.inputs = []
+
+        async def astream(self, input, config=None, **kwargs):
+            self.calls += 1
+            self.inputs.append(input)
+            if self.calls == 1:
+                yield AIMessageChunk(content="Let me check.")
+                yield AIMessageChunk(content="\n\n")
+                yield AIMessageChunk(content=_LEAK)
+            else:
+                yield AIMessageChunk(content="Here is the answer.")
+
+    model = _LeakThenAnswerModel()
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "deepseek")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="inspect the schema")]},
+            {"configurable": {"thread_id": "thread-leak-retry", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    # The raw protocol markup never reaches the user.
+    assert "DSML" not in streamed
+    assert "｜" not in streamed
+    # The clean prefix and the retried answer both show.
+    assert "Let me check." in streamed
+    assert "Here is the answer." in streamed
+    assert model.calls == 2
+    # The retry turn's system prompt names the attempted tool and how to unlock
+    # it (render the providing skill), steering the model back into disclosure.
+    retry_system_prompt = model.inputs[1][0].content
+    assert "graph__schema" in retry_system_prompt
+    assert "first call the skill that provides it" in retry_system_prompt
+
+
+async def test_chat_graph_degrades_when_tool_markup_leaks_twice(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _AlwaysLeakModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def astream(self, input, config=None, **kwargs):
+            self.calls += 1
+            yield AIMessageChunk(content=_LEAK)
+
+    model = _AlwaysLeakModel()
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "deepseek")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="inspect the schema")]},
+            {"configurable": {"thread_id": "thread-leak-degrade", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "DSML" not in streamed
+    assert "｜" not in streamed
+    assert "couldn't complete that request" in streamed
+    # Retried exactly once before degrading.
+    assert model.calls == 2
+
+    state = await graph.aget_state({"configurable": {"thread_id": "thread-leak-degrade"}})
+    persisted = state.values["messages"][-1]
+    assert has_tag(persisted, MessageTag.BROKEN)
+
+
 async def test_chat_graph_marks_output_limit_cutoff(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -508,6 +632,80 @@ async def test_progressive_disclosure_exposes_only_skill_required_tools(mocker):
     assert "github_security__org_overview" in second_turn_names
     assert "github_security__update_repo" not in second_turn_names
     list_tools.assert_awaited_once()
+    call_tool.assert_awaited_once()
+    assert call_tool.await_args.args[1] == "github_security__org_overview"
+
+
+async def test_progressive_disclosure_persists_unlocked_tools_across_turns(mocker):
+    """A tool unlocked by a skill in one turn stays callable in the next turn.
+
+    The in-turn disclosure set is otherwise reset each turn, so a turn that
+    ended mid-flow (rate limit, output cap) would lose the tools a rendered
+    skill had surfaced. ``ChatState.disclosed_tools`` carries them forward.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    fake_model = _ToolCallingFakeModel(
+        [
+            # Turn 1: render the skill (which discloses the tool), then finish
+            # without calling it.
+            AIMessage(content="", tool_calls=[_tool_call("investigation__triage", {"org": "mappedsky"})]),
+            AIMessage(content="Triage skill rendered."),
+            # Turn 2: call the disclosed tool directly, without re-rendering the
+            # skill first.
+            AIMessage(content="", tool_calls=[_tool_call("github_security__org_overview", {"org": "mappedsky"})]),
+            AIMessage(content="Overview summarized."),
+        ]
+    )
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=fake_model)
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_prompts_for_user",
+        return_value=[Prompt(name="investigation__triage", description="Triage a graph investigation", arguments=[])],
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[
+            Tool(name="github_security__org_overview", description="Org overview", inputSchema={"type": "object"}),
+            Tool(name="github_security__update_repo", description="Update repo", inputSchema={"type": "object"}),
+        ],
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.render_prompt_for_chat",
+        return_value=ChatActionOutcome(
+            text="Use the org overview tool.",
+            tools_required=("github_security__org_overview",),
+        ),
+    )
+    call_tool = mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"overview": true}'),
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+    config = {"configurable": {"thread_id": "thread-persist-disclosure", "current_user": _user()}}
+
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content="Render the triage skill")]}, config, stream_mode="custom"
+    ):
+        pass
+
+    second_turn_chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="Now run the org overview")]}, config, stream_mode="custom"
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in second_turn_chunks if chunk.get("kind") == "token")
+    assert "Overview summarized." in streamed
+    # The first LLM turn of the *second* request must already see the unlocked
+    # tool (seeded from persisted disclosed_tools), without re-rendering the
+    # skill — but not tools that were never disclosed.
+    second_request_first_bind = {tool["function"]["name"] for tool in fake_model.bound_tools[2]}
+    assert "github_security__org_overview" in second_request_first_bind
+    assert "github_security__update_repo" not in second_request_first_bind
+    # The tool actually ran rather than being reported as unavailable.
     call_tool.assert_awaited_once()
     assert call_tool.await_args.args[1] == "github_security__org_overview"
 

@@ -56,6 +56,13 @@ class ChatState(TypedDict):
     plan: NotRequired[list[dict[str, Any]]]  # serialized PlanStep dicts
     step_results: NotRequired[list[dict[str, Any]]]  # per-step worker outputs
     iteration: NotRequired[int]  # verify-driven retry cycles consumed
+    # Tool names the conversation has already unlocked under progressive
+    # disclosure. ``disclosed_tool_names`` is otherwise a per-turn local, so a
+    # turn that ended mid-flow (rate limit, output cap) would lose the tools a
+    # rendered skill had surfaced; persisting the set here lets the next turn
+    # call them without re-rendering the disclosing skill. Overwrite reducer:
+    # ``chat_agent_node`` is the sole writer and writes back the full union.
+    disclosed_tools: NotRequired[list[str]]
 
 
 class ChatGraph(Protocol):
@@ -110,6 +117,13 @@ class LLMTurnResult:
     streamed: str
     finish_reason: str | None = None
     details: tuple[dict[str, Any], ...] = ()
+    # True when the model emitted raw tool-call protocol markup as text instead
+    # of a structured tool call (seen with some DeepSeek models). The markup is
+    # withheld from the user; the caller retries the turn once, then degrades.
+    tool_markup_leaked: bool = False
+    # Best-effort tool names parsed out of that leaked markup, so the retry can
+    # tell the model specifically which tool it reached for and how to unlock it.
+    leaked_tool_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,8 +308,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     skills = await _list_chat_prompts(current_user)
     tools: list[Tool] = []
     progressive_disclosure = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
-    disclosed_tool_names: set[str] = set()
+    # Carry forward tools the conversation already unlocked in earlier turns so a
+    # resumed/follow-up turn can call them directly (the in-turn disclosure set
+    # is otherwise reset each turn — see ChatState.disclosed_tools).
+    disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
     if not progressive_disclosure:
+        tools = await _list_chat_tools(current_user)
+    elif disclosed_tool_names:
+        # Resolve the persisted names against the live store; names whose tool
+        # no longer exists simply drop out.
         tools = await _list_chat_tools(current_user)
 
     capability_context = build_capability_context(skills, tools if not progressive_disclosure else None)
@@ -303,13 +324,18 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
 
     skill_specs = _skill_tool_specs(skills)
-    tool_specs: list[ChatToolSpec] = _mcp_tool_specs(tools) if not progressive_disclosure else []
+    tool_specs: list[ChatToolSpec]
+    if not progressive_disclosure:
+        tool_specs = _mcp_tool_specs(tools)
+    else:
+        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
 
     action_count = 0
     action_summaries: list[str] = []
     executed_action_keys: set[str] = set()
     empty_retry_used = False
     repeated_action_retry_used = False
+    tool_markup_retry_used = False
     response_is_broken = False
     response_hit_output_limit = False
     streamed_response = ""
@@ -337,6 +363,16 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         detail_events.extend(turn_result.details)
+        if turn_result.tool_markup_leaked:
+            # The model wrote raw tool-call markup as text (already withheld from
+            # the user). Retry once with corrective guidance, then degrade.
+            if not tool_markup_retry_used:
+                tool_markup_retry_used = True
+                pending_system_addendum = _tool_markup_retry_message(turn_result.leaked_tool_names)
+                continue
+            response = _tool_markup_fallback()
+            response_is_broken = True
+            break
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
         if unavailable:
             action_summaries.append(_tool_call_user_summary(unavailable))
@@ -413,10 +449,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                available_by_name = {tool.name: tool for tool in tools}
-                tool_specs = _mcp_tool_specs(
-                    [tool for name, tool in available_by_name.items() if name in disclosed_tool_names]
-                )
+                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
@@ -439,39 +472,69 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         response = _empty_response_fallback(action_summaries)
         response_is_broken = True
 
-    # Streaming contract: the LLM-produced text is written to the writer as the
-    # chunks arrive, so it is already on the wire. Synthetic fallbacks (and any
-    # final tail not already streamed) are emitted here as a single delta.
-    if response and response != streamed_response:
-        if not streamed_response:
+    ai_message = finalize_assistant_message(
+        response=response,
+        streamed=streamed_response,
+        writer=writer,
+        details=detail_events,
+        output_limit=response_hit_output_limit,
+        broken=response_is_broken,
+    )
+    state_update: ChatState = {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    if progressive_disclosure and disclosed_tool_names:
+        # Persist the union so a later turn (including one resuming after an
+        # interrupted turn) keeps tools this conversation already unlocked.
+        state_update["disclosed_tools"] = sorted(disclosed_tool_names)
+    return state_update
+
+
+def finalize_assistant_message(
+    *,
+    response: str,
+    streamed: str,
+    writer: Callable[[dict[str, Any]], None] | None,
+    details: list[dict[str, Any]] | None = None,
+    output_limit: bool = False,
+    broken: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
+) -> AIMessage:
+    """Reconcile streamed text with the final response and build the persisted
+    assistant message.
+
+    Shared by the single-agent terminal (``chat_agent_node``) and the
+    orchestrated terminal (``synthesizer_node``) so the "Continue response"
+    signal (``finish_reason``/``seizu_output_limit``) and the ``seizu_details``
+    trace are emitted identically regardless of which path produced the turn.
+
+    Streaming contract: LLM text is already on the wire as chunks arrived;
+    synthetic fallbacks and any tail not yet streamed are emitted here as a
+    single delta, and the persisted content is synced to match the wire.
+    """
+    if writer is not None and response and response != streamed:
+        if not streamed:
             writer({"kind": "token", "content": response})
-        elif response.startswith(streamed_response):
-            writer({"kind": "token", "content": response[len(streamed_response) :]})
+        elif response.startswith(streamed):
+            writer({"kind": "token", "content": response[len(streamed) :]})
         else:
             tail = f"\n\n{response}"
             writer({"kind": "token", "content": tail})
-            # Sync the persisted content with what was sent on the wire so that
-            # history replay matches the user-visible conversation. This matters
-            # when an earlier turn already streamed text (e.g. "Let me check…")
-            # before a blocked or fallback response was generated.
-            if streamed_response:
-                response = f"{streamed_response}{tail}"
-    if response_hit_output_limit:
+            response = f"{streamed}{tail}"
+    if output_limit and writer is not None:
         writer({"kind": "finish_reason", "finish_reason": "length"})
 
-    response_metadata: dict[str, Any] = {}
-    if detail_events:
-        response_metadata["seizu_details"] = detail_events
-    if response_hit_output_limit:
+    response_metadata: dict[str, Any] = dict(extra_metadata or {})
+    if details:
+        response_metadata["seizu_details"] = details
+    if output_limit:
         response_metadata["seizu_output_limit"] = True
     ai_message = AIMessage(
         content=response,
         id=f"msg_{uuid.uuid4().hex}",
         response_metadata=response_metadata,
     )
-    if response_is_broken:
+    if broken:
         tag_message(ai_message, MessageTag.BROKEN)
-    return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    return ai_message
 
 
 def _combined_system_prompt(base: str, addendum: str) -> str:
@@ -701,6 +764,77 @@ def _chat_state_with_ai_response(
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
 
 
+# DeepSeek-family models sometimes emit their tool-call protocol tokens as
+# literal text instead of the API parsing them into structured ``tool_calls``
+# (observed with deepseek-v4-pro, whose markup looks like ``<｜｜DSML｜｜invoke
+# name=...>``). Every such marker starts ``<`` or ``</`` immediately followed by
+# the fullwidth vertical bar U+FF5C, which never appears that way in legitimate
+# assistant markdown — so it is a reliable, low-false-positive signal.
+# Note: ｜ is the fullwidth bar, NOT an ASCII '|' — an ASCII pipe here would
+# turn the pattern into the alternation "</" or "" and match everywhere.
+_TOOL_MARKUP_RE = re.compile("</?｜")
+
+
+def _strip_tool_markup(text: str) -> str:
+    """Drop everything from the first leaked tool-call marker onward."""
+    match = _TOOL_MARKUP_RE.search(text)
+    return text[: match.start()] if match else text
+
+
+# Seizu tool/skill names follow the ``group__action`` convention, which never
+# occurs in ordinary prose — so scanning the leaked region for it recovers the
+# tool the model tried to call without parsing the proprietary markup grammar.
+_TOOL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*__[a-z0-9_]+")
+
+
+def _leaked_tool_names(text: str) -> tuple[str, ...]:
+    """Best-effort tool names the model tried to call in leaked markup."""
+    match = _TOOL_MARKUP_RE.search(text)
+    region = text[match.start() :] if match else text
+    seen: list[str] = []
+    for name in _TOOL_NAME_RE.findall(region):
+        if name not in seen:
+            seen.append(name)
+    return tuple(seen[:5])
+
+
+class _ToolMarkupFilter:
+    """Withhold leaked tool-call protocol markup from the streamed output.
+
+    Holds back a trailing partial ``<...`` so a marker split across stream chunks
+    is never shown, and once a marker appears suppresses everything after it.
+    ``detected`` reports whether any markup was seen.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self.detected = False
+
+    def feed(self, delta: str) -> str:
+        if self.detected:
+            return ""
+        self._buffer += delta
+        match = _TOOL_MARKUP_RE.search(self._buffer)
+        if match:
+            self.detected = True
+            safe = self._buffer[: match.start()]
+            self._buffer = ""
+            return safe
+        # Hold back only a dangling unclosed ``<...`` (a possible marker prefix).
+        cut = self._buffer.rfind("<")
+        if cut != -1 and ">" not in self._buffer[cut:]:
+            safe, self._buffer = self._buffer[:cut], self._buffer[cut:]
+            return safe
+        safe, self._buffer = self._buffer, ""
+        return safe
+
+    def flush(self) -> str:
+        if self.detected:
+            return ""
+        safe, self._buffer = self._buffer, ""
+        return safe
+
+
 async def _run_llm_tool_turn(
     model: ChatModel,
     system_prompt: str,
@@ -732,6 +866,7 @@ async def _run_llm_tool_turn(
     streamed = ""
     finish_reason: str | None = None
     stream_text = writer is not None
+    markup_filter = _ToolMarkupFilter()
     async for chunk in runnable.astream(
         [SystemMessage(content=system_prompt), *messages],
         config=config,
@@ -756,19 +891,34 @@ async def _run_llm_tool_turn(
         if stream_text and writer is not None:
             delta = message_text(getattr(chunk, "content", ""))
             if delta:
-                writer({"kind": "token", "content": delta})
-                streamed += delta
+                safe = markup_filter.feed(delta)
+                if safe:
+                    writer({"kind": "token", "content": safe})
+                    streamed += safe
         merged = chunk if merged is None else merged + chunk
+    if stream_text and writer is not None:
+        tail = markup_filter.flush()
+        if tail:
+            writer({"kind": "token", "content": tail})
+            streamed += tail
+
+    merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
+    tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
+    leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
 
     if isinstance(merged, AIMessage):
+        if tool_markup_leaked:
+            merged.content = _strip_tool_markup(merged_text)
         return LLMTurnResult(
             message=_strip_reasoning_context(merged),
             streamed=streamed,
             finish_reason=finish_reason or _chunk_finish_reason(merged),
             details=(reasoning_detail_data,) if reasoning_detail_data else (),
+            tool_markup_leaked=tool_markup_leaked,
+            leaked_tool_names=leaked_tool_names,
         )
     fallback = AIMessage(
-        content=message_text(getattr(merged, "content", "")) if merged is not None else "",
+        content=_strip_tool_markup(merged_text),
         tool_calls=list(getattr(merged, "tool_calls", []) or []),
         invalid_tool_calls=list(getattr(merged, "invalid_tool_calls", []) or []),
         id=getattr(merged, "id", None),
@@ -778,6 +928,8 @@ async def _run_llm_tool_turn(
         streamed=streamed,
         finish_reason=finish_reason or _chunk_finish_reason(merged),
         details=(reasoning_detail_data,) if reasoning_detail_data else (),
+        tool_markup_leaked=tool_markup_leaked,
+        leaked_tool_names=leaked_tool_names,
     )
 
 
@@ -1390,6 +1542,11 @@ def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> s
     return disclosed
 
 
+def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatToolSpec]:
+    """Tool specs for the subset of ``tools`` already disclosed to the model."""
+    return _mcp_tool_specs([tool for tool in tools if tool.name in disclosed])
+
+
 def _common_batch_url(results: list[ToolCallResult]) -> str | None:
     """Return the shared batch_url if all results share the same non-None batch_id."""
     batch_url: str | None = None
@@ -1512,6 +1669,30 @@ def _initial_empty_response_retry_message() -> str:
         "Your previous response was empty before Seizu could run any skill or tool. Retry now. Either answer the "
         "user directly, or use a structured skill/tool call with every required argument. Do not return an empty "
         "response."
+    )
+
+
+def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
+    if leaked_tool_names:
+        names = ", ".join(f"`{name}`" for name in leaked_tool_names)
+        return (
+            f"You wrote a tool call for {names} as plain text, so nothing ran — that tool is not available to call "
+            "directly right now. Tools are disclosed on demand: to use one, first call the skill that provides it "
+            "(rendering a skill exposes the tools it declares), then call the tool with the structured tool-calling "
+            "mechanism. Never write tool-call tokens, tags, or XML-like markup in your message text. If no available "
+            "skill provides what you need, use the skills and tools already available, or answer in plain language."
+        )
+    return (
+        "Your previous reply wrote raw tool-call markup as plain text instead of invoking a tool, so nothing ran. "
+        "To call a tool, use the structured tool-calling mechanism provided by the API — never write tool-call "
+        "tokens, tags, or XML-like markup in your message text. If you do not need a tool, answer in plain language."
+    )
+
+
+def _tool_markup_fallback() -> str:
+    return (
+        "I couldn't complete that request: the model returned an unusable tool call. Please try again, "
+        "or rephrase the request."
     )
 
 
@@ -1682,6 +1863,20 @@ def _resume_confirmation_id(messages: list[Any]) -> str | None:
                 return confirmation_id
         return None
     return None
+
+
+def _is_continuation_turn(messages: list[Any]) -> bool:
+    """True when this turn is a "continue the previous response" request.
+
+    Like ``_resume_confirmation_id``, only the most recent HumanMessage counts —
+    it is the message that triggered this graph turn.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        return bool(isinstance(additional_kwargs, dict) and additional_kwargs.get("continue_response") is True)
+    return False
 
 
 def _last_user_text(messages: list[Any]) -> str:

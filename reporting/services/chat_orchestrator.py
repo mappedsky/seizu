@@ -45,12 +45,14 @@ from reporting.services.chat_graph import (
     ChatState,
     ChatToolSpec,
     ToolCallResult,
+    _append_output_limit_notice,
     _blocked_tool_call_response,
     _chat_provider,
     _client_thread_id_from_config,
     _collect_confirmations_to_run,
     _current_user_from_config,
     _execute_confirmations,
+    _is_continuation_turn,
     _last_user_text,
     _list_chat_prompts,
     _list_chat_tools,
@@ -66,6 +68,7 @@ from reporting.services.chat_graph import (
     _truncate_text,
     _with_provider_tool_names,
     build_capability_context,
+    finalize_assistant_message,
     get_chat_model,
 )
 from reporting.services.chat_messages import message_text
@@ -170,18 +173,39 @@ def _structured_model(schema: type[BaseModel]) -> Any:
 # --- Router --------------------------------------------------------------------
 
 
-async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
-    """Classify the turn as simple (existing loop) or orchestrate (plan path)."""
+def _forced_route(state: ChatState) -> str | None:
+    """Deterministic routing that must not depend on the LLM classifier.
+
+    Centralizes every special-turn short-circuit in one place so neither the
+    router nor a future caller can forget one (the divergence that broke
+    continuation). Returns ``"simple"``/``"orchestrate"`` for a special turn, or
+    ``None`` to let the model classify a genuine new-task request.
+    """
     if not settings.CHAT_ORCHESTRATOR_ENABLED:
-        return {"route": "simple"}
+        return "simple"
     # The mock provider has no real model; orchestration would have nothing to
     # call, so always take the simple path (which mock_agent_node handles).
     if _chat_provider() == "mock":
-        return {"route": "simple"}
+        return "simple"
     # An in-flight plan being resumed (e.g. after an action confirmation) must
     # continue on the orchestrated path rather than be re-routed from scratch.
     if _has_pending_plan(state):
-        return {"route": "orchestrate"}
+        return "orchestrate"
+    # Continuation ("continue this response") and simple confirmation-resume turns
+    # are owned by the single-agent path: chat_agent_node extends the prior answer
+    # (and emits the cut-off/finish-reason that drives the "Continue response"
+    # button) or resumes one confirmed tool call. The planner would replan from
+    # scratch and drop the continuation, so never route these to orchestrate.
+    if _is_continuation_turn(state["messages"]) or _resume_confirmation_id(state["messages"]):
+        return "simple"
+    return None
+
+
+async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+    """Classify the turn as simple (existing loop) or orchestrate (plan path)."""
+    forced = _forced_route(state)
+    if forced is not None:
+        return {"route": forced}
 
     user_text = _last_user_text(state["messages"])
     if not user_text.strip():
@@ -657,15 +681,21 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
     messages: list[BaseMessage] = [HumanMessage(content=f"User request: {user_text}\n\n{context}")]
     turn = await _run_llm_tool_turn(model, _SYNTHESIZER_PROMPT, messages, [], config, writer)
     response = message_text(turn.message.content)
-    if not response:
+    output_limit = False
+    if response:
+        # Mirror the single-agent path: append the cut-off notice and surface the
+        # finish_reason so a synthesis truncated by the output limit also offers
+        # "Continue response".
+        response, output_limit = _append_output_limit_notice(response, turn.finish_reason)
+    else:
         response = _synthesis_fallback(plan, results)
-        if not turn.streamed:
-            writer({"kind": "token", "content": response})
 
-    ai_message = AIMessage(
-        content=response,
-        id=f"msg_{uuid.uuid4().hex}",
-        response_metadata={"seizu_details": _orchestration_details(plan, results)},
+    ai_message = finalize_assistant_message(
+        response=response,
+        streamed=turn.streamed,
+        writer=writer,
+        details=_orchestration_details(plan, results),
+        output_limit=output_limit,
     )
     # Clear transient orchestration state so completed runs don't bloat the
     # persisted thread/checkpoint.
