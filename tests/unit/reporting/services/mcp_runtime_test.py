@@ -425,6 +425,44 @@ async def test_approved_mutating_builtin_executes_handler(mocker):
     create_confirmation.assert_not_called()
 
 
+async def test_builtin_handler_validation_error_returns_actionable_message(mocker):
+    # A malformed argument (here a tools_required entry with an empty tool id)
+    # should come back as an actionable validation message the model can fix,
+    # not a generic "Failed to execute".
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        return_value=_confirmation("approved"),
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.claim_action_confirmation_for_execution",
+        return_value=_confirmation("executed"),
+    )
+    mocker.patch(
+        "reporting.services.mcp_builtins.skillsets.report_store.get_skill",
+        return_value=_skill(),
+    )
+    current = _user(frozenset({Permission.SKILLS_WRITE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "skillsets__update_skill",
+        {
+            "skillset_id": "security",
+            "skill_id": "summarize",
+            "name": "Summarize",
+            "template": "Summarize {% $topic %}.",
+            "parameters": [{"name": "topic", "type": "string", "required": True}],
+            "tools_required": ["toolsets__"],
+        },
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    payload = json.loads(result[0].text)
+    assert "Invalid arguments" in payload["error"]
+    assert "tools_required" in payload["error"]
+
+
 async def test_concurrent_claim_race_returns_notice_not_confirmation_required(mocker):
     """When another caller already claimed the approval, the response is a notice (not
     CONFIRMATION_REQUIRED) so the LLM does not retry and trigger a second execution."""

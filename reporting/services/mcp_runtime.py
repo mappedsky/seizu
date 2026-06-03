@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
+from pydantic import ValidationError
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
@@ -111,6 +112,18 @@ def build_input_schema(parameters: list[Any]) -> dict[str, Any]:
 def text_response(payload: Any) -> list[TextContent]:
     """Serialize *payload* to JSON and wrap it as a single MCP TextContent."""
     return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
+
+
+def _format_validation_error(exc: Exception) -> str:
+    """Turn a Pydantic ValidationError (or ValueError) into a compact, model-
+    actionable message: one ``field: reason`` per line."""
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors():
+            loc = ".".join(str(p) for p in err.get("loc", ())) or "input"
+            parts.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        return "Invalid arguments — " + "; ".join(parts)
+    return f"Invalid arguments — {exc}"
 
 
 def missing_permissions(required: list[str], granted: frozenset[str]) -> list[str]:
@@ -335,6 +348,14 @@ async def _call_tool_core(
                 _bounded_text_response(result, max_rows=result_max_rows, max_bytes=result_max_bytes),
                 None,
             )
+        except (ValidationError, ValueError) as exc:
+            # Bad arguments (e.g. a malformed tools_required entry) are the
+            # caller's fault, not a server fault: return the validation detail so
+            # the model can fix the call and retry, and log at warning without a
+            # stack trace so it doesn't read as an unhandled crash.
+            message = _format_validation_error(exc)
+            logger.warning("Invalid arguments for built-in MCP tool %s: %s", name, message)
+            return text_response({"error": message}), None
         except Exception:
             logger.exception("Failed to execute built-in MCP tool %s", name)
             return text_response({"error": f"Failed to execute tool '{name}'"}), None
