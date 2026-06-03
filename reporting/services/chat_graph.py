@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -42,6 +43,8 @@ from reporting.services.chat_messages import (
     tag_message,
 )
 from reporting.services.mcp_runtime import ChatBlockReason
+
+logger = logging.getLogger(__name__)
 
 
 class ChatState(TypedDict):
@@ -134,17 +137,19 @@ class AnswerBudget:
     max_tables: int
 
 
-class _TerminalResponseDecision(BaseModel):
-    complete: bool
-    reason: str = ""
-
-
 # Provider sentinel. "mock" keeps chat deterministic and keyless; every other
 # value routes through LiteLLM, so the supported provider/model surface is
 # whatever LiteLLM supports rather than a fixed in-code allowlist. LiteLLM owns
 # the cross-provider quirks (base_url/api_key handling, DeepSeek-shape endpoints,
 # reasoning_content normalization) that Seizu used to special-case here.
 _MOCK_PROVIDER = "mock"
+
+# Structural completion signal for the tool loop. Once Seizu has run an action,
+# the model finishes the turn by calling this synthetic tool with the final
+# answer (rather than us classifying plain text as "done"). Exposed post-action
+# only, so trivial pre-action replies keep streaming directly. The loop
+# intercepts the call by name and never dispatches it to MCP.
+_FINAL_ANSWER_TOOL = "respond_to_user"
 
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
@@ -327,16 +332,16 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
 
     response = ""
     streamed_in_last_turn = ""
-    user_text = _last_user_text(state["messages"])
     while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
         turn_system_prompt = _combined_system_prompt(base_system_prompt, pending_system_addendum)
         pending_system_addendum = ""
-        available_specs = _with_provider_tool_names([*skill_specs, *tool_specs])
-        # After Seizu has run actions, candidate prose must not be streamed until
-        # it is validated as a terminal answer. Otherwise a model can say "I'll
-        # run the next tool" without making a structured call, and the UI cannot
-        # retract that text when we correctly retry.
-        turn_writer = None if action_summaries else writer
+        post_action = bool(action_summaries)
+        available_specs = _with_provider_tool_names([*skill_specs, *tool_specs, *_terminal_specs(post_action)])
+        # Pre-action prose streams live (the fast path for a direct answer). Once
+        # Seizu has run actions the model must finish through a structured
+        # respond_to_user call; post-action prose is a stall, not streamed, so we
+        # never ship un-retractable text.
+        turn_writer = None if post_action else writer
         turn_result = await _run_llm_tool_turn(
             model,
             turn_system_prompt,
@@ -366,34 +371,26 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             break
 
         requested = _tool_call_requests(ai_message, available_specs)
+        finish_requests = [request for request in requested if request.name == _FINAL_ANSWER_TOOL]
+        requested = [request for request in requested if request.name != _FINAL_ANSWER_TOOL]
         if not requested:
-            response = message_text(ai_message.content)
+            # Structural completion: an explicit respond_to_user call (or, for a
+            # pre-action turn, plain text) is the terminal answer. Post-action
+            # plain text that skipped respond_to_user is a stall — nudge once to
+            # act-or-finish, then accept whatever the model returns next.
+            if finish_requests:
+                response = _final_answer_text(finish_requests[0]) or message_text(ai_message.content)
+            else:
+                response = message_text(ai_message.content)
+                if response and post_action and not terminal_response_retry_used:
+                    terminal_response_retry_used = True
+                    pending_system_addendum = _terminal_stall_retry_message(action_summaries)
+                    response = ""
+                    continue
             if response:
-                if action_summaries:
-                    complete, reason = await _terminal_response_complete(
-                        model,
-                        user_text=user_text,
-                        response=response,
-                        action_summaries=action_summaries,
-                        available_specs=available_specs,
-                        config=config,
-                    )
-                    if not complete:
-                        if not terminal_response_retry_used:
-                            terminal_response_retry_used = True
-                            pending_system_addendum = _terminal_response_retry_message(
-                                response=response,
-                                reason=reason,
-                                action_summaries=action_summaries,
-                            )
-                            response = ""
-                            continue
-                        response = _empty_response_fallback(action_summaries)
-                        response_is_broken = True
-                        break
-                    if not streamed_response and writer is not None:
-                        writer({"kind": "token", "content": response})
-                        streamed_response = response
+                if post_action and not streamed_response and writer is not None:
+                    writer({"kind": "token", "content": response})
+                    streamed_response = response
                 response, appended, still_truncated, cont_details = await _auto_continue_answer(
                     model, messages, turn_system_prompt, response, turn_result.finish_reason, config, writer
                 )
@@ -404,6 +401,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 )
                 break
             if action_summaries:
+                # Empty post-action turn: fall through to the forced synthesis below.
                 break
             if not empty_retry_used:
                 empty_retry_used = True
@@ -425,6 +423,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 response_is_broken = True
                 break
             break
+
+        # Prose emitted alongside a tool call is plan narration, not an answer.
+        # Record it as a thinking detail so it survives a reload as narration
+        # rather than leaking into the persisted answer body.
+        narration = message_text(ai_message.content).strip()
+        if narration:
+            narration_detail = _planning_narration_detail_data(narration)
+            detail_events.append(narration_detail)
+            writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": narration_detail})
 
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
@@ -1390,6 +1397,38 @@ def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
     ]
 
 
+def _terminal_specs(post_action: bool) -> list[ChatToolSpec]:
+    """The respond_to_user finish tool, exposed only after an action has run."""
+    if not post_action:
+        return []
+    return [
+        ChatToolSpec(
+            name=_FINAL_ANSWER_TOOL,
+            kind="tool",
+            description=(
+                "Deliver your complete final answer to the user and end the turn. Call this once you have enough "
+                "information from the tools/skills you already ran. Put the full user-facing answer in `answer`; do "
+                "not call any other tool in the same step. If you still need live data, call that tool instead."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "The complete, user-facing final answer for this turn.",
+                    }
+                },
+                "required": ["answer"],
+            },
+        )
+    ]
+
+
+def _final_answer_text(request: ToolCallRequest) -> str:
+    answer = request.arguments.get("answer")
+    return answer.strip() if isinstance(answer, str) else ""
+
+
 def _mcp_tool_specs(tools: list[Tool]) -> list[ChatToolSpec]:
     return [
         ChatToolSpec(
@@ -1635,7 +1674,10 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "the resource is already available and continue the workflow by reading, updating, or using that resource "
         "instead of stopping as a failure. "
         "Do not pretend to have executed a tool unless the conversation contains its "
-        f"result.{user_context}{provider_note}"
+        "result. After you have run one or more skills or tools, finish the turn by calling the "
+        f"`{_FINAL_ANSWER_TOOL}` tool with your complete final answer; do not deliver a post-action answer as plain "
+        "text, and never describe tool work you have not performed."
+        f"{user_context}{provider_note}"
     )
 
 
@@ -1713,6 +1755,22 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "status": status,
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
+    }
+
+
+def _planning_narration_detail_data(text: str) -> dict[str, Any]:
+    """Render prose that accompanied a tool call as a 'thinking' detail.
+
+    Such prose ("I'll start by investigating…") is the model narrating its plan,
+    not an answer. Keeping it out of the answer body — and recording it as a
+    thinking detail — means a page reload shows the same narration-as-thinking
+    the live stream did, instead of a stray sentence in the assistant bubble.
+    """
+    return {
+        "kind": "thinking",
+        "title": "Planning",
+        "status": "completed",
+        "body": _truncate_text(text.strip(), 4000),
     }
 
 
@@ -1879,7 +1937,11 @@ async def _invoke_structured_output(
             if isinstance(result, dict):
                 return schema.model_validate(result)
         except Exception:
-            pass
+            logger.info(
+                "with_structured_output failed for %s; falling back to JSON parsing",
+                schema.__name__,
+                exc_info=True,
+            )
 
     schema_json = _json_dump(schema.model_json_schema())
     system_prompt = (
@@ -1912,59 +1974,20 @@ def _json_object_from_text(text: str) -> dict[str, Any] | None:
     return None
 
 
-async def _terminal_response_complete(
-    model: Any,
-    *,
-    user_text: str,
-    response: str,
-    action_summaries: list[str],
-    available_specs: list[ChatToolSpec],
-    config: RunnableConfig,
-) -> tuple[bool, str]:
-    """Ask the model whether a post-action no-tool response completes the turn.
+def _terminal_stall_retry_message(action_summaries: list[str]) -> str:
+    """Nudge a post-action turn that returned plain text instead of finishing.
 
-    This is intentionally semantic rather than regex-based. The code only
-    enforces state: once Seizu has completed actions, plain assistant text is a
-    terminal answer only if the model judges that it satisfies the user's
-    request using the completed action results. If more live data is needed, the
-    next retry keeps tools available so the model can make a structured call.
+    The model either still needs live data — in which case it should make the
+    next structured tool/skill call — or it is done, in which case it should
+    deliver the answer through the respond_to_user tool. We do not classify the
+    prose; we just give the model one structured chance to act or finish before
+    accepting whatever it returns next.
     """
-    tools = ", ".join(spec.name for spec in available_specs[:50]) or "(none)"
-    summaries = _truncate_text("\n\n".join(action_summaries), 10000)
-    prompt = (
-        "Judge whether the assistant candidate is a terminal answer to the user's request.\n\n"
-        "Return complete=false if the candidate does not actually answer the request, omits a requested step, "
-        "needs more live data, or should have made another structured skill/tool call. Return complete=true only "
-        "when the candidate can be shown to the user as the final answer for this turn.\n\n"
-        f"User request:\n{_truncate_text(user_text, 3000)}\n\n"
-        f"Available structured skills/tools for a retry:\n{tools}\n\n"
-        f"Completed action summaries:\n{summaries}\n\n"
-        f"Assistant candidate:\n{_truncate_text(response, 4000)}"
-    )
-    try:
-        decision = await _invoke_structured_output(
-            model,
-            _TerminalResponseDecision,
-            [HumanMessage(content=prompt)],
-            config,
-        )
-    except Exception:
-        return False, "Could not verify that the candidate response completes the requested workflow."
-    if not isinstance(decision, _TerminalResponseDecision):
-        return False, "Could not verify that the candidate response completes the requested workflow."
-    return decision.complete, decision.reason
-
-
-def _terminal_response_retry_message(*, response: str, reason: str, action_summaries: list[str]) -> str:
-    reason_text = reason.strip() or "The candidate response did not fully satisfy the user's requested workflow."
     return (
-        "Your previous candidate response was not accepted as final for this turn. "
-        f"Reason: {reason_text}\n\n"
-        "Do not describe future tool work in plain text. Either make the next required structured skill/tool call "
-        "now, or provide a final answer that fully satisfies the user's request using the completed action results. "
-        "If a skill result disclosed tools required for the next step, call one of those tools with the structured "
-        "tool-calling mechanism.\n\n"
-        f"Rejected candidate response:\n{_truncate_text(response, 3000)}\n\n"
+        "You returned plain text after Seizu already ran one or more actions, without finishing the turn. "
+        f"If the user's request needs more live data, make the next structured skill/tool call now. If you have "
+        f"enough evidence, deliver the complete final answer by calling the `{_FINAL_ANSWER_TOOL}` tool with the "
+        "full answer in `answer`. Do not describe future work in plain text.\n\n"
         f"Completed action summaries so far:\n{_truncate_text(chr(10).join(action_summaries), 10000)}"
     )
 

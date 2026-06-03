@@ -5,6 +5,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from mcp.types import Prompt, PromptArgument, Tool
+from pydantic import BaseModel
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
@@ -63,9 +64,9 @@ class _ToolCallingFakeModel:
         return self
 
     def with_structured_output(self, schema):
-        if schema is chat_graph._TerminalResponseDecision:
-            return _Structured(chat_graph._TerminalResponseDecision(complete=True, reason="complete"))
-        raise AssertionError(f"unexpected schema {schema!r}")
+        # The single-agent loop no longer uses structured output; this is only
+        # reached if a test drives the orchestrator router through this model.
+        raise AssertionError(f"unexpected structured-output schema {schema!r}")
 
     async def astream(self, input, config=None, **kwargs):
         self.inputs.append(input)
@@ -154,6 +155,10 @@ def test_ai_message_for_tool_results_preserves_reasoning_while_filtering_tool_ca
 
 
 async def test_invoke_structured_output_falls_back_to_json_text():
+    class _Decision(BaseModel):
+        complete: bool
+        reason: str = ""
+
     class _BrokenStructured:
         async def ainvoke(self, _messages, config=None):
             raise RuntimeError("structured output unavailable")
@@ -167,32 +172,21 @@ async def test_invoke_structured_output_falls_back_to_json_text():
 
     result = await chat_graph._invoke_structured_output(
         _JsonModel(),
-        chat_graph._TerminalResponseDecision,
+        _Decision,
         [HumanMessage(content="decide")],
         {},
     )
 
-    assert isinstance(result, chat_graph._TerminalResponseDecision)
+    assert isinstance(result, _Decision)
     assert result.complete is False
     assert result.reason == "more evidence is needed"
 
 
-async def test_terminal_response_completion_fails_closed_when_decision_unavailable():
-    class _BadModel:
-        async def astream(self, _input, config=None, **kwargs):
-            yield AIMessageChunk(content="not json")
-
-    complete, reason = await chat_graph._terminal_response_complete(
-        _BadModel(),
-        user_text="Run a multi-step workflow",
-        response="I'll gather more evidence next.",
-        action_summaries=["Seizu ran tool `security__one`.\n\nResult:\n{}"],
-        available_specs=[],
-        config={},
-    )
-
-    assert complete is False
-    assert "Could not verify" in reason
+def test_terminal_specs_exposed_only_after_an_action_has_run():
+    assert chat_graph._terminal_specs(post_action=False) == []
+    specs = chat_graph._terminal_specs(post_action=True)
+    assert [spec.name for spec in specs] == [chat_graph._FINAL_ANSWER_TOOL]
+    assert specs[0].input_schema["required"] == ["answer"]
 
 
 async def test_run_llm_tool_turn_streams_reasoning_as_detail_and_strips_context():
@@ -651,10 +645,69 @@ async def test_chat_graph_streams_tool_enabled_text_as_it_arrives(mocker):
     assert "Running tool `security__one`..." not in streamed
     assert "Final answer." in streamed
     details = [chunk for chunk in chunks if chunk.get("kind") == "detail"]
-    assert len(details) == 1
-    assert details[0]["data"]["title"] == "Tool: security__one"
-    assert details[0]["data"]["arguments"] == '{"org":"mappedsky"}'
-    assert details[0]["data"]["body"] == '{"ok": true}'
+    # Prose that accompanied the tool call is recorded as a "Planning" thinking
+    # detail so it survives a reload as narration instead of leaking into the
+    # persisted answer body, alongside the tool-execution detail.
+    planning = [d for d in details if d["data"]["title"] == "Planning"]
+    tool_details = [d for d in details if d["data"]["title"] == "Tool: security__one"]
+    assert len(planning) == 1
+    assert planning[0]["data"]["kind"] == "thinking"
+    assert planning[0]["data"]["body"] == "Inspecting now"
+    assert len(tool_details) == 1
+    assert tool_details[0]["data"]["arguments"] == '{"org":"mappedsky"}'
+    assert tool_details[0]["data"]["body"] == '{"ok": true}'
+
+
+async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    fake_model = _ToolCallingFakeModel(
+        [
+            AIMessage(content="", tool_calls=[_tool_call("security__one", {"org": "mappedsky"})]),
+            # Well-behaved completion: deliver the answer through respond_to_user
+            # instead of plain text, so no stall nudge is needed.
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _tool_call(chat_graph._FINAL_ANSWER_TOOL, {"answer": "Three repos are high-risk."}, "call_2")
+                ],
+            ),
+        ]
+    )
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", False)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=fake_model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+    )
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"ok": true}'),
+    )
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="Run the overview")]},
+            {"configurable": {"thread_id": "thread-respond-tool", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
+    assert streamed == "Three repos are high-risk."
+    # respond_to_user is intercepted as the terminal answer, not dispatched as a
+    # tool, so it produces no tool-execution detail and only one model turn ran
+    # after the action (no stall nudge).
+    assert not [
+        c
+        for c in chunks
+        if c.get("kind") == "detail" and c["data"]["title"] == f"Tool: {chat_graph._FINAL_ANSWER_TOOL}"
+    ]
+    assert fake_model.calls == 2
 
 
 async def test_run_llm_tool_turn_streams_text_before_and_after_tool_call_chunk():
@@ -1120,13 +1173,6 @@ async def test_chat_graph_retries_nonterminal_post_action_text_without_streaming
             ChatActionOutcome(text='{"high": 26}'),
         ],
     )
-    completion_gate = mocker.patch(
-        "reporting.services.chat_graph._terminal_response_complete",
-        side_effect=[
-            (False, "The response says another evidence-gathering step remains."),
-            (True, "Final answer is complete."),
-        ],
-    )
     graph = chat_graph.build_chat_graph(MemorySaver())
 
     chunks = [
@@ -1138,14 +1184,17 @@ async def test_chat_graph_retries_nonterminal_post_action_text_without_streaming
         )
     ]
 
+    # Post-action plain text ("Let me pull… next") skipped respond_to_user, so it
+    # is treated as a stall: never streamed, and the model is nudged once to act
+    # or finish. It then makes the second tool call and the real answer is taken.
     streamed = "".join(chunk["content"] for chunk in chunks if chunk.get("kind") == "token")
     assert "Let me pull the high-severity findings next." not in streamed
     assert "Final answer using both tool results." in streamed
     assert call_tool.await_count == 2
     assert [call.args[1] for call in call_tool.await_args_list] == ["security__one", "security__two"]
-    assert completion_gate.await_count == 2
-    assert "not accepted as final" in fake_model.inputs[2][0].content
-    assert "structured skill/tool call" in fake_model.inputs[2][0].content
+    # The stall nudge is appended to the next turn's system prompt.
+    assert "without finishing the turn" in fake_model.inputs[2][0].content
+    assert chat_graph._FINAL_ANSWER_TOOL in fake_model.inputs[2][0].content
 
 
 async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):

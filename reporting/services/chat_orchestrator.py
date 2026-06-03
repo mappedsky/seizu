@@ -30,6 +30,7 @@ Design notes:
 
 import asyncio
 import json
+import logging
 import uuid
 from dataclasses import replace
 from typing import Any, Literal, cast
@@ -80,6 +81,8 @@ from reporting.services.chat_graph import (
 )
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_runtime import ChatBlockReason
+
+logger = logging.getLogger(__name__)
 
 # Plan-step status lifecycle: pending -> ran (dispatcher) -> passed|failed
 # (verifier). Failed steps may be reset to pending for a bounded retry.
@@ -242,6 +245,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
     """Classify the turn as simple (existing loop) or orchestrate (plan path)."""
     forced = _forced_route(state)
     if forced is not None:
+        logger.info("chat router: forced route=%s", forced)
         return {"route": forced}
 
     user_text = _last_user_text(state["messages"])
@@ -260,8 +264,16 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
         )
     except Exception:
         # Any provider/structured-output failure degrades to the proven path.
+        # Log it: a silent degrade here bypasses the whole orchestrator (plan +
+        # verify), so an invisible router failure looks like the agent simply
+        # ignoring a multi-step request.
+        logger.warning("Router structured-output failed; degrading to the single-agent path", exc_info=True)
         return {"route": "simple"}
 
+    # Always-on so a run can be traced without reproducing a failure: this is the
+    # single fact that explains whether a turn used the orchestrator or the
+    # single-agent loop.
+    logger.info("chat router: route=%s reason=%s", decision.route, _truncate_text(decision.reason, 300))
     _emit(
         writer,
         {
@@ -308,6 +320,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         )
         planned = plan_result.steps[: settings.CHAT_ORCHESTRATOR_MAX_STEPS]
     except Exception:
+        logger.warning("Planner structured-output failed; falling back to a single-step plan", exc_info=True)
         planned = []
 
     if not planned:
