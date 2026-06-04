@@ -364,6 +364,61 @@ async def test_call_tool_validate_query_empty_query_string():
 
 
 # ---------------------------------------------------------------------------
+# call_tool — graph__explain
+# ---------------------------------------------------------------------------
+
+
+async def test_call_tool_explain_returns_plan():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {"operatorType": "NodeByLabelScan", "identifiers": ["n"], "children": []}
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=[], warnings=["unindexed scan"]),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query",
+            new_callable=AsyncMock,
+            return_value=plan,
+        ),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__explain", {"query": "MATCH (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["plan"] == plan
+        assert data["warnings"] == ["unindexed scan"]
+
+
+async def test_call_tool_explain_blocks_invalid_query_before_planning():
+    from reporting.services.query_validator import ValidationResult
+
+    explain = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query", explain),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__explain", {"query": "CREATE (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert "Write queries are not allowed" in data["errors"]
+    # A rejected query must never reach the planner.
+    explain.assert_not_called()
+
+
+async def test_call_tool_explain_empty_query_string():
+    server = _build_mcp_server()
+    result = await _call_tool(server, "graph__explain", {"query": "  "})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# ---------------------------------------------------------------------------
 # call_tool — graph__schema
 # ---------------------------------------------------------------------------
 

@@ -31,7 +31,12 @@ def test_list_builtin_tools_filters_by_group():
     with patch("reporting.settings.MCP_ENABLED_BUILTINS", ["graph"]):
         tools = list_builtin_tools()
     assert {t.group for t in tools} == {"graph"}
-    assert {t.name for t in tools} == {"graph__schema", "graph__query", "graph__validate_query"}
+    assert {t.name for t in tools} == {
+        "graph__schema",
+        "graph__query",
+        "graph__validate_query",
+        "graph__explain",
+    }
 
 
 def test_find_builtin_returns_tool():

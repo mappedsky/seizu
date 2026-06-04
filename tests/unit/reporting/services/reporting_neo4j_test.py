@@ -83,6 +83,32 @@ async def test_run_query(mocker):
     assert kwargs == {"parameters": None}
 
 
+async def test_explain_query_prefixes_explain_and_returns_plan(mocker):
+    plan = {"operatorType": "ProduceResults", "children": []}
+    summary = MagicMock()
+    summary.plan = plan
+    result = AsyncMock()
+    result.consume = AsyncMock(return_value=summary)
+
+    session_mock = AsyncMock()
+    session_mock.run = AsyncMock(return_value=result)
+    driver_mock = MagicMock()
+    driver_mock.session.return_value.__aenter__ = AsyncMock(return_value=session_mock)
+    driver_mock.session.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch(
+        "reporting.services.reporting_neo4j._get_async_neo4j_client",
+        return_value=driver_mock,
+    )
+
+    out = await reporting_neo4j.explain_query("MATCH (n) RETURN n")
+    assert out == plan
+    # EXPLAIN is prefixed (plan-only) and carries the transaction timeout.
+    query_arg = session_mock.run.await_args.args[0]
+    assert isinstance(query_arg, reporting_neo4j.Query)
+    assert query_arg.text == "EXPLAIN MATCH (n) RETURN n"
+    assert query_arg.timeout == reporting_neo4j.settings.NEO4J_QUERY_TIMEOUT
+
+
 async def test_run_query_with_single_retry_failure(mocker):
     run_query_mock = mocker.patch(
         "reporting.services.reporting_neo4j.run_query",

@@ -40,6 +40,20 @@ async def _handle_validate_query(args: dict[str, Any], current_user: CurrentUser
     }
 
 
+async def _handle_explain(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    cypher = str(args.get("query", "")).strip()
+    if not cypher:
+        return {"error": "query parameter is required"}
+    # Validate before planning so the same guards as graph__query apply (no
+    # writes, no disallowed procedures/SSRF) — EXPLAIN must not become a way to
+    # plan a query the validator would otherwise reject.
+    validation = await validate_query(cypher)
+    if validation.has_errors:
+        return {"errors": validation.errors, "warnings": validation.warnings}
+    plan = await reporting_neo4j.explain_query(cypher)
+    return {"plan": plan, "warnings": validation.warnings}
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -99,6 +113,29 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.QUERY_EXECUTE.value],
             handler=_handle_validate_query,
+        ),
+        BuiltinTool(
+            name="graph__explain",
+            group=GROUP,
+            description=(
+                "Return Neo4j's execution plan for a read-only Cypher query without running it. "
+                "The query is validated first (same guards as graph__query — writes and disallowed "
+                "procedures are rejected), then EXPLAIN is run and the planner's plan is returned as "
+                "{plan, warnings}. Use the plan (operator types, estimated rows, index usage) to check "
+                "that a query hits indexes and avoids full scans before saving or running it."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A read-only Cypher query to plan with EXPLAIN.",
+                    }
+                },
+                "required": ["query"],
+            },
+            required_permissions=[Permission.QUERY_EXECUTE.value],
+            handler=_handle_explain,
         ),
     ],
 )

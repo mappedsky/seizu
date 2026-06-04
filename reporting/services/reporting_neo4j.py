@@ -69,6 +69,22 @@ async def run_query(cypher: str, parameters: dict = None) -> list[Record]:
     return results
 
 
+async def explain_query(cypher: str) -> dict[str, Any]:
+    """Return Neo4j's query plan for ``EXPLAIN <cypher>`` without executing it.
+
+    EXPLAIN produces the plan only — it never runs the query (unlike PROFILE).
+    Callers must validate *cypher* first (so disallowed constructs are rejected
+    before it reaches the planner) and pass a bare query: the validator rejects a
+    leading EXPLAIN/PROFILE, so prefixing EXPLAIN here is always plan-only.
+    """
+    driver = _get_async_neo4j_client()
+    async with driver.session() as session:
+        query = Query(f"EXPLAIN {cypher}", timeout=settings.NEO4J_QUERY_TIMEOUT)
+        result = await session.run(query)
+        summary = await result.consume()
+    return summary.plan or {}
+
+
 _LABELS_QUERY = "CALL db.labels() YIELD label RETURN label ORDER BY label"
 _RELS_QUERY = "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS type ORDER BY type"
 _PROPS_QUERY = "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey AS key ORDER BY key"
