@@ -377,6 +377,39 @@ async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
     assert result["disclosed_tools"] == ["github_security__org_overview"]
 
 
+def test_match_action_spec_resolves_short_skill_id():
+    skill = chat_graph.ChatToolSpec(
+        name="github_security_investigations__github_org_security_overview",
+        kind="skill",
+        description="overview",
+        input_schema={"type": "object"},
+    )
+    # The planner referenced the skill by its short id, not the full slug.
+    assert chat_orchestrator._match_action_spec([skill], "skill", "github_org_security_overview") is skill
+    assert (
+        chat_orchestrator._match_action_spec(
+            [skill], "skill", "github_security_investigations__github_org_security_overview"
+        )
+        is skill
+    )
+    # Wrong kind / unknown name does not resolve.
+    assert chat_orchestrator._match_action_spec([skill], "tool", "github_org_security_overview") is None
+    assert chat_orchestrator._match_action_spec([skill], "skill", "nope") is None
+
+
+def test_step_tool_specs_accepts_short_skill_id_and_reports_canonical():
+    skill = chat_graph.ChatToolSpec(
+        name="github_security_investigations__github_org_security_overview",
+        kind="skill",
+        description="overview",
+        input_schema={"type": "object"},
+    )
+    step = _step("s1", action_kind="skill", required_action="github_org_security_overview")
+    specs, error = chat_orchestrator._step_tool_specs([skill], step)
+    assert error is None
+    assert [s.name for s in specs] == ["github_security_investigations__github_org_security_overview"]
+
+
 async def test_worker_step_cannot_call_undisclosed_tool_under_progressive_disclosure(mocker):
     # A bare tool step whose tool no skill has disclosed is not callable.
     sub_tool = chat_graph.ChatToolSpec(

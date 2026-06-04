@@ -623,6 +623,12 @@ async def _run_worker_step(
             _step_detail_id(step_id),
         )
         return contract_result
+    # Normalize required_action to the canonical (fully-qualified) name the spec
+    # resolved to, so the downstream "did it call the required action" and
+    # argument-enforcement checks compare against the names that appear in
+    # tools_used (which are always fully qualified).
+    if step.get("action_kind") in ("skill", "tool") and specs:
+        step = {**step, "required_action": specs[0].name}
     # Progressive disclosure inside the worker: a skill step starts with only the
     # skill spec, but rendering a skill discloses the tools it declares. Those must
     # become callable for the rest of this step, or a meta-skill (e.g. one whose
@@ -757,16 +763,36 @@ async def _run_worker_step(
     return step_result
 
 
+def _match_action_spec(tool_specs: list[ChatToolSpec], action_kind: str, required_action: str) -> ChatToolSpec | None:
+    """Resolve a planner ``required_action`` to a concrete spec.
+
+    Names are fully qualified (``skillset__skill`` / ``toolset__tool``), but the
+    planner often references the short id (``github_org_security_overview``). Try
+    an exact match first, then a unique match on the action part after ``__``.
+    """
+    candidates = [spec for spec in tool_specs if spec.kind == action_kind]
+    exact = [spec for spec in candidates if spec.name == required_action]
+    if exact:
+        return exact[0]
+    short = [spec for spec in candidates if spec.name.split("__", 1)[-1] == required_action]
+    if len(short) == 1:
+        return short[0]
+    suffix = [spec for spec in candidates if spec.name.endswith(f"__{required_action}")]
+    if len(suffix) == 1:
+        return suffix[0]
+    return None
+
+
 def _step_tool_specs(tool_specs: list[ChatToolSpec], step: dict[str, Any]) -> tuple[list[ChatToolSpec], str | None]:
     action_kind = step.get("action_kind") or "auto"
     required_action = str(step.get("required_action") or "")
     if action_kind == "answer":
         return [], None
     if action_kind in ("skill", "tool") and required_action:
-        matching = [spec for spec in tool_specs if spec.name == required_action and spec.kind == action_kind]
-        if not matching:
+        spec = _match_action_spec(tool_specs, action_kind, required_action)
+        if spec is None:
             return [], f"Required {action_kind} action `{required_action}` is not available to this chat session."
-        return matching, None
+        return [spec], None
     if action_kind in ("skill", "tool") and not required_action:
         return [], f"Planner marked this as a {action_kind} step but did not provide required_action."
     return _scoped_tool_specs(tool_specs, step.get("suggested_tools") or []), None
