@@ -372,6 +372,34 @@ async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
     assert result["output"] == "Found 2 critical CVEs: CVE-1, CVE-2."
 
 
+def test_orchestration_details_carry_step_hierarchy():
+    plan = [_step("s1", goal="gather"), _step("s2", goal="summarize", depends_on=["s1"])]
+    plan[0]["goal"] = "gather"
+    plan[1]["goal"] = "summarize"
+    results = [
+        {
+            "step_id": "s1",
+            "output": "found data",
+            "tools_used": ["github_security", "github_security__org_overview"],
+            "verified": True,
+            "verify_reason": "ok",
+        },
+        {"step_id": "s2", "output": "summary", "tools_used": [], "verified": True, "verify_reason": "ok"},
+    ]
+    details = chat_orchestrator._orchestration_details(plan, results)
+
+    # Step and its tool/verify entries all carry the same step_id for nesting.
+    s1_step = next(d for d in details if d["kind"] == "step" and d.get("step_id") == "s1")
+    assert s1_step["status"] == "completed"
+    tool_details = [d for d in details if d["kind"] == "tool" and d.get("step_id") == "s1"]
+    assert {d["title"] for d in tool_details} == {
+        "Tool: github_security",
+        "Tool: github_security__org_overview",
+    }
+    s1_verify = next(d for d in details if d["kind"] == "verify" and d.get("step_id") == "s1")
+    assert s1_verify["status"] == "completed"
+
+
 # --- Router short-circuits (no LLM call) --------------------------------------
 
 

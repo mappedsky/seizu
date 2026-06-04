@@ -73,6 +73,7 @@ type SeizuChatDetail = {
   status?: string;
   arguments?: string;
   body?: string;
+  step_id?: string;
 };
 
 const KNOWN_DETAIL_KINDS = [
@@ -169,6 +170,10 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
         body:
           'body' in detail && typeof detail.body === 'string'
             ? detail.body
+            : undefined,
+        step_id:
+          'step_id' in detail && typeof detail.step_id === 'string'
+            ? detail.step_id
             : undefined,
       };
     })
@@ -277,19 +282,139 @@ function detailsEqual(
       detail.title === candidate.title &&
       detail.status === candidate.status &&
       detail.arguments === candidate.arguments &&
-      detail.body === candidate.body
+      detail.body === candidate.body &&
+      detail.step_id === candidate.step_id
     );
   });
 }
 
+type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
+
+// Group the flat detail stream into a step hierarchy: a `step` detail opens a
+// group, and the tool/verify details tagged with its step_id nest under it.
+// Ungrouped details (routing, plan, top-level thinking) stay at the root.
+function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
+  const nodes: DetailNode[] = [];
+  let currentStep: DetailNode | null = null;
+  for (const detail of details) {
+    if (detail.kind === 'step') {
+      currentStep = { detail, children: [] };
+      nodes.push(currentStep);
+    } else if (
+      detail.step_id &&
+      currentStep &&
+      currentStep.detail.step_id === detail.step_id
+    ) {
+      currentStep.children.push(detail);
+    } else {
+      nodes.push({ detail, children: [] });
+    }
+  }
+  return nodes;
+}
+
+function detailStatusColor(
+  status: string | undefined,
+): 'default' | 'success' | 'warning' | 'error' {
+  switch (status) {
+    case 'completed':
+      return 'success';
+    case 'running':
+      return 'warning';
+    case 'blocked':
+    case 'denied':
+      return 'error';
+    default:
+      return 'default';
+  }
+}
+
+function DetailRow({ detail }: { detail: SeizuChatDetail }) {
+  const hasContent = Boolean(detail.arguments || detail.body);
+  return (
+    <Accordion
+      disableGutters
+      elevation={0}
+      square
+      slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
+      sx={{
+        border: 1,
+        borderColor: 'divider',
+        borderRadius: 1,
+        '&:before': { display: 'none' },
+      }}
+    >
+      <AccordionSummary
+        expandIcon={hasContent ? <ExpandMore fontSize="small" /> : null}
+        sx={{
+          minHeight: 30,
+          px: 1,
+          py: 0,
+          cursor: hasContent ? 'pointer' : 'default',
+          '& .MuiAccordionSummary-content': {
+            alignItems: 'center',
+            gap: 0.75,
+            my: 0.5,
+          },
+        }}
+      >
+        {detailKindIcon(detail.kind)}
+        <Typography
+          sx={{ fontWeight: 600, minWidth: 0, wordBreak: 'break-word' }}
+          variant="caption"
+        >
+          {detail.title}
+        </Typography>
+        {detail.status ? (
+          <Chip
+            label={detail.status}
+            size="small"
+            color={detailStatusColor(detail.status)}
+            sx={{ height: 18 }}
+          />
+        ) : null}
+      </AccordionSummary>
+      {hasContent ? (
+        <AccordionDetails sx={{ px: 1, pt: 0, pb: 1 }}>
+          {detail.arguments ? (
+            <DetailPre label="Arguments" value={detail.arguments} />
+          ) : null}
+          {detail.body ? (
+            <DetailPre label="Output" value={detail.body} />
+          ) : null}
+        </AccordionDetails>
+      ) : null}
+    </Accordion>
+  );
+}
+
 const ChatMessageDetails = memo(
-  function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
+  function ChatMessageDetails({
+    details,
+    isStreaming,
+  }: {
+    details: SeizuChatDetail[];
+    isStreaming?: boolean;
+  }) {
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const tree = useMemo(() => buildDetailTree(details), [details]);
+
+    // Follow the content while it streams, but only when the user is already near
+    // the bottom — never yank them away from something they scrolled up to read.
+    useEffect(() => {
+      const el = scrollRef.current;
+      if (!el || !isStreaming) return;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      if (nearBottom) el.scrollTop = el.scrollHeight;
+    }, [details, isStreaming]);
+
     if (details.length === 0) return null;
     return (
       <Accordion
         disableGutters
         elevation={0}
         square
+        defaultExpanded={isStreaming}
         slotProps={{ transition: { timeout: 0 } }}
         sx={{
           bgcolor: 'background.paper',
@@ -329,89 +454,53 @@ const ChatMessageDetails = memo(
             sx={{ height: 18, minWidth: 18 }}
           />
         </AccordionSummary>
-        <AccordionDetails
-          sx={{
-            maxHeight: { xs: 220, md: 300 },
-            overflowY: 'auto',
-            px: 1,
-            pt: 0,
-            pb: 1,
-          }}
-        >
-          {details.map((detail, index) => (
-            <Box
-              key={`${detail.title}-${index}`}
-              sx={{
-                pt: index === 0 ? 0 : 0.75,
-                mt: index === 0 ? 0 : 0.75,
-              }}
-            >
-              <Accordion
-                disableGutters
-                elevation={0}
-                square
-                slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
-                sx={{
-                  border: 1,
-                  borderColor: 'divider',
-                  borderRadius: 1,
-                  '&:before': { display: 'none' },
-                }}
-              >
-                <AccordionSummary
-                  expandIcon={<ExpandMore fontSize="small" />}
-                  sx={{
-                    minHeight: 30,
-                    px: 1,
-                    py: 0,
-                    '& .MuiAccordionSummary-content': {
-                      alignItems: 'center',
-                      gap: 0.75,
-                      my: 0.5,
-                    },
-                  }}
-                >
-                  {detailKindIcon(detail.kind)}
-                  <Typography
+        <AccordionDetails sx={{ px: 0, py: 0 }}>
+          <Box
+            ref={scrollRef}
+            sx={{
+              height: 300,
+              overflowY: 'auto',
+              px: 1,
+              py: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 0.75,
+            }}
+          >
+            {tree.map((node, index) => (
+              <Box key={`${node.detail.step_id ?? node.detail.title}-${index}`}>
+                <DetailRow detail={node.detail} />
+                {node.children.length > 0 ? (
+                  <Box
                     sx={{
-                      fontWeight: 600,
-                      minWidth: 0,
-                      wordBreak: 'break-word',
+                      ml: 1,
+                      mt: 0.5,
+                      pl: 1,
+                      borderLeft: 2,
+                      borderColor: 'divider',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 0.5,
                     }}
-                    variant="caption"
                   >
-                    {detail.title}
-                  </Typography>
-                  {detail.status ? (
-                    <Chip
-                      label={detail.status}
-                      size="small"
-                      sx={{ height: 18 }}
-                    />
-                  ) : null}
-                </AccordionSummary>
-                <AccordionDetails
-                  sx={{
-                    px: 1,
-                    pt: 0,
-                    pb: 1,
-                  }}
-                >
-                  {detail.arguments ? (
-                    <DetailPre label="Arguments" value={detail.arguments} />
-                  ) : null}
-                  {detail.body ? (
-                    <DetailPre label="Output" value={detail.body} />
-                  ) : null}
-                </AccordionDetails>
-              </Accordion>
-            </Box>
-          ))}
+                    {node.children.map((child, childIndex) => (
+                      <DetailRow
+                        key={`${child.title}-${childIndex}`}
+                        detail={child}
+                      />
+                    ))}
+                  </Box>
+                ) : null}
+              </Box>
+            ))}
+          </Box>
         </AccordionDetails>
       </Accordion>
     );
   },
-  (previous, next) => detailsEqual(previous.details, next.details),
+  (previous, next) =>
+    previous.isStreaming === next.isStreaming &&
+    detailsEqual(previous.details, next.details),
 );
 
 function DetailPre({ label, value }: { label: string; value: string }) {
@@ -1173,7 +1262,10 @@ export default function ChatInterface() {
                                 zIndex: 2,
                               }}
                             >
-                              <ChatMessageDetails details={details} />
+                              <ChatMessageDetails
+                                details={details}
+                                isStreaming={message.id === streamingMessageId}
+                              />
                             </Box>
                           ) : null}
                           <Box

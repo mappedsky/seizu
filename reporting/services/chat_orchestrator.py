@@ -71,6 +71,7 @@ from reporting.services.chat_graph import (
     _run_llm_tool_turn,
     _run_tool_call_batch,
     _skill_tool_specs,
+    _tool_call_detail_data,
     _tool_call_requests,
     _trim_inner_loop_messages,
     _trim_messages,
@@ -199,8 +200,19 @@ def _worker_user_message(step: dict[str, Any], dependency_context: str) -> str:
 # --- Detail events -------------------------------------------------------------
 
 
-def _emit(writer: Any, data: dict[str, Any]) -> None:
-    writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": data})
+def _emit(writer: Any, data: dict[str, Any], detail_id: str | None = None) -> None:
+    # A stable id lets the UI reconcile successive states of the same detail
+    # (e.g. a step going running -> completed) into one entry instead of leaving
+    # a stale "running" duplicate behind.
+    writer({"kind": "detail", "id": detail_id or f"detail_{uuid.uuid4().hex}", "data": data})
+
+
+def _step_detail_id(step_id: str) -> str:
+    return f"step-{step_id}"
+
+
+def _verify_detail_id(step_id: str) -> str:
+    return f"verify-{step_id}"
 
 
 async def _structured_invoke(
@@ -284,6 +296,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
             "route": decision.route,
             "body": decision.reason,
         },
+        "routing",
     )
     return {"route": decision.route}
 
@@ -338,6 +351,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
             "steps": [{"id": s["id"], "goal": s["goal"], "depends_on": s["depends_on"]} for s in plan],
             "body": _plan_summary(plan),
         },
+        "plan",
     )
     return {"plan": plan, "step_results": [], "iteration": 0}
 
@@ -564,6 +578,7 @@ async def _run_worker_step(
     writer: Any,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict."""
+    step_id = str(step["id"])
     specs, contract_error = _step_tool_specs(tool_specs, step)
     if contract_error:
         contract_result = _step_contract_error_result(step, contract_error)
@@ -573,8 +588,10 @@ async def _run_worker_step(
                 "kind": "step",
                 "title": f"Step: {step['goal']}",
                 "status": "blocked",
+                "step_id": step_id,
                 "body": contract_error,
             },
+            _step_detail_id(step_id),
         )
         return contract_result
     # Progressive disclosure inside the worker: a skill step starts with only the
@@ -592,7 +609,11 @@ async def _run_worker_step(
         HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results)))
     ]
 
-    _emit(writer, {"kind": "step", "title": f"Step: {step['goal']}", "status": "running", "body": ""})
+    _emit(
+        writer,
+        {"kind": "step", "title": f"Step: {step['goal']}", "status": "running", "step_id": step_id, "body": ""},
+        _step_detail_id(step_id),
+    )
 
     action_count = 0
     output_text = ""
@@ -624,6 +645,10 @@ async def _run_worker_step(
             session_key=session_key,
             batch_id=_confirmation_batch_id_for_requests(batch),
         )
+        # Surface each tool/skill call as a detail tagged with this step, so the UI
+        # can nest the calls under the step that made them.
+        for result in batch_results:
+            _emit(writer, {**_tool_call_detail_data(result), "step_id": step_id})
         tool_ai_message = _ai_message_for_tool_results(ai_message, batch_results)
         messages = [
             *messages,
@@ -683,8 +708,10 @@ async def _run_worker_step(
             "kind": "step",
             "title": f"Step: {step['goal']}",
             "status": "blocked" if blocked is not None or execution_error else "completed",
+            "step_id": step_id,
             "body": _truncate_text(execution_error or output_text, 6000),
         },
+        _step_detail_id(step_id),
     )
     return step_result
 
@@ -780,8 +807,10 @@ async def verifier_node(state: ChatState, config: RunnableConfig) -> dict[str, A
                 "kind": "verify",
                 "title": f"Verify: {step['goal']}",
                 "status": "completed" if passed else "blocked",
+                "step_id": str(step["id"]),
                 "body": reason,
             },
+            _verify_detail_id(str(step["id"])),
         )
     return {"plan": plan, "step_results": results}
 
@@ -941,21 +970,28 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
         }
     ]
     for step in plan:
+        step_id = str(step["id"])
         result = results_by_id.get(step["id"], {})
         details.append(
             {
                 "kind": "step",
                 "title": f"Step: {step['goal']}",
-                "status": "blocked" if result.get("blocked") else "completed",
-                "body": _truncate_text(result.get("output", ""), 6000),
+                "status": "blocked" if result.get("blocked") or result.get("execution_error") else "completed",
+                "step_id": step_id,
+                "body": _truncate_text(str(result.get("execution_error") or result.get("output", "")), 6000),
             }
         )
+        # Per-tool entries are reconstructed name-only (the step result keeps tool
+        # names, not each call's args/output), enough to show what ran under the step.
+        for tool_name in result.get("tools_used", []) or []:
+            details.append({"kind": "tool", "title": f"Tool: {tool_name}", "status": "completed", "step_id": step_id})
         if "verified" in result:
             details.append(
                 {
                     "kind": "verify",
                     "title": f"Verify: {step['goal']}",
                     "status": "completed" if result.get("verified") else "blocked",
+                    "step_id": step_id,
                     "body": result.get("verify_reason", ""),
                 }
             )

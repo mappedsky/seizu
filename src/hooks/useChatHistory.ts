@@ -7,20 +7,38 @@ type SeizuChatHistoryMessage = UIMessage<
     finish_reason?: string;
     response_cut_off?: boolean;
     details?: {
-      kind: 'thinking' | 'skill' | 'tool';
+      kind:
+        | 'thinking'
+        | 'skill'
+        | 'tool'
+        | 'routing'
+        | 'plan'
+        | 'step'
+        | 'verify';
       title: string;
       status?: string;
       arguments?: string;
       body?: string;
+      step_id?: string;
+      route?: string;
     }[];
   },
   {
     'seizu-detail': {
-      kind: 'thinking' | 'skill' | 'tool';
+      kind:
+        | 'thinking'
+        | 'skill'
+        | 'tool'
+        | 'routing'
+        | 'plan'
+        | 'step'
+        | 'verify';
       title: string;
       status?: string;
       arguments?: string;
       body?: string;
+      step_id?: string;
+      route?: string;
     };
   }
 >;
@@ -33,11 +51,20 @@ interface ChatHistoryMessage {
     finish_reason?: string;
     response_cut_off?: boolean;
     details?: {
-      kind: 'thinking' | 'skill' | 'tool';
+      kind:
+        | 'thinking'
+        | 'skill'
+        | 'tool'
+        | 'routing'
+        | 'plan'
+        | 'step'
+        | 'verify';
       title: string;
       status?: string;
       arguments?: string;
       body?: string;
+      step_id?: string;
+      route?: string;
     }[];
   } | null;
 }
