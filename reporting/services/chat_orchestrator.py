@@ -702,12 +702,18 @@ async def _run_worker_step(
         step_result["awaiting_confirmation"] = True
         step_result["confirmation_id"] = _confirmation_id_from_content(confirmation_blocked[0].content)
         step_result["confirmation_message"] = _blocked_tool_call_response(confirmation_blocked)
+    if confirmation_blocked:
+        step_status = "awaiting"  # parked on an approval; a wait, not a failure
+    elif blocked is not None or execution_error:
+        step_status = "blocked"
+    else:
+        step_status = "completed"
     _emit(
         writer,
         {
             "kind": "step",
             "title": f"Step: {step['goal']}",
-            "status": "blocked" if blocked is not None or execution_error else "completed",
+            "status": step_status,
             "step_id": step_id,
             "body": _truncate_text(execution_error or output_text, 6000),
         },
@@ -972,11 +978,17 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
     for step in plan:
         step_id = str(step["id"])
         result = results_by_id.get(step["id"], {})
+        if result.get("awaiting_confirmation"):
+            step_status = "awaiting"
+        elif result.get("blocked") or result.get("execution_error"):
+            step_status = "blocked"
+        else:
+            step_status = "completed"
         details.append(
             {
                 "kind": "step",
                 "title": f"Step: {step['goal']}",
-                "status": "blocked" if result.get("blocked") or result.get("execution_error") else "completed",
+                "status": step_status,
                 "step_id": step_id,
                 "body": _truncate_text(str(result.get("execution_error") or result.get("output", "")), 6000),
             }

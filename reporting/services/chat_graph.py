@@ -1748,7 +1748,14 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
 
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
-    status = "blocked" if result.blocked is not None else "completed"
+    # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
+    # other block is a failure ("blocked").
+    if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
+        status = "awaiting"
+    elif result.blocked is not None:
+        status = "blocked"
+    else:
+        status = "completed"
     return {
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",

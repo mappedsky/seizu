@@ -30,6 +30,9 @@ import {
 } from '@mui/material';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import KeyboardDoubleArrowDown from '@mui/icons-material/KeyboardDoubleArrowDown';
+import CheckCircle from '@mui/icons-material/CheckCircle';
+import HourglassEmpty from '@mui/icons-material/HourglassEmpty';
+import ErrorOutlined from '@mui/icons-material/ErrorOutlined';
 import Psychology from '@mui/icons-material/Psychology';
 import AltRoute from '@mui/icons-material/AltRoute';
 import Checklist from '@mui/icons-material/Checklist';
@@ -313,20 +316,48 @@ function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
   return nodes;
 }
 
-function detailStatusColor(
-  status: string | undefined,
-): 'default' | 'success' | 'warning' | 'error' {
+// Status icons replace text labels: a checkmark/spinner/hourglass/error reads at
+// a glance, and the raw status stays available on hover. "blocked" is a failure
+// (a verification that did not pass, a permission/error block); a genuine wait is
+// the distinct "awaiting"/"pending" confirmation state.
+function DetailStatus({ status }: { status?: string }) {
+  if (!status) return null;
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  let icon;
   switch (status) {
     case 'completed':
-      return 'success';
+      icon = <CheckCircle sx={{ fontSize: 15, color: 'success.main' }} />;
+      break;
     case 'running':
-      return 'warning';
+      icon = <CircularProgress size={12} thickness={6} />;
+      break;
+    case 'awaiting':
+    case 'pending':
+      icon = <HourglassEmpty sx={{ fontSize: 15, color: 'warning.main' }} />;
+      break;
     case 'blocked':
+    case 'failed':
     case 'denied':
-      return 'error';
+      icon = <ErrorOutlined sx={{ fontSize: 15, color: 'error.main' }} />;
+      break;
     default:
-      return 'default';
+      icon = <CheckCircle sx={{ fontSize: 15, color: 'text.disabled' }} />;
   }
+  return (
+    <Tooltip title={label}>
+      <Box
+        component="span"
+        sx={{
+          alignItems: 'center',
+          display: 'inline-flex',
+          flexShrink: 0,
+          ml: 'auto',
+        }}
+      >
+        {icon}
+      </Box>
+    </Tooltip>
+  );
 }
 
 function DetailRow({ detail }: { detail: SeizuChatDetail }) {
@@ -365,14 +396,7 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
         >
           {detail.title}
         </Typography>
-        {detail.status ? (
-          <Chip
-            label={detail.status}
-            size="small"
-            color={detailStatusColor(detail.status)}
-            sx={{ height: 18 }}
-          />
-        ) : null}
+        <DetailStatus status={detail.status} />
       </AccordionSummary>
       {hasContent ? (
         <AccordionDetails sx={{ px: 1, pt: 0, pb: 1 }}>
