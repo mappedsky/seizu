@@ -262,6 +262,40 @@ def test_enforce_required_arguments_merges_static_args_and_rejects_conflicts():
     assert "worker used" in str(error)
 
 
+def test_enforce_required_arguments_ignores_placeholder_values():
+    spec = chat_graph.ChatToolSpec(
+        name="attack_path__trace", kind="skill", description="trace", input_schema={"type": "object"}
+    )
+    # The planner left a template for the value derived from a dependency step.
+    step = _step(
+        "s3",
+        action_kind="skill",
+        required_action="attack_path__trace",
+        required_arguments={"vulnerability_ids": ["<from s2>"], "depth": 3},
+    )
+    request = chat_graph.ToolCallRequest(
+        id="c1",
+        name="attack_path__trace",
+        arguments={"vulnerability_ids": ["CVE-2023-41419"]},
+        spec=spec,
+    )
+
+    enforced, error = chat_orchestrator._enforce_required_arguments(step, [request])
+    assert error is None
+    # The placeholder is not enforced (worker's real value wins); the concrete
+    # static arg (depth) is still applied.
+    assert enforced[0].arguments == {"vulnerability_ids": ["CVE-2023-41419"], "depth": 3}
+
+
+def test_is_placeholder_value_detects_templates():
+    assert chat_orchestrator._is_placeholder_value("<from s2>")
+    assert chat_orchestrator._is_placeholder_value(["<vulnerability_id>"])
+    assert chat_orchestrator._is_placeholder_value({"id": "<derived>"})
+    assert not chat_orchestrator._is_placeholder_value("CVE-2023-41419")
+    assert not chat_orchestrator._is_placeholder_value(["CVE-1", "CVE-2"])
+    assert not chat_orchestrator._is_placeholder_value(3)
+
+
 async def test_worker_step_fails_when_required_action_is_not_called():
     model = _OrchestratorFakeModel(stream_text="I will pull the repo risk snapshot next.")
     details: list[dict[str, Any]] = []

@@ -145,8 +145,10 @@ _PLANNER_PROMPT = (
     ' it must call a specific tool, and "answer" only for a synthesis/selection'
     " step that needs no live action. For skill/tool steps, required_action must"
     " be the exact listed skill/tool name; required_arguments should include"
-    " known static arguments and may omit values that must be derived from"
-    " dependency results. Put the same exact name in suggested_tools. Keep steps"
+    " known static arguments and must OMIT any value that has to be derived from"
+    " a dependency result (do not put a placeholder like '<from s2>' — leave the"
+    " argument out and the sub-agent will fill it). Put the same exact name in"
+    " suggested_tools. Keep steps"
     " independent unless a real data dependency exists, so they can run in"
     " parallel. Do not invent tools or mark a live-data step as answer."
 )
@@ -814,6 +816,23 @@ def _step_contract_error_result(step: dict[str, Any], error: str) -> dict[str, A
     }
 
 
+def _is_placeholder_value(value: Any) -> bool:
+    """True when a required_argument value is a template the worker must fill in.
+
+    The planner is meant to omit arguments that must be derived from a dependency
+    step's result, but it often leaves a template instead (e.g. "<from s2>",
+    "['<vulnerability_id>']"). Those must not be enforced as literal values —
+    the worker supplies the real value from the dependency context.
+    """
+    if isinstance(value, str):
+        return "<" in value and ">" in value
+    if isinstance(value, (list, tuple)):
+        return any(_is_placeholder_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(_is_placeholder_value(item) for item in value.values())
+    return False
+
+
 def _enforce_required_arguments(
     step: dict[str, Any], requests: list[chat_graph.ToolCallRequest]
 ) -> tuple[list[chat_graph.ToolCallRequest], str | None]:
@@ -829,6 +848,10 @@ def _enforce_required_arguments(
             continue
         merged = dict(request.arguments)
         for key, value in required_arguments.items():
+            # Skip placeholder values: the planner meant the worker to derive this
+            # from a dependency result, so its concrete value wins.
+            if _is_placeholder_value(value):
+                continue
             if key in merged and merged[key] != value:
                 return (
                     requests,
