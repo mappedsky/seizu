@@ -37,6 +37,7 @@ import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import {
   useToolsList,
   useToolMutations,
+  mcpNameForTool,
   ToolItem,
   ToolParamDef,
   CreateToolRequest,
@@ -95,6 +96,7 @@ function toolStatus(item: ToolItem): { enabled: boolean; label: string } {
 function toolViewData(item: ToolItem): ToolViewData {
   return {
     name: item.name,
+    slug: mcpNameForTool(item),
     description: item.description,
     cypher: item.cypher,
     parameters: item.parameters,
@@ -557,7 +559,7 @@ function ToolsetTools() {
       label: 'Slug',
       hideBelow: 'lg',
       cellSx: listTableMonoCellSx,
-      render: (item) => item.tool_id,
+      render: (item) => mcpNameForTool(item),
     },
     {
       key: 'description',

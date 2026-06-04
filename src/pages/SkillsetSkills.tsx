@@ -43,6 +43,7 @@ import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import {
   useSkillsList,
   useSkillMutations,
+  mcpNameForSkill,
   SkillItem,
   CreateSkillRequest,
   UpdateSkillRequest,
@@ -531,7 +532,7 @@ function SkillDetailDialog({
               Slug
             </Typography>
             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-              {skill.skill_id}
+              {mcpNameForSkill(skill)}
             </Typography>
           </Box>
           <Box>
@@ -1027,7 +1028,7 @@ function SkillsetSkills() {
       label: 'Slug',
       hideBelow: 'lg',
       cellSx: listTableMonoCellSx,
-      render: (skill) => skill.skill_id,
+      render: (skill) => mcpNameForSkill(skill),
     },
     {
       key: 'description',

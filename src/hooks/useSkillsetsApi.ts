@@ -26,6 +26,17 @@ export interface SkillsetVersion {
   comment: string | null;
 }
 
+/**
+ * The fully-qualified MCP slug for a skill — `skillset__skill`. This is the exact
+ * name the skill is callable/renderable by (in chat, the MCP server, the CLI).
+ */
+export function mcpNameForSkill(skill: {
+  skill_id: string;
+  skillset_id: string;
+}): string {
+  return `${skill.skillset_id}__${skill.skill_id}`;
+}
+
 export interface SkillItem {
   skill_id: string;
   skillset_id: string;
