@@ -83,6 +83,64 @@ describe('MarkdocRenderer', () => {
     expect(a?.className).toContain('MuiLink-underlineHover');
   });
 
+  it('renders an LLM <details> block converted from HTML', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source={
+          '<details><summary>Title</summary>\n\nBody content here.\n\n</details>'
+        }
+      />,
+    );
+    expect(container.querySelector('details')).not.toBeNull();
+    expect(container.textContent).toContain('Title');
+    expect(container.textContent).toContain('Body content here.');
+  });
+
+  it('does not truncate <details> body at an embedded </details> string', () => {
+    const source =
+      '<details><summary>Example</summary>\n' +
+      'See the closing tag: </details> and more content here.\n' +
+      '</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.textContent).toContain('See the closing tag:');
+    expect(container.textContent).toContain('and more content here.');
+  });
+
+  it('does not let injected {% /details %} escape the <details> block boundary', () => {
+    // Without Markdoc-tag escaping, {% /details %} closes the block prematurely and
+    // {% details summary="injected" %} opens a second block, yielding two details
+    // elements.  With escaping, all body content stays inside one block.
+    const source =
+      '<details><summary>s</summary>' +
+      '{% /details %} outside {% details summary="injected" %}' +
+      '</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.querySelectorAll('details').length).toBe(1);
+    expect(container.textContent).toContain('outside');
+  });
+
+  it('handles HTML attribute with > inside summary without corrupting text', () => {
+    const source =
+      '<details><summary><b data-x="a>b">label</b></summary>body</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.querySelector('details')).not.toBeNull();
+    // The summary should contain the text content, not raw HTML fragments.
+    const summary = container.querySelector('summary');
+    expect(summary?.textContent).not.toContain('<b');
+    expect(summary?.textContent).not.toContain('data-x');
+  });
+
+  it('renders the continuation tag as a divider', () => {
+    render(
+      <MarkdocRenderer source={'Before\n\n{% continuation /%}\n\nAfter'} />,
+    );
+
+    expect(screen.getByText('Before')).toBeInTheDocument();
+    expect(screen.getByText('After')).toBeInTheDocument();
+    expect(screen.getByText('...')).toBeInTheDocument();
+    expect(screen.queryByText('{% continuation /%}')).not.toBeInTheDocument();
+  });
+
   it('does not render nested paragraphs when conditionals return block content', () => {
     const { container } = render(
       <MarkdocRenderer

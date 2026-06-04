@@ -2,21 +2,67 @@ import { useCallback } from 'react';
 import type { UIMessage } from 'ai';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 
+type SeizuChatHistoryMessage = UIMessage<
+  {
+    finish_reason?: string;
+    response_cut_off?: boolean;
+    details?: {
+      kind: 'thinking' | 'skill' | 'tool';
+      title: string;
+      status?: string;
+      arguments?: string;
+      body?: string;
+    }[];
+  },
+  {
+    'seizu-detail': {
+      kind: 'thinking' | 'skill' | 'tool';
+      title: string;
+      status?: string;
+      arguments?: string;
+      body?: string;
+    };
+  }
+>;
+
 interface ChatHistoryMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  metadata?: {
+    finish_reason?: string;
+    response_cut_off?: boolean;
+    details?: {
+      kind: 'thinking' | 'skill' | 'tool';
+      title: string;
+      status?: string;
+      arguments?: string;
+      body?: string;
+    }[];
+  } | null;
 }
 
 interface ChatHistoryResponse {
   messages: ChatHistoryMessage[];
 }
 
-function toUIMessage(message: ChatHistoryMessage): UIMessage {
+function toUIMessage(message: ChatHistoryMessage): SeizuChatHistoryMessage {
+  const detailParts =
+    message.role === 'assistant'
+      ? (message.metadata?.details ?? []).map((detail, index) => ({
+          type: 'data-seizu-detail' as const,
+          id: `${message.id}-detail-${index}`,
+          data: detail,
+        }))
+      : [];
+  const textParts = [{ type: 'text' as const, text: message.text }];
+  const parts = [...detailParts, ...textParts];
+
   return {
     id: message.id,
     role: message.role,
-    parts: [{ type: 'text', text: message.text }],
+    metadata: message.metadata ?? undefined,
+    parts,
   };
 }
 
@@ -26,11 +72,13 @@ function toUIMessage(message: ChatHistoryMessage): UIMessage {
  * empty array when auth is required but no token is available yet, or on any
  * failure — a missing history should never block starting a conversation.
  */
-export function useChatHistory(): (threadId: string) => Promise<UIMessage[]> {
+export function useChatHistory(): (
+  threadId: string,
+) => Promise<SeizuChatHistoryMessage[]> {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
 
   return useCallback(
-    async (threadId: string): Promise<UIMessage[]> => {
+    async (threadId: string): Promise<SeizuChatHistoryMessage[]> => {
       if (!checkAuthReady()) return [];
       try {
         const res = await fetch(

@@ -23,6 +23,7 @@ import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
+import { brand } from 'src/theme/brand';
 
 function MarkdocTable({ children }: { children?: React.ReactNode }) {
   return (
@@ -99,28 +100,107 @@ function MarkdocDetails({
   );
 }
 
+function MarkdocContinuation() {
+  return (
+    <Box
+      aria-hidden="true"
+      sx={{
+        alignItems: 'center',
+        color: (theme) =>
+          theme.palette.mode === 'dark' ? brand.starlight : brand.starlightDark,
+        display: 'flex',
+        gap: 1,
+        my: 1.5,
+        '&::before, &::after': {
+          borderTop: 2,
+          borderColor: 'currentColor',
+          content: '""',
+          flex: 1,
+        },
+      }}
+    >
+      <Typography
+        component="span"
+        sx={{
+          color: 'inherit',
+          fontFamily: '"JetBrains Mono", monospace',
+          fontSize: '0.8em',
+          fontWeight: 700,
+          lineHeight: 1,
+        }}
+      >
+        ...
+      </Typography>
+    </Box>
+  );
+}
+
 // Preprocesses LLM-generated <details>/<summary> HTML blocks into Markdoc
 // {% details %} tag syntax so they render as collapsible sections.  Raw HTML
 // is blocked by Markdoc's html:false setting (intentional security constraint),
 // so this conversion is the safe way to support them.
 // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
 const DETAILS_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
-const DETAILS_BLOCK_RE =
-  /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi;
+// Strips HTML tags including those whose attributes contain ">", which the
+// simpler [^>]+ form would mis-handle (e.g. <b onclick="a>b">).
+const HTML_TAG_RE = /<(?:[^"'>]|"[^"]*"|'[^']*')*>/g;
+// Matches the <details> opener through </summary>; body closing is found by
+// taking the last raw </details> before the next raw <details> opener. That
+// preserves inline "</details>" text in the body while still supporting
+// multiple sibling HTML details blocks.
+const DETAILS_OPEN_RE = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>/i;
+
+function findDetailsCloseTag(
+  text: string,
+): { index: number; length: number } | null {
+  const nextOpenIndex = text.indexOf('<details');
+  const searchEnd = nextOpenIndex === -1 ? text.length : nextOpenIndex;
+  const closeIndex = text.lastIndexOf('</details>', searchEnd);
+  return closeIndex === -1
+    ? null
+    : { index: closeIndex, length: '</details>'.length };
+}
 
 function preprocessDetailsBlocks(source: string): string {
-  return source.replace(
-    DETAILS_BLOCK_RE,
-    (_match, rawSummary: string, body: string) => {
+  let result = '';
+  let remaining = source;
+
+  for (;;) {
+    const match = DETAILS_OPEN_RE.exec(remaining);
+    if (!match) {
+      result += remaining;
+      break;
+    }
+
+    const afterSummary = remaining.slice(match.index + match[0].length);
+    const closeTag = findDetailsCloseTag(afterSummary);
+
+    result += remaining.slice(0, match.index);
+
+    if (!closeTag) {
+      // No matching closing tag — leave this occurrence unchanged.
+      result += match[0];
+      remaining = afterSummary;
+    } else {
+      const rawSummary = match[1];
       const summaryText = rawSummary
-        .replace(/<[^>]+>/g, '')
+        .replace(HTML_TAG_RE, '')
         .replace(DETAILS_CONTROL_RE, '')
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
         .trim();
-      return `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
-    },
-  );
+      // Escape Markdoc tag openers in the body so LLM content cannot inject
+      // registered tags (e.g. {% /details %} to escape the block, or
+      // {% continuation /%} to insert a spurious divider).
+      const body = afterSummary
+        .slice(0, closeTag.index)
+        .replace(/\{%/g, '\\{%');
+      result += `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
+      remaining = afterSummary.slice(closeTag.index + closeTag.length);
+    }
+  }
+
+  return result;
 }
 
 const markdocComponents = {
@@ -132,6 +212,7 @@ const markdocComponents = {
   MuiTableHeadCell: MarkdocHeadCell,
   MuiTableCell: MarkdocCell,
   MuiDetails: MarkdocDetails,
+  MuiContinuation: MarkdocContinuation,
 };
 
 const headingNode = {
@@ -349,6 +430,10 @@ const markdocNodes = {
 };
 
 const markdocTags = {
+  continuation: {
+    render: 'MuiContinuation',
+    selfClosing: true,
+  },
   details: {
     render: 'MuiDetails',
     attributes: {

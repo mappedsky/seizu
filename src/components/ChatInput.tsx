@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type FormEvent,
+  type KeyboardEvent,
   memo,
   useCallback,
   useRef,
@@ -40,12 +41,24 @@ export default memo(function ChatInput({
     setInput(event.target.value);
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const submitInput = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed || busy || disabled) return;
+    if (!trimmed || busy || disabled) return false;
     setInput('');
     onSubmit(trimmed);
+    return true;
+  }, [busy, disabled, input, onSubmit]);
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    submitInput();
+  };
+
+  const handleInputKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey) return;
+    if (event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    submitInput();
   };
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
@@ -114,6 +127,7 @@ export default memo(function ChatInput({
               fullWidth
               value={input}
               onChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
               placeholder="Ask about your security graph..."
               disabled={busy}
               variant="outlined"

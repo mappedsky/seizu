@@ -17,6 +17,8 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
+CONTINUATION_MARKDOC = "\n\n{% continuation /%}\n\n"
+
 
 def message_text(content: Any) -> str:
     """Flatten LangChain message content (str | content blocks) to plain text.
@@ -39,6 +41,11 @@ def message_text(content: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return ""
+
+
+def strip_chat_ui_markers(text: str) -> str:
+    """Remove UI-only Markdoc markers before sending history back to the LLM."""
+    return text.replace(CONTINUATION_MARKDOC, "\n\n").strip()
 
 
 _TAGS_KEY = "seizu_tags"

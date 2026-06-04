@@ -11,11 +11,13 @@ class ChatStreamRequest(BaseModel):
     message: str = Field(default="", max_length=32000)
     thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    continue_response: bool = False
+    continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def require_message_or_resume(self) -> "ChatStreamRequest":
-        if not self.message and not self.resume_confirmation_id:
-            raise ValueError("message or resume_confirmation_id is required")
+        if not self.message and not self.resume_confirmation_id and not self.continue_response:
+            raise ValueError("message, resume_confirmation_id, or continue_response is required")
         return self
 
 
@@ -23,6 +25,7 @@ class ChatHistoryMessage(BaseModel):
     id: str
     role: Literal["user", "assistant"]
     text: str
+    metadata: dict[str, object] | None = None
 
 
 class ChatHistoryResponse(BaseModel):

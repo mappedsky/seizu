@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
+from reporting.routes import chat
 from reporting.schema.chat import ChatSessionItem
 from reporting.schema.report_config import User
 
@@ -47,6 +48,29 @@ class FakeCutoffChatGraph(FakeChatGraph):
         self.calls.append((input, config, stream_mode))
         yield {"kind": "token", "content": "Partial answer"}
         yield {"kind": "finish_reason", "finish_reason": "length"}
+
+
+class FakeDetailChatGraph(FakeChatGraph):
+    async def astream(
+        self,
+        input: dict[str, Any],
+        config: dict[str, Any],
+        *,
+        stream_mode: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.calls.append((input, config, stream_mode))
+        yield {
+            "kind": "detail",
+            "id": "detail_1",
+            "data": {
+                "kind": "tool",
+                "title": "Tool: graph__schema",
+                "status": "completed",
+                "arguments": "{}",
+                "body": '{"labels":["CVE"]}',
+            },
+        }
+        yield {"kind": "token", "content": "Schema has CVEs."}
 
 
 def _current_user(permissions: frozenset[str] = ALL_PERMISSIONS) -> CurrentUser:
@@ -171,6 +195,127 @@ async def test_chat_stream_surfaces_output_limit_finish_reason(mocker):
     assert '"delta":"Partial answer"' in body
     assert '"finishReason":"length"' in body
     assert '"response_cut_off":true' in body
+    assert '"messageMetadata":{"finish_reason":"length","response_cut_off":true}' in body
+
+
+async def test_chat_stream_continuation_reuses_message_id_and_emits_marker(mocker):
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={
+                "thread_id": "1001",
+                "continue_response": True,
+                "continue_message_id": "assistant-message-1",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"messageId":"assistant-message-1"' in body
+    assert '"delta":"\\n\\n{% continuation /%}\\n\\n"' in body
+    graph_input, _, _ = fake_graph.calls[0]
+    assert graph_input["messages"][0].additional_kwargs["continue_response"] is True
+
+
+def test_history_message_metadata_marks_output_limit_notice():
+    message = type(
+        "Message",
+        (),
+        {
+            "response_metadata": {
+                "seizu_details": [
+                    {
+                        "kind": "tool",
+                        "title": "Tool: graph__schema",
+                        "status": "completed",
+                        "arguments": "{}",
+                        "body": '{"labels":["CVE"]}',
+                    }
+                ]
+            }
+        },
+    )()
+    metadata = chat._history_message_metadata(
+        message,
+        "assistant",
+        "Partial.\n\n> Response stopped because the model hit its output limit. Ask me to continue from here.",
+    )
+
+    assert metadata == {
+        "finish_reason": "length",
+        "response_cut_off": True,
+        "details": [
+            {
+                "kind": "tool",
+                "title": "Tool: graph__schema",
+                "status": "completed",
+                "arguments": "{}",
+                "body": '{"labels":["CVE"]}',
+            }
+        ],
+    }
+    assert (
+        chat._history_message_metadata(
+            type("Message", (), {})(),
+            "user",
+            "Response stopped because the model hit its output limit",
+        )
+        is None
+    )
+
+
+def test_history_message_metadata_prefers_seizu_output_limit_over_text():
+    """seizu_output_limit in response_metadata takes precedence over text matching."""
+    message = type(
+        "Message",
+        (),
+        {"response_metadata": {"seizu_output_limit": True}},
+    )()
+    metadata = chat._history_message_metadata(message, "assistant", "No notice phrase here.")
+    assert metadata is not None
+    assert metadata["finish_reason"] == "length"
+    assert metadata["response_cut_off"] is True
+
+
+def test_history_message_metadata_falls_back_to_text_when_no_signal():
+    """Text-based fallback still works for messages persisted before seizu_output_limit."""
+    message = type("Message", (), {"response_metadata": {}})()
+    text = "partial\n\n> Response stopped because the model hit its output limit. Ask me to continue."
+    metadata = chat._history_message_metadata(message, "assistant", text)
+    assert metadata is not None
+    assert metadata["finish_reason"] == "length"
+
+
+def test_history_message_metadata_no_false_positive_from_seizu_output_limit_absent():
+    """Message with no output_limit signal and no notice phrase has no finish_reason."""
+    message = type("Message", (), {"response_metadata": {}})()
+    metadata = chat._history_message_metadata(message, "assistant", "Normal response.")
+    assert metadata is None
+
+
+async def test_chat_stream_emits_detail_data_parts(mocker):
+    fake_graph = FakeDetailChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert '"type":"data-seizu-detail"' in body
+    assert '"id":"detail_1"' in body
+    assert '"title":"Tool: graph__schema"' in body
+    assert '"delta":"Schema has CVEs."' in body
 
 
 async def test_chat_stream_with_real_graph_emits_tokens(mocker):
@@ -244,6 +389,7 @@ async def test_chat_stream_rejects_missing_session_before_graph_write(mocker):
         )
 
     assert response.status_code == 200
+    assert '"type":"start"' not in response.text
     assert '"errorText":"Session not found"' in response.text
     assert '"finishReason":"error"' in response.text
     assert '"type":"text-start"' not in response.text
@@ -280,6 +426,39 @@ async def test_chat_history_round_trips_persisted_messages(mocker):
     assert messages[1]["role"] == "assistant"
     assert messages[1]["text"] == "I received your message: Hi"
     assert all(message["id"] for message in messages)
+
+
+async def test_chat_history_hides_and_collapses_continue_response_turn(mocker):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from reporting.services.chat_graph import build_chat_graph
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
+    graph = build_chat_graph(MemorySaver())
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=graph)
+    mocker.patch("reporting.services.chat_graph.get_chat_graph", return_value=graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1010")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1010"},
+        )
+        assert first.status_code == 200
+        continuation = await client.post(
+            "/api/v1/chat/stream",
+            json={"thread_id": "1010", "continue_response": True},
+        )
+        assert continuation.status_code == 200
+        history = await client.get("/api/v1/chat/history", params={"thread_id": "1010"})
+
+    assert history.status_code == 200
+    messages = history.json()["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["text"] == "Hi"
+    assert messages[1]["text"].startswith("I received your message: Hi")
+    assert messages[1]["metadata"] is None
 
 
 async def test_chat_sessions_list_sorts_by_updated_at(mocker):

@@ -32,7 +32,15 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.services import action_confirmations, mcp_runtime, report_store
-from reporting.services.chat_messages import MessageTag, drop_tagged, has_tag, message_text, tag_message
+from reporting.services.chat_messages import (
+    CONTINUATION_MARKDOC,
+    MessageTag,
+    drop_tagged,
+    has_tag,
+    message_text,
+    strip_chat_ui_markers,
+    tag_message,
+)
 from reporting.services.mcp_runtime import ChatBlockReason
 
 
@@ -91,26 +99,29 @@ class LLMTurnResult:
     message: AIMessage
     streamed: str
     finish_reason: str | None = None
+    details: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class AnswerBudget:
+    min_words: int
+    max_words: int
+    max_bullets: int
+    max_tables: int
 
 
 class SeizuChatDeepSeekMixin:
-    """Round-trip DeepSeek's OpenAI-API-shape ``reasoning_content`` field.
+    """Expose DeepSeek's OpenAI-API-shape ``reasoning_content`` field.
 
     DeepSeek emits its hidden chain-of-thought in the OpenAI Chat Completions
     streaming shape under ``choices[0].delta.reasoning_content``. The current
     ``langchain-deepseek`` adapter pulls that into ``AIMessageChunk.additional_kwargs``
-    on the way down, but does not write it back into the assistant turn on the
-    way up — so on a tool-call follow-up, DeepSeek loses its own thinking and
-    quality regresses. This mixin patches both halves.
+    on the way down. We keep it available long enough to render UI diagnostics,
+    but strip it before the message is reused as model context.
 
     Scope: DeepSeek only (and OpenAI-shape gateways routed to DeepSeek). It does
     not handle Anthropic ``ThinkingBlock`` or Gemini reasoning parts, which use
-    different transport shapes; those providers don't need the round-trip
-    today because their LangChain adapters already serialise thinking back.
-
-    TODO: Remove this mixin when langchain-deepseek serialises
-    ``reasoning_content`` back into assistant tool-call messages upstream.
-    See https://github.com/langchain-ai/docs/issues/3765.
+    different transport shapes.
     """
 
     def _convert_chunk_to_generation_chunk(
@@ -128,18 +139,6 @@ class SeizuChatDeepSeekMixin:
         if reasoning_content and generation_chunk is not None and isinstance(generation_chunk.message, AIMessageChunk):
             generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning_content
         return generation_chunk
-
-    def _get_request_payload(
-        self,
-        input_: Any,
-        *,
-        stop: list[str] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        messages = self._convert_input(input_).to_messages()  # type: ignore[attr-defined]
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)  # type: ignore[misc]
-        _add_reasoning_content_to_payload(payload, messages)
-        return payload
 
 
 _VALID_CHAT_PROVIDERS = frozenset({"mock", "openai", "anthropic", "gemini", "deepseek"})
@@ -168,8 +167,66 @@ async def load_thread_messages(current_user: CurrentUser, thread_id: str, *, lim
     messages = values.get("messages", [])
     if not isinstance(messages, list):
         return []
-    filtered = drop_tagged(messages, MessageTag.EPHEMERAL)
-    return filtered[-limit:] if limit > 0 else []
+    visible = _collapse_ephemeral_continuations(messages)
+    return visible[-limit:] if limit > 0 else []
+
+
+def _collapse_ephemeral_continuations(messages: list[Any]) -> list[Any]:
+    visible: list[Any] = []
+    merge_next_ai = False
+    for message in messages:
+        if has_tag(message, MessageTag.EPHEMERAL):
+            additional_kwargs = getattr(message, "additional_kwargs", None)
+            if isinstance(additional_kwargs, dict) and additional_kwargs.get("continue_response") is True:
+                merge_next_ai = True
+            continue
+        if merge_next_ai and isinstance(message, AIMessage):
+            merge_next_ai = False
+            if visible and isinstance(visible[-1], AIMessage):
+                visible[-1] = _merge_ai_continuation(visible[-1], message)
+            # When the merge target is absent (e.g. trimmed by the message cap),
+            # discard the orphaned continuation rather than appending it as a
+            # confusing standalone message.
+            continue
+        else:
+            merge_next_ai = False
+        visible.append(message)
+    return visible
+
+
+def _merge_ai_continuation(previous: AIMessage, continuation: AIMessage) -> AIMessage:
+    previous_text = _strip_output_limit_notice(message_text(previous.content))
+    continuation_text = message_text(continuation.content).lstrip()
+    if not previous_text:
+        merged_text = continuation_text
+    elif not continuation_text:
+        merged_text = previous_text
+    else:
+        merged_text = f"{previous_text}{CONTINUATION_MARKDOC}{continuation_text}"
+    previous_details = previous.response_metadata.get("seizu_details", [])
+    continuation_details = continuation.response_metadata.get("seizu_details", [])
+    merged_details = (
+        [
+            *previous_details,
+            *continuation_details,
+        ]
+        if isinstance(previous_details, list) and isinstance(continuation_details, list)
+        else []
+    )
+    return AIMessage(
+        content=merged_text,
+        id=previous.id,
+        additional_kwargs={**previous.additional_kwargs, **continuation.additional_kwargs},
+        response_metadata={
+            **previous.response_metadata,
+            **continuation.response_metadata,
+            **({"seizu_details": merged_details} if merged_details else {}),
+        },
+    )
+
+
+def _strip_output_limit_notice(response: str) -> str:
+    return response.replace(_OUTPUT_LIMIT_NOTICE, "").replace(_OUTPUT_LIMIT_SUMMARY_NOTICE, "").rstrip()
 
 
 async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> None:
@@ -246,6 +303,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     response_is_broken = False
     response_hit_output_limit = False
     streamed_response = ""
+    detail_events: list[dict[str, Any]] = []
     # Retry guidance for the *next* LLM call is appended to the system prompt
     # so it never appears as a mid-conversation SystemMessage (which several
     # provider adapters — most notably ChatAnthropic — discourage).
@@ -268,6 +326,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         ai_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
+        detail_events.extend(turn_result.details)
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
         if unavailable:
             action_summaries.append(_tool_call_user_summary(unavailable))
@@ -308,7 +367,6 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
 
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
-        writer({"kind": "token", "content": _tool_call_start_status(batch)})
         batch_id = uuid.uuid4().hex
         results = await _run_tool_call_batch(
             batch,
@@ -316,6 +374,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             session_key=_client_thread_id_from_config(config),
             batch_id=batch_id,
         )
+        for result in results:
+            detail_data = _tool_call_detail_data(result)
+            detail_events.append(detail_data)
+            writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
         messages = [
@@ -354,10 +416,14 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         final_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
+        detail_events.extend(turn_result.details)
         response = message_text(final_message.content)
-        response, response_hit_output_limit = _append_output_limit_notice(
-            response, turn_result.finish_reason, action_summaries
-        )
+        if response:
+            response, response_hit_output_limit = _append_output_limit_notice(
+                response, turn_result.finish_reason, action_summaries
+            )
+        else:
+            response_is_broken = True
 
     if not response:
         response = _empty_response_fallback(action_summaries)
@@ -372,11 +438,27 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         elif response.startswith(streamed_response):
             writer({"kind": "token", "content": response[len(streamed_response) :]})
         else:
-            writer({"kind": "token", "content": f"\n\n{response}"})
+            tail = f"\n\n{response}"
+            writer({"kind": "token", "content": tail})
+            # Sync the persisted content with what was sent on the wire so that
+            # history replay matches the user-visible conversation. This matters
+            # when an earlier turn already streamed text (e.g. "Let me check…")
+            # before a blocked or fallback response was generated.
+            if streamed_response:
+                response = f"{streamed_response}{tail}"
     if response_hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
 
-    ai_message = AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}")
+    response_metadata: dict[str, Any] = {}
+    if detail_events:
+        response_metadata["seizu_details"] = detail_events
+    if response_hit_output_limit:
+        response_metadata["seizu_output_limit"] = True
+    ai_message = AIMessage(
+        content=response,
+        id=f"msg_{uuid.uuid4().hex}",
+        response_metadata=response_metadata,
+    )
     if response_is_broken:
         tag_message(ai_message, MessageTag.BROKEN)
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
@@ -458,14 +540,12 @@ async def _resume_confirmed_tool_turn(
         writer({"kind": "token", "content": response})
         return _chat_state_with_ai_response(state, response)
 
-    if len(to_run) == 1:
-        writer({"kind": "token", "content": f"Running approved tool `{to_run[0].tool_name}`...\n\n"})
-    else:
-        names = ", ".join(f"`{c.tool_name}`" for c in to_run)
-        writer({"kind": "token", "content": f"Running {len(to_run)} approved tools: {names}...\n\n"})
+    action_word = "action" if len(to_run) == 1 else "actions"
+    writer({"kind": "token", "content": f"Running approved {action_word}...\n\n"})
 
     outcomes: list[tuple[str, str]] = []  # (tool_name, result_text)
     errors: list[str] = []
+    detail_events: list[dict[str, Any]] = []
 
     async def _run_one(c: ActionConfirmation) -> None:
         claimed = await report_store.claim_action_confirmation_for_execution(
@@ -486,8 +566,10 @@ async def _resume_confirmed_tool_turn(
         )
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
+            detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
         else:
             outcomes.append((c.tool_name, outcome.text))
+            detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="completed"))
 
     max_parallel = settings.CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
@@ -500,11 +582,13 @@ async def _resume_confirmed_tool_turn(
             await _run_one(c)
 
     await asyncio.gather(*(_run_one_limited(c) for c in to_run))
+    for detail_data in detail_events:
+        writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
 
     if errors and not outcomes:
         response = "The approved action(s) could not be executed:\n" + "\n".join(f"- {e}" for e in errors)
         writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return _chat_state_with_ai_response(state, response, details=detail_events)
 
     provider = _chat_provider()
     combined_results = "\n\n".join(f"`{name}`:\n{_truncate_text(text, 6000)}" for name, text in outcomes)
@@ -512,9 +596,11 @@ async def _resume_confirmed_tool_turn(
         combined_results += "\n\nThe following actions could not be executed:\n" + "\n".join(f"- {e}" for e in errors)
 
     if provider == "mock":
-        response = f"Approved action(s) completed.\n\nResult:\n{_truncate_text(combined_results, 4000)}"
+        response = "Approved action(s) completed."
+        if errors:
+            response += "\n\nSome approved actions could not be executed."
         writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return _chat_state_with_ai_response(state, response, details=detail_events)
 
     model = get_chat_model()
     n_ran = len(outcomes)
@@ -535,6 +621,7 @@ async def _resume_confirmed_tool_turn(
         ),
     ]
     turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer)
+    detail_events.extend(turn_result.details)
     response = message_text(turn_result.message.content) or (
         f"Approved action(s) completed.\n\nResult:\n{_truncate_text(combined_results, 4000)}"
     )
@@ -549,11 +636,26 @@ async def _resume_confirmed_tool_turn(
             writer({"kind": "token", "content": f"\n\n{response}"})
     if hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
-    return _chat_state_with_ai_response(state, response)
+    return _chat_state_with_ai_response(state, response, details=detail_events, output_limit=hit_output_limit)
 
 
-def _chat_state_with_ai_response(state: ChatState, response: str) -> ChatState:
-    ai_message = AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}")
+def _chat_state_with_ai_response(
+    state: ChatState,
+    response: str,
+    *,
+    details: list[dict[str, Any]] | None = None,
+    output_limit: bool = False,
+) -> ChatState:
+    response_metadata: dict[str, Any] = {}
+    if details:
+        response_metadata["seizu_details"] = details
+    if output_limit:
+        response_metadata["seizu_output_limit"] = True
+    ai_message = AIMessage(
+        content=response,
+        id=f"msg_{uuid.uuid4().hex}",
+        response_metadata=response_metadata,
+    )
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
 
 
@@ -567,12 +669,10 @@ async def _run_llm_tool_turn(
 ) -> LLMTurnResult:
     """Run one LLM turn, streaming text deltas via *writer* as they arrive.
 
-    Streaming policy: text deltas are emitted live *until* a chunk in this
-    turn signals a tool call (tool_call_chunks, parsed tool_calls, or an
-    Anthropic ``tool_use`` content block). After that, any remaining text in
-    the turn is treated as pre-tool reasoning and is buffered into the merged
-    message but not shown to the user — they would otherwise see "Let me
-    check…" preambles that are about to be invalidated by a tool run.
+    Streaming policy: text deltas stream as they arrive, even when tools are
+    available. Tool-call chunks are still detected so the caller can avoid
+    treating them as user-visible text, but the visible response should progress
+    while details and tool activity are emitted.
 
     Returns the merged message, the concatenation of deltas already shipped,
     and any provider finish reason observed while streaming. The streamed text
@@ -584,6 +684,9 @@ async def _run_llm_tool_turn(
         runnable = bind_tools([_langchain_tool_schema(tool) for tool in tools])
 
     merged: Any | None = None
+    reasoning_detail_id = f"detail_{uuid.uuid4().hex}"
+    reasoning_text = ""
+    reasoning_detail_data: dict[str, Any] | None = None
     streamed = ""
     finish_reason: str | None = None
     stream_text = writer is not None
@@ -592,8 +695,22 @@ async def _run_llm_tool_turn(
         config=config,
     ):
         finish_reason = _chunk_finish_reason(chunk) or finish_reason
-        if stream_text and _chunk_signals_tool_call(chunk):
-            stream_text = False
+        reasoning_delta = _chunk_reasoning_delta(chunk)
+        if reasoning_delta and writer is not None:
+            reasoning_text = _truncate_text(f"{reasoning_text}{reasoning_delta}", 6000)
+            reasoning_detail_data = {
+                "kind": "thinking",
+                "title": "Thinking",
+                "status": "completed",
+                "body": reasoning_text,
+            }
+            writer(
+                {
+                    "kind": "detail",
+                    "id": reasoning_detail_id,
+                    "data": {**reasoning_detail_data, "status": "running"},
+                }
+            )
         if stream_text and writer is not None:
             delta = message_text(getattr(chunk, "content", ""))
             if delta:
@@ -603,9 +720,10 @@ async def _run_llm_tool_turn(
 
     if isinstance(merged, AIMessage):
         return LLMTurnResult(
-            message=merged,
+            message=_strip_reasoning_context(merged),
             streamed=streamed,
             finish_reason=finish_reason or _chunk_finish_reason(merged),
+            details=(reasoning_detail_data,) if reasoning_detail_data else (),
         )
     fallback = AIMessage(
         content=message_text(getattr(merged, "content", "")) if merged is not None else "",
@@ -614,33 +732,49 @@ async def _run_llm_tool_turn(
         id=getattr(merged, "id", None),
     )
     return LLMTurnResult(
-        message=fallback,
+        message=_strip_reasoning_context(fallback),
         streamed=streamed,
         finish_reason=finish_reason or _chunk_finish_reason(merged),
+        details=(reasoning_detail_data,) if reasoning_detail_data else (),
     )
 
 
-def _chunk_signals_tool_call(chunk: Any) -> bool:
-    """True if *chunk* carries a tool-call delta — partial or complete."""
-    if getattr(chunk, "tool_call_chunks", None):
-        return True
-    if getattr(chunk, "tool_calls", None):
-        return True
-    if getattr(chunk, "invalid_tool_calls", None):
-        return True
-    # Anthropic streams ``tool_use`` blocks inside ``content`` as content-block
-    # dicts; LangChain typically also surfaces them via ``tool_call_chunks`` but
-    # we still check the content list so we trip on the earliest signal.
+def _strip_reasoning_context(message: AIMessage) -> AIMessage:
+    """Remove provider thinking fields before message reuse in LLM context."""
+    if "reasoning_content" not in message.additional_kwargs:
+        return message
+    message.additional_kwargs = {
+        key: value for key, value in message.additional_kwargs.items() if key != "reasoning_content"
+    }
+    return message
+
+
+def _chunk_reasoning_delta(chunk: Any) -> str:
+    additional_kwargs = getattr(chunk, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        reasoning_content = additional_kwargs.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            return reasoning_content
     content = getattr(chunk, "content", None)
     if isinstance(content, list):
+        parts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") in ("tool_use", "tool_call"):
-                return True
-    return False
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") not in ("thinking", "reasoning"):
+                continue
+            text = item.get("text") or item.get("thinking") or item.get("content")
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return ""
 
 
 _OUTPUT_LIMIT_NOTICE = (
     "\n\n> Response stopped because the model hit its output limit. Ask me to continue from here if you need the rest."
+)
+_OUTPUT_LIMIT_SUMMARY_NOTICE = (
+    "\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete."
 )
 
 
@@ -653,9 +787,7 @@ def _append_output_limit_notice(
         return response, False
     if _OUTPUT_LIMIT_NOTICE in response:
         return response, True
-    summary_notice = ""
-    if action_summaries:
-        summary_notice = f"\n\nCompleted before the cutoff:\n{_truncate_text(action_summaries[-1], 4000)}"
+    summary_notice = _OUTPUT_LIMIT_SUMMARY_NOTICE if action_summaries else ""
     return f"{response.rstrip()}{_OUTPUT_LIMIT_NOTICE}{summary_notice}", True
 
 
@@ -741,9 +873,6 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
 def _message_context_size(message: BaseMessage) -> int:
     size = len(message_text(getattr(message, "content", "")))
     if isinstance(message, AIMessage):
-        reasoning_content = message.additional_kwargs.get("reasoning_content")
-        if isinstance(reasoning_content, str):
-            size += len(reasoning_content)
         if message.tool_calls:
             size += len(_json_dump(message.tool_calls))
         if message.invalid_tool_calls:
@@ -850,23 +979,6 @@ def _deepseek_reasoning_content_delta(chunk: dict[str, Any]) -> str:
         return ""
     reasoning_content = delta.get("reasoning_content")
     return reasoning_content if isinstance(reasoning_content, str) else ""
-
-
-def _add_reasoning_content_to_payload(payload: dict[str, Any], messages: list[BaseMessage]) -> None:
-    payload_messages = payload.get("messages")
-    if not isinstance(payload_messages, list):
-        return
-    payload_index = 0
-    for message in messages:
-        if payload_index >= len(payload_messages):
-            return
-        payload_message = payload_messages[payload_index]
-        payload_index += 1
-        if not isinstance(message, AIMessage) or not isinstance(payload_message, dict):
-            continue
-        reasoning_content = message.additional_kwargs.get("reasoning_content")
-        if isinstance(reasoning_content, str) and reasoning_content:
-            payload_message["reasoning_content"] = reasoning_content
 
 
 def _uses_deepseek_compatible_endpoint(model_name: str) -> bool:
@@ -1073,13 +1185,15 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     # prompt. json.dumps escapes embedded quotes, newlines, and control chars.
     user_context = f"\nCurrent Seizu user display name: {json.dumps(display_name)}." if display_name else ""
     provider_note = _provider_prompt_note(provider_name)
+    answer_budget = _answer_budget()
     return (
         "You are Seizu's AI investigation assistant inside a security graph dashboard. "
         "Seizu is a configuration-driven reporting platform for Neo4j security graph data; "
         "it is not a generic chatbot, coding harness, or open-ended automation shell.\n\n"
         "Help users investigate security relationships, interpret graph-backed results, design and refine reports, "
         "draft dashboard panels, explain Cypher query intent, and turn findings into practical next steps. "
-        "Prefer concise, evidence-oriented answers with clear assumptions and limits.\n\n"
+        f"{_answer_budget_prompt(answer_budget)} When using tool output, prioritize the answer to the user's ask, "
+        "then the top evidence and next actions; do not enumerate every row, field, or intermediate result.\n\n"
         "Do not invent graph facts, report contents, user identities, vulnerabilities, assets, or incident findings. "
         "When live data is needed, say what data or Seizu tool output would answer the question. "
         "If the user provides tool results, reason from those results and call out truncation or uncertainty.\n\n"
@@ -1123,16 +1237,32 @@ def _provider_prompt_note(provider: str) -> str:
     return ""
 
 
-def _tool_call_start_status(requests: list[ToolCallRequest]) -> str:
-    if len(requests) == 1:
-        request = requests[0]
-        if request.spec.kind == "skill":
-            return f"Loading skill `{request.name}`...\n\n"
-        return f"Running tool `{request.name}`...\n\n"
-    names = ", ".join(f"`{request.name}`" for request in requests)
-    if all(request.spec.kind == "tool" for request in requests):
-        return f"Running {len(requests)} tools in parallel: {names}...\n\n"
-    return f"Running {len(requests)} actions in parallel: {names}...\n\n"
+def _answer_budget(max_tokens: int | None = None) -> AnswerBudget:
+    tokens = settings.CHAT_LLM_MAX_TOKENS if max_tokens is None else max_tokens
+    # The token cap includes formatting and non-word tokens, so budget visible
+    # prose conservatively at roughly 0.3 words per output token.
+    effective_tokens = tokens if tokens > 0 else 2048
+    max_words = max(150, min(1600, round(effective_tokens * 0.3 / 50) * 50))
+    min_words = max(75, round(max_words * 0.5 / 25) * 25)
+    max_bullets = max(4, min(16, round(effective_tokens / 256)))
+    max_tables = 1 if effective_tokens < 3072 else 2
+    return AnswerBudget(
+        min_words=min_words,
+        max_words=max_words,
+        max_bullets=max_bullets,
+        max_tables=max_tables,
+    )
+
+
+def _answer_budget_prompt(budget: AnswerBudget) -> str:
+    table_noun = "table" if budget.max_tables == 1 else "tables"
+    table_count = "one" if budget.max_tables == 1 else str(budget.max_tables)
+    return (
+        "Prefer concise, evidence-oriented answers with clear assumptions and limits. "
+        f"Given the configured output budget, keep normal answers under about {budget.max_words} words unless the "
+        f"user explicitly asks for a full report. Use at most {budget.max_bullets} bullets and at most "
+        f"{table_count} compact {table_noun}, only when tables are materially clearer than bullets."
+    )
 
 
 def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
@@ -1151,6 +1281,28 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
         f"Seizu {action} `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}`.\n\n"
         f"Result:\n{_truncate_text(result.content, 4000)}"
     )
+
+
+def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
+    action = "Skill" if result.request.spec.kind == "skill" else "Tool"
+    status = "blocked" if result.blocked is not None else "completed"
+    return {
+        "kind": result.request.spec.kind,
+        "title": f"{action}: {result.request.name}",
+        "status": status,
+        "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
+        "body": _truncate_text(result.content, 6000),
+    }
+
+
+def _confirmation_tool_detail_data(confirmation: ActionConfirmation, content: str, *, status: str) -> dict[str, Any]:
+    return {
+        "kind": "tool",
+        "title": f"Tool: {confirmation.tool_name}",
+        "status": status,
+        "arguments": _truncate_text(_json_dump(confirmation.arguments), 3000),
+        "body": _truncate_text(content, 6000),
+    }
 
 
 def _blocked_tool_call_results(results: list[ToolCallResult]) -> list[ToolCallResult]:
@@ -1240,7 +1392,7 @@ def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
     ]
     for result in results:
         lines.append(
-            f"- `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}` was blocked "
+            f"- `{result.request.name}` was blocked "
             f"({_blocked_tool_call_reason_label(result.blocked)}): {_blocked_tool_call_body(result.content)}"
         )
     lines.append("No blocked action was executed.")
@@ -1306,9 +1458,7 @@ def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_su
 
 def _repeated_tool_call_fallback(requests: list[ToolCallRequest], action_summaries: list[str]) -> str:
     repeated = ", ".join(f"`{request.name}`" for request in requests)
-    details = (
-        "\n\nMost recent completed action:\n" + _truncate_text(action_summaries[-1], 5000) if action_summaries else ""
-    )
+    details = " Seizu had already completed tool work for this turn." if action_summaries else ""
     return (
         "I stopped because the model repeatedly requested the same internal action instead of producing a final "
         f"answer. Repeated action: {repeated}.{details}"
@@ -1325,10 +1475,16 @@ def _initial_empty_response_retry_message() -> str:
 
 def _final_synthesis_retry_message(action_summaries: list[str]) -> str:
     joined_summaries = "\n".join(action_summaries)
+    budget = _answer_budget()
+    table_noun = "table" if budget.max_tables == 1 else "tables"
+    table_count = "one" if budget.max_tables == 1 else str(budget.max_tables)
     return (
         "Seizu has finished running the requested tool calls for this turn. Do not call any more tools. Provide the "
-        "final answer to the user using the action results below. Summarize the evidence, note uncertainty or "
-        f"truncation, and give practical next steps.\n\n{_truncate_text(joined_summaries, 12000)}"
+        "final answer to the user using the action results below. Be selective: lead with the direct answer, include "
+        "only the most decision-relevant evidence, and avoid dumping full tables or exhaustive breakdowns. Target "
+        f"{budget.min_words}-{budget.max_words} words, at most {budget.max_bullets} bullets, and at most "
+        f"{table_count} compact {table_noun}. Note uncertainty or truncation only when it "
+        f"changes the conclusion or next action.\n\n{_truncate_text(joined_summaries, 12000)}"
     )
 
 
@@ -1340,8 +1496,7 @@ def _empty_response_fallback(action_summaries: list[str]) -> str:
         )
     return (
         "I ran the Seizu workflow, but the model did not return a final synthesis after the last action. "
-        "The most recent action result is below, so the investigation state is not lost.\n\n"
-        f"{_truncate_text(action_summaries[-1], 6000)}"
+        "The tool output was kept out of chat history; try asking for a concise summary again."
     )
 
 
@@ -1501,9 +1656,9 @@ def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
     context: list[BaseMessage] = []
     for message in filtered:
         if isinstance(message, HumanMessage):
-            context.append(message)
+            context.append(HumanMessage(content=message.content, id=message.id))
         elif isinstance(message, AIMessage) and message_text(message.content) and not _is_broken_ai_message(message):
-            context.append(message)
+            context.append(AIMessage(content=strip_chat_ui_markers(message_text(message.content)), id=message.id))
 
     max_messages = settings.CHAT_LLM_CONTEXT_MAX_MESSAGES
     if max_messages > 0:

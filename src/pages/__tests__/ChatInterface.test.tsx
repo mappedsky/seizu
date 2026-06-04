@@ -457,7 +457,7 @@ describe('ChatInterface', () => {
     ).toBeInTheDocument();
   });
 
-  it('does not hydrate over existing client messages', async () => {
+  it('hydrates over a stale local user turn when history has caught up', async () => {
     const history = [
       {
         id: 'h1',
@@ -494,8 +494,8 @@ describe('ChatInterface', () => {
 
     await waitFor(() => {
       expect(fetchHistory).toHaveBeenCalled();
+      expect(setMessages).toHaveBeenCalledWith(history);
     });
-    expect(setMessages).not.toHaveBeenCalledWith(history);
   });
 
   it('sends typed input through useChat', async () => {
@@ -530,6 +530,68 @@ describe('ChatInterface', () => {
     });
   });
 
+  it('sends typed input with Enter', async () => {
+    const sendMessage = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    const input = screen.getByPlaceholderText(
+      'Ask about your security graph...',
+    );
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'Map my graph' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+    });
+
+    await waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith({ text: 'Map my graph' });
+    });
+  });
+
+  it('keeps Shift+Enter available for multiline input', async () => {
+    const sendMessage = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    const input = screen.getByPlaceholderText(
+      'Ask about your security graph...',
+    );
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'Line one' } });
+      fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    });
+
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
   it('renders streamed assistant text parts', async () => {
     mockUseChat.mockReturnValue({
       id: 'chat-id',
@@ -559,6 +621,66 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Assistant')).toBeInTheDocument();
     expect(screen.getByText('Streaming response')).toBeInTheDocument();
     expect(screen.getByText('Assistant is working...')).toBeInTheDocument();
+  });
+
+  it('renders assistant detail data parts in a collapsed details block', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-1',
+              data: {
+                kind: 'tool',
+                title: 'Tool: graph__schema',
+                status: 'completed',
+                arguments: '{}',
+                body: '{"labels":["CVE"]}',
+              },
+            },
+            { type: 'text', text: 'Schema has CVEs.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(screen.getByText('Details')).toBeInTheDocument();
+    expect(screen.getByText('Schema has CVEs.')).toBeInTheDocument();
+    expect(screen.getByText('Tool: graph__schema')).not.toBeVisible();
+    expect(screen.queryByText('{}')).not.toBeInTheDocument();
+    expect(screen.queryByText('{"labels":["CVE"]}')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    });
+
+    expect(screen.getByText('Tool: graph__schema')).toBeVisible();
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: /Tool: graph__schema/ }),
+      );
+    });
+
+    expect(screen.getByText('{}')).toBeVisible();
+    expect(screen.getByText('{"labels":["CVE"]}')).toBeVisible();
   });
 
   it('renders streaming Markdown in token batches and leaves the live tail as text', async () => {
@@ -706,6 +828,246 @@ describe('ChatInterface', () => {
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith(rawResponse);
+    });
+  });
+
+  it('shows load more on output-limited assistant responses', async () => {
+    const sendMessage = jest.fn();
+    const touchSession = jest.fn();
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession: jest.fn(),
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession,
+    });
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          metadata: { finish_reason: 'length', response_cut_off: true },
+          parts: [{ type: 'text', text: 'Partial response' }],
+        },
+      ],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more response' }));
+
+    expect(touchSession).toHaveBeenCalledWith('thread-1');
+    expect(sendMessage).toHaveBeenCalledWith(undefined, {
+      body: {
+        continue_message_id: 'assistant-message',
+        continue_response: true,
+      },
+    });
+  });
+
+  it('renders the continuation divider from Markdoc markup', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'user-message',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Earlier question' }],
+        },
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'text',
+              text: 'Partial response\n\n{% continuation /%}\n\n',
+            },
+            { type: 'text', text: 'continued answer' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    expect(screen.getByText('Partial response')).toBeInTheDocument();
+    expect(screen.getByText('continued answer')).toBeInTheDocument();
+    expect(screen.getByText('...')).toBeInTheDocument();
+    expect(screen.queryByText('{% continuation /%}')).not.toBeInTheDocument();
+  });
+
+  it('hides load more after a continued response finishes normally', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          metadata: { finish_reason: 'length', response_cut_off: false },
+          parts: [{ type: 'text', text: 'Complete stitched response' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    expect(
+      screen.queryByRole('button', { name: 'Load more response' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides load more after the conversation has moved on', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          metadata: { finish_reason: 'length', response_cut_off: true },
+          parts: [{ type: 'text', text: 'Partial response' }],
+        },
+        {
+          id: 'user-message',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Different follow-up' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    expect(screen.getByText('Partial response')).toBeInTheDocument();
+    expect(screen.getByText('Different follow-up')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Load more response' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('hides the continue button immediately after it is clicked', async () => {
+    const sendMessage = jest.fn().mockResolvedValue(undefined);
+    const touchSession = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          metadata: { finish_reason: 'length', response_cut_off: true },
+          parts: [
+            {
+              type: 'text',
+              text: 'Partial response',
+            },
+          ],
+        },
+      ],
+      sendMessage,
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession: jest.fn(),
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession,
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Load more response' }),
+      );
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: 'Load more response' }),
+      ).not.toBeInTheDocument();
+    });
+    expect(sendMessage).toHaveBeenCalledWith(undefined, {
+      body: {
+        continue_message_id: 'assistant-message',
+        continue_response: true,
+      },
     });
   });
 
