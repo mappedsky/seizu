@@ -28,6 +28,18 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     return {"results": serialized, "warnings": validation.warnings}
 
 
+async def _handle_validate_query(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    cypher = str(args.get("query", "")).strip()
+    if not cypher:
+        return {"error": "query parameter is required"}
+    validation = await validate_query(cypher)
+    return {
+        "valid": not validation.has_errors,
+        "errors": validation.errors,
+        "warnings": validation.warnings,
+    }
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -64,6 +76,29 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.QUERY_EXECUTE.value],
             handler=_handle_query,
+        ),
+        BuiltinTool(
+            name="graph__validate_query",
+            group=GROUP,
+            description=(
+                "Validate a read-only Cypher query without executing it. Returns "
+                "{valid, errors, warnings}: errors block (write operations, disallowed "
+                "procedures, syntax), warnings do not. Use this to check a query before "
+                "saving it as a toolset tool — toolset tools reject write/invalid Cypher, "
+                "so validating first lets you fix issues before the (mutating) create call."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A read-only Cypher query to validate.",
+                    }
+                },
+                "required": ["query"],
+            },
+            required_permissions=[Permission.QUERY_EXECUTE.value],
+            handler=_handle_validate_query,
         ),
     ],
 )

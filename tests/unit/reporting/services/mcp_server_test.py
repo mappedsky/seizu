@@ -315,6 +315,55 @@ async def test_call_tool_query_execution_error():
 
 
 # ---------------------------------------------------------------------------
+# call_tool — graph__validate_query
+# ---------------------------------------------------------------------------
+
+
+async def test_call_tool_validate_query_valid():
+    from reporting.services.query_validator import ValidationResult
+
+    run_query = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=[], warnings=["uses an unindexed scan"]),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query", run_query),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__validate_query", {"query": "MATCH (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["valid"] is True
+        assert data["errors"] == []
+        assert data["warnings"] == ["uses an unindexed scan"]
+    # Validation must never execute the query.
+    run_query.assert_not_called()
+
+
+async def test_call_tool_validate_query_invalid():
+    from reporting.services.query_validator import ValidationResult
+
+    with patch(
+        "reporting.services.mcp_builtins.graph.validate_query",
+        new_callable=AsyncMock,
+        return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__validate_query", {"query": "CREATE (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["valid"] is False
+        assert "Write queries are not allowed" in data["errors"]
+
+
+async def test_call_tool_validate_query_empty_query_string():
+    server = _build_mcp_server()
+    result = await _call_tool(server, "graph__validate_query", {"query": "  "})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# ---------------------------------------------------------------------------
 # call_tool — graph__schema
 # ---------------------------------------------------------------------------
 
