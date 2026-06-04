@@ -268,7 +268,7 @@ reports:
     name: CVEs
     queries:
       cves: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity =~ ($base_severity)
         RETURN DISTINCT {
           id: c.id,
@@ -280,7 +280,7 @@ reports:
     inputs:
       - input_id: cve_base_severity
         cypher: |-
-          MATCH (c:CVE)
+          MATCH (c:CVEMetadata)
           RETURN DISTINCT c.base_severity AS value
         label: Base Severity
         type: autocomplete
@@ -303,29 +303,29 @@ reports:
     name: Panel Examples
     queries:
       cves-total: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         RETURN count(c.id) AS total
       cves-severity-fraction: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WITH COUNT(DISTINCT c.id) AS denominator
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity = $base_severity
         RETURN count(DISTINCT c.id) AS numerator, denominator
       cves-severity-fraction-details: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity = $base_severity
         RETURN c AS details
       cves-severity-count: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity = $base_severity
         RETURN count(DISTINCT c.id) AS total
       cves-by-severity: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity IS NOT NULL
         WITH c.base_severity AS severity, count(c.id) AS total
         RETURN {id: severity, value: total} AS details
       cves-graph: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity IS NOT NULL
         WITH c LIMIT 50
         WITH
@@ -334,7 +334,7 @@ reports:
           collect({source: c.id, target: c.base_severity}) AS links
         RETURN {nodes: severity_nodes + cve_nodes, links: links}
       cves-id-search: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.id CONTAINS $search
         RETURN c.id AS id,
                c.base_severity AS base_severity,
@@ -343,7 +343,7 @@ reports:
         ORDER BY datetime(c.published_date) DESC
         LIMIT 25
       cves-by-severity-list: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity = $base_severity
         RETURN c.id AS id,
                c.base_severity AS base_severity,
@@ -352,7 +352,7 @@ reports:
         ORDER BY c.base_score DESC
         LIMIT 25
       cve-single: |-
-        MATCH (c:CVE)
+        MATCH (c:CVEMetadata)
         WHERE c.base_severity IS NOT NULL
         RETURN c.id AS id,
                c.base_severity AS severity,
@@ -371,7 +371,7 @@ reports:
         size: 3
       - input_id: panel_examples_severity
         cypher: |-
-          MATCH (c:CVE)
+          MATCH (c:CVEMetadata)
           RETURN DISTINCT c.base_severity AS value
         label: Base Severity
         type: autocomplete
@@ -973,7 +973,7 @@ toolsets:
           Return full details for a single CVE by its ID (e.g. CVE-2024-12345).
           Returns id, base_severity, base_score, description, and published_date.
         cypher: |-
-          MATCH (c:CVE {id: $cve_id})
+          MATCH (c:CVEMetadata {id: $cve_id})
           RETURN c.id AS id,
                  c.base_severity AS base_severity,
                  c.base_score AS base_score,
@@ -991,7 +991,7 @@ toolsets:
           List CVEs filtered by base severity (CRITICAL, HIGH, MEDIUM, or LOW),
           ordered by base score descending. Returns up to `limit` results.
         cypher: |-
-          MATCH (c:CVE)
+          MATCH (c:CVEMetadata)
           WHERE c.base_severity = $severity
           RETURN c.id AS id,
                  c.base_severity AS base_severity,
@@ -1017,7 +1017,7 @@ toolsets:
           Return a breakdown of CVE counts grouped by base severity.
           Useful for a quick risk overview.
         cypher: |-
-          MATCH (c:CVE)
+          MATCH (c:CVEMetadata)
           WHERE c.base_severity IS NOT NULL
           RETURN c.base_severity AS severity, count(c.id) AS total
           ORDER BY total DESC
@@ -1029,7 +1029,7 @@ toolsets:
           filtered to a specific severity. Results are ordered by published
           date descending.
         cypher: |-
-          MATCH (c:CVE)
+          MATCH (c:CVEMetadata)
           WHERE datetime(c.published_date) > datetime() - duration({hours: $hours})
             AND ($severity = '' OR c.base_severity = $severity)
           RETURN c.id AS id,
@@ -1839,7 +1839,7 @@ scheduled_queries:
       MATCH (s:SyncMetadata)
       WHERE s.grouptype = "CVE" AND s.syncedtype IN $syncedtype
       WITH datetime({epochSeconds: s.lastupdated}) - duration({hours: 24}) AS feedupdatetime
-      MATCH (c:CVE)
+      MATCH (c:CVEMetadata)
       WHERE (datetime(c.published_date)) > feedupdatetime AND c.base_severity IN $base_severity
       RETURN {id: c.id, base_severity: c.base_severity, base_score: c.base_score, description: c.description} AS details
     params:
@@ -1866,7 +1866,7 @@ scheduled_queries:
 
   - name: CVE counts by severity
     cypher: |-
-      MATCH (c:CVE)
+      MATCH (c:CVEMetadata)
       WHERE c.base_severity IS NOT NULL
       WITH c.base_severity AS severity, count(c.id) AS total
       RETURN {severity: severity, total: total} AS details
