@@ -231,18 +231,12 @@ def test_step_tool_specs_enforces_required_action_contract():
     assert "not available" in str(error)
 
 
-def test_enforce_required_arguments_merges_static_args_and_rejects_conflicts():
+def test_apply_planned_arguments_fills_omitted_and_keeps_worker_values():
     spec = chat_graph.ChatToolSpec(
         name="github_security__repo_risk_summary",
         kind="tool",
         description="Repo risks",
         input_schema={"type": "object"},
-    )
-    request = chat_graph.ToolCallRequest(
-        id="call_1",
-        name="github_security__repo_risk_summary",
-        arguments={},
-        spec=spec,
     )
     step = _step(
         "s1",
@@ -251,22 +245,25 @@ def test_enforce_required_arguments_merges_static_args_and_rejects_conflicts():
         required_arguments={"org": "mappedsky"},
     )
 
-    enforced, error = chat_orchestrator._enforce_required_arguments(step, [request])
-    assert error is None
-    assert enforced[0].arguments == {"org": "mappedsky"}
-
-    _, error = chat_orchestrator._enforce_required_arguments(
-        step,
-        [chat_graph.ToolCallRequest(id="call_1", name=request.name, arguments={"org": "other"}, spec=spec)],
+    # Omitted arg is filled from the planner's value.
+    filled = chat_orchestrator._apply_planned_arguments(
+        step, [chat_graph.ToolCallRequest(id="c1", name=spec.name, arguments={}, spec=spec)]
     )
-    assert "worker used" in str(error)
+    assert filled[0].arguments == {"org": "mappedsky"}
+
+    # The worker's explicit value always wins — never overridden, never rejected.
+    kept = chat_orchestrator._apply_planned_arguments(
+        step, [chat_graph.ToolCallRequest(id="c1", name=spec.name, arguments={"org": "other"}, spec=spec)]
+    )
+    assert kept[0].arguments == {"org": "other"}
 
 
-def test_enforce_required_arguments_ignores_placeholder_values():
+def test_apply_planned_arguments_does_not_clobber_dependency_derived_values():
+    # The planner can only template a derived value ("<from s2>"); the worker
+    # supplies the real one, and that must survive (this is the s3 regression).
     spec = chat_graph.ChatToolSpec(
         name="attack_path__trace", kind="skill", description="trace", input_schema={"type": "object"}
     )
-    # The planner left a template for the value derived from a dependency step.
     step = _step(
         "s3",
         action_kind="skill",
@@ -274,26 +271,12 @@ def test_enforce_required_arguments_ignores_placeholder_values():
         required_arguments={"vulnerability_ids": ["<from s2>"], "depth": 3},
     )
     request = chat_graph.ToolCallRequest(
-        id="c1",
-        name="attack_path__trace",
-        arguments={"vulnerability_ids": ["CVE-2023-41419"]},
-        spec=spec,
+        id="c1", name=spec.name, arguments={"vulnerability_ids": ["CVE-2023-41419"]}, spec=spec
     )
 
-    enforced, error = chat_orchestrator._enforce_required_arguments(step, [request])
-    assert error is None
-    # The placeholder is not enforced (worker's real value wins); the concrete
-    # static arg (depth) is still applied.
-    assert enforced[0].arguments == {"vulnerability_ids": ["CVE-2023-41419"], "depth": 3}
-
-
-def test_is_placeholder_value_detects_templates():
-    assert chat_orchestrator._is_placeholder_value("<from s2>")
-    assert chat_orchestrator._is_placeholder_value(["<vulnerability_id>"])
-    assert chat_orchestrator._is_placeholder_value({"id": "<derived>"})
-    assert not chat_orchestrator._is_placeholder_value("CVE-2023-41419")
-    assert not chat_orchestrator._is_placeholder_value(["CVE-1", "CVE-2"])
-    assert not chat_orchestrator._is_placeholder_value(3)
+    applied = chat_orchestrator._apply_planned_arguments(step, [request])
+    # Worker's real CVE kept; the concrete static arg (depth) still filled.
+    assert applied[0].arguments == {"vulnerability_ids": ["CVE-2023-41419"], "depth": 3}
 
 
 async def test_worker_step_fails_when_required_action_is_not_called():

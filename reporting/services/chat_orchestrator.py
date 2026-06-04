@@ -671,11 +671,7 @@ async def _run_worker_step(
             break
         remaining = settings.CHAT_LLM_MAX_AUTO_ACTIONS - action_count
         batch = requested[:remaining]
-        batch, argument_error = _enforce_required_arguments(step, batch)
-        if argument_error:
-            execution_error = argument_error
-            output_text = ""
-            break
+        batch = _apply_planned_arguments(step, batch)
         action_count += len(batch)
         batch_results = await _run_tool_call_batch(
             batch,
@@ -816,51 +812,37 @@ def _step_contract_error_result(step: dict[str, Any], error: str) -> dict[str, A
     }
 
 
-def _is_placeholder_value(value: Any) -> bool:
-    """True when a required_argument value is a template the worker must fill in.
-
-    The planner is meant to omit arguments that must be derived from a dependency
-    step's result, but it often leaves a template instead (e.g. "<from s2>",
-    "['<vulnerability_id>']"). Those must not be enforced as literal values —
-    the worker supplies the real value from the dependency context.
-    """
-    if isinstance(value, str):
-        return "<" in value and ">" in value
-    if isinstance(value, (list, tuple)):
-        return any(_is_placeholder_value(item) for item in value)
-    if isinstance(value, dict):
-        return any(_is_placeholder_value(item) for item in value.values())
-    return False
-
-
-def _enforce_required_arguments(
+def _apply_planned_arguments(
     step: dict[str, Any], requests: list[chat_graph.ToolCallRequest]
-) -> tuple[list[chat_graph.ToolCallRequest], str | None]:
+) -> list[chat_graph.ToolCallRequest]:
+    """Fill in planner-specified arguments the worker omitted — a hint, not a rule.
+
+    The planner guesses arguments before execution; the worker sees the live tool
+    schema and the dependency results, so its explicit values always win and are
+    never overridden or rejected. We only supply an argument the worker left out
+    (with ``setdefault``). Step correctness is the verifier's job.
+
+    This deliberately replaces an earlier strict-match check: matching the
+    planner's value exactly was both wrong (it blocked correct,
+    dependency-derived values like a CVE id the planner could only template as
+    "<from s2>") and brittle (it relied on guessing the planner's placeholder
+    format to know what not to enforce).
+    """
     required_action = str(step.get("required_action") or "")
     required_arguments = step.get("required_arguments") or {}
     if not required_action or not isinstance(required_arguments, dict) or not required_arguments:
-        return requests, None
+        return requests
 
-    enforced: list[chat_graph.ToolCallRequest] = []
+    applied: list[chat_graph.ToolCallRequest] = []
     for request in requests:
         if request.name != required_action:
-            enforced.append(request)
+            applied.append(request)
             continue
         merged = dict(request.arguments)
         for key, value in required_arguments.items():
-            # Skip placeholder values: the planner meant the worker to derive this
-            # from a dependency result, so its concrete value wins.
-            if _is_placeholder_value(value):
-                continue
-            if key in merged and merged[key] != value:
-                return (
-                    requests,
-                    f"Step required `{required_action}` argument `{key}` to be `{value}`, "
-                    f"but the worker used `{merged[key]}`.",
-                )
-            merged[key] = value
-        enforced.append(replace(request, arguments=merged))
-    return enforced, None
+            merged.setdefault(key, value)
+        applied.append(replace(request, arguments=merged))
+    return applied
 
 
 def _scoped_tool_specs(tool_specs: list[ChatToolSpec], suggested: list[str]) -> list[ChatToolSpec]:
