@@ -62,6 +62,9 @@ const isBuiltinToolset = (id: string): boolean =>
   id.startsWith(BUILTIN_PREFIX) && id.endsWith('__');
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+// Cap each slug component so the full "toolset__tool" MCP name stays <= 64 chars
+// (31 + "__" + 31). Mirrors MAX_SLUG_COMPONENT_LEN in reporting/schema/mcp_config.py.
+const MAX_SLUG_LEN = 31;
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '24%' };
 const typeColumnSx = { width: 144 };
@@ -103,6 +106,10 @@ function ToolsetDialog({ open, onClose, onSave, initial }: ToolsetDialogProps) {
     }
     if (!initial && !LOWER_SNAKE_ID.test(toolsetId.trim())) {
       setError('ID must be lower_snake_case.');
+      return;
+    }
+    if (!initial && toolsetId.trim().length > MAX_SLUG_LEN) {
+      setError(`ID must be at most ${MAX_SLUG_LEN} characters.`);
       return;
     }
     const req = initial

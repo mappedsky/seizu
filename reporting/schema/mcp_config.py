@@ -7,11 +7,20 @@ from pydantic import BaseModel, Field, field_validator
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
+# The MCP name is "{parent}__{child}" (toolset__tool / skillset__skill) and the
+# provider tool-call APIs cap names at 64 chars. Capping each component at 31
+# keeps every combination provider-safe (31 + len("__") + 31 == 64) without
+# coupling the parent and child budgets, so a long toolset id can't silently
+# push a tool past the limit and into an opaque hashed name.
+MAX_SLUG_COMPONENT_LEN = 31
+
 
 def validate_lower_snake_id(value: str) -> str:
     """Validate immutable user-supplied IDs used in MCP names."""
     if not LOWER_SNAKE_ID_RE.fullmatch(value):
         raise ValueError("must be lower_snake_case matching ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+    if len(value) > MAX_SLUG_COMPONENT_LEN:
+        raise ValueError(f"must be at most {MAX_SLUG_COMPONENT_LEN} characters so the full MCP name stays under 64")
     return value
 
 

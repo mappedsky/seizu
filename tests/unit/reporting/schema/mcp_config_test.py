@@ -1,12 +1,30 @@
+import pytest
+
 from reporting.schema.mcp_config import (
+    MAX_SLUG_COMPONENT_LEN,
     ToolParamDef,
     render_skill_template,
     template_placeholders,
+    validate_lower_snake_id,
     validate_skill_template,
 )
 
 _PARAM_REQUEST = ToolParamDef(name="request", type="string", required=True)
 _PARAM_DRY_RUN = ToolParamDef(name="dry_run", type="boolean", required=False, default=True)
+
+
+def test_validate_lower_snake_id_enforces_length_cap():
+    # At the cap is fine; two capped components fit the 64-char provider limit.
+    at_cap = "a" * MAX_SLUG_COMPONENT_LEN
+    assert validate_lower_snake_id(at_cap) == at_cap
+    assert len(f"{at_cap}__{at_cap}") == 64
+
+    with pytest.raises(ValueError, match="at most 31 characters"):
+        validate_lower_snake_id("a" * (MAX_SLUG_COMPONENT_LEN + 1))
+
+    # Pattern errors still take precedence.
+    with pytest.raises(ValueError, match="lower_snake_case"):
+        validate_lower_snake_id("Not_Snake")
 
 
 def test_template_placeholders_finds_vars():
