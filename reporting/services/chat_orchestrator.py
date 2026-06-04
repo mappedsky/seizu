@@ -62,7 +62,7 @@ from reporting.services.chat_graph import (
     _internal_action_transcript_leaked,
     _invoke_structured_output,
     _is_continuation_turn,
-    _last_user_text,
+    _last_user_request,
     _list_chat_prompts,
     _list_chat_tools,
     _llm_tool_name,
@@ -249,7 +249,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
         logger.info("chat router: forced route=%s", forced)
         return {"route": forced}
 
-    user_text = _last_user_text(state["messages"])
+    user_text = _last_user_request(state["messages"])
     if not user_text.strip():
         return {"route": "simple"}
 
@@ -302,7 +302,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         return {}
 
     current_user = _current_user_from_config(config)
-    user_text = _last_user_text(state["messages"])
+    user_text = _last_user_request(state["messages"])
     writer = get_stream_writer()
 
     skills = await _list_chat_prompts(current_user)
@@ -829,7 +829,7 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
     """Integrate step results into the final, streamed answer."""
     plan = state.get("plan") or []
     results = state.get("step_results") or []
-    user_text = _last_user_text(state["messages"])
+    user_text = _last_user_request(state["messages"])
     writer = get_stream_writer()
     model = get_chat_model()
 

@@ -2356,6 +2356,27 @@ def _last_user_text(messages: list[Any]) -> str:
     return ""
 
 
+def _last_user_request(messages: list[Any]) -> str:
+    """The last user message that is an actual request, not a control directive.
+
+    Confirmation-resume and "continue response" turns are injected as synthetic
+    HumanMessages (e.g. "Resume approved confirmation <id>") carrying a marker in
+    ``additional_kwargs``. They drive the graph but are not the user's ask, so
+    answering them literally — the orchestrator synthesizer describing how to
+    "query the approval system" for a confirmation id — is wrong. Skip them and
+    return the request that actually spawned the work.
+    """
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            kwargs = getattr(message, "additional_kwargs", None) or {}
+            if isinstance(kwargs, dict) and (kwargs.get("resume_confirmation_id") or kwargs.get("continue_response")):
+                continue
+            return str(message.content)
+        if isinstance(message, dict) and message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
+
+
 def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
     filtered = drop_tagged(messages, MessageTag.EPHEMERAL, MessageTag.BROKEN)
     context: list[BaseMessage] = []

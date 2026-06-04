@@ -270,6 +270,28 @@ async def test_invoke_structured_output_stops_retrying_native_after_unsupported_
     assert model.structured_calls == 1
 
 
+def test_last_user_request_skips_control_directives():
+    messages = [
+        HumanMessage(content="Update the CVE toolset to use CVEMetadata"),
+        AIMessage(content="Done, pending approval."),
+        HumanMessage(
+            content="Resume approved confirmation 475a9796",
+            additional_kwargs={"resume_confirmation_id": "475a9796"},
+        ),
+    ]
+    # The synthetic resume directive must not be mistaken for the user's request.
+    assert chat_graph._last_user_request(messages) == "Update the CVE toolset to use CVEMetadata"
+
+    continuation = [
+        HumanMessage(content="Real ask"),
+        HumanMessage(content="continue", additional_kwargs={"continue_response": True}),
+    ]
+    assert chat_graph._last_user_request(continuation) == "Real ask"
+
+    # No directive -> same as the plain last-user-text.
+    assert chat_graph._last_user_request([HumanMessage(content="hello")]) == "hello"
+
+
 def test_terminal_specs_exposed_only_after_an_action_has_run():
     assert chat_graph._terminal_specs(post_action=False) == []
     specs = chat_graph._terminal_specs(post_action=True)
