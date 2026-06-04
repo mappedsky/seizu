@@ -1629,7 +1629,8 @@ skillsets:
     name: Seizu Skill Authoring
     description: >-
       Self-referential workflows for inspecting, designing, and maintaining
-      Seizu skillsets and skills through the skillsets MCP tools.
+      Seizu skillsets, skills, toolsets, and Cypher-backed tools through the
+      skillsets/toolsets MCP tools, validating tool queries before saving them.
     enabled: true
     skills:
       skillset_inventory_review:
@@ -1693,8 +1694,9 @@ skillsets:
       skill_authoring_workflow:
         name: Skill Authoring Workflow
         description: >-
-          Design, create, or update Seizu skillsets and skills, including the
-          self-referential skill_authoring skillset itself.
+          Design, create, or update Seizu skillsets, skills, toolsets, and
+          Cypher-backed tools, including the self-referential skill_authoring
+          skillset itself.
         template: |-
           Help implement this Seizu skill authoring request:
 
@@ -1717,21 +1719,41 @@ skillsets:
           - skillsets__update: skillset_id, name, description, enabled, comment
           - skillsets__create_skill: skillset_id, skill_id, name, template, description, parameters, triggers, tools_required, enabled
           - skillsets__update_skill: skillset_id, skill_id, name, template, description, parameters, triggers, tools_required, enabled, comment
-          `name` and `template` are required on every create_skill and update_skill call.
+          - toolsets__create: toolset_id, name, description, enabled
+          - toolsets__update: toolset_id, name, description, enabled, comment
+          - toolsets__create_tool: toolset_id, tool_id, name, description, cypher, parameters, enabled
+          - toolsets__update_tool: toolset_id, tool_id, name, description, cypher, parameters, enabled, comment
+          `name` and `template` are required on every create_skill and update_skill call;
+          `name` and `cypher` are required on every create_tool and update_tool call.
           `parameters` is a list of objects shaped {name, type, description, required, default}.
 
-          Full-object writes: skillsets__update and skillsets__update_skill REPLACE the stored
-          record. Any optional field you omit resets to its default (enabled -> true,
-          parameters / triggers / tools_required -> empty). Always call the matching get tool
-          first (`skillsets__get` / `skillsets__get_skill`) and resend the complete merged
-          object, keeping every existing field you are not deliberately changing.
+          Full-object writes: skillsets__update, skillsets__update_skill, toolsets__update, and
+          toolsets__update_tool REPLACE the stored record. Any optional field you omit resets to
+          its default (enabled -> true, parameters / triggers / tools_required -> empty). Always
+          call the matching get tool first (`skillsets__get` / `skillsets__get_skill` /
+          `toolsets__get` / `toolsets__get_tool`) and resend the complete merged object, keeping
+          every existing field you are not deliberately changing.
+
+          Cypher tools: toolsets__create_tool / toolsets__update_tool carry a read-only `cypher`
+          query. A write or invalid query is rejected by the create/update call, and creating a
+          tool is a mutating (approval-gated) action — never spend an approval on a query you have
+          not checked. Before any tool create/update with cypher:
+          1. Call `graph__schema` to see available node labels, relationship types, property keys,
+             and indexes.
+          2. Call `graph__validate_query` with the tool's exact cypher. If `valid` is false, fix
+             the query and re-validate; do not call create_tool/update_tool until it is valid.
+          3. Call `graph__explain` and read the returned plan. Prefer queries that match an indexed
+             label/property (see the indexes from graph__schema) and avoid full scans (e.g.
+             AllNodesScan, or a label scan over a large label); adjust the query to use an index
+             where possible, and surface any unavoidable full scan as a risk.
+          Only after the cypher validates and the plan is acceptable, call create_tool/update_tool.
 
           Operating rules:
           - Treat `dry_run=true` as plan-only. Do not call create or update tools in dry-run mode; produce the exact proposed payloads instead.
           - Treat `dry_run=false` as permission to apply create/update operations, but still inspect current state first.
           - Never delete a skillset or skill from this workflow. If deletion seems necessary, recommend it separately and require explicit user confirmation outside this skill.
           - Preserve existing enabled state unless the request explicitly says otherwise.
-          - Use lower_snake_case IDs. Do not rename IDs unless the user explicitly requests a migration.
+          - Use lower_snake_case IDs, at most 31 characters each (so the full skillset__skill / toolset__tool name stays under the 64-char limit). Do not rename IDs unless the user explicitly requests a migration.
           - Keep templates actionable: include required tool order, output format, evidence rules, and limits.
           - Every tool named in a template's workflow must appear in tools_required unless it is only mentioned as an example.
 
@@ -1744,13 +1766,15 @@ skillsets:
           6. For skillset metadata changes, prepare or call `skillsets__update`.
           7. For a new skill, prepare or call `skillsets__create_skill`.
           8. For an existing skill, prepare or call `skillsets__update_skill`.
-          9. If applying changes, call the relevant get/list tool afterward to verify the stored result.
+          9. For toolset/tool authoring, follow the same discover-then-write pattern: call `toolsets__list`, and for a target toolset call `toolsets__get` and `toolsets__list_tools` (call `toolsets__get_tool` for an existing tool). Create the toolset with `toolsets__create` if it is missing.
+          10. Before any `toolsets__create_tool` / `toolsets__update_tool` whose `cypher` you are setting or changing, run the "Cypher tools" checks above (graph__schema -> graph__validate_query -> graph__explain) and only write once the cypher is valid and the plan is acceptable.
+          11. If applying changes, call the relevant get/list tool afterward to verify the stored result.
 
           Output format:
           - `Intent`: restate the requested skill authoring change.
           - `Current State`: summarize discovered existing skillset/skill state.
           - `Plan`: ordered implementation steps.
-          - `Payloads`: include exact skillset and skill payloads, including parameters, triggers, tools_required, enabled, and template.
+          - `Payloads`: include exact skillset, skill, toolset, and tool payloads, including parameters, triggers, tools_required, enabled, template, and (for tools) the validated cypher.
           - `Applied Changes`: if `dry_run=false`, list each tool call made and the resulting IDs/versions.
           - `Verification`: describe post-write checks or dry-run validation.
           - `Risks and Follow-up`: note permission limits, blocked tools, missing required data, or manual review needed.
@@ -1778,6 +1802,9 @@ skillsets:
           - create a Seizu skill
           - update a skill prompt
           - add a skillset
+          - create a Seizu tool
+          - add a toolset
+          - update a Cypher tool
           - improve this skill
           - maintain Seizu skills
         tools_required:
@@ -1792,6 +1819,18 @@ skillsets:
           - skillsets__create_skill
           - skillsets__update_skill
           - skillsets__render_skill
+          - toolsets__list
+          - toolsets__get
+          - toolsets__create
+          - toolsets__update
+          - toolsets__list_versions
+          - toolsets__list_tools
+          - toolsets__get_tool
+          - toolsets__create_tool
+          - toolsets__update_tool
+          - graph__schema
+          - graph__validate_query
+          - graph__explain
         enabled: true
 
 scheduled_queries:
