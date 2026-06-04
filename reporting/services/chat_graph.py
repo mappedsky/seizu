@@ -1976,29 +1976,89 @@ async def _invoke_structured_output(
         f"JSON schema:\n{schema_json}"
     )
     turn = await _run_llm_tool_turn(model, system_prompt, messages, [], config, None)
-    data = _json_object_from_text(message_text(turn.message.content))
-    if data is None:
-        raise ValueError(f"Model did not return a JSON object for {schema.__name__}")
-    return schema.model_validate(data)
+    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    if parsed is not None:
+        return parsed
+    # Reasoning models sometimes bury the object in analysis on the first ask;
+    # one firmer retry usually lands a clean object.
+    retry_prompt = (
+        "Output the JSON object only — no analysis, no explanation, no markdown code fences. "
+        f"Return a single JSON object matching this schema:\n{schema_json}"
+    )
+    turn = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    if parsed is not None:
+        return parsed
+    raise ValueError(f"Model did not return a JSON object for {schema.__name__}")
 
 
-def _json_object_from_text(text: str) -> dict[str, Any] | None:
+def _structured_from_text(schema: type[BaseModel], text: str) -> BaseModel | None:
+    """Validate the first JSON object in *text* that matches *schema*.
+
+    Candidates are tried richest-first, because a reasoning model often emits
+    small stray brace groups in the prose around the real, larger payload.
+    """
+    for candidate in _json_objects_from_text(text):
+        try:
+            return schema.model_validate(candidate)
+        except Exception:
+            continue
+    return None
+
+
+def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
     text = text.strip()
     if not text:
-        return None
-    candidates = [text]
-    start = text.find("{")
-    end = text.rfind("}")
-    if 0 <= start < end:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
+        return []
+    seen: set[str] = set()
+    objects: list[dict[str, Any]] = []
+    for candidate in [text, *_fenced_code_blocks(text), *_balanced_brace_objects(text)]:
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict):
-            return data
-    return None
+        if not isinstance(data, dict):
+            continue
+        key = _json_dump(data)
+        if key not in seen:
+            seen.add(key)
+            objects.append(data)
+    objects.sort(key=lambda obj: len(_json_dump(obj)), reverse=True)
+    return objects
+
+
+def _fenced_code_blocks(text: str) -> list[str]:
+    return [match.group(1) for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)]
+
+
+def _balanced_brace_objects(text: str) -> list[str]:
+    """Every top-level balanced ``{...}`` span, ignoring braces inside strings."""
+    objects: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                objects.append(text[start : index + 1])
+                start = -1
+    return objects
 
 
 def _terminal_stall_retry_message(action_summaries: list[str]) -> str:

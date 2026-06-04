@@ -195,6 +195,50 @@ async def test_invoke_structured_output_falls_back_to_json_text():
     assert result.reason == "more evidence is needed"
 
 
+def test_structured_from_text_extracts_object_from_fences_and_prose():
+    class _Plan(BaseModel):
+        steps: list[str]
+
+    text = 'Let me plan this out.\n```json\n{"steps": ["s1", "s2"]}\n```\nThat should work.'
+    parsed = chat_graph._structured_from_text(_Plan, text)
+    assert parsed is not None and parsed.steps == ["s1", "s2"]
+
+
+def test_structured_from_text_skips_objects_that_do_not_match_schema():
+    class _Decision(BaseModel):
+        route: str
+
+    # A stray object in the reasoning, then the real one; only the latter matches.
+    text = 'First {"note": "thinking out loud"} then the decision {"route": "orchestrate"} done.'
+    parsed = chat_graph._structured_from_text(_Decision, text)
+    assert parsed is not None and parsed.route == "orchestrate"
+
+
+def test_balanced_brace_objects_ignores_braces_inside_strings():
+    text = 'prefix {"text": "a } brace in a string", "n": 1} suffix'
+    assert chat_graph._balanced_brace_objects(text) == ['{"text": "a } brace in a string", "n": 1}']
+
+
+async def test_invoke_structured_output_retries_when_first_response_lacks_json():
+    class _Decision(BaseModel):
+        ok: bool
+
+    class _Model:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        # No with_structured_output -> straight to the JSON-prompt fallback.
+        async def astream(self, _input, config=None, **kwargs):
+            self.calls += 1
+            content = "Here is my analysis, but no JSON yet." if self.calls == 1 else '{"ok": true}'
+            yield AIMessageChunk(content=content)
+
+    model = _Model()
+    result = await chat_graph._invoke_structured_output(model, _Decision, [HumanMessage(content="x")], {})
+    assert result.ok is True
+    assert model.calls == 2
+
+
 async def test_invoke_structured_output_stops_retrying_native_after_unsupported_error():
     class _Decision(BaseModel):
         ok: bool
