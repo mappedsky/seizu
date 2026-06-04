@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Literal, cast
 
 import neo4j.exceptions
-from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Record
+from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Query, Record
 
 from reporting import settings
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
@@ -57,7 +57,13 @@ async def run_query(cypher: str, parameters: dict = None) -> list[Record]:
     results = []
     driver = _get_async_neo4j_client()
     async with driver.session() as session:
-        query_results = await session.run(cypher, parameters=parameters, timeout=settings.NEO4J_QUERY_TIMEOUT)
+        # The transaction timeout must travel as part of the Query object — the
+        # driver's session.run() has no `timeout` kwarg, so passing one was
+        # silently sent as a query parameter (`$timeout`) and NOT enforced,
+        # leaving heavy/unindexed queries to run unbounded. Wrapped here, the
+        # server terminates the transaction after NEO4J_QUERY_TIMEOUT seconds.
+        query = Query(cypher, timeout=settings.NEO4J_QUERY_TIMEOUT)
+        query_results = await session.run(query, parameters=parameters)
         async for result in query_results:
             results.append(result)
     return results
@@ -77,7 +83,11 @@ async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Rec
 
 async def run_tx(tx: AsyncTransaction, cypher: str, parameters: dict = None) -> list[Record]:
     results = []
-    query_results = await tx.run(cypher, parameters=parameters, timeout=settings.NEO4J_QUERY_TIMEOUT)
+    # tx.run() takes no transaction timeout — for an explicit transaction the
+    # timeout is fixed when it is begun (session.begin_transaction(timeout=...)),
+    # so a caller wanting a bound must set it there. Passing `timeout=` here would
+    # only add a stray query parameter, never an enforced timeout.
+    query_results = await tx.run(cypher, parameters=parameters)
     async for result in query_results:
         results.append(result)
     return results

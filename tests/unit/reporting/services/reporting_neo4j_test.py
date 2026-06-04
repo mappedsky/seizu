@@ -72,11 +72,15 @@ async def test_run_query(mocker):
     )
     result = await reporting_neo4j.run_query("MATCH (n) RETURN n")
     assert result == [mock_record]
-    session_mock.run.assert_awaited_once_with(
-        "MATCH (n) RETURN n",
-        parameters=None,
-        timeout=reporting_neo4j.settings.NEO4J_QUERY_TIMEOUT,
-    )
+    session_mock.run.assert_awaited_once()
+    args, kwargs = session_mock.run.await_args
+    # The query is wrapped in a Query carrying a server-enforced transaction
+    # timeout (driver session.run has no `timeout` kwarg).
+    query_arg = args[0]
+    assert isinstance(query_arg, reporting_neo4j.Query)
+    assert query_arg.text == "MATCH (n) RETURN n"
+    assert query_arg.timeout == reporting_neo4j.settings.NEO4J_QUERY_TIMEOUT
+    assert kwargs == {"parameters": None}
 
 
 async def test_run_query_with_single_retry_failure(mocker):
@@ -109,11 +113,8 @@ async def test_run_tx(mocker):
     tx_mock.run = AsyncMock(return_value=_records())
     result = await reporting_neo4j.run_tx(tx_mock, "MATCH (n) RETURN n")
     assert result == [mock_record]
-    tx_mock.run.assert_awaited_once_with(
-        "MATCH (n) RETURN n",
-        parameters=None,
-        timeout=reporting_neo4j.settings.NEO4J_QUERY_TIMEOUT,
-    )
+    # No bogus timeout kwarg — an explicit transaction's timeout is set at begin.
+    tx_mock.run.assert_awaited_once_with("MATCH (n) RETURN n", parameters=None)
 
 
 async def test_run_tx_with_single_retry_failure(mocker):
