@@ -6,6 +6,7 @@ import {
   Box,
   IconButton,
   List,
+  ListItem,
   ListItemButton,
   Tooltip,
   Typography,
@@ -15,13 +16,27 @@ import AccountTree from '@mui/icons-material/AccountTree';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import History from '@mui/icons-material/History';
-import { useGraphSchema } from 'src/hooks/useGraphSchema';
+import { useGraphSchema, type GraphIndex } from 'src/hooks/useGraphSchema';
 import { colorForGroup } from 'src/components/reports/CypherGraph';
 import { chartPalette } from 'src/theme/brand';
 import QueryConsoleHistoryPanel from 'src/components/QueryConsoleHistoryPanel';
 import { QueryHistoryItem } from 'src/hooks/useQueryHistory';
 
 const PANEL_WIDTH = 260;
+
+/** Render an index target like "(:CVE) {id}" or "[:DEPENDS_ON] {version}". */
+function indexTarget(index: GraphIndex): string {
+  const names = index.labels_or_types.join(':');
+  const scope = names
+    ? index.entity_type === 'RELATIONSHIP'
+      ? `[:${names}]`
+      : `(:${names})`
+    : '';
+  const properties = index.properties.length
+    ? ` {${index.properties.join(', ')}}`
+    : '';
+  return `${scope}${properties}`.trim();
+}
 
 type ActiveTab = 'schema' | 'history';
 
@@ -54,6 +69,7 @@ function QueryConsoleSchemaPanel({
   const labels = schema?.labels ?? [];
   const rels = schema?.relationship_types ?? [];
   const props = schema?.property_keys ?? [];
+  const indexes = schema?.indexes ?? [];
 
   /** Open or switch to a tab. If already open on the same tab, collapse. */
   const handleTabClick = (tab: ActiveTab) => {
@@ -375,6 +391,73 @@ function QueryConsoleSchemaPanel({
                           # {key}
                         </Typography>
                       </ListItemButton>
+                    ))}
+                  </List>
+                </AccordionDetails>
+              </Accordion>
+
+              {/* ── Indexes ────────────────────────────────────────── */}
+              <Accordion
+                defaultExpanded
+                disableGutters
+                elevation={0}
+                square
+                sx={{
+                  '&:before': { display: 'none' },
+                  borderTop: 1,
+                  borderColor: 'divider',
+                }}
+              >
+                <AccordionSummary
+                  expandIcon={<ExpandMore fontSize="small" />}
+                  sx={{
+                    minHeight: 36,
+                    px: 1.5,
+                    '& .MuiAccordionSummary-content': { my: 0.5 },
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{ fontWeight: 700, letterSpacing: 0.5 }}
+                  >
+                    INDEXES{indexes.length > 0 && ` (${indexes.length})`}
+                  </Typography>
+                </AccordionSummary>
+                <AccordionDetails sx={{ p: 0 }}>
+                  <List dense disablePadding>
+                    {indexes.map((index) => (
+                      <ListItem
+                        key={index.name}
+                        sx={{ display: 'block', py: 0.5, px: 1.5 }}
+                      >
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            color: 'text.secondary',
+                            whiteSpace: 'normal',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {indexTarget(index) || index.name}
+                        </Typography>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            display: 'block',
+                            color: 'text.disabled',
+                            whiteSpace: 'normal',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {index.type}
+                          {index.state !== 'ONLINE'
+                            ? ` · ${index.state}`
+                            : ''}{' '}
+                          · {index.name}
+                        </Typography>
+                      </ListItem>
                     ))}
                   </List>
                 </AccordionDetails>

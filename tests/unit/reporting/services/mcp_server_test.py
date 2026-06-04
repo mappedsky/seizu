@@ -327,6 +327,16 @@ async def test_call_tool_schema_success():
             [{"label": "Person"}],
             [{"type": "KNOWS"}],
             [{"key": "name"}],
+            [
+                {
+                    "name": "person_name",
+                    "type": "RANGE",
+                    "entityType": "NODE",
+                    "labelsOrTypes": ["Person"],
+                    "properties": ["name"],
+                    "state": "ONLINE",
+                }
+            ],
         ],
     ):
         server = _build_mcp_server()
@@ -335,6 +345,16 @@ async def test_call_tool_schema_success():
         assert data["labels"] == ["Person"]
         assert data["relationship_types"] == ["KNOWS"]
         assert data["property_keys"] == ["name"]
+        assert data["indexes"] == [
+            {
+                "name": "person_name",
+                "type": "RANGE",
+                "entity_type": "NODE",
+                "labels_or_types": ["Person"],
+                "properties": ["name"],
+                "state": "ONLINE",
+            }
+        ]
 
 
 async def test_call_tool_schema_error():

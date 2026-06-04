@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import neo4j.exceptions
 from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Query, Record
@@ -67,6 +67,53 @@ async def run_query(cypher: str, parameters: dict = None) -> list[Record]:
         async for result in query_results:
             results.append(result)
     return results
+
+
+_LABELS_QUERY = "CALL db.labels() YIELD label RETURN label ORDER BY label"
+_RELS_QUERY = "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS type ORDER BY type"
+_PROPS_QUERY = "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey AS key ORDER BY key"
+_INDEXES_QUERY = "SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, state ORDER BY name"
+
+
+async def _fetch_indexes() -> list[dict[str, Any]]:
+    try:
+        results = await run_query(_INDEXES_QUERY)
+    except neo4j.exceptions.Neo4jError:
+        # SHOW INDEXES needs catalog privileges (and a recent Neo4j); degrade to
+        # an empty list rather than failing the whole schema fetch.
+        logger.warning("SHOW INDEXES failed; returning schema without indexes", exc_info=True)
+        return []
+    return [
+        {
+            "name": str(record["name"]),
+            "type": str(record["type"]),
+            "entity_type": str(record["entityType"]),
+            "labels_or_types": [str(value) for value in (record["labelsOrTypes"] or [])],
+            "properties": [str(value) for value in (record["properties"] or [])],
+            "state": str(record["state"]),
+        }
+        for record in results
+    ]
+
+
+async def fetch_graph_schema() -> dict[str, Any]:
+    """Introspect the graph: node labels, relationship types, property keys, indexes.
+
+    Runs privileged catalog queries (incl. SHOW INDEXES) directly — the user query
+    validator intentionally blocks these for ad-hoc user queries, so they are only
+    reachable through this server-side path. Shared by the schema route and the
+    graph__schema built-in tool.
+    """
+    labels = await run_query(_LABELS_QUERY)
+    rels = await run_query(_RELS_QUERY)
+    props = await run_query(_PROPS_QUERY)
+    indexes = await _fetch_indexes()
+    return {
+        "labels": [str(record["label"]) for record in labels],
+        "relationship_types": [str(record["type"]) for record in rels],
+        "property_keys": [str(record["key"]) for record in props],
+        "indexes": indexes,
+    }
 
 
 async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Record]:
