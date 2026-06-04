@@ -319,8 +319,11 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     writer = get_stream_writer()
 
     skills = await _list_chat_prompts(current_user)
-    tools = await _list_chat_tools(current_user)
-    capability = build_capability_context(skills, tools)
+    # Under progressive disclosure the planner sees skills only (tools are
+    # disclosed by rendered skills), so it plans skill-first instead of wiring up
+    # raw tool/graph queries it would not otherwise be allowed to call.
+    capability_tools = None if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE else await _list_chat_tools(current_user)
+    capability = build_capability_context(skills, capability_tools)
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
 
     try:
@@ -425,6 +428,10 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
 
     model = get_chat_model()
     tool_specs = await _worker_tool_specs(current_user)
+    # Progressive disclosure carries across steps: tools a skill disclosed in an
+    # earlier super-step stay callable for the dependent steps that follow.
+    progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
+    disclosed_names = set(state.get("disclosed_tools") or []) if progressive else set()
 
     new_results = await asyncio.gather(
         *(
@@ -437,12 +444,16 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
                 session_key=session_key,
                 config=config,
                 tool_specs=tool_specs,
+                disclosed_names=disclosed_names,
+                progressive=progressive,
                 writer=writer,
             )
             for step in batch
         )
     )
     merged = _merge_results(results, list(new_results))
+    for result in new_results:
+        disclosed_names.update(result.get("disclosed_tools") or [])
 
     # A step whose worker hit a confirmation gate is parked as "awaiting" so the
     # plan pauses (rather than verifying/retrying) until the user approves.
@@ -450,7 +461,10 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     for step in batch:
         if merged_by_id.get(step["id"], {}).get("awaiting_confirmation"):
             step["status"] = "awaiting"
-    return {"plan": plan, "step_results": merged, "iteration": iteration}
+    update: dict[str, Any] = {"plan": plan, "step_results": merged, "iteration": iteration}
+    if progressive:
+        update["disclosed_tools"] = sorted(disclosed_names)
+    return update
 
 
 def route_from_dispatcher(state: ChatState) -> str:
@@ -575,11 +589,26 @@ async def _run_worker_step(
     session_key: str | None,
     config: RunnableConfig,
     tool_specs: list[ChatToolSpec],
-    writer: Any,
+    disclosed_names: set[str] | None = None,
+    progressive: bool | None = None,
+    writer: Any = None,
 ) -> dict[str, Any]:
-    """Run one plan step as an isolated sub-agent; return its result dict."""
+    """Run one plan step as an isolated sub-agent; return its result dict.
+
+    ``tool_specs`` is the full universe of skills + tools; under progressive
+    disclosure only skills and already-``disclosed_names`` tools are callable at
+    the start, with the rest unlocked when a rendered skill declares them.
+    """
     step_id = str(step["id"])
-    specs, contract_error = _step_tool_specs(tool_specs, step)
+    if progressive is None:
+        progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
+    disclosed_names = set(disclosed_names or ())
+    available_pool = (
+        tool_specs
+        if not progressive
+        else [spec for spec in tool_specs if spec.kind == "skill" or spec.name in disclosed_names]
+    )
+    specs, contract_error = _step_tool_specs(available_pool, step)
     if contract_error:
         contract_result = _step_contract_error_result(step, contract_error)
         _emit(
@@ -601,6 +630,7 @@ async def _run_worker_step(
     # renders, the sub-tools stay invisible, and the step produces no findings.
     active_specs = list(specs)
     active_names = {spec.name for spec in active_specs}
+    newly_disclosed_names: set[str] = set()
     available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)
     if step.get("retry_guidance"):
@@ -674,12 +704,14 @@ async def _run_worker_step(
         if blocked is not None:
             break
         # Surface any tools a rendered skill just disclosed so the next turn can
-        # call them. Looked up from the full worker tool list, not re-fetched.
+        # call them. Looked up from the full worker tool universe, not re-fetched;
+        # the names also propagate to dependent steps via the dispatcher.
         newly_disclosed = _disclosed_tool_names_from_skill_results(batch_results)
         added = [spec for spec in tool_specs if spec.name in newly_disclosed and spec.name not in active_names]
         if added:
             active_specs.extend(added)
             active_names.update(spec.name for spec in added)
+            newly_disclosed_names.update(spec.name for spec in added)
             available = _with_provider_tool_names(active_specs)
 
     if not execution_error and _step_requires_action(step) and required_action not in tools_used and blocked is None:
@@ -694,6 +726,9 @@ async def _run_worker_step(
         "tools_used": tools_used,
         "blocked": blocked.value if blocked is not None else None,
     }
+    if newly_disclosed_names:
+        # Propagate to the dispatcher so dependent steps inherit the disclosure.
+        step_result["disclosed_tools"] = sorted(newly_disclosed_names)
     if execution_error:
         step_result["execution_error"] = execution_error
     if confirmation_blocked:

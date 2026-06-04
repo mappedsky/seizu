@@ -289,6 +289,9 @@ async def test_worker_step_fails_when_required_action_is_not_called():
         session_key="thread",
         config={"configurable": {}},
         tool_specs=tool_specs,
+        # The required tool is already disclosed; the failure is that the worker
+        # narrated instead of calling it (not that the tool was unavailable).
+        disclosed_names={"github_security__repo_risk_summary"},
         writer=lambda event: details.append(event),
     )
 
@@ -370,6 +373,33 @@ async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
     assert "github_security" in result["tools_used"]
     assert "github_security__org_overview" in result["tools_used"]
     assert result["output"] == "Found 2 critical CVEs: CVE-1, CVE-2."
+    # The disclosure propagates so dependent steps inherit it.
+    assert result["disclosed_tools"] == ["github_security__org_overview"]
+
+
+async def test_worker_step_cannot_call_undisclosed_tool_under_progressive_disclosure(mocker):
+    # A bare tool step whose tool no skill has disclosed is not callable.
+    sub_tool = chat_graph.ChatToolSpec(
+        name="graph__query", kind="tool", description="run cypher", input_schema={"type": "object"}
+    )
+    step = _step("s1", action_kind="tool", required_action="graph__query", success_criteria="rows")
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=object(),  # never invoked: the contract fails before any model call
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[sub_tool],
+        disclosed_names=set(),
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert result["output"] == ""
+    assert "not available" in result["execution_error"]
 
 
 def test_orchestration_details_carry_step_hierarchy():
