@@ -1758,21 +1758,23 @@ skillsets:
           - Every tool named in a template's workflow must appear in tools_required unless it is only mentioned as an example.
 
           Workflow:
-          1. Call `skillsets__list` to discover current skillsets.
-          2. If `target_skillset_id` is provided, call `skillsets__get` and `skillsets__list_skills` for that skillset. If it is missing, decide whether the request calls for `skillsets__create`.
-          3. If `target_skill_id` is provided, call `skillsets__get_skill` and inspect the existing template, parameters, triggers, tools_required, and enabled state. To review version history before editing, call `skillsets__list_skill_versions` (or `skillsets__list_versions` for the parent skillset).
-          4. Render or mentally validate any proposed template placeholders against the proposed parameter list. Every template placeholder must have a matching parameter with a supported type.
-          5. For a new skillset, prepare or call `skillsets__create`.
-          6. For skillset metadata changes, prepare or call `skillsets__update`.
-          7. For a new skill, prepare or call `skillsets__create_skill`.
-          8. For an existing skill, prepare or call `skillsets__update_skill`.
-          9. For toolset/tool authoring, follow the same discover-then-write pattern: call `toolsets__list`, and for a target toolset call `toolsets__get` and `toolsets__list_tools` (call `toolsets__get_tool` for an existing tool). Create the toolset with `toolsets__create` if it is missing.
-          10. Before any `toolsets__create_tool` / `toolsets__update_tool` whose `cypher` you are setting or changing, run the "Cypher tools" checks above (graph__schema -> graph__validate_query -> graph__explain) and only write once the cypher is valid and the plan is acceptable.
-          11. If applying changes, call the relevant get/list tool afterward to verify the stored result.
+          1. Determine the scope from the request: does it target skills/skillsets, toolsets/tools, or both? Run only the discovery and writes for the scope it actually involves. Do not inspect the side you are not changing — for a tools-only request, skip `skillsets__list` and every `skillsets__*` call; for a skills-only request, skip `toolsets__list` and every `toolsets__*` and `graph__*` call. This conserves the per-step tool-call budget.
+
+          Skill / skillset work (only if in scope):
+          2. Call `skillsets__list`. If `target_skillset_id` is provided, call `skillsets__get` and `skillsets__list_skills`; if it is missing, decide whether to call `skillsets__create`.
+          3. If `target_skill_id` is provided, call `skillsets__get_skill` and inspect the existing template, parameters, triggers, tools_required, and enabled state (use `skillsets__list_skill_versions` / `skillsets__list_versions` to review history before editing).
+          4. Validate any proposed template placeholders against the proposed parameter list — every placeholder must have a matching parameter with a supported type.
+          5. Prepare or call `skillsets__create` / `skillsets__update` for the skillset and `skillsets__create_skill` / `skillsets__update_skill` for the skill.
+
+          Toolset / tool work (only if in scope):
+          6. Call `toolsets__list`. For a target toolset call `toolsets__get` and `toolsets__list_tools` (and `toolsets__get_tool` for an existing tool); create the toolset with `toolsets__create` if it is missing.
+          7. Before any `toolsets__create_tool` / `toolsets__update_tool` whose `cypher` you set or change, run the "Cypher tools" checks (graph__schema -> graph__validate_query -> graph__explain) and only write once the cypher is valid and the plan is acceptable. Call `graph__schema` once and reuse it for every tool in the same toolset rather than re-fetching it per tool.
+
+          8. After applying any change, call the relevant get/list tool to verify the stored result.
 
           Output format:
-          - `Intent`: restate the requested skill authoring change.
-          - `Current State`: summarize discovered existing skillset/skill state.
+          - `Intent`: restate the requested skill or tool authoring change.
+          - `Current State`: summarize the discovered existing skillset/skill or toolset/tool state.
           - `Plan`: ordered implementation steps.
           - `Payloads`: include exact skillset, skill, toolset, and tool payloads, including parameters, triggers, tools_required, enabled, template, and (for tools) the validated cypher.
           - `Applied Changes`: if `dry_run=false`, list each tool call made and the resulting IDs/versions.
