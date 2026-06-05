@@ -1746,6 +1746,11 @@ skillsets:
              label/property (see the indexes from graph__schema) and avoid full scans (e.g.
              AllNodesScan, or a label scan over a large label); adjust the query to use an index
              where possible, and surface any unavoidable full scan as a risk.
+          4. Keep the tool's `parameters` in sync with the cypher: every `$param` the query
+             references MUST be declared in `parameters` (with a type), and remove any declared
+             parameter the new query no longer uses. create_tool/update_tool rejects a query that
+             references an undeclared parameter (it would otherwise fail every call), so when you
+             change a query's parameters you must update the `parameters` list in the same write.
           Only after the cypher validates and the plan is acceptable, call create_tool/update_tool.
 
           Operating rules:
