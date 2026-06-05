@@ -113,6 +113,34 @@ class ToolParamDef(BaseModel):
         return _coerce_decimal(v)
 
 
+# Cypher parameter references: $name or $`quoted name`.
+_CYPHER_PARAM_RE = re.compile(r"\$(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def cypher_parameter_names(cypher: str) -> set[str]:
+    """The parameter names a Cypher query references ($name / $`name`).
+
+    String literals and comments are stripped first so a ``$`` inside them is not
+    mistaken for a parameter reference.
+    """
+    no_block = re.sub(r"/\*.*?\*/", " ", cypher, flags=re.DOTALL)
+    no_line = re.sub(r"//[^\n]*", " ", no_block)
+    no_double = re.sub(r'"(?:\\.|[^"\\])*"', " ", no_line)
+    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", " ", no_double)
+    return {match.group(1) or match.group(2) for match in _CYPHER_PARAM_RE.finditer(cleaned)}
+
+
+def undeclared_cypher_parameters(cypher: str, parameters: list[ToolParamDef]) -> list[str]:
+    """Cypher ``$parameters`` not declared in the tool's parameter list.
+
+    A tool whose query references ``$x`` without declaring ``x`` fails at call
+    time with a Neo4j ParameterMissing error, so this must be rejected when the
+    tool is created or updated.
+    """
+    declared = {param.name for param in parameters}
+    return sorted(name for name in cypher_parameter_names(cypher) if name not in declared)
+
+
 class ToolsetListItem(BaseModel):
     """Lightweight summary of a toolset for list views."""
 

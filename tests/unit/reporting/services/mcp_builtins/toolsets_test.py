@@ -413,7 +413,7 @@ async def test_toolsets_create_tool_success():
             return_value=None,
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(),
         ),
@@ -450,7 +450,7 @@ async def test_toolsets_create_tool_rejects_invalid_cypher():
             return_value=None,
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(errors=["write not allowed"]),
         ),
@@ -479,7 +479,7 @@ async def test_toolsets_create_tool_returns_error_when_toolset_missing():
             return_value=None,
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(),
         ),
@@ -514,7 +514,7 @@ async def test_toolsets_update_tool_success():
             return_value=_tool(),
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(),
         ),
@@ -596,7 +596,7 @@ async def test_toolsets_update_tool_rejects_invalid_cypher():
             return_value=_tool(),
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(errors=["nope"]),
         ),
@@ -625,7 +625,7 @@ async def test_toolsets_update_tool_returns_error_on_store_failure():
             return_value=_tool(),
         ),
         patch(
-            "reporting.services.mcp_builtins.toolsets.validate_query",
+            "reporting.services.mcp_builtins.toolsets.validate_tool_cypher",
             new_callable=AsyncMock,
             return_value=ValidationResult(),
         ),

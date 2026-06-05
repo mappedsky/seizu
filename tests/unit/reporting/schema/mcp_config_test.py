@@ -3,11 +3,33 @@ import pytest
 from reporting.schema.mcp_config import (
     MAX_SLUG_COMPONENT_LEN,
     ToolParamDef,
+    cypher_parameter_names,
     render_skill_template,
     template_placeholders,
+    undeclared_cypher_parameters,
     validate_lower_snake_id,
     validate_skill_template,
 )
+
+
+def test_cypher_parameter_names_extracts_refs_ignoring_strings_and_comments():
+    cypher = (
+        "MATCH (n:CVE) WHERE n.id = $cve_id // not a param: $nope\n"
+        "AND n.note = 'mentions $ignored' AND n.x = $`odd name` RETURN n LIMIT $limit"
+    )
+    assert cypher_parameter_names(cypher) == {"cve_id", "odd name", "limit"}
+
+
+def test_undeclared_cypher_parameters_flags_missing_declarations():
+    cypher = "MATCH (n) WHERE n.id = $cve_id RETURN n LIMIT $limit"
+    only_limit = [ToolParamDef(name="limit", type="integer")]
+    assert undeclared_cypher_parameters(cypher, only_limit) == ["cve_id"]
+
+    both = [ToolParamDef(name="cve_id", type="string"), ToolParamDef(name="limit", type="integer")]
+    assert undeclared_cypher_parameters(cypher, both) == []
+    # A declared-but-unused parameter is fine (not flagged).
+    assert undeclared_cypher_parameters("MATCH (n) RETURN n", both) == []
+
 
 _PARAM_REQUEST = ToolParamDef(name="request", type="string", required=True)
 _PARAM_DRY_RUN = ToolParamDef(name="dry_run", type="boolean", required=False, default=True)

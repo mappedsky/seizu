@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from reporting import settings
-from reporting.services.query_validator import ValidationResult, validate_query
+from reporting.schema.mcp_config import ToolParamDef
+from reporting.services import query_validator
+from reporting.services.query_validator import ValidationResult, validate_query, validate_tool_cypher
 from tests.query_validator_cases import (
     ADMIN_COMMAND_FUZZ_CASES,
     ALLOWED_PROCEDURE_CASES,
@@ -50,6 +52,38 @@ def _mock_cyver(
         props_ok,
         props_meta if props_meta is not None else [],
     )
+
+
+# --- validate_tool_cypher: undeclared-parameter guard ---
+
+
+async def test_validate_tool_cypher_flags_undeclared_parameters(mocker):
+    # Isolate the parameter check from the DB-backed query validation.
+    mocker.patch.object(
+        query_validator,
+        "validate_query",
+        new=AsyncMock(return_value=ValidationResult(errors=[], warnings=["a warning"])),
+    )
+    result = await validate_tool_cypher(
+        "MATCH (n) WHERE n.id = $cve_id RETURN n LIMIT $limit",
+        [ToolParamDef(name="limit", type="integer")],
+    )
+    assert result.has_errors
+    assert any("$cve_id" in err for err in result.errors)
+    assert result.warnings == ["a warning"]  # query warnings are preserved
+
+
+async def test_validate_tool_cypher_passes_when_all_parameters_declared(mocker):
+    mocker.patch.object(
+        query_validator,
+        "validate_query",
+        new=AsyncMock(return_value=ValidationResult(errors=[], warnings=[])),
+    )
+    result = await validate_tool_cypher(
+        "MATCH (n) WHERE n.id = $cve_id RETURN n LIMIT $limit",
+        [ToolParamDef(name="cve_id", type="string"), ToolParamDef(name="limit", type="integer")],
+    )
+    assert not result.has_errors
 
 
 # --- validate_query returns ValidationResult ---
