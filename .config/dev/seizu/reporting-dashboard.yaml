@@ -1750,7 +1750,7 @@ skillsets:
 
           Operating rules:
           - Treat `dry_run=true` as plan-only. Do not call create or update tools in dry-run mode; produce the exact proposed payloads instead.
-          - Treat `dry_run=false` as permission to apply create/update operations, but still inspect current state first.
+          - Treat `dry_run=false` as an apply request: after inspecting current state and validating cypher, you MUST call the create/update tools in this same run. Do not stop after validation or after presenting payloads — produce the output sections AND apply the changes in one pass. (Writes are confirmation-gated, so the user still approves each mutation.) The default is to apply; only use dry_run=true when the request explicitly asks for a preview or plan.
           - Never delete a skillset or skill from this workflow. If deletion seems necessary, recommend it separately and require explicit user confirmation outside this skill.
           - Preserve existing enabled state unless the request explicitly says otherwise.
           - Use lower_snake_case IDs, at most 31 characters each (so the full skillset__skill / toolset__tool name stays under the 64-char limit). Do not rename IDs unless the user explicitly requests a migration.
@@ -1797,9 +1797,9 @@ skillsets:
             default: ""
           - name: dry_run
             type: boolean
-            description: When true, produce payloads without creating or updating anything.
+            description: When true, produce payloads without creating or updating anything. Defaults to false (apply); set true only to preview a plan.
             required: false
-            default: true
+            default: false
         triggers:
           - create a Seizu skill
           - update a skill prompt
