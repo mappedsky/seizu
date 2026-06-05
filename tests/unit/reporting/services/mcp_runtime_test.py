@@ -174,6 +174,36 @@ async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker
     assert json.loads(result[0].text) == [{"name": "node-1"}]
 
 
+async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
+    import neo4j.exceptions
+
+    mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
+    err = neo4j.exceptions.ClientError("Expected parameter(s): cve_id, limit")
+    # A server-hydrated Neo4jError exposes the human-readable text via .message
+    # (backed by ._message); set it to mirror what the driver returns.
+    err._message = "Expected parameter(s): cve_id, limit"
+    mocker.patch(
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
+        side_effect=err,
+    )
+    log = mocker.patch("reporting.services.mcp_runtime.logger")
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "security__lookup",
+        {"limit": 3},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+    )
+
+    data = json.loads(result[0].text)
+    # The database message is surfaced so the caller can see why the tool failed.
+    assert "Expected parameter(s): cve_id, limit" in data["error"]
+    # Logged concisely (warning), not as a full-traceback ERROR.
+    log.warning.assert_called_once()
+    log.exception.assert_not_called()
+
+
 async def test_chat_tool_call_applies_row_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
