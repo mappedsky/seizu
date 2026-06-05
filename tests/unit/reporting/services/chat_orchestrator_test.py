@@ -738,6 +738,20 @@ async def test_resume_awaiting_steps_runs_approved_action(mocker):
     result = {r["step_id"]: r for r in out["step_results"]}["s1"]
     assert "mutated ok" in result["output"]
     assert not result.get("awaiting_confirmation")
+    # Flagged so the verifier auto-passes it (no re-verify/retry of an applied change).
+    assert result["confirmation_executed"] is True
+
+
+async def test_verify_step_auto_passes_executed_confirmation():
+    # A step whose approved action executed must pass without re-judging the raw
+    # tool output (and without a model call), so it is never retried.
+    step = _step("s1", success_criteria="the tools are updated to use indexed queries")
+    result = {"step_id": "s1", "output": '{"tool_id": "trace", "version": 2}', "confirmation_executed": True}
+
+    passed, reason = await chat_orchestrator._verify_step(step, result, {"configurable": {}})
+
+    assert passed is True
+    assert "approved action" in reason.lower()
 
 
 async def test_resume_awaiting_steps_keeps_waiting(mocker):

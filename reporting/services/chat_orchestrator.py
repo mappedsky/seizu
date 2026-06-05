@@ -526,6 +526,9 @@ async def _resume_awaiting_steps(
                 result["output"] = combined
                 result["blocked"] = None
                 result.pop("awaiting_confirmation", None)
+                # The approved action ran; the verifier auto-passes it so the plan
+                # does not retry an already-applied change.
+                result["confirmation_executed"] = True
                 step["status"] = "ran"
             else:
                 step["status"] = "failed"
@@ -911,6 +914,12 @@ async def verifier_node(state: ChatState, config: RunnableConfig) -> dict[str, A
 
 
 async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: RunnableConfig) -> tuple[bool, str]:
+    # A step whose mutating action the user explicitly approved and that executed
+    # is done: do not LLM-re-judge the raw tool output (which reads as data, not a
+    # success narrative) and do not retry — retrying re-runs the whole worker and
+    # would re-attempt the already-applied change.
+    if result.get("confirmation_executed"):
+        return True, "User-approved action executed."
     # A blocked step (e.g. needs confirmation, permission denied) is never a pass.
     if result.get("blocked"):
         return False, f"Step was blocked: {result.get('blocked')}"
