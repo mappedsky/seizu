@@ -452,6 +452,55 @@ async def test_worker_step_cannot_call_undisclosed_tool_under_progressive_disclo
     assert "not available" in result["execution_error"]
 
 
+async def test_worker_step_synthesizes_when_action_budget_exhausted(mocker):
+    # A worker that keeps calling tools until its budget runs out must still
+    # produce a result (forced synthesis) rather than reporting "no output".
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 2)
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    step = _step("s1")  # action_kind="auto", no required action
+
+    class _BudgetModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def bind_tools(self, _tools: Any) -> "_BudgetModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            self.calls += 1
+            if self.calls <= 2:
+                yield AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": f"c{self.calls}"}])
+            else:
+                # The forced-synthesis turn (called with no tools).
+                yield AIMessage(content="Validated the queries but ran out of budget before applying updates.")
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+        return [chat_graph.ToolCallResult(request=req, content="{}") for req in batch]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_BudgetModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[spec],
+        disclosed_names={"t__one"},
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert result["blocked"] is None
+    assert result.get("execution_error") in (None, "")
+    assert result["tools_used"] == ["t__one", "t__one"]  # stopped at the budget
+    assert "ran out of budget" in result["output"]  # forced synthesis, not empty
+
+
 def test_orchestration_details_carry_step_hierarchy():
     plan = [_step("s1", goal="gather"), _step("s2", goal="summarize", depends_on=["s1"])]
     plan[0]["goal"] = "gather"

@@ -359,6 +359,11 @@ CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
 CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
 # Maximum independent steps the dispatcher runs concurrently in one batch.
 CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Per-step tool-call budget for an orchestrator worker. Higher than the
+# interactive CHAT_LLM_MAX_AUTO_ACTIONS because a worker is a focused sub-agent
+# that may need to discover, validate, and then apply changes across several
+# resources in one step (e.g. validate+explain+update each tool in a toolset).
+CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
 
 # Standard provider API key env vars. These are intentionally not exposed via
 # GET /api/v1/config.

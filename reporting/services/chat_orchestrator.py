@@ -199,6 +199,14 @@ def _worker_user_message(step: dict[str, Any], dependency_context: str) -> str:
     return "\n".join(parts)
 
 
+def _worker_budget_exhausted_message() -> str:
+    return (
+        "You have used this step's tool-call budget. Do not call any more tools. Using the tool results already in "
+        "this conversation, write a concise factual result for this step: what you accomplished, the concrete "
+        "findings or values produced, and any part of the step's goal that was not completed and still remains."
+    )
+
+
 # --- Detail events -------------------------------------------------------------
 
 
@@ -660,7 +668,7 @@ async def _run_worker_step(
     confirmation_blocked: list[ToolCallResult] = []
     required_action = str(step.get("required_action") or "")
     execution_error = ""
-    while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
+    while action_count < settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
         turn = await _run_llm_tool_turn(model, system_prompt, messages, available, config, None)
@@ -669,7 +677,7 @@ async def _run_worker_step(
         if not requested:
             output_text = message_text(ai_message.content)
             break
-        remaining = settings.CHAT_LLM_MAX_AUTO_ACTIONS - action_count
+        remaining = settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS - action_count
         batch = requested[:remaining]
         batch = _apply_planned_arguments(step, batch)
         action_count += len(batch)
@@ -721,6 +729,21 @@ async def _run_worker_step(
     if not execution_error and _step_requires_action(step) and required_action not in tools_used and blocked is None:
         execution_error = f"Step required structured action `{required_action}`, but the worker did not call it."
         output_text = ""
+
+    # The worker took tool actions but never produced a final text result — it ran
+    # out of its action budget mid-work. Synthesize a result from what it did
+    # (mirrors the single-agent path) so the step reports its progress and what
+    # remains instead of "Step produced no output".
+    if not output_text.strip() and not execution_error and blocked is None and tools_used:
+        synthesis = await _run_llm_tool_turn(
+            model,
+            f"{system_prompt}\n\n{_worker_budget_exhausted_message()}",
+            messages,
+            [],
+            config,
+            None,
+        )
+        output_text = message_text(synthesis.message.content)
 
     step_result: dict[str, Any] = {
         "step_id": step["id"],
