@@ -95,6 +95,10 @@ jobs:
             type=match,pattern=v(.*),group=1
             type=match,pattern=server-v(.*),group=1
             type=raw,value=latest,enable={{is_default_branch}}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm64
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
       - name: Login to GitHub Container Registry
@@ -109,6 +113,7 @@ jobs:
           file: Dockerfile
           context: .
           target: production
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
