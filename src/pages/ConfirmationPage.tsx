@@ -14,6 +14,7 @@ import { AuthConfigContext } from 'src/authConfig.context';
 import { AuthContext } from 'src/auth.context';
 import {
   type ActionConfirmation,
+  effectiveConfirmationStatus,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
@@ -97,69 +98,85 @@ export default function ConfirmationPage() {
           {error}
         </Alert>
       ) : null}
-      {confirmation ? (
-        <Paper sx={{ p: 2 }} variant="outlined">
-          <Typography variant="h6">
-            {confirmation.action} {confirmation.resource_type}
-          </Typography>
-          <Typography
-            color="text.secondary"
-            sx={{ wordBreak: 'break-word' }}
-            variant="body2"
-          >
-            {confirmation.resource_id}
-          </Typography>
-          <Typography sx={{ mt: 2 }} variant="subtitle2">
-            Tool
-          </Typography>
-          <Typography sx={{ wordBreak: 'break-word' }} variant="body2">
-            {confirmation.tool_name}
-          </Typography>
-          <Typography sx={{ mt: 2 }} variant="subtitle2">
-            Arguments
-          </Typography>
-          <Typography
-            component="pre"
-            sx={{
-              bgcolor: 'action.hover',
-              borderRadius: 1,
-              fontFamily: '"JetBrains Mono", monospace',
-              fontSize: '0.8rem',
-              maxHeight: 360,
-              overflow: 'auto',
-              p: 1.25,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}
-          >
-            {JSON.stringify(confirmation.arguments, null, 2)}
-          </Typography>
-          <Typography color="text.secondary" sx={{ mt: 1 }} variant="body2">
-            Status: {confirmation.status}
-          </Typography>
-          {confirmation.status === 'pending' ? (
-            <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
-              <Button
-                disabled={deciding !== null}
-                onClick={() => void decide('approved')}
-                startIcon={<CheckCircle />}
-                variant="contained"
-              >
-                Allow
-              </Button>
-              <Button
-                color="error"
-                disabled={deciding !== null}
-                onClick={() => void decide('denied')}
-                startIcon={<Block />}
-                variant="outlined"
-              >
-                Deny
-              </Button>
-            </Box>
-          ) : null}
-        </Paper>
-      ) : null}
+      {confirmation
+        ? (() => {
+            const status = effectiveConfirmationStatus(confirmation);
+            const isExpired = status === 'expired';
+            return (
+              <Paper sx={{ p: 2 }} variant="outlined">
+                <Typography variant="h6">
+                  {confirmation.action} {confirmation.resource_type}
+                </Typography>
+                <Typography
+                  color="text.secondary"
+                  sx={{ wordBreak: 'break-word' }}
+                  variant="body2"
+                >
+                  {confirmation.resource_id}
+                </Typography>
+                <Typography sx={{ mt: 2 }} variant="subtitle2">
+                  Tool
+                </Typography>
+                <Typography sx={{ wordBreak: 'break-word' }} variant="body2">
+                  {confirmation.tool_name}
+                </Typography>
+                <Typography sx={{ mt: 2 }} variant="subtitle2">
+                  Arguments
+                </Typography>
+                <Typography
+                  component="pre"
+                  sx={{
+                    bgcolor: 'action.hover',
+                    borderRadius: 1,
+                    fontFamily: '"JetBrains Mono", monospace',
+                    fontSize: '0.8rem',
+                    maxHeight: 360,
+                    overflow: 'auto',
+                    p: 1.25,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {JSON.stringify(confirmation.arguments, null, 2)}
+                </Typography>
+                <Typography
+                  color="text.secondary"
+                  sx={{ mt: 1 }}
+                  variant="body2"
+                >
+                  Status: {status}
+                </Typography>
+                {isExpired ? (
+                  <Alert severity="warning" sx={{ mt: 2 }}>
+                    This confirmation has expired and can no longer be approved.
+                    Re-run the action to get a fresh confirmation.
+                  </Alert>
+                ) : null}
+                {status === 'pending' ? (
+                  <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+                    <Button
+                      disabled={deciding !== null}
+                      onClick={() => void decide('approved')}
+                      startIcon={<CheckCircle />}
+                      variant="contained"
+                    >
+                      Allow
+                    </Button>
+                    <Button
+                      color="error"
+                      disabled={deciding !== null}
+                      onClick={() => void decide('denied')}
+                      startIcon={<Block />}
+                      variant="outlined"
+                    >
+                      Deny
+                    </Button>
+                  </Box>
+                ) : null}
+              </Paper>
+            );
+          })()
+        : null}
     </Box>
   );
 }
