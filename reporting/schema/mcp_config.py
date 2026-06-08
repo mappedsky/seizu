@@ -16,9 +16,15 @@ MAX_SLUG_COMPONENT_LEN = 31
 
 
 def validate_lower_snake_id(value: str) -> str:
-    """Validate immutable user-supplied IDs used in MCP names."""
+    """Validate lower_snake_case identifiers such as parameter names."""
     if not LOWER_SNAKE_ID_RE.fullmatch(value):
         raise ValueError("must be lower_snake_case matching ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+    return value
+
+
+def validate_mcp_slug_component(value: str) -> str:
+    """Validate immutable user-supplied IDs used as MCP name components."""
+    validate_lower_snake_id(value)
     if len(value) > MAX_SLUG_COMPONENT_LEN:
         raise ValueError(f"must be at most {MAX_SLUG_COMPONENT_LEN} characters so the full MCP name stays under 64")
     return value
@@ -313,7 +319,7 @@ class CreateToolsetRequest(BaseModel):
     @field_validator("toolset_id")
     @classmethod
     def validate_toolset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolsetRequest(BaseModel):
@@ -338,7 +344,7 @@ class CreateToolRequest(BaseModel):
     @field_validator("tool_id")
     @classmethod
     def validate_tool_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolRequest(BaseModel):
@@ -515,7 +521,7 @@ class CreateSkillsetRequest(BaseModel):
     @field_validator("skillset_id")
     @classmethod
     def validate_skillset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateSkillsetRequest(BaseModel):
@@ -542,7 +548,7 @@ class CreateSkillRequest(BaseModel):
     @field_validator("skill_id")
     @classmethod
     def validate_skill_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
     @field_validator("triggers")
     @classmethod

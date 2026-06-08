@@ -2,12 +2,14 @@ import pytest
 
 from reporting.schema.mcp_config import (
     MAX_SLUG_COMPONENT_LEN,
+    CreateToolRequest,
     ToolParamDef,
     cypher_parameter_names,
     render_skill_template,
     template_placeholders,
     undeclared_cypher_parameters,
     validate_lower_snake_id,
+    validate_mcp_slug_component,
     validate_skill_template,
 )
 
@@ -35,18 +37,35 @@ _PARAM_REQUEST = ToolParamDef(name="request", type="string", required=True)
 _PARAM_DRY_RUN = ToolParamDef(name="dry_run", type="boolean", required=False, default=True)
 
 
-def test_validate_lower_snake_id_enforces_length_cap():
+def test_validate_mcp_slug_component_enforces_length_cap():
     # At the cap is fine; two capped components fit the 64-char provider limit.
     at_cap = "a" * MAX_SLUG_COMPONENT_LEN
-    assert validate_lower_snake_id(at_cap) == at_cap
+    assert validate_mcp_slug_component(at_cap) == at_cap
     assert len(f"{at_cap}__{at_cap}") == 64
 
     with pytest.raises(ValueError, match="at most 31 characters"):
-        validate_lower_snake_id("a" * (MAX_SLUG_COMPONENT_LEN + 1))
+        validate_mcp_slug_component("a" * (MAX_SLUG_COMPONENT_LEN + 1))
 
     # Pattern errors still take precedence.
     with pytest.raises(ValueError, match="lower_snake_case"):
-        validate_lower_snake_id("Not_Snake")
+        validate_mcp_slug_component("Not_Snake")
+
+
+def test_tool_parameter_names_are_not_capped_by_mcp_slug_limit():
+    long_param = "this_is_a_valid_long_parameter_name"
+
+    assert len(long_param) > MAX_SLUG_COMPONENT_LEN
+    assert validate_lower_snake_id(long_param) == long_param
+    assert ToolParamDef(name=long_param, type="string").name == long_param
+
+
+def test_create_tool_id_still_uses_mcp_slug_limit():
+    with pytest.raises(ValueError, match="at most 31 characters"):
+        CreateToolRequest(
+            tool_id="a" * (MAX_SLUG_COMPONENT_LEN + 1),
+            name="Too long",
+            cypher="MATCH (n) RETURN n",
+        )
 
 
 def test_template_placeholders_finds_vars():
