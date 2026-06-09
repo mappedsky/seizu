@@ -48,6 +48,9 @@ import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+// Cap each slug component so the full "skillset__skill" MCP name stays <= 64
+// chars (31 + "__" + 31). Mirrors MAX_SLUG_COMPONENT_LEN in mcp_config.py.
+const MAX_SLUG_LEN = 31;
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '24%' };
 const versionColumnSx = { ...listTableSecondaryCellSx, width: 96 };
@@ -89,6 +92,10 @@ function SkillsetDialog({
     }
     if (!initial && !LOWER_SNAKE_ID.test(skillsetId.trim())) {
       setError('ID must be lower_snake_case.');
+      return;
+    }
+    if (!initial && skillsetId.trim().length > MAX_SLUG_LEN) {
+      setError(`ID must be at most ${MAX_SLUG_LEN} characters.`);
       return;
     }
     const req = initial

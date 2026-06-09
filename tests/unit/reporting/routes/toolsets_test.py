@@ -408,7 +408,7 @@ async def test_create_tool_success(mocker):
         new=AsyncMock(return_value=None),
     )
     mocker.patch(
-        "reporting.routes.toolsets.validate_query",
+        "reporting.routes.toolsets.validate_tool_cypher",
         new=AsyncMock(return_value=ValidationResult()),
     )
     mocker.patch(
@@ -428,7 +428,7 @@ async def test_create_tool_cypher_validation_error(mocker):
         new=AsyncMock(return_value=None),
     )
     mocker.patch(
-        "reporting.routes.toolsets.validate_query",
+        "reporting.routes.toolsets.validate_tool_cypher",
         new=AsyncMock(return_value=ValidationResult(errors=["Write queries are not allowed"])),
     )
     app = _make_app()
@@ -445,7 +445,7 @@ async def test_create_tool_toolset_not_found(mocker):
         new=AsyncMock(return_value=None),
     )
     mocker.patch(
-        "reporting.routes.toolsets.validate_query",
+        "reporting.routes.toolsets.validate_tool_cypher",
         new=AsyncMock(return_value=ValidationResult()),
     )
     mocker.patch(
@@ -523,7 +523,7 @@ async def test_update_tool_success(mocker):
         new=AsyncMock(return_value=_toolset_item()),
     )
     mocker.patch(
-        "reporting.routes.toolsets.validate_query",
+        "reporting.routes.toolsets.validate_tool_cypher",
         new=AsyncMock(return_value=ValidationResult()),
     )
     mocker.patch(
@@ -555,7 +555,7 @@ async def test_update_tool_cypher_validation_error(mocker):
         new=AsyncMock(return_value=_tool_item()),
     )
     mocker.patch(
-        "reporting.routes.toolsets.validate_query",
+        "reporting.routes.toolsets.validate_tool_cypher",
         new=AsyncMock(return_value=ValidationResult(errors=["Write queries are not allowed"])),
     )
     app = _make_app()

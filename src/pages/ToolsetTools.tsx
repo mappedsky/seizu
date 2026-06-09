@@ -37,6 +37,7 @@ import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import {
   useToolsList,
   useToolMutations,
+  mcpNameForTool,
   ToolItem,
   ToolParamDef,
   CreateToolRequest,
@@ -76,6 +77,9 @@ const isBuiltinToolset = (id: string | undefined | null): boolean =>
   !!id && id.startsWith(BUILTIN_PREFIX) && id.endsWith('__');
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+// Cap each slug component so the full "toolset__tool" MCP name stays <= 64 chars
+// (31 + "__" + 31). Mirrors MAX_SLUG_COMPONENT_LEN in mcp_config.py.
+const MAX_SLUG_LEN = 31;
 
 const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '22%' };
 const paramsColumnSx = { ...listTableSecondaryCellSx, width: 96 };
@@ -95,6 +99,7 @@ function toolStatus(item: ToolItem): { enabled: boolean; label: string } {
 function toolViewData(item: ToolItem): ToolViewData {
   return {
     name: item.name,
+    slug: mcpNameForTool(item),
     description: item.description,
     cypher: item.cypher,
     parameters: item.parameters,
@@ -198,6 +203,10 @@ function ToolDialog({ open, onClose, onSave, initial }: ToolDialogProps) {
     }
     if (!initial && !LOWER_SNAKE_ID.test(toolId.trim())) {
       setError('ID must be lower_snake_case.');
+      return;
+    }
+    if (!initial && toolId.trim().length > MAX_SLUG_LEN) {
+      setError(`ID must be at most ${MAX_SLUG_LEN} characters.`);
       return;
     }
     for (const p of params) {
@@ -557,7 +566,7 @@ function ToolsetTools() {
       label: 'Slug',
       hideBelow: 'lg',
       cellSx: listTableMonoCellSx,
-      render: (item) => item.tool_id,
+      render: (item) => mcpNameForTool(item),
     },
     {
       key: 'description',

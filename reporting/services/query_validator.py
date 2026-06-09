@@ -6,6 +6,7 @@ from typing import Any
 from CyVer import PropertiesValidator, SchemaValidator
 
 from reporting import settings
+from reporting.schema.mcp_config import ToolParamDef, undeclared_cypher_parameters
 from reporting.services.reporting_neo4j import _get_async_neo4j_client, _get_sync_neo4j_client
 
 _UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
@@ -379,4 +380,23 @@ async def validate_query(query: str, params: dict[str, Any] | None = None) -> Va
     if not properties_is_valid:
         result.warnings.extend(properties_metadata)
 
+    return result
+
+
+async def validate_tool_cypher(cypher: str, parameters: list[ToolParamDef]) -> ValidationResult:
+    """Validate a toolset tool's query for create/update.
+
+    Runs the standard query validation, then adds the tool-specific rule that
+    every ``$parameter`` the query references must be declared in the tool's
+    parameters — otherwise the tool fails every call with a Neo4j
+    ParameterMissing error.
+    """
+    result = await validate_query(cypher)
+    undeclared = undeclared_cypher_parameters(cypher, parameters)
+    if undeclared:
+        names = ", ".join(f"${name}" for name in undeclared)
+        result.errors.append(
+            f"Cypher references undeclared parameter(s): {names}. "
+            "Declare them in the tool's parameters or remove them from the query."
+        )
     return result

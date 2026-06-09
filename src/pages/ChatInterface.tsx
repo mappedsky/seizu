@@ -2,6 +2,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -29,7 +30,14 @@ import {
 } from '@mui/material';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 import KeyboardDoubleArrowDown from '@mui/icons-material/KeyboardDoubleArrowDown';
+import CheckCircle from '@mui/icons-material/CheckCircle';
+import HourglassEmpty from '@mui/icons-material/HourglassEmpty';
+import ErrorOutlined from '@mui/icons-material/ErrorOutlined';
 import Psychology from '@mui/icons-material/Psychology';
+import AltRoute from '@mui/icons-material/AltRoute';
+import Checklist from '@mui/icons-material/Checklist';
+import PlayArrow from '@mui/icons-material/PlayArrow';
+import FactCheck from '@mui/icons-material/FactCheck';
 import SmartToy from '@mui/icons-material/SmartToy';
 import Person from '@mui/icons-material/Person';
 import Check from '@mui/icons-material/Check';
@@ -60,18 +68,48 @@ const OUTPUT_LIMIT_NOTICE =
 const OUTPUT_LIMIT_TOOL_NOTICE =
   '\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete.';
 
+// 'routing' | 'plan' | 'step' | 'verify' are emitted by the chat orchestrator
+// (plan->dispatch->verify); the rest come from the single-agent path.
 type SeizuChatDetail = {
-  kind: 'thinking' | 'skill' | 'tool';
+  kind: 'thinking' | 'skill' | 'tool' | 'routing' | 'plan' | 'step' | 'verify';
   title: string;
   status?: string;
   arguments?: string;
   body?: string;
+  step_id?: string;
 };
+
+const KNOWN_DETAIL_KINDS = [
+  'thinking',
+  'skill',
+  'tool',
+  'routing',
+  'plan',
+  'step',
+  'verify',
+] as const;
+
+function detailKindIcon(kind: SeizuChatDetail['kind']) {
+  const sx = { color: 'text.secondary', fontSize: 14, flexShrink: 0 };
+  switch (kind) {
+    case 'routing':
+      return <AltRoute sx={sx} />;
+    case 'plan':
+      return <Checklist sx={sx} />;
+    case 'step':
+      return <PlayArrow sx={sx} />;
+    case 'verify':
+      return <FactCheck sx={sx} />;
+    default:
+      return null;
+  }
+}
 
 type SeizuChatMessage = UIMessage<
   {
     finish_reason?: string;
     response_cut_off?: boolean;
+    seizu_hidden?: boolean;
   },
   {
     'seizu-detail': SeizuChatDetail;
@@ -104,7 +142,7 @@ function shouldPollChatHistory(messages: SeizuChatMessage[]): boolean {
 
 function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
   return message.parts
-    .map((part) => {
+    .map((part): SeizuChatDetail | null => {
       if (!part.type.startsWith('data-') || !('data' in part)) return null;
       const detail = part.data;
       if (
@@ -117,10 +155,9 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
       }
       const kind =
         'kind' in detail &&
-        (detail.kind === 'thinking' ||
-          detail.kind === 'skill' ||
-          detail.kind === 'tool')
-          ? detail.kind
+        typeof detail.kind === 'string' &&
+        (KNOWN_DETAIL_KINDS as readonly string[]).includes(detail.kind)
+          ? (detail.kind as SeizuChatDetail['kind'])
           : 'tool';
       return {
         kind,
@@ -136,6 +173,10 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
         body:
           'body' in detail && typeof detail.body === 'string'
             ? detail.body
+            : undefined,
+        step_id:
+          'step_id' in detail && typeof detail.step_id === 'string'
+            ? detail.step_id
             : undefined,
       };
     })
@@ -159,35 +200,188 @@ function stripOutputLimitNotice(text: string): string {
     .trimEnd();
 }
 
-function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
-  if (details.length === 0) return null;
+function hiddenResumeMessage(confirmationId: string): SeizuChatMessage {
+  return {
+    id: `resume-${confirmationId}`,
+    role: 'user',
+    metadata: { seizu_hidden: true },
+    parts: [],
+  };
+}
+
+// Split a streaming response into completed blocks (separated by blank lines)
+// and the still-growing final block. Each completed block has a fixed source, so
+// rendering them through their own <MarkdocRenderer> lets Markdoc parse each one
+// exactly once and memoize it — only new text is ever parsed, old blocks never
+// re-parse or flicker. An open fenced code block keeps accumulating into the tail
+// (its blank lines must not split it) until the closing fence arrives.
+function splitIntoBlocks(text: string): { blocks: string[]; tail: string } {
+  const merged: string[] = [];
+  let buffer = '';
+  for (const segment of text.split('\n\n')) {
+    buffer = buffer === '' ? segment : `${buffer}\n\n${segment}`;
+    const fenceOpen = ((buffer.match(/```/g)?.length ?? 0) & 1) === 1;
+    if (!fenceOpen) {
+      merged.push(buffer);
+      buffer = '';
+    }
+  }
+  if (buffer !== '') merged.push(buffer);
+  // The last entry is still in progress (no trailing blank line / open fence);
+  // everything before it is settled and safe to parse once.
+  return { blocks: merged.slice(0, -1), tail: merged.at(-1) ?? '' };
+}
+
+// Live-rendered assistant message: settled blocks as memoized Markdown, plus the
+// in-progress block as plain text. Parsing Markdoc on the whole growing response
+// every token is O(n^2) and freezes the tab; here only newly-settled blocks are
+// ever parsed. Pure (no state/timer), so it can neither loop nor flicker old
+// text. The parent renders completed messages through Markdoc directly, so this
+// only ever handles the single in-flight message.
+function StreamingMarkdown({ text }: { text: string }) {
+  const { blocks, tail } = useMemo(() => splitIntoBlocks(text), [text]);
+  const tailText = tail.replace(/^\n+/, '');
+  // Settled blocks are append-only, so their identity is pinned by index; the
+  // memo keeps their element subtrees stable across tokens (re-created only when
+  // a new block settles). blocks.length is the stable key for that set.
+  const renderedBlocks = useMemo(
+    () =>
+      blocks.map((block, index) => (
+        <MarkdocRenderer key={index} source={block} untrustedUrls />
+      )),
+
+    [blocks.length],
+  );
+  return (
+    <>
+      {renderedBlocks}
+      {tailText || blocks.length === 0 ? (
+        <Typography
+          component="div"
+          sx={{
+            fontSize: 'inherit',
+            lineHeight: 'inherit',
+            mt: blocks.length > 0 ? 1 : 0,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}
+        >
+          {tailText || '...'}
+        </Typography>
+      ) : null}
+    </>
+  );
+}
+
+function detailsEqual(
+  previous: readonly SeizuChatDetail[],
+  next: readonly SeizuChatDetail[],
+): boolean {
+  if (previous.length !== next.length) return false;
+  return previous.every((detail, index) => {
+    const candidate = next[index];
+    return (
+      detail.kind === candidate.kind &&
+      detail.title === candidate.title &&
+      detail.status === candidate.status &&
+      detail.arguments === candidate.arguments &&
+      detail.body === candidate.body &&
+      detail.step_id === candidate.step_id
+    );
+  });
+}
+
+type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
+
+// Group the flat detail stream into a step hierarchy: a `step` detail opens a
+// group, and the tool/verify details tagged with its step_id nest under it.
+// Ungrouped details (routing, plan, top-level thinking) stay at the root.
+function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
+  const nodes: DetailNode[] = [];
+  let currentStep: DetailNode | null = null;
+  for (const detail of details) {
+    if (detail.kind === 'step') {
+      currentStep = { detail, children: [] };
+      nodes.push(currentStep);
+    } else if (
+      detail.step_id &&
+      currentStep &&
+      currentStep.detail.step_id === detail.step_id
+    ) {
+      currentStep.children.push(detail);
+    } else {
+      nodes.push({ detail, children: [] });
+    }
+  }
+  return nodes;
+}
+
+// Status icons replace text labels: a checkmark/spinner/hourglass/error reads at
+// a glance, and the raw status stays available on hover. "blocked" is a failure
+// (a verification that did not pass, a permission/error block); a genuine wait is
+// the distinct "awaiting"/"pending" confirmation state.
+function DetailStatus({ status }: { status?: string }) {
+  if (!status) return null;
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
+  let icon;
+  switch (status) {
+    case 'completed':
+      icon = <CheckCircle sx={{ fontSize: 15, color: 'success.main' }} />;
+      break;
+    case 'running':
+      icon = <CircularProgress size={12} thickness={6} />;
+      break;
+    case 'awaiting':
+    case 'pending':
+      icon = <HourglassEmpty sx={{ fontSize: 15, color: 'warning.main' }} />;
+      break;
+    case 'blocked':
+    case 'failed':
+    case 'denied':
+      icon = <ErrorOutlined sx={{ fontSize: 15, color: 'error.main' }} />;
+      break;
+    default:
+      icon = <CheckCircle sx={{ fontSize: 15, color: 'text.disabled' }} />;
+  }
+  return (
+    <Tooltip title={label}>
+      <Box
+        component="span"
+        sx={{
+          alignItems: 'center',
+          display: 'inline-flex',
+          flexShrink: 0,
+          ml: 'auto',
+        }}
+      >
+        {icon}
+      </Box>
+    </Tooltip>
+  );
+}
+
+function DetailRow({ detail }: { detail: SeizuChatDetail }) {
+  const hasContent = Boolean(detail.arguments || detail.body);
   return (
     <Accordion
       disableGutters
       elevation={0}
       square
-      slotProps={{ transition: { timeout: 0 } }}
+      slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
       sx={{
-        bgcolor: 'background.paper',
         border: 1,
         borderColor: 'divider',
         borderRadius: 1,
-        mb: 1,
-        mt: 0,
-        width: '100%',
-        boxSizing: 'border-box',
-        zIndex: 1,
-        borderTopLeftRadius: 0,
-        borderTopRightRadius: 0,
         '&:before': { display: 'none' },
       }}
     >
       <AccordionSummary
-        expandIcon={<ExpandMore fontSize="small" />}
+        expandIcon={hasContent ? <ExpandMore fontSize="small" /> : null}
         sx={{
-          minHeight: 32,
+          minHeight: 30,
           px: 1,
           py: 0,
+          cursor: hasContent ? 'pointer' : 'default',
           '& .MuiAccordionSummary-content': {
             alignItems: 'center',
             gap: 0.75,
@@ -195,97 +389,143 @@ function ChatMessageDetails({ details }: { details: SeizuChatDetail[] }) {
           },
         }}
       >
-        <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
-        <Typography color="text.secondary" variant="caption">
-          Details
+        {detailKindIcon(detail.kind)}
+        <Typography
+          sx={{ fontWeight: 600, minWidth: 0, wordBreak: 'break-word' }}
+          variant="caption"
+        >
+          {detail.title}
         </Typography>
-        <Chip
-          label={details.length}
-          size="small"
-          sx={{ height: 18, minWidth: 18 }}
-        />
+        <DetailStatus status={detail.status} />
       </AccordionSummary>
-      <AccordionDetails
-        sx={{
-          maxHeight: { xs: 220, md: 300 },
-          overflowY: 'auto',
-          px: 1,
-          pt: 0,
-          pb: 1,
-        }}
-      >
-        {details.map((detail, index) => (
-          <Box
-            key={`${detail.title}-${index}`}
-            sx={{
-              pt: index === 0 ? 0 : 0.75,
-              mt: index === 0 ? 0 : 0.75,
-            }}
-          >
-            <Accordion
-              disableGutters
-              elevation={0}
-              square
-              slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
-              sx={{
-                border: 1,
-                borderColor: 'divider',
-                borderRadius: 1,
-                '&:before': { display: 'none' },
-              }}
-            >
-              <AccordionSummary
-                expandIcon={<ExpandMore fontSize="small" />}
-                sx={{
-                  minHeight: 30,
-                  px: 1,
-                  py: 0,
-                  '& .MuiAccordionSummary-content': {
-                    alignItems: 'center',
-                    gap: 0.75,
-                    my: 0.5,
-                  },
-                }}
-              >
-                <Typography
-                  sx={{
-                    fontWeight: 600,
-                    minWidth: 0,
-                    wordBreak: 'break-word',
-                  }}
-                  variant="caption"
-                >
-                  {detail.title}
-                </Typography>
-                {detail.status ? (
-                  <Chip
-                    label={detail.status}
-                    size="small"
-                    sx={{ height: 18 }}
-                  />
-                ) : null}
-              </AccordionSummary>
-              <AccordionDetails
-                sx={{
-                  px: 1,
-                  pt: 0,
-                  pb: 1,
-                }}
-              >
-                {detail.arguments ? (
-                  <DetailPre label="Arguments" value={detail.arguments} />
-                ) : null}
-                {detail.body ? (
-                  <DetailPre label="Output" value={detail.body} />
-                ) : null}
-              </AccordionDetails>
-            </Accordion>
-          </Box>
-        ))}
-      </AccordionDetails>
+      {hasContent ? (
+        <AccordionDetails sx={{ px: 1, pt: 0, pb: 1 }}>
+          {detail.arguments ? (
+            <DetailPre label="Arguments" value={detail.arguments} />
+          ) : null}
+          {detail.body ? (
+            <DetailPre label="Output" value={detail.body} />
+          ) : null}
+        </AccordionDetails>
+      ) : null}
     </Accordion>
   );
 }
+
+const ChatMessageDetails = memo(
+  function ChatMessageDetails({
+    details,
+    isStreaming,
+  }: {
+    details: SeizuChatDetail[];
+    isStreaming?: boolean;
+  }) {
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const tree = useMemo(() => buildDetailTree(details), [details]);
+
+    // Follow the content while it streams, but only when the user is already near
+    // the bottom — never yank them away from something they scrolled up to read.
+    useEffect(() => {
+      const el = scrollRef.current;
+      if (!el || !isStreaming) return;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      if (nearBottom) el.scrollTop = el.scrollHeight;
+    }, [details, isStreaming]);
+
+    if (details.length === 0) return null;
+    return (
+      <Accordion
+        disableGutters
+        elevation={0}
+        square
+        defaultExpanded={isStreaming}
+        slotProps={{ transition: { timeout: 0 } }}
+        sx={{
+          bgcolor: 'background.paper',
+          border: 1,
+          borderColor: 'divider',
+          borderRadius: 1,
+          mb: 1,
+          mt: 0,
+          width: '100%',
+          boxSizing: 'border-box',
+          zIndex: 1,
+          borderTopLeftRadius: 0,
+          borderTopRightRadius: 0,
+          '&:before': { display: 'none' },
+        }}
+      >
+        <AccordionSummary
+          expandIcon={<ExpandMore fontSize="small" />}
+          sx={{
+            minHeight: 32,
+            px: 1,
+            py: 0,
+            '& .MuiAccordionSummary-content': {
+              alignItems: 'center',
+              gap: 0.75,
+              my: 0.5,
+            },
+          }}
+        >
+          <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
+          <Typography color="text.secondary" variant="caption">
+            Details
+          </Typography>
+          <Chip
+            label={details.length}
+            size="small"
+            sx={{ height: 18, minWidth: 18 }}
+          />
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 0, py: 0 }}>
+          <Box
+            ref={scrollRef}
+            sx={{
+              height: 300,
+              overflowY: 'auto',
+              px: 1,
+              py: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 0.75,
+            }}
+          >
+            {tree.map((node, index) => (
+              <Box key={`${node.detail.step_id ?? node.detail.title}-${index}`}>
+                <DetailRow detail={node.detail} />
+                {node.children.length > 0 ? (
+                  <Box
+                    sx={{
+                      ml: 1,
+                      mt: 0.5,
+                      pl: 1,
+                      borderLeft: 2,
+                      borderColor: 'divider',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 0.5,
+                    }}
+                  >
+                    {node.children.map((child, childIndex) => (
+                      <DetailRow
+                        key={`${child.title}-${childIndex}`}
+                        detail={child}
+                      />
+                    ))}
+                  </Box>
+                ) : null}
+              </Box>
+            ))}
+          </Box>
+        </AccordionDetails>
+      </Accordion>
+    );
+  },
+  (previous, next) =>
+    previous.isStreaming === next.isStreaming &&
+    detailsEqual(previous.details, next.details),
+);
 
 function DetailPre({ label, value }: { label: string; value: string }) {
   return (
@@ -623,6 +863,15 @@ export default function ChatInterface() {
   setMessagesRef.current = setMessages;
 
   const busy = status === 'submitted' || status === 'streaming';
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
+    [messages],
+  );
+  // Id of the assistant message currently being streamed. It renders through
+  // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
+  // rather than feeding the whole growing response to Markdoc every token.
+  const streamingMessageId =
+    status === 'streaming' ? (messages.at(-1)?.id ?? null) : null;
   const continuableMessage = useMemo(() => {
     const lastMessage = messages.at(-1);
     return lastMessage && canLoadMore(lastMessage) ? lastMessage : null;
@@ -744,7 +993,7 @@ export default function ChatInterface() {
           resumeConfirmationIdRef.current = confirmation.confirmation_id;
           touchSession(activeThreadId);
           await Promise.resolve(
-            sendMessage(undefined, {
+            sendMessage(hiddenResumeMessage(confirmation.confirmation_id), {
               body: { resume_confirmation_id: confirmation.confirmation_id },
             }),
           );
@@ -775,7 +1024,7 @@ export default function ChatInterface() {
     touchSession(activeThreadId);
     try {
       void Promise.resolve(
-        sendMessage(undefined, {
+        sendMessage(hiddenResumeMessage(resumeConfirmationId), {
           body: { resume_confirmation_id: resumeConfirmationId },
         }),
       ).catch(() => {
@@ -957,7 +1206,8 @@ export default function ChatInterface() {
                 py: 1.5,
               }}
             >
-              {sessionsLoading || (historyLoading && messages.length === 0) ? (
+              {sessionsLoading ||
+              (historyLoading && visibleMessages.length === 0) ? (
                 <Box
                   sx={{
                     alignItems: 'center',
@@ -968,7 +1218,7 @@ export default function ChatInterface() {
                 >
                   <ConstellationSpinner size={64} />
                 </Box>
-              ) : messages.length === 0 ? (
+              ) : visibleMessages.length === 0 ? (
                 <Box
                   sx={{
                     alignItems: 'center',
@@ -985,7 +1235,7 @@ export default function ChatInterface() {
                 </Box>
               ) : (
                 <>
-                  {messages.map((message) => {
+                  {visibleMessages.map((message) => {
                     const text = messageText(message);
                     const details = messageDetails(message);
                     const copied = copiedMessageId === message.id;
@@ -1036,7 +1286,10 @@ export default function ChatInterface() {
                                 zIndex: 2,
                               }}
                             >
-                              <ChatMessageDetails details={details} />
+                              <ChatMessageDetails
+                                details={details}
+                                isStreaming={message.id === streamingMessageId}
+                              />
                             </Box>
                           ) : null}
                           <Box
@@ -1140,13 +1393,19 @@ export default function ChatInterface() {
                                   },
                                 })}
                               >
-                                <MarkdocRenderer
-                                  source={
-                                    stripOutputLimitNotice(text) ||
-                                    (busy ? '...' : '')
-                                  }
-                                  untrustedUrls
-                                />
+                                {message.id === streamingMessageId ? (
+                                  <StreamingMarkdown
+                                    text={stripOutputLimitNotice(text)}
+                                  />
+                                ) : (
+                                  <MarkdocRenderer
+                                    source={
+                                      stripOutputLimitNotice(text) ||
+                                      (busy ? '...' : '')
+                                    }
+                                    untrustedUrls
+                                  />
+                                )}
                                 {loadMore && !isContinuationSource ? (
                                   <Box sx={{ mt: 1 }}>
                                     <Button

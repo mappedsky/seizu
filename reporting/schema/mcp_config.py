@@ -7,11 +7,26 @@ from pydantic import BaseModel, Field, field_validator
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
+# The MCP name is "{parent}__{child}" (toolset__tool / skillset__skill) and the
+# provider tool-call APIs cap names at 64 chars. Capping each component at 31
+# keeps every combination provider-safe (31 + len("__") + 31 == 64) without
+# coupling the parent and child budgets, so a long toolset id can't silently
+# push a tool past the limit and into an opaque hashed name.
+MAX_SLUG_COMPONENT_LEN = 31
+
 
 def validate_lower_snake_id(value: str) -> str:
-    """Validate immutable user-supplied IDs used in MCP names."""
+    """Validate lower_snake_case identifiers such as parameter names."""
     if not LOWER_SNAKE_ID_RE.fullmatch(value):
         raise ValueError("must be lower_snake_case matching ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+    return value
+
+
+def validate_mcp_slug_component(value: str) -> str:
+    """Validate immutable user-supplied IDs used as MCP name components."""
+    validate_lower_snake_id(value)
+    if len(value) > MAX_SLUG_COMPONENT_LEN:
+        raise ValueError(f"must be at most {MAX_SLUG_COMPONENT_LEN} characters so the full MCP name stays under 64")
     return value
 
 
@@ -102,6 +117,34 @@ class ToolParamDef(BaseModel):
     @classmethod
     def coerce_default(cls, v: Any) -> Any:
         return _coerce_decimal(v)
+
+
+# Cypher parameter references: $name or $`quoted name`.
+_CYPHER_PARAM_RE = re.compile(r"\$(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def cypher_parameter_names(cypher: str) -> set[str]:
+    """The parameter names a Cypher query references ($name / $`name`).
+
+    String literals and comments are stripped first so a ``$`` inside them is not
+    mistaken for a parameter reference.
+    """
+    no_block = re.sub(r"/\*.*?\*/", " ", cypher, flags=re.DOTALL)
+    no_line = re.sub(r"//[^\n]*", " ", no_block)
+    no_double = re.sub(r'"(?:\\.|[^"\\])*"', " ", no_line)
+    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", " ", no_double)
+    return {match.group(1) or match.group(2) for match in _CYPHER_PARAM_RE.finditer(cleaned)}
+
+
+def undeclared_cypher_parameters(cypher: str, parameters: list[ToolParamDef]) -> list[str]:
+    """Cypher ``$parameters`` not declared in the tool's parameter list.
+
+    A tool whose query references ``$x`` without declaring ``x`` fails at call
+    time with a Neo4j ParameterMissing error, so this must be rejected when the
+    tool is created or updated.
+    """
+    declared = {param.name for param in parameters}
+    return sorted(name for name in cypher_parameter_names(cypher) if name not in declared)
 
 
 class ToolsetListItem(BaseModel):
@@ -276,7 +319,7 @@ class CreateToolsetRequest(BaseModel):
     @field_validator("toolset_id")
     @classmethod
     def validate_toolset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolsetRequest(BaseModel):
@@ -301,7 +344,7 @@ class CreateToolRequest(BaseModel):
     @field_validator("tool_id")
     @classmethod
     def validate_tool_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolRequest(BaseModel):
@@ -478,7 +521,7 @@ class CreateSkillsetRequest(BaseModel):
     @field_validator("skillset_id")
     @classmethod
     def validate_skillset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateSkillsetRequest(BaseModel):
@@ -505,7 +548,7 @@ class CreateSkillRequest(BaseModel):
     @field_validator("skill_id")
     @classmethod
     def validate_skill_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
     @field_validator("triggers")
     @classmethod

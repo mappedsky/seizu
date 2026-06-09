@@ -16,6 +16,7 @@ import { AuthConfigContext } from 'src/authConfig.context';
 import { AuthContext } from 'src/auth.context';
 import {
   type ActionConfirmation,
+  effectiveConfirmationStatus,
   useConfirmationsApi,
 } from 'src/hooks/useConfirmationsApi';
 import { pageContentSx } from 'src/theme/layout';
@@ -38,7 +39,8 @@ function ConfirmationCard({
   onDecide: (id: string, decision: 'approved' | 'denied') => void;
   deciding: string | null;
 }) {
-  const isPending = confirmation.status === 'pending';
+  const status = effectiveConfirmationStatus(confirmation);
+  const isPending = status === 'pending';
   const isDeciding = deciding === confirmation.confirmation_id;
 
   return (
@@ -47,11 +49,7 @@ function ConfirmationCard({
         <Typography sx={{ flexGrow: 1 }} variant="h6">
           {confirmation.action} {confirmation.resource_type}
         </Typography>
-        <Chip
-          color={statusColor(confirmation.status)}
-          label={confirmation.status}
-          size="small"
-        />
+        <Chip color={statusColor(status)} label={status} size="small" />
       </Box>
       <Typography
         color="text.secondary"
@@ -165,11 +163,12 @@ export default function BatchConfirmationPage() {
         setConfirmations(nextConfirmations);
         setError(null);
         const remainingPending = nextConfirmations.filter(
-          (c) => c.status === 'pending',
+          (c) => effectiveConfirmationStatus(c) === 'pending',
         ).length;
-        const hasBlockedDecision = nextConfirmations.some(
-          (c) => c.status === 'denied' || c.status === 'expired',
-        );
+        const hasBlockedDecision = nextConfirmations.some((c) => {
+          const status = effectiveConfirmationStatus(c);
+          return status === 'denied' || status === 'expired';
+        });
         if (
           decision === 'approved' &&
           remainingPending === 0 &&
@@ -193,7 +192,7 @@ export default function BatchConfirmationPage() {
   );
 
   const pendingCount = confirmations.filter(
-    (c) => c.status === 'pending',
+    (c) => effectiveConfirmationStatus(c) === 'pending',
   ).length;
 
   if (waitingForToken || loading) {

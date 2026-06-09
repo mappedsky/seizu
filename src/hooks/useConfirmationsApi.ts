@@ -21,6 +21,34 @@ interface ConfirmationResponse {
   confirmation: ActionConfirmation;
 }
 
+/**
+ * A pending confirmation whose expiry has passed can no longer be acted on, but
+ * the server leaves its stored status as `pending` (expiry is time-based, see
+ * `action_confirmations.is_expired`). Mirror that check client-side.
+ */
+export function isConfirmationExpired(
+  confirmation: Pick<ActionConfirmation, 'expires_at'>,
+): boolean {
+  return new Date(confirmation.expires_at).getTime() <= Date.now();
+}
+
+/**
+ * The status to show the user: a `pending` confirmation past its expiry reads as
+ * `expired` so the UI hides Allow/Deny instead of offering a decision that the
+ * backend will reject.
+ */
+export function effectiveConfirmationStatus(
+  confirmation: Pick<ActionConfirmation, 'status' | 'expires_at'>,
+): ActionConfirmation['status'] {
+  if (
+    confirmation.status === 'pending' &&
+    isConfirmationExpired(confirmation)
+  ) {
+    return 'expired';
+  }
+  return confirmation.status;
+}
+
 interface ConfirmationListResponse {
   confirmations: ActionConfirmation[];
 }

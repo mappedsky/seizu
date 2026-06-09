@@ -34,6 +34,9 @@ from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, m
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+# Detail kinds preserved in history so a reloaded turn keeps its full trace —
+# single-agent (thinking/skill/tool) plus the orchestration trace.
+_HISTORY_DETAIL_KINDS = frozenset({"thinking", "skill", "tool", "routing", "plan", "step", "verify"})
 _CONTINUE_RESPONSE_PROMPT = (
     "Continue the previous assistant response from where it stopped because of the output limit. "
     "Do not repeat earlier content."
@@ -228,10 +231,13 @@ def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, o
                     continue
                 title = detail.get("title")
                 kind = detail.get("kind")
-                if not isinstance(title, str) or kind not in {"thinking", "skill", "tool"}:
+                # Keep the full orchestration trace (routing/plan/step/verify), not
+                # just single-agent kinds, so an orchestrated turn's details survive
+                # a reload. step_id/route carry the hierarchy and routing decision.
+                if not isinstance(title, str) or kind not in _HISTORY_DETAIL_KINDS:
                     continue
                 safe_detail: dict[str, object] = {"kind": kind, "title": title}
-                for key in ("status", "arguments", "body"):
+                for key in ("status", "arguments", "body", "step_id", "route"):
                     value = detail.get(key)
                     if isinstance(value, str):
                         safe_detail[key] = value

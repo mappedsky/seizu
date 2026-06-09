@@ -8,7 +8,7 @@ from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.mcp_config import CreateToolRequest, CreateToolsetRequest, UpdateToolRequest, UpdateToolsetRequest
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
-from reporting.services.query_validator import validate_query
+from reporting.services.query_validator import validate_tool_cypher
 
 GROUP = "toolsets"
 
@@ -169,7 +169,7 @@ async def _create_tool(args: dict[str, Any], current_user: CurrentUser | None) -
     body = CreateToolRequest.model_validate({k: v for k, v in args.items() if k != "toolset_id"})
     if await report_store.get_tool(body.tool_id):
         return {"error": "Tool already exists"}
-    validation = await validate_query(body.cypher)
+    validation = await validate_tool_cypher(body.cypher, body.parameters)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
     tool = await report_store.create_tool(
@@ -195,7 +195,7 @@ async def _update_tool(args: dict[str, Any], current_user: CurrentUser | None) -
     if not existing or existing.toolset_id != toolset_id:
         return {"error": "Tool not found"}
     body = UpdateToolRequest.model_validate({k: v for k, v in args.items() if k not in ("toolset_id", "tool_id")})
-    validation = await validate_query(body.cypher)
+    validation = await validate_tool_cypher(body.cypher, body.parameters)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
     tool = await report_store.update_tool(

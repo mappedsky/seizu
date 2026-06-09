@@ -174,6 +174,36 @@ async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker
     assert json.loads(result[0].text) == [{"name": "node-1"}]
 
 
+async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
+    import neo4j.exceptions
+
+    mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
+    err = neo4j.exceptions.ClientError("Expected parameter(s): cve_id, limit")
+    # A server-hydrated Neo4jError exposes the human-readable text via .message
+    # (backed by ._message); set it to mirror what the driver returns.
+    err._message = "Expected parameter(s): cve_id, limit"
+    mocker.patch(
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
+        side_effect=err,
+    )
+    log = mocker.patch("reporting.services.mcp_runtime.logger")
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "security__lookup",
+        {"limit": 3},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+    )
+
+    data = json.loads(result[0].text)
+    # The database message is surfaced so the caller can see why the tool failed.
+    assert "Expected parameter(s): cve_id, limit" in data["error"]
+    # Logged concisely (warning), not as a full-traceback ERROR.
+    log.warning.assert_called_once()
+    log.exception.assert_not_called()
+
+
 async def test_chat_tool_call_applies_row_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
@@ -423,6 +453,44 @@ async def test_approved_mutating_builtin_executes_handler(mocker):
     delete_report.assert_awaited_once_with("r1", user_id="user-1")
     claim_confirmation.assert_awaited_once_with("confirm-1", "user-1")
     create_confirmation.assert_not_called()
+
+
+async def test_builtin_handler_validation_error_returns_actionable_message(mocker):
+    # A malformed argument (here a tools_required entry with an empty tool id)
+    # should come back as an actionable validation message the model can fix,
+    # not a generic "Failed to execute".
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.find_action_confirmation_grant",
+        return_value=_confirmation("approved"),
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.claim_action_confirmation_for_execution",
+        return_value=_confirmation("executed"),
+    )
+    mocker.patch(
+        "reporting.services.mcp_builtins.skillsets.report_store.get_skill",
+        return_value=_skill(),
+    )
+    current = _user(frozenset({Permission.SKILLS_WRITE.value}))
+
+    result = await mcp_runtime.call_tool_for_user(
+        current,
+        "skillsets__update_skill",
+        {
+            "skillset_id": "security",
+            "skill_id": "summarize",
+            "name": "Summarize",
+            "template": "Summarize {% $topic %}.",
+            "parameters": [{"name": "topic", "type": "string", "required": True}],
+            "tools_required": ["toolsets__"],
+        },
+        confirmation_source="mcp",
+        confirmation_session_key="session-1",
+    )
+
+    payload = json.loads(result[0].text)
+    assert "Invalid arguments" in payload["error"]
+    assert "tools_required" in payload["error"]
 
 
 async def test_concurrent_claim_race_returns_notice_not_confirmation_required(mocker):

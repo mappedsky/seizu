@@ -117,7 +117,8 @@ describe('SkillsetSkills', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Triage' });
     expect(dialog).toBeInTheDocument();
-    expect(within(dialog).getByText('triage')).toBeInTheDocument();
+    // Slug shows the fully-qualified skillset__skill name.
+    expect(within(dialog).getByText('responders__triage')).toBeInTheDocument();
     expect(within(dialog).getByText('No parameters.')).toBeInTheDocument();
   });
 

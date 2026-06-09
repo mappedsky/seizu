@@ -1,18 +1,18 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Annotated, Any, Literal, Protocol
+from typing import Annotated, Any, Literal, NotRequired, Protocol
 
 import botocore.config
 from botocore.exceptions import ClientError
 from langchain_core.messages import (
     AIMessage,
-    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     RemoveMessage,
@@ -25,6 +25,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph_checkpoint_aws import DynamoDBSaver
 from mcp.types import Prompt, Tool
+from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from reporting import settings
@@ -43,9 +44,28 @@ from reporting.services.chat_messages import (
 )
 from reporting.services.mcp_runtime import ChatBlockReason
 
+logger = logging.getLogger(__name__)
+
 
 class ChatState(TypedDict):
     messages: Annotated[list[Any], add_messages]
+    # Orchestration state (plan -> dispatch -> verify). All optional so the
+    # simple single-agent path never has to populate them; they round-trip
+    # through the checkpointer so an orchestrated turn can resume mid-plan.
+    # Each uses the default overwrite reducer: the dispatcher is the sole writer
+    # of ``plan``/``step_results`` per super-step (worker parallelism happens
+    # inside the node via asyncio), so no concurrent-write reducer is needed.
+    route: NotRequired[str]  # "simple" | "orchestrate"
+    plan: NotRequired[list[dict[str, Any]]]  # serialized PlanStep dicts
+    step_results: NotRequired[list[dict[str, Any]]]  # per-step worker outputs
+    iteration: NotRequired[int]  # verify-driven retry cycles consumed
+    # Tool names the conversation has already unlocked under progressive
+    # disclosure. ``disclosed_tool_names`` is otherwise a per-turn local, so a
+    # turn that ended mid-flow (rate limit, output cap) would lose the tools a
+    # rendered skill had surfaced; persisting the set here lets the next turn
+    # call them without re-rendering the disclosing skill. Overwrite reducer:
+    # ``chat_agent_node`` is the sole writer and writes back the full union.
+    disclosed_tools: NotRequired[list[str]]
 
 
 class ChatGraph(Protocol):
@@ -100,6 +120,13 @@ class LLMTurnResult:
     streamed: str
     finish_reason: str | None = None
     details: tuple[dict[str, Any], ...] = ()
+    # True when the model emitted raw tool-call protocol markup as text instead
+    # of a structured tool call (seen with some DeepSeek models). The markup is
+    # withheld from the user; the caller retries the turn once, then degrades.
+    tool_markup_leaked: bool = False
+    # Best-effort tool names parsed out of that leaked markup, so the retry can
+    # tell the model specifically which tool it reached for and how to unlock it.
+    leaked_tool_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,38 +137,19 @@ class AnswerBudget:
     max_tables: int
 
 
-class SeizuChatDeepSeekMixin:
-    """Expose DeepSeek's OpenAI-API-shape ``reasoning_content`` field.
+# Provider sentinel. "mock" keeps chat deterministic and keyless; every other
+# value routes through LiteLLM, so the supported provider/model surface is
+# whatever LiteLLM supports rather than a fixed in-code allowlist. LiteLLM owns
+# the cross-provider quirks (base_url/api_key handling, DeepSeek-shape endpoints,
+# reasoning_content normalization) that Seizu used to special-case here.
+_MOCK_PROVIDER = "mock"
 
-    DeepSeek emits its hidden chain-of-thought in the OpenAI Chat Completions
-    streaming shape under ``choices[0].delta.reasoning_content``. The current
-    ``langchain-deepseek`` adapter pulls that into ``AIMessageChunk.additional_kwargs``
-    on the way down. We keep it available long enough to render UI diagnostics,
-    but strip it before the message is reused as model context.
-
-    Scope: DeepSeek only (and OpenAI-shape gateways routed to DeepSeek). It does
-    not handle Anthropic ``ThinkingBlock`` or Gemini reasoning parts, which use
-    different transport shapes.
-    """
-
-    def _convert_chunk_to_generation_chunk(
-        self,
-        chunk: dict[str, Any],
-        default_chunk_class: type,
-        base_generation_info: dict[str, Any] | None,
-    ) -> Any:
-        generation_chunk = super()._convert_chunk_to_generation_chunk(  # type: ignore[misc]
-            chunk,
-            default_chunk_class,
-            base_generation_info,
-        )
-        reasoning_content = _deepseek_reasoning_content_delta(chunk)
-        if reasoning_content and generation_chunk is not None and isinstance(generation_chunk.message, AIMessageChunk):
-            generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning_content
-        return generation_chunk
-
-
-_VALID_CHAT_PROVIDERS = frozenset({"mock", "openai", "anthropic", "gemini", "deepseek"})
+# Structural completion signal for the tool loop. Once Seizu has run an action,
+# the model finishes the turn by calling this synthetic tool with the final
+# answer (rather than us classifying plain text as "done"). Exposed post-action
+# only, so trivial pre-action replies keep streaming directly. The loop
+# intercepts the call by name and never dispatches it to MCP.
+_FINAL_ANSWER_TOOL = "respond_to_user"
 
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
@@ -284,8 +292,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     skills = await _list_chat_prompts(current_user)
     tools: list[Tool] = []
     progressive_disclosure = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
-    disclosed_tool_names: set[str] = set()
+    # Carry forward tools the conversation already unlocked in earlier turns so a
+    # resumed/follow-up turn can call them directly (the in-turn disclosure set
+    # is otherwise reset each turn — see ChatState.disclosed_tools).
+    disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
     if not progressive_disclosure:
+        tools = await _list_chat_tools(current_user)
+    elif disclosed_tool_names:
+        # Resolve the persisted names against the live store; names whose tool
+        # no longer exists simply drop out.
         tools = await _list_chat_tools(current_user)
 
     capability_context = build_capability_context(skills, tools if not progressive_disclosure else None)
@@ -293,13 +308,19 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
 
     skill_specs = _skill_tool_specs(skills)
-    tool_specs: list[ChatToolSpec] = _mcp_tool_specs(tools) if not progressive_disclosure else []
+    tool_specs: list[ChatToolSpec]
+    if not progressive_disclosure:
+        tool_specs = _mcp_tool_specs(tools)
+    else:
+        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
 
     action_count = 0
     action_summaries: list[str] = []
     executed_action_keys: set[str] = set()
     empty_retry_used = False
     repeated_action_retry_used = False
+    tool_markup_retry_used = False
+    terminal_response_retry_used = False
     response_is_broken = False
     response_hit_output_limit = False
     streamed_response = ""
@@ -314,19 +335,35 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     while action_count < settings.CHAT_LLM_MAX_AUTO_ACTIONS:
         turn_system_prompt = _combined_system_prompt(base_system_prompt, pending_system_addendum)
         pending_system_addendum = ""
-        available_specs = _with_provider_tool_names([*skill_specs, *tool_specs])
+        post_action = bool(action_summaries)
+        available_specs = _with_provider_tool_names([*skill_specs, *tool_specs, *_terminal_specs(post_action)])
+        # Pre-action prose streams live (the fast path for a direct answer). Once
+        # Seizu has run actions the model must finish through a structured
+        # respond_to_user call; post-action prose is a stall, not streamed, so we
+        # never ship un-retractable text.
+        turn_writer = None if post_action else writer
         turn_result = await _run_llm_tool_turn(
             model,
             turn_system_prompt,
             messages,
             available_specs,
             config,
-            writer,
+            turn_writer,
         )
         ai_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         detail_events.extend(turn_result.details)
+        if turn_result.tool_markup_leaked:
+            # The model wrote raw tool-call markup as text (already withheld from
+            # the user). Retry once with corrective guidance, then degrade.
+            if not tool_markup_retry_used:
+                tool_markup_retry_used = True
+                pending_system_addendum = _tool_markup_retry_message(turn_result.leaked_tool_names)
+                continue
+            response = _tool_markup_fallback()
+            response_is_broken = True
+            break
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
         if unavailable:
             action_summaries.append(_tool_call_user_summary(unavailable))
@@ -334,14 +371,37 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             break
 
         requested = _tool_call_requests(ai_message, available_specs)
+        finish_requests = [request for request in requested if request.name == _FINAL_ANSWER_TOOL]
+        requested = [request for request in requested if request.name != _FINAL_ANSWER_TOOL]
         if not requested:
-            response = message_text(ai_message.content)
+            # Structural completion: an explicit respond_to_user call (or, for a
+            # pre-action turn, plain text) is the terminal answer. Post-action
+            # plain text that skipped respond_to_user is a stall — nudge once to
+            # act-or-finish, then accept whatever the model returns next.
+            if finish_requests:
+                response = _final_answer_text(finish_requests[0]) or message_text(ai_message.content)
+            else:
+                response = message_text(ai_message.content)
+                if response and post_action and not terminal_response_retry_used:
+                    terminal_response_retry_used = True
+                    pending_system_addendum = _terminal_stall_retry_message(action_summaries)
+                    response = ""
+                    continue
             if response:
+                if post_action and not streamed_response and writer is not None:
+                    writer({"kind": "token", "content": response})
+                    streamed_response = response
+                response, appended, still_truncated, cont_details = await _auto_continue_answer(
+                    model, messages, turn_system_prompt, response, turn_result.finish_reason, config, writer
+                )
+                streamed_response += appended
+                detail_events.extend(cont_details)
                 response, response_hit_output_limit = _append_output_limit_notice(
-                    response, turn_result.finish_reason, action_summaries
+                    response, "length" if still_truncated else None, action_summaries
                 )
                 break
             if action_summaries:
+                # Empty post-action turn: fall through to the forced synthesis below.
                 break
             if not empty_retry_used:
                 empty_retry_used = True
@@ -357,7 +417,6 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             if repeated:
                 if not repeated_action_retry_used:
                     repeated_action_retry_used = True
-                    messages = [*messages, ai_message]
                     pending_system_addendum = _repeated_tool_call_retry_message(repeated, action_summaries)
                     continue
                 response = _repeated_tool_call_fallback(repeated, action_summaries)
@@ -365,9 +424,18 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 break
             break
 
+        # Prose emitted alongside a tool call is plan narration, not an answer.
+        # Record it as a thinking detail so it survives a reload as narration
+        # rather than leaking into the persisted answer body.
+        narration = message_text(ai_message.content).strip()
+        if narration:
+            narration_detail = _planning_narration_detail_data(narration)
+            detail_events.append(narration_detail)
+            writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": narration_detail})
+
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
-        batch_id = uuid.uuid4().hex
+        batch_id = _confirmation_batch_id_for_requests(batch)
         results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -380,9 +448,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
+        tool_ai_message = _ai_message_for_tool_results(ai_message, results)
         messages = [
             *messages,
-            ai_message,
+            tool_ai_message,
             *[
                 ToolMessage(
                     content=result.content,
@@ -403,24 +472,40 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                available_by_name = {tool.name: tool for tool in tools}
-                tool_specs = _mcp_tool_specs(
-                    [tool for name, tool in available_by_name.items() if name in disclosed_tool_names]
-                )
+                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
             base_system_prompt, _final_synthesis_retry_message(action_summaries)
         )
-        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, writer)
+        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, None)
         final_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
         detail_events.extend(turn_result.details)
         response = message_text(final_message.content)
+        if response and _internal_action_transcript_leaked(response):
+            retry_prompt = _combined_system_prompt(
+                synthesis_system_prompt,
+                _action_transcript_retry_message(),
+            )
+            turn_result = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+            final_message = turn_result.message
+            streamed_in_last_turn = turn_result.streamed
+            streamed_response = streamed_in_last_turn
+            detail_events.extend(turn_result.details)
+            response = message_text(final_message.content)
         if response:
+            if writer is not None and not streamed_response:
+                writer({"kind": "token", "content": response})
+                streamed_response = response
+            response, appended, still_truncated, cont_details = await _auto_continue_answer(
+                model, messages, synthesis_system_prompt, response, turn_result.finish_reason, config, writer
+            )
+            streamed_response += appended
+            detail_events.extend(cont_details)
             response, response_hit_output_limit = _append_output_limit_notice(
-                response, turn_result.finish_reason, action_summaries
+                response, "length" if still_truncated else None, action_summaries
             )
         else:
             response_is_broken = True
@@ -429,39 +514,82 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         response = _empty_response_fallback(action_summaries)
         response_is_broken = True
 
-    # Streaming contract: the LLM-produced text is written to the writer as the
-    # chunks arrive, so it is already on the wire. Synthetic fallbacks (and any
-    # final tail not already streamed) are emitted here as a single delta.
-    if response and response != streamed_response:
-        if not streamed_response:
+    ai_message = finalize_assistant_message(
+        response=response,
+        streamed=streamed_response,
+        writer=writer,
+        details=detail_events,
+        output_limit=response_hit_output_limit,
+        broken=response_is_broken,
+    )
+    state_update: ChatState = {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    if progressive_disclosure and disclosed_tool_names:
+        # Persist the union so a later turn (including one resuming after an
+        # interrupted turn) keeps tools this conversation already unlocked.
+        state_update["disclosed_tools"] = sorted(disclosed_tool_names)
+    return state_update
+
+
+def finalize_assistant_message(
+    *,
+    response: str,
+    streamed: str,
+    writer: Callable[[dict[str, Any]], None] | None,
+    details: list[dict[str, Any]] | None = None,
+    output_limit: bool = False,
+    broken: bool = False,
+    extra_metadata: dict[str, Any] | None = None,
+) -> AIMessage:
+    """Reconcile streamed text with the final response and build the persisted
+    assistant message.
+
+    Shared by the single-agent terminal (``chat_agent_node``) and the
+    orchestrated terminal (``synthesizer_node``) so the "Continue response"
+    signal (``finish_reason``/``seizu_output_limit``) and the ``seizu_details``
+    trace are emitted identically regardless of which path produced the turn.
+
+    Streaming contract: LLM text is already on the wire as chunks arrived;
+    synthetic fallbacks and any tail not yet streamed are emitted here as a
+    single delta, and the persisted content is synced to match the wire.
+    """
+    if writer is not None and response and response != streamed:
+        if not streamed:
             writer({"kind": "token", "content": response})
-        elif response.startswith(streamed_response):
-            writer({"kind": "token", "content": response[len(streamed_response) :]})
-        else:
-            tail = f"\n\n{response}"
+        elif response.startswith(streamed):
+            tail = _stream_tail(streamed, response[len(streamed) :])
             writer({"kind": "token", "content": tail})
-            # Sync the persisted content with what was sent on the wire so that
-            # history replay matches the user-visible conversation. This matters
-            # when an earlier turn already streamed text (e.g. "Let me check…")
-            # before a blocked or fallback response was generated.
-            if streamed_response:
-                response = f"{streamed_response}{tail}"
-    if response_hit_output_limit:
+            response = f"{streamed}{tail}"
+        else:
+            tail = _stream_tail(streamed, response, separator="\n\n")
+            writer({"kind": "token", "content": tail})
+            response = f"{streamed}{tail}"
+    if output_limit and writer is not None:
         writer({"kind": "finish_reason", "finish_reason": "length"})
 
-    response_metadata: dict[str, Any] = {}
-    if detail_events:
-        response_metadata["seizu_details"] = detail_events
-    if response_hit_output_limit:
+    response_metadata: dict[str, Any] = dict(extra_metadata or {})
+    if details:
+        response_metadata["seizu_details"] = details
+    if output_limit:
         response_metadata["seizu_output_limit"] = True
     ai_message = AIMessage(
         content=response,
         id=f"msg_{uuid.uuid4().hex}",
         response_metadata=response_metadata,
     )
-    if response_is_broken:
+    if broken:
         tag_message(ai_message, MessageTag.BROKEN)
-    return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    return ai_message
+
+
+def _stream_tail(streamed: str, tail: str, *, separator: str = " ") -> str:
+    """Return a stream delta that does not jam two text segments together."""
+    if not streamed or not tail:
+        return tail
+    if streamed[-1].isspace() or tail[0].isspace():
+        return tail
+    if streamed[-1] in "([{/" or tail[0] in ".,;:!?)]}/":
+        return tail
+    return f"{separator}{tail}"
 
 
 def _combined_system_prompt(base: str, addendum: str) -> str:
@@ -470,38 +598,172 @@ def _combined_system_prompt(base: str, addendum: str) -> str:
     return f"{base}\n\n{addendum}"
 
 
-async def _resume_confirmed_tool_turn(
-    state: ChatState,
-    config: RunnableConfig,
-    current_user: CurrentUser | None,
-    confirmation_id: str,
-) -> ChatState:
-    writer = get_stream_writer()
-    if current_user is None:
-        response = "Seizu could not resume the action because the current user is not authenticated."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+# --- Auto-continuation of length-truncated answers ----------------------------
 
-    # Capture as a non-optional type for use inside nested closures below.
-    authed_user: CurrentUser = current_user
+# How much of the prior answer's tail to quote back as the exact continuation
+# point, and how many leading continuation chars to buffer while trimming any
+# text the model repeats from that tail.
+_CONTINUATION_CONTEXT_CHARS = 600
+_CONTINUATION_OVERLAP_CAP = 400
+
+
+def _trim_overlap(prior: str, continuation: str) -> str:
+    """Drop the longest prefix of *continuation* that repeats the tail of *prior*.
+
+    Models often re-emit the last sentence or two when asked to continue; trimming
+    the verbatim overlap makes the stitched seam invisible. Exact-match only, so
+    genuinely new content is never deleted.
+    """
+    limit = min(len(prior), len(continuation), _CONTINUATION_OVERLAP_CAP)
+    for size in range(limit, 0, -1):
+        if prior.endswith(continuation[:size]):
+            return continuation[size:]
+    return continuation
+
+
+class _ContinuationStitcher:
+    """Wraps a continuation turn's token stream: holds back the leading window
+    until the overlap with the prior answer is trimmed, then passes tokens through
+    live. ``emitted`` is the (trimmed) text actually sent to the user."""
+
+    def __init__(self, prior: str, writer: Callable[[dict[str, Any]], None]) -> None:
+        self._prior = prior
+        self._writer = writer
+        self._buffer = ""
+        self._resolved = False
+        self.emitted = ""
+
+    def feed_token(self, delta: str) -> None:
+        if self._resolved:
+            self._emit(delta)
+            return
+        self._buffer += delta
+        if len(self._buffer) >= _CONTINUATION_OVERLAP_CAP:
+            self._resolve()
+
+    def _resolve(self) -> None:
+        self._resolved = True
+        trimmed = _trim_overlap(self._prior, self._buffer)
+        self._buffer = ""
+        self._emit(trimmed)
+
+    def _emit(self, text: str) -> None:
+        if text:
+            self._writer({"kind": "token", "content": text})
+            self.emitted += text
+
+    def flush(self) -> str:
+        if not self._resolved:
+            self._resolve()
+        return self.emitted
+
+
+def _stitch_writer(
+    real_writer: Callable[[dict[str, Any]], None], prior: str
+) -> tuple[Callable[[dict[str, Any]], None], _ContinuationStitcher]:
+    stitcher = _ContinuationStitcher(prior, real_writer)
+
+    def wrapped(chunk: dict[str, Any]) -> None:
+        if isinstance(chunk, dict) and chunk.get("kind") == "token":
+            stitcher.feed_token(str(chunk.get("content", "")))
+        else:
+            real_writer(chunk)
+
+    return wrapped, stitcher
+
+
+def _continuation_prompt(prior_tail: str) -> str:
+    return (
+        "Your previous message was cut off by the output limit. Continue it from exactly where it stopped — "
+        "resume mid-sentence or mid-structure if needed. Do not repeat any text you already wrote, do not add a "
+        "preamble, recap, or closing remark, and do not restate headings or list markers already shown. If you were "
+        "inside a code block, table, or list, continue it seamlessly.\n\n"
+        f"The end of what you have written so far (continue immediately after this):\n{prior_tail}"
+    )
+
+
+async def _auto_continue_answer(
+    model: ChatModel,
+    context_messages: list[BaseMessage],
+    system_prompt: str,
+    response: str,
+    finish_reason: str | None,
+    config: RunnableConfig,
+    writer: Callable[[dict[str, Any]], None] | None,
+) -> tuple[str, str, bool, tuple[dict[str, Any], ...]]:
+    """Auto-continue an output-limit-truncated answer, stitching the pieces.
+
+    Loops up to ``CHAT_LLM_MAX_CONTINUATIONS`` while the model keeps hitting the
+    length limit, trims the repeated overlap at each seam, and stops early if a
+    continuation adds no new text (the no-progress / anti-loop guard) or the
+    stitched response would exceed ``CHAT_LLM_MAX_RESPONSE_CHARS``. Returns the
+    full response, the text appended (so the caller can extend ``streamed``),
+    whether it is *still* truncated after the budget, and any reasoning details.
+    Only runs when streaming (``writer`` set); sub-agent/worker turns skip it.
+    """
+    max_loops = settings.CHAT_LLM_MAX_CONTINUATIONS
+    max_chars = settings.CHAT_LLM_MAX_RESPONSE_CHARS
+    details: list[dict[str, Any]] = []
+    appended = ""
+    loops = 0
+    while (
+        writer is not None
+        and max_loops > 0
+        and _is_output_limit_finish_reason(finish_reason)
+        and loops < max_loops
+        and (max_chars <= 0 or len(response) < max_chars)
+    ):
+        loops += 1
+        prior_tail = response[-_CONTINUATION_CONTEXT_CHARS:]
+        continuation_messages: list[BaseMessage] = [
+            *context_messages,
+            AIMessage(content=response, id=f"msg_{uuid.uuid4().hex}"),
+            HumanMessage(content=_continuation_prompt(prior_tail), id=f"msg_{uuid.uuid4().hex}"),
+        ]
+        stitch_writer, stitcher = _stitch_writer(writer, response)
+        turn = await _run_llm_tool_turn(model, system_prompt, continuation_messages, [], config, stitch_writer)
+        added = stitcher.flush()
+        details.extend(turn.details)
+        finish_reason = turn.finish_reason
+        if not added.strip():
+            break  # no progress -> stop rather than loop
+        response += added
+        appended += added
+    still_truncated = _is_output_limit_finish_reason(finish_reason)
+    return response, appended, still_truncated, tuple(details)
+
+
+@dataclass(frozen=True)
+class _ConfirmResolution:
+    # "run": ``to_run`` holds approved confirmations to execute now.
+    # "wait": still pending approvals in the batch — surface message, don't run.
+    # "abort": denied/expired/not-found/already-executed — surface message, don't run.
+    kind: Literal["run", "wait", "abort"]
+    message: str = ""
+
+
+async def _collect_confirmations_to_run(
+    confirmation_id: str,
+    authed_user: CurrentUser,
+    client_thread_id: str | None,
+) -> tuple[list[ActionConfirmation], _ConfirmResolution]:
+    """Validate a confirmation and collect the approved batch to execute.
+
+    Centralizes the security-sensitive checks (ownership, expiry, approval,
+    batch completeness) shared by the single-agent resume path and the
+    orchestrated mid-plan resume path, so the rules cannot drift between them.
+    """
     confirmation = await report_store.get_action_confirmation(confirmation_id, user_id=authed_user.user.user_id)
     if confirmation is None:
-        response = "Seizu could not find that action confirmation."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
-    client_thread_id = _client_thread_id_from_config(config)
+        return [], _ConfirmResolution("abort", "Seizu could not find that action confirmation.")
     if confirmation.source != "chat" or confirmation.session_key != client_thread_id:
-        response = "That action confirmation does not belong to this chat thread, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution(
+            "abort", "That action confirmation does not belong to this chat thread, so Seizu did not run it."
+        )
     if action_confirmations.is_expired(confirmation) and confirmation.status != "executed":
-        response = "That action confirmation has expired, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "That action confirmation has expired, so Seizu did not run it.")
     if confirmation.status not in ("approved", "executed"):
-        response = "That action is not approved, so Seizu did not run it."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "That action is not approved, so Seizu did not run it.")
 
     # Collect the full batch — all confirmations that share the same batch_id.
     # If this is a legacy confirmation with no batch_id, run only it.
@@ -516,33 +778,39 @@ async def _resume_confirmed_tool_turn(
         if pending:
             n = len(pending)
             noun = "approval" if n == 1 else "approvals"
-            response = (
+            return [], _ConfirmResolution(
+                "wait",
                 f"Waiting for {n} more {noun} before proceeding. "
-                "Use the confirmation panel or URLs to approve the remaining actions."
+                "Use the confirmation panel or URLs to approve the remaining actions.",
             )
-            writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response)
         denied = [c for c in batch if c.status == "denied"]
         # Only count a confirmation as blocking-expired when it still needed a
         # decision — executed items have already run and must not abort the batch.
         expired = [c for c in batch if c.status in ("pending", "approved") and action_confirmations.is_expired(c)]
         if denied or expired:
             reason = "denied" if denied else "expired"
-            response = f"One or more actions in this approval batch were {reason}, so Seizu did not run the batch."
-            writer({"kind": "token", "content": response})
-            return _chat_state_with_ai_response(state, response)
+            return [], _ConfirmResolution(
+                "abort", f"One or more actions in this approval batch were {reason}, so Seizu did not run the batch."
+            )
         to_run = [c for c in batch if c.status == "approved"]
     else:
         to_run = [confirmation] if confirmation.status == "approved" else []
 
     if not to_run:
-        response = "All actions in this batch have already been executed."
-        writer({"kind": "token", "content": response})
-        return _chat_state_with_ai_response(state, response)
+        return [], _ConfirmResolution("abort", "All actions in this batch have already been executed.")
+    return to_run, _ConfirmResolution("run")
 
-    action_word = "action" if len(to_run) == 1 else "actions"
-    writer({"kind": "token", "content": f"Running approved {action_word}...\n\n"})
 
+async def _execute_confirmations(
+    to_run: list[ActionConfirmation],
+    authed_user: CurrentUser,
+) -> tuple[list[tuple[str, str]], list[str], list[dict[str, Any]]]:
+    """Atomically claim and execute approved confirmations.
+
+    Returns ``(outcomes, errors, detail_events)`` where ``outcomes`` are
+    ``(tool_name, result_text)`` pairs. The claim step ensures each approved
+    action runs at most once even under concurrent resumes.
+    """
     outcomes: list[tuple[str, str]] = []  # (tool_name, result_text)
     errors: list[str] = []
     detail_events: list[dict[str, Any]] = []
@@ -567,6 +835,9 @@ async def _resume_confirmed_tool_turn(
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
             detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
+        elif error_text := _tool_result_error_text(outcome.text):
+            errors.append(f"`{c.tool_name}`: {error_text}")
+            detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="blocked"))
         else:
             outcomes.append((c.tool_name, outcome.text))
             detail_events.append(_confirmation_tool_detail_data(c, outcome.text, status="completed"))
@@ -582,6 +853,33 @@ async def _resume_confirmed_tool_turn(
             await _run_one(c)
 
     await asyncio.gather(*(_run_one_limited(c) for c in to_run))
+    return outcomes, errors, detail_events
+
+
+async def _resume_confirmed_tool_turn(
+    state: ChatState,
+    config: RunnableConfig,
+    current_user: CurrentUser | None,
+    confirmation_id: str,
+) -> ChatState:
+    writer = get_stream_writer()
+    if current_user is None:
+        response = "Seizu could not resume the action because the current user is not authenticated."
+        writer({"kind": "token", "content": response})
+        return _chat_state_with_ai_response(state, response)
+
+    # Capture as a non-optional type for the shared helpers below.
+    authed_user: CurrentUser = current_user
+    client_thread_id = _client_thread_id_from_config(config)
+    to_run, resolution = await _collect_confirmations_to_run(confirmation_id, authed_user, client_thread_id)
+    if resolution.kind != "run":
+        writer({"kind": "token", "content": resolution.message})
+        return _chat_state_with_ai_response(state, resolution.message)
+
+    action_word = "action" if len(to_run) == 1 else "actions"
+    writer({"kind": "token", "content": f"Running approved {action_word}...\n\n"})
+
+    outcomes, errors, detail_events = await _execute_confirmations(to_run, authed_user)
     for detail_data in detail_events:
         writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
 
@@ -631,9 +929,9 @@ async def _resume_confirmed_tool_turn(
         if not streamed:
             writer({"kind": "token", "content": response})
         elif response.startswith(streamed):
-            writer({"kind": "token", "content": response[len(streamed) :]})
+            writer({"kind": "token", "content": _stream_tail(streamed, response[len(streamed) :])})
         else:
-            writer({"kind": "token", "content": f"\n\n{response}"})
+            writer({"kind": "token", "content": _stream_tail(streamed, response, separator="\n\n")})
     if hit_output_limit:
         writer({"kind": "finish_reason", "finish_reason": "length"})
     return _chat_state_with_ai_response(state, response, details=detail_events, output_limit=hit_output_limit)
@@ -657,6 +955,77 @@ def _chat_state_with_ai_response(
         response_metadata=response_metadata,
     )
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+
+
+# DeepSeek-family models sometimes emit their tool-call protocol tokens as
+# literal text instead of the API parsing them into structured ``tool_calls``
+# (observed with deepseek-v4-pro, whose markup looks like ``<｜｜DSML｜｜invoke
+# name=...>``). Every such marker starts ``<`` or ``</`` immediately followed by
+# the fullwidth vertical bar U+FF5C, which never appears that way in legitimate
+# assistant markdown — so it is a reliable, low-false-positive signal.
+# Note: ｜ is the fullwidth bar, NOT an ASCII '|' — an ASCII pipe here would
+# turn the pattern into the alternation "</" or "" and match everywhere.
+_TOOL_MARKUP_RE = re.compile("</?｜")
+
+
+def _strip_tool_markup(text: str) -> str:
+    """Drop everything from the first leaked tool-call marker onward."""
+    match = _TOOL_MARKUP_RE.search(text)
+    return text[: match.start()] if match else text
+
+
+# Seizu tool/skill names follow the ``group__action`` convention, which never
+# occurs in ordinary prose — so scanning the leaked region for it recovers the
+# tool the model tried to call without parsing the proprietary markup grammar.
+_TOOL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*__[a-z0-9_]+")
+
+
+def _leaked_tool_names(text: str) -> tuple[str, ...]:
+    """Best-effort tool names the model tried to call in leaked markup."""
+    match = _TOOL_MARKUP_RE.search(text)
+    region = text[match.start() :] if match else text
+    seen: list[str] = []
+    for name in _TOOL_NAME_RE.findall(region):
+        if name not in seen:
+            seen.append(name)
+    return tuple(seen[:5])
+
+
+class _ToolMarkupFilter:
+    """Withhold leaked tool-call protocol markup from the streamed output.
+
+    Holds back a trailing partial ``<...`` so a marker split across stream chunks
+    is never shown, and once a marker appears suppresses everything after it.
+    ``detected`` reports whether any markup was seen.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self.detected = False
+
+    def feed(self, delta: str) -> str:
+        if self.detected:
+            return ""
+        self._buffer += delta
+        match = _TOOL_MARKUP_RE.search(self._buffer)
+        if match:
+            self.detected = True
+            safe = self._buffer[: match.start()]
+            self._buffer = ""
+            return safe
+        # Hold back only a dangling unclosed ``<...`` (a possible marker prefix).
+        cut = self._buffer.rfind("<")
+        if cut != -1 and ">" not in self._buffer[cut:]:
+            safe, self._buffer = self._buffer[:cut], self._buffer[cut:]
+            return safe
+        safe, self._buffer = self._buffer, ""
+        return safe
+
+    def flush(self) -> str:
+        if self.detected:
+            return ""
+        safe, self._buffer = self._buffer, ""
+        return safe
 
 
 async def _run_llm_tool_turn(
@@ -687,9 +1056,11 @@ async def _run_llm_tool_turn(
     reasoning_detail_id = f"detail_{uuid.uuid4().hex}"
     reasoning_text = ""
     reasoning_detail_data: dict[str, Any] | None = None
+    reasoning_detail_started = False
     streamed = ""
     finish_reason: str | None = None
     stream_text = writer is not None
+    markup_filter = _ToolMarkupFilter()
     async for chunk in runnable.astream(
         [SystemMessage(content=system_prompt), *messages],
         config=config,
@@ -704,29 +1075,52 @@ async def _run_llm_tool_turn(
                 "status": "completed",
                 "body": reasoning_text,
             }
-            writer(
-                {
-                    "kind": "detail",
-                    "id": reasoning_detail_id,
-                    "data": {**reasoning_detail_data, "status": "running"},
-                }
-            )
+            if not reasoning_detail_started:
+                reasoning_detail_started = True
+                writer(
+                    {
+                        "kind": "detail",
+                        "id": reasoning_detail_id,
+                        "data": {
+                            "kind": "thinking",
+                            "title": "Thinking",
+                            "status": "running",
+                        },
+                    }
+                )
         if stream_text and writer is not None:
             delta = message_text(getattr(chunk, "content", ""))
             if delta:
-                writer({"kind": "token", "content": delta})
-                streamed += delta
+                safe = markup_filter.feed(delta)
+                if safe:
+                    writer({"kind": "token", "content": safe})
+                    streamed += safe
         merged = chunk if merged is None else merged + chunk
+    if stream_text and writer is not None:
+        tail = markup_filter.flush()
+        if tail:
+            writer({"kind": "token", "content": tail})
+            streamed += tail
+    if reasoning_detail_started and reasoning_detail_data is not None and writer is not None:
+        writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
+
+    merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
+    tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
+    leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
 
     if isinstance(merged, AIMessage):
+        if tool_markup_leaked:
+            merged.content = _strip_tool_markup(merged_text)
         return LLMTurnResult(
             message=_strip_reasoning_context(merged),
             streamed=streamed,
             finish_reason=finish_reason or _chunk_finish_reason(merged),
             details=(reasoning_detail_data,) if reasoning_detail_data else (),
+            tool_markup_leaked=tool_markup_leaked,
+            leaked_tool_names=leaked_tool_names,
         )
     fallback = AIMessage(
-        content=message_text(getattr(merged, "content", "")) if merged is not None else "",
+        content=_strip_tool_markup(merged_text),
         tool_calls=list(getattr(merged, "tool_calls", []) or []),
         invalid_tool_calls=list(getattr(merged, "invalid_tool_calls", []) or []),
         id=getattr(merged, "id", None),
@@ -736,16 +1130,40 @@ async def _run_llm_tool_turn(
         streamed=streamed,
         finish_reason=finish_reason or _chunk_finish_reason(merged),
         details=(reasoning_detail_data,) if reasoning_detail_data else (),
+        tool_markup_leaked=tool_markup_leaked,
+        leaked_tool_names=leaked_tool_names,
     )
 
 
 def _strip_reasoning_context(message: AIMessage) -> AIMessage:
-    """Remove provider thinking fields before message reuse in LLM context."""
-    if "reasoning_content" not in message.additional_kwargs:
-        return message
-    message.additional_kwargs = {
-        key: value for key, value in message.additional_kwargs.items() if key != "reasoning_content"
-    }
+    """Normalize an assistant message before it is reused as model context.
+
+    LiteLLM surfaces reasoning two ways: ``additional_kwargs["reasoning_content"]``
+    (DeepSeek/OpenAI shape) and injected ``{"type": "thinking"}`` blocks in list
+    content (Anthropic shape). During streaming, chunk-merge concatenates the
+    list-shaped reasoning with the plain-string answer delta into a *mixed* list
+    (thinking dicts plus bare answer-text strings). Some providers reject that
+    when it is re-sent in the tool loop — e.g. DeepSeek's content-list-to-str
+    conversion calls ``.get("text")`` on every element and crashes on a bare str.
+
+    Reasoning is normally a UI-only diagnostic (streamed separately as a thinking
+    detail), but DeepSeek thinking mode requires an assistant message that
+    performed a tool call to be replayed with its original ``reasoning_content``.
+    Therefore: flatten list content back to the plain answer text for every
+    provider, strip reasoning from normal assistant messages, and preserve or
+    reconstruct ``reasoning_content`` only on assistant tool-call messages.
+    """
+    has_tool_calls = bool(message.tool_calls or message.additional_kwargs.get("tool_calls"))
+    reasoning_content = _chunk_reasoning_delta(message)
+    additional_kwargs = dict(message.additional_kwargs)
+    if has_tool_calls:
+        if reasoning_content:
+            additional_kwargs["reasoning_content"] = reasoning_content
+    else:
+        additional_kwargs.pop("reasoning_content", None)
+    message.additional_kwargs = additional_kwargs
+    if isinstance(message.content, list):
+        message.content = message_text(message.content)
     return message
 
 
@@ -967,38 +1385,6 @@ def _json_schema_object(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _deepseek_reasoning_content_delta(chunk: dict[str, Any]) -> str:
-    choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices") or []
-    if not choices:
-        return ""
-    first = choices[0]
-    if not isinstance(first, dict):
-        return ""
-    delta = first.get("delta")
-    if not isinstance(delta, dict):
-        return ""
-    reasoning_content = delta.get("reasoning_content")
-    return reasoning_content if isinstance(reasoning_content, str) else ""
-
-
-def _uses_deepseek_compatible_endpoint(model_name: str) -> bool:
-    base_url_host = _hostname(settings.CHAT_LLM_BASE_URL).lower()
-    if base_url_host == "deepseek.com" or base_url_host.endswith(".deepseek.com"):
-        return True
-    return model_name.lower().startswith("deepseek-")
-
-
-def _hostname(url: str) -> str:
-    if not url:
-        return ""
-    from urllib.parse import urlparse
-
-    try:
-        return urlparse(url).hostname or ""
-    except ValueError:
-        return ""
-
-
 def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
     return [
         ChatToolSpec(
@@ -1009,6 +1395,38 @@ def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
         )
         for prompt in skills
     ]
+
+
+def _terminal_specs(post_action: bool) -> list[ChatToolSpec]:
+    """The respond_to_user finish tool, exposed only after an action has run."""
+    if not post_action:
+        return []
+    return [
+        ChatToolSpec(
+            name=_FINAL_ANSWER_TOOL,
+            kind="tool",
+            description=(
+                "Deliver your complete final answer to the user and end the turn. Call this once you have enough "
+                "information from the tools/skills you already ran. Put the full user-facing answer in `answer`; do "
+                "not call any other tool in the same step. If you still need live data, call that tool instead."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "The complete, user-facing final answer for this turn.",
+                    }
+                },
+                "required": ["answer"],
+            },
+        )
+    ]
+
+
+def _final_answer_text(request: ToolCallRequest) -> str:
+    answer = request.arguments.get("answer")
+    return answer.strip() if isinstance(answer, str) else ""
 
 
 def _mcp_tool_specs(tools: list[Tool]) -> list[ChatToolSpec]:
@@ -1129,6 +1547,44 @@ async def _run_tool_call_batch(
     return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
 
+def _ai_message_for_tool_results(message: AIMessage, results: list[ToolCallResult]) -> AIMessage:
+    """Return an assistant message whose tool calls match the ToolMessages emitted.
+
+    Providers require every assistant ``tool_call_id`` to be followed by exactly
+    one tool response. Seizu may execute only a subset of the model's requested
+    calls (auto-action limit, repeated-call filtering), so never pass through the
+    original full ``tool_calls`` list when building the next in-turn context.
+    """
+    result_ids = {result.request.id for result in results}
+    tool_calls = [
+        call for call in (message.tool_calls or []) if isinstance(call, dict) and str(call.get("id", "")) in result_ids
+    ]
+    additional_kwargs = {key: value for key, value in message.additional_kwargs.items() if key != "tool_calls"}
+    raw_tool_calls = message.additional_kwargs.get("tool_calls")
+    if isinstance(raw_tool_calls, list):
+        filtered_raw = [
+            call for call in raw_tool_calls if isinstance(call, dict) and str(call.get("id", "")) in result_ids
+        ]
+        if filtered_raw:
+            additional_kwargs["tool_calls"] = filtered_raw
+    return AIMessage(
+        content=message.content,
+        id=message.id,
+        additional_kwargs=additional_kwargs,
+        response_metadata=message.response_metadata,
+        tool_calls=tool_calls,
+    )
+
+
+def _confirmation_batch_id_for_requests(requests: list[ToolCallRequest]) -> str | None:
+    """Only group true multi-action approvals into a confirmation batch.
+
+    A one-action "batch" creates stale/confusing batch links after execution,
+    while adding no value over the confirmation panel's single-item approval.
+    """
+    return uuid.uuid4().hex if len(requests) > 1 else None
+
+
 async def _run_tool_call(
     request: ToolCallRequest,
     current_user: CurrentUser | None,
@@ -1218,18 +1674,25 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "the resource is already available and continue the workflow by reading, updating, or using that resource "
         "instead of stopping as a failure. "
         "Do not pretend to have executed a tool unless the conversation contains its "
-        f"result.{user_context}{provider_note}"
+        "result. After you have run one or more skills or tools, finish the turn by calling the "
+        f"`{_FINAL_ANSWER_TOOL}` tool with your complete final answer; do not deliver a post-action answer as plain "
+        "text, and never describe tool work you have not performed."
+        f"{user_context}{provider_note}"
     )
 
 
 def _provider_prompt_note(provider: str) -> str:
-    if provider == "anthropic":
+    # provider may be the generic "litellm" sentinel now, so fold the configured
+    # model string into the match (e.g. "anthropic/claude-...") and key the
+    # family-specific note off whichever signal is present.
+    hint = f"{provider} {settings.CHAT_LLM_MODEL}".lower()
+    if "anthropic" in hint or "claude" in hint:
         return "\nFor Claude, keep the final answer direct and avoid prefilling or hidden chain-of-thought."
-    if provider == "gemini":
+    if "gemini" in hint or "vertex" in hint:
         return "\nFor Gemini, preserve structured report suggestions as compact headings and bullet lists."
-    if provider == "deepseek":
+    if "deepseek" in hint:
         return "\nFor DeepSeek, keep reasoning concise and surface only the conclusion, evidence, and next action."
-    if provider == "openai":
+    if "openai" in hint or "gpt" in hint or "/o1" in hint or "/o3" in hint:
         return (
             "\nFor OpenAI, use a developer-instruction style: follow these Seizu constraints "
             "over generic assistant behavior."
@@ -1285,13 +1748,36 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
 
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
-    status = "blocked" if result.blocked is not None else "completed"
+    # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
+    # other block is a failure ("blocked").
+    if result.blocked == ChatBlockReason.CONFIRMATION_REQUIRED:
+        status = "awaiting"
+    elif result.blocked is not None:
+        status = "blocked"
+    else:
+        status = "completed"
     return {
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",
         "status": status,
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
+    }
+
+
+def _planning_narration_detail_data(text: str) -> dict[str, Any]:
+    """Render prose that accompanied a tool call as a 'thinking' detail.
+
+    Such prose ("I'll start by investigating…") is the model narrating its plan,
+    not an answer. Keeping it out of the answer body — and recording it as a
+    thinking detail — means a page reload shows the same narration-as-thinking
+    the live stream did, instead of a stray sentence in the assistant bubble.
+    """
+    return {
+        "kind": "thinking",
+        "title": "Planning",
+        "status": "completed",
+        "body": _truncate_text(text.strip(), 4000),
     }
 
 
@@ -1348,22 +1834,9 @@ def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> s
     return disclosed
 
 
-def _common_batch_url(results: list[ToolCallResult]) -> str | None:
-    """Return the shared batch_url if all results share the same non-None batch_id."""
-    batch_url: str | None = None
-    for result in results:
-        try:
-            data = json.loads(result.content)
-        except json.JSONDecodeError:
-            return None
-        url = data.get("batch_url") if isinstance(data, dict) else None
-        if not isinstance(url, str):
-            return None
-        if batch_url is None:
-            batch_url = url
-        elif batch_url != url:
-            return None
-    return batch_url
+def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatToolSpec]:
+    """Tool specs for the subset of ``tools`` already disclosed to the model."""
+    return _mcp_tool_specs([tool for tool in tools if tool.name in disclosed])
 
 
 def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
@@ -1374,15 +1847,12 @@ def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
                 "This action needed approval, but the confirmation has already been decided or has expired. "
                 "Nothing was executed."
             )
-        batch_url = _common_batch_url(pending)
-        if batch_url:
-            n = len(pending)
-            noun = "action" if n == 1 else f"{n} actions"
-            return (
-                f"Approval needed for {noun}. Visit the confirmation page to allow or deny, "
-                f"then the conversation will resume automatically: {batch_url}"
-            )
-        lines = ["Approval needed. Open the confirmation URL to allow or deny, then resume the conversation."]
+        n = len(pending)
+        noun = "action" if n == 1 else f"{n} actions"
+        lines = [
+            f"Approval needed for {noun}. Use the confirmations panel in this chat to allow or deny. "
+            "After all pending approvals are allowed, the conversation will resume automatically."
+        ]
         for result in pending:
             lines.append(f"- {_blocked_tool_call_body(result.content)}")
         return "\n".join(lines)
@@ -1438,9 +1908,182 @@ def _blocked_tool_call_body(content: str) -> str:
         status = data.get("status")
         if status == "denied":
             return "Action was denied for this confirmation window."
-        url = data.get("confirmation_url")
-        return f"Approval required at {url}" if isinstance(url, str) else "Approval required."
+        return "Approval required."
     return content.strip() or "blocked"
+
+
+def _tool_result_error_text(content: str) -> str | None:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    error = data.get("error")
+    return error if isinstance(error, str) and error.strip() else None
+
+
+# Providers disagree on native structured output (the OpenAI ``response_format``
+# shape). DeepSeek, for one, rejects it with 400 "response_format type is
+# unavailable". We try the native path once per model; on a definitive rejection
+# we remember it and route every later decision straight to the JSON-prompt
+# fallback, so an unsupported provider pays one failing round-trip per process
+# instead of one on every router/planner/verifier call.
+_structured_output_native_ok: dict[int, bool] = {}
+
+
+def _structured_output_unsupported(exc: Exception) -> bool:
+    """True when a provider definitively rejects native structured output.
+
+    Distinguished from a transient error (timeout, 5xx) so we only disable the
+    native path for a real capability gap, not a blip.
+    """
+    text = str(exc).lower()
+    return "response_format" in text or exc.__class__.__name__ in ("BadRequestError", "UnsupportedParamsError")
+
+
+async def _invoke_structured_output(
+    model: Any,
+    schema: type[BaseModel],
+    messages: list[BaseMessage],
+    config: RunnableConfig,
+) -> BaseModel:
+    """Invoke *model* for a structured decision with a JSON fallback.
+
+    Some LiteLLM/provider combinations are inconsistent with LangChain's
+    ``with_structured_output`` wrapper. The fallback still delegates the
+    semantic decision to the LLM; code only validates and parses the JSON object.
+    """
+    structured = getattr(model, "with_structured_output", None)
+    if callable(structured) and _structured_output_native_ok.get(id(model), True):
+        try:
+            result = await structured(schema).ainvoke(messages, config=config)
+            _structured_output_native_ok[id(model)] = True
+            if isinstance(result, schema):
+                return result
+            if isinstance(result, dict):
+                return schema.model_validate(result)
+        except Exception as exc:
+            if _structured_output_unsupported(exc):
+                # Expected capability gap: log once, concisely, and stop trying
+                # the native path for this model.
+                if _structured_output_native_ok.get(id(model), True):
+                    logger.info("Native structured output unavailable for this provider; using JSON-prompt fallback")
+                _structured_output_native_ok[id(model)] = False
+            else:
+                logger.info(
+                    "with_structured_output failed for %s; falling back to JSON parsing",
+                    schema.__name__,
+                    exc_info=True,
+                )
+
+    schema_json = _json_dump(schema.model_json_schema())
+    system_prompt = (
+        "Return only a valid JSON object matching this JSON schema. Do not include markdown, prose, or code fences.\n\n"
+        f"JSON schema:\n{schema_json}"
+    )
+    turn = await _run_llm_tool_turn(model, system_prompt, messages, [], config, None)
+    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    if parsed is not None:
+        return parsed
+    # Reasoning models sometimes bury the object in analysis on the first ask;
+    # one firmer retry usually lands a clean object.
+    retry_prompt = (
+        "Output the JSON object only — no analysis, no explanation, no markdown code fences. "
+        f"Return a single JSON object matching this schema:\n{schema_json}"
+    )
+    turn = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    if parsed is not None:
+        return parsed
+    raise ValueError(f"Model did not return a JSON object for {schema.__name__}")
+
+
+def _structured_from_text(schema: type[BaseModel], text: str) -> BaseModel | None:
+    """Validate the first JSON object in *text* that matches *schema*.
+
+    Candidates are tried richest-first, because a reasoning model often emits
+    small stray brace groups in the prose around the real, larger payload.
+    """
+    for candidate in _json_objects_from_text(text):
+        try:
+            return schema.model_validate(candidate)
+        except Exception:
+            continue
+    return None
+
+
+def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    text = text.strip()
+    if not text:
+        return []
+    seen: set[str] = set()
+    objects: list[dict[str, Any]] = []
+    for candidate in [text, *_fenced_code_blocks(text), *_balanced_brace_objects(text)]:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        key = _json_dump(data)
+        if key not in seen:
+            seen.add(key)
+            objects.append(data)
+    objects.sort(key=lambda obj: len(_json_dump(obj)), reverse=True)
+    return objects
+
+
+def _fenced_code_blocks(text: str) -> list[str]:
+    return [match.group(1) for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)]
+
+
+def _balanced_brace_objects(text: str) -> list[str]:
+    """Every top-level balanced ``{...}`` span, ignoring braces inside strings."""
+    objects: list[str] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                objects.append(text[start : index + 1])
+                start = -1
+    return objects
+
+
+def _terminal_stall_retry_message(action_summaries: list[str]) -> str:
+    """Nudge a post-action turn that returned plain text instead of finishing.
+
+    The model either still needs live data — in which case it should make the
+    next structured tool/skill call — or it is done, in which case it should
+    deliver the answer through the respond_to_user tool. We do not classify the
+    prose; we just give the model one structured chance to act or finish before
+    accepting whatever it returns next.
+    """
+    return (
+        "You returned plain text after Seizu already ran one or more actions, without finishing the turn. "
+        f"If the user's request needs more live data, make the next structured skill/tool call now. If you have "
+        f"enough evidence, deliver the complete final answer by calling the `{_FINAL_ANSWER_TOOL}` tool with the "
+        "full answer in `answer`. Do not describe future work in plain text.\n\n"
+        f"Completed action summaries so far:\n{_truncate_text(chr(10).join(action_summaries), 10000)}"
+    )
 
 
 def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_summaries: list[str]) -> str:
@@ -1448,11 +2091,17 @@ def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_su
     prior = (
         "\n\nMost recent completed action:\n" + _truncate_text(action_summaries[-1], 5000) if action_summaries else ""
     )
+    all_results = (
+        "\n\nAll completed action summaries so far:\n" + _truncate_text("\n\n".join(action_summaries), 10000)
+        if action_summaries
+        else ""
+    )
     return (
         "You requested an action Seizu has already run in this turn: "
         f"{repeated}. Do not repeat the same skill or tool call. Use the existing result to answer the user, or call "
-        "a different tool only if it adds new required evidence. If you have enough evidence, provide the final "
-        f"synthesis now.{prior}"
+        "a different tool only if it adds new required evidence. If the user's request has another step, continue "
+        "with that different step using data from the completed result. If you have enough evidence, provide the "
+        f"final synthesis now.{prior}{all_results}"
     )
 
 
@@ -1473,6 +2122,54 @@ def _initial_empty_response_retry_message() -> str:
     )
 
 
+def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
+    if leaked_tool_names:
+        names = ", ".join(f"`{name}`" for name in leaked_tool_names)
+        return (
+            f"You wrote a tool call for {names} as plain text, so nothing ran — that tool is not available to call "
+            "directly right now. Tools are disclosed on demand: to use one, first call the skill that provides it "
+            "(rendering a skill exposes the tools it declares), then call the tool with the structured tool-calling "
+            "mechanism. Never write tool-call tokens, tags, or XML-like markup in your message text. If no available "
+            "skill provides what you need, use the skills and tools already available, or answer in plain language."
+        )
+    return (
+        "Your previous reply wrote raw tool-call markup as plain text instead of invoking a tool, so nothing ran. "
+        "To call a tool, use the structured tool-calling mechanism provided by the API — never write tool-call "
+        "tokens, tags, or XML-like markup in your message text. If you do not need a tool, answer in plain language."
+    )
+
+
+def _tool_markup_fallback() -> str:
+    return (
+        "I couldn't complete that request: the model returned an unusable tool call. Please try again, "
+        "or rephrase the request."
+    )
+
+
+_INTERNAL_ACTION_TRANSCRIPT_RE = re.compile(
+    r"(^|\n)\s*(?:"
+    r"Seizu ran \d+ actions?(?: in parallel)?[:.]|"
+    r"Seizu (?:ran tool|rendered skill) `[^`]+`|"
+    r"-?\s*`[a-z][a-z0-9_]*__[a-z0-9_]+` with arguments "
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _internal_action_transcript_leaked(text: str) -> bool:
+    """True when a final draft copied Seizu's internal action transcript."""
+    return bool(_INTERNAL_ACTION_TRANSCRIPT_RE.search(text))
+
+
+def _action_transcript_retry_message() -> str:
+    return (
+        "Your previous draft copied Seizu's internal action transcript instead of answering the user. Rewrite it as "
+        "a user-facing answer. Do not say 'Seizu ran', do not list tool names, do not show tool arguments, and do not "
+        "paste raw returned JSON. Use the tool results only as evidence. Lead with the conclusion, then summarize the "
+        "most important evidence, impact, and recommended next actions."
+    )
+
+
 def _final_synthesis_retry_message(action_summaries: list[str]) -> str:
     joined_summaries = "\n".join(action_summaries)
     budget = _answer_budget()
@@ -1481,7 +2178,8 @@ def _final_synthesis_retry_message(action_summaries: list[str]) -> str:
     return (
         "Seizu has finished running the requested tool calls for this turn. Do not call any more tools. Provide the "
         "final answer to the user using the action results below. Be selective: lead with the direct answer, include "
-        "only the most decision-relevant evidence, and avoid dumping full tables or exhaustive breakdowns. Target "
+        "only the most decision-relevant evidence, and avoid dumping full tables, exhaustive breakdowns, tool names, "
+        "tool arguments, or raw returned JSON. Target "
         f"{budget.min_words}-{budget.max_words} words, at most {budget.max_bullets} bullets, and at most "
         f"{table_count} compact {table_noun}. Note uncertainty or truncation only when it "
         f"changes the conclusion or next action.\n\n{_truncate_text(joined_summaries, 12000)}"
@@ -1642,9 +2340,44 @@ def _resume_confirmation_id(messages: list[Any]) -> str | None:
     return None
 
 
+def _is_continuation_turn(messages: list[Any]) -> bool:
+    """True when this turn is a "continue the previous response" request.
+
+    Like ``_resume_confirmation_id``, only the most recent HumanMessage counts —
+    it is the message that triggered this graph turn.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        return bool(isinstance(additional_kwargs, dict) and additional_kwargs.get("continue_response") is True)
+    return False
+
+
 def _last_user_text(messages: list[Any]) -> str:
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
+            return str(message.content)
+        if isinstance(message, dict) and message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
+
+
+def _last_user_request(messages: list[Any]) -> str:
+    """The last user message that is an actual request, not a control directive.
+
+    Confirmation-resume and "continue response" turns are injected as synthetic
+    HumanMessages (e.g. "Resume approved confirmation <id>") carrying a marker in
+    ``additional_kwargs``. They drive the graph but are not the user's ask, so
+    answering them literally — the orchestrator synthesizer describing how to
+    "query the approval system" for a confirmation id — is wrong. Skip them and
+    return the request that actually spawned the work.
+    """
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            kwargs = getattr(message, "additional_kwargs", None) or {}
+            if isinstance(kwargs, dict) and (kwargs.get("resume_confirmation_id") or kwargs.get("continue_response")):
+                continue
             return str(message.content)
         if isinstance(message, dict) and message.get("role") == "user":
             return str(message.get("content", ""))
@@ -1722,10 +2455,44 @@ def _chunk_text(text: str, chunk_size: int = 8) -> list[str]:
 
 
 def build_chat_graph(checkpointer: Any) -> ChatGraph:
+    # Local import breaks the import cycle: chat_orchestrator imports the shared
+    # turn/tool helpers from this module at import time, while this module only
+    # needs the orchestrator nodes here, at graph-build time.
+    from reporting.services import chat_orchestrator as orchestrator
+
     graph = StateGraph(ChatState)
+    graph.add_node("router", orchestrator.router_node)
     graph.add_node("chat_agent", chat_agent_node)
-    graph.add_edge(START, "chat_agent")
+    graph.add_node("planner", orchestrator.planner_node)
+    graph.add_node("dispatcher", orchestrator.dispatcher_node)
+    graph.add_node("verifier", orchestrator.verifier_node)
+    graph.add_node("synthesizer", orchestrator.synthesizer_node)
+    graph.add_node("confirmation_pause", orchestrator.confirmation_pause_node)
+
+    graph.add_edge(START, "router")
+    graph.add_conditional_edges(
+        "router",
+        orchestrator.route_from_router,
+        {"planner": "planner", "chat_agent": "chat_agent"},
+    )
     graph.add_edge("chat_agent", END)
+    graph.add_edge("planner", "dispatcher")
+    graph.add_conditional_edges(
+        "dispatcher",
+        orchestrator.route_from_dispatcher,
+        {
+            "verifier": "verifier",
+            "synthesizer": "synthesizer",
+            "confirmation_pause": "confirmation_pause",
+        },
+    )
+    graph.add_edge("confirmation_pause", END)
+    graph.add_conditional_edges(
+        "verifier",
+        orchestrator.route_from_verifier,
+        {"dispatcher": "dispatcher", "synthesizer": "synthesizer"},
+    )
+    graph.add_edge("synthesizer", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -1737,108 +2504,98 @@ def get_chat_graph() -> ChatGraph:
 @lru_cache(maxsize=1)
 def get_chat_model() -> ChatModel:
     provider = _chat_provider()
-    if provider == "mock":
+    if provider == _MOCK_PROVIDER:
         raise RuntimeError("CHAT_LLM_PROVIDER=mock does not use a real chat model")
-    model_name = _chat_model_name(provider)
-    max_tokens = settings.CHAT_LLM_MAX_TOKENS if settings.CHAT_LLM_MAX_TOKENS > 0 else None
+    from langchain_litellm import ChatLiteLLM
 
-    if provider == "openai":
-        kwargs = _chat_model_kwargs(settings.OPENAI_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        cls = _openai_chat_class(deepseek_compatible=_uses_deepseek_compatible_endpoint(model_name))
-        return cls(model=model_name, **kwargs)
-
-    if provider == "deepseek":
-        kwargs = _chat_model_kwargs(settings.DEEPSEEK_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        return _deepseek_chat_class()(model=model_name, **kwargs)
-
-    if provider == "anthropic":
-        kwargs = _chat_model_kwargs(settings.ANTHROPIC_API_KEY, include_base_url=True)
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        from langchain_anthropic import ChatAnthropic
-
-        return ChatAnthropic(model=model_name, **kwargs)
-
-    # gemini — ChatGoogleGenerativeAI does not accept a base_url kwarg, so the
-    # operator-set CHAT_LLM_BASE_URL is intentionally not forwarded here.
-    kwargs = _chat_model_kwargs(settings.GEMINI_API_KEY or settings.GOOGLE_API_KEY, include_base_url=False)
-    if max_tokens is not None:
-        kwargs["max_output_tokens"] = max_tokens
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(model=model_name, **kwargs)
-
-
-@lru_cache(maxsize=2)
-def _openai_chat_class(deepseek_compatible: bool) -> type:
-    from langchain_openai import ChatOpenAI
-
-    if not deepseek_compatible:
-        return ChatOpenAI
-
-    class SeizuChatOpenAI(SeizuChatDeepSeekMixin, ChatOpenAI):
-        pass
-
-    return SeizuChatOpenAI
-
-
-@lru_cache(maxsize=1)
-def _deepseek_chat_class() -> type:
-    from langchain_deepseek import ChatDeepSeek
-
-    class SeizuChatDeepSeek(SeizuChatDeepSeekMixin, ChatDeepSeek):
-        pass
-
-    return SeizuChatDeepSeek
+    kwargs: dict[str, Any] = {
+        "model": _litellm_model_id(provider),
+        "temperature": settings.CHAT_LLM_TEMPERATURE,
+        "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
+        "max_retries": settings.CHAT_LLM_MAX_RETRIES,
+        # Seizu always consumes the model through .astream(); make the streaming
+        # intent explicit so LiteLLM emits stream=true on the wire.
+        "streaming": True,
+    }
+    if settings.CHAT_LLM_MAX_TOKENS > 0:
+        kwargs["max_tokens"] = settings.CHAT_LLM_MAX_TOKENS
+    api_key = settings.CHAT_LLM_API_KEY or _legacy_provider_api_key(provider)
+    if api_key:
+        kwargs["api_key"] = api_key
+    # base_url applies to every provider now: LiteLLM routes any model through an
+    # OpenAI-compatible gateway (e.g. a self-hosted LiteLLM proxy) when api_base
+    # is set, so the proxy is an opt-in deployment rather than a hard dependency.
+    if settings.CHAT_LLM_BASE_URL:
+        kwargs["api_base"] = settings.CHAT_LLM_BASE_URL
+    return ChatLiteLLM(**kwargs)
 
 
 def _chat_provider() -> str:
-    provider = settings.CHAT_LLM_PROVIDER.strip().lower()
-    if provider not in _VALID_CHAT_PROVIDERS:
-        raise ValueError("CHAT_LLM_PROVIDER must be one of: " + ", ".join(sorted(_VALID_CHAT_PROVIDERS)))
-    return provider
+    """Resolve the configured provider sentinel.
+
+    "mock" is the only special value; any other (including the explicit
+    "litellm") routes through LiteLLM. The provider is no longer constrained to a
+    fixed allowlist — provider/model choice is delegated to LiteLLM via the
+    CHAT_LLM_MODEL string.
+    """
+    return settings.CHAT_LLM_PROVIDER.strip().lower() or "litellm"
 
 
-def _chat_model_name(provider: str) -> str:
+# Legacy single-provider names map onto LiteLLM's provider namespace so existing
+# CHAT_LLM_PROVIDER=<name> + bare CHAT_LLM_MODEL deployments keep working without
+# config changes. New deployments can instead set a fully-qualified model string
+# (e.g. "anthropic/claude-3-5-sonnet-latest") and leave CHAT_LLM_PROVIDER unset.
+_LEGACY_PROVIDER_NAMESPACE = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "gemini",
+    "deepseek": "deepseek",
+}
+
+
+def _litellm_model_id(provider: str) -> str:
     model = settings.CHAT_LLM_MODEL.strip()
     if not model:
         raise ValueError(
-            f"CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER={provider!r}. Set it to a model identifier "
-            "supported by the provider (e.g. an OpenAI/Anthropic/Gemini/DeepSeek model name). The mock provider "
-            "is the only one that runs without a model."
+            "CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER is not 'mock'. Set it to a LiteLLM model "
+            "identifier, optionally namespaced by provider (e.g. 'openai/gpt-4o', "
+            "'anthropic/claude-3-5-sonnet-latest', 'gemini/gemini-2.0-flash', 'deepseek/deepseek-reasoner'). "
+            "The mock provider is the only one that runs without a model."
         )
-    return model
+    # Already provider-qualified, or the operator opted into fully-qualified
+    # model strings by leaving the provider as the generic sentinel.
+    if "/" in model or provider in ("", "litellm", _MOCK_PROVIDER):
+        return model
+    namespace = _LEGACY_PROVIDER_NAMESPACE.get(provider, provider)
+    return f"{namespace}/{model}"
 
 
-def _chat_model_kwargs(provider_api_key: str, *, include_base_url: bool) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "temperature": settings.CHAT_LLM_TEMPERATURE,
-        "timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
-        "max_retries": settings.CHAT_LLM_MAX_RETRIES,
-    }
-    api_key = settings.CHAT_LLM_API_KEY or provider_api_key
-    if api_key:
-        kwargs["api_key"] = api_key
-    if include_base_url and settings.CHAT_LLM_BASE_URL:
-        kwargs["base_url"] = settings.CHAT_LLM_BASE_URL
-    return kwargs
+def _legacy_provider_api_key(provider: str) -> str:
+    """Best-effort map of legacy per-provider key settings.
+
+    When CHAT_LLM_API_KEY is unset and a legacy provider name is used, forward
+    the matching provider key. For the generic "litellm" sentinel this returns
+    "" and LiteLLM falls back to its own provider-specific env var lookup
+    (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, ...).
+    """
+    return {
+        "openai": settings.OPENAI_API_KEY,
+        "anthropic": settings.ANTHROPIC_API_KEY,
+        "gemini": settings.GEMINI_API_KEY or settings.GOOGLE_API_KEY,
+        "deepseek": settings.DEEPSEEK_API_KEY,
+    }.get(provider, "")
 
 
 def validate_chat_llm_config() -> None:
     """Fail-fast validation called at startup when chat is enabled.
 
-    Raises ``ValueError`` if ``CHAT_LLM_PROVIDER`` is unknown or, for a real
-    provider, ``CHAT_LLM_MODEL`` is missing. Catches typos that previously
-    surfaced only on the first user request.
+    Raises ``ValueError`` if a real provider is selected without CHAT_LLM_MODEL,
+    catching a missing model that previously surfaced only on the first request.
     """
     provider = _chat_provider()
-    if provider == "mock":
+    if provider == _MOCK_PROVIDER:
         return
-    _chat_model_name(provider)
+    _litellm_model_id(provider)
 
 
 def _build_checkpointer() -> DynamoDBSaver:

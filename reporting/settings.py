@@ -286,25 +286,43 @@ SQL_DATABASE_URL = str_env("SQL_DATABASE_URL", "")
 # Chat UI (surfaced via GET /api/v1/config -> features.chat).
 CHAT_ENABLED = bool_env("CHAT_ENABLED", True)
 
-# LLM provider for the chat assistant. "mock" keeps local/dev chat deterministic
-# and keyless; set to "openai", "anthropic", "gemini", or "deepseek" to call a
-# real model through the LangGraph chat node.
+# LLM provider sentinel for the chat assistant. "mock" keeps local/dev chat
+# deterministic and keyless; any other value routes through LiteLLM, so the
+# supported provider/model surface is whatever LiteLLM supports rather than a
+# fixed allowlist. Legacy values ("openai", "anthropic", "gemini", "deepseek")
+# still work and namespace a bare CHAT_LLM_MODEL; new deployments can leave this
+# at "litellm" and set a fully-qualified CHAT_LLM_MODEL instead.
 CHAT_LLM_PROVIDER = str_env("CHAT_LLM_PROVIDER", "mock")
-# Model identifier for the selected provider. Required whenever
-# CHAT_LLM_PROVIDER is not "mock"; Seizu fails fast at startup if a real
-# provider is selected without an explicit model.
+# LiteLLM model identifier for the chat assistant. Required whenever
+# CHAT_LLM_PROVIDER is not "mock"; Seizu fails fast at startup if a real provider
+# is selected without one. Prefer a provider-namespaced string
+# (e.g. "openai/gpt-4o", "anthropic/claude-3-5-sonnet-latest",
+# "gemini/gemini-2.0-flash", "deepseek/deepseek-reasoner"). A bare model name is
+# namespaced using the legacy CHAT_LLM_PROVIDER value.
 CHAT_LLM_MODEL = str_env("CHAT_LLM_MODEL", "")
-# Optional provider API key override. If empty, provider-specific env vars below
-# are used, then the underlying SDK's normal environment lookup applies.
+# Optional API key override passed to LiteLLM. If empty, the legacy
+# provider-specific env vars below are used, then LiteLLM's own per-provider
+# environment lookup applies (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
 CHAT_LLM_API_KEY = str_env("CHAT_LLM_API_KEY", "")
-# Optional provider base URL override. Useful for provider gateways and private
-# endpoints when the selected LangChain integration supports it.
+# Optional OpenAI-compatible base URL (LiteLLM api_base). Set this to point chat
+# at a self-hosted LiteLLM proxy or other gateway/private endpoint; it now
+# applies regardless of which model/provider is selected.
 CHAT_LLM_BASE_URL = str_env("CHAT_LLM_BASE_URL", "")
 # Generation controls for real chat providers.
 CHAT_LLM_TEMPERATURE = float_env("CHAT_LLM_TEMPERATURE", 0.2)
-CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 2048)
+# Per-call output token cap. Kept generous so most answers finish in one shot;
+# replies still truncated by it are auto-continued server-side (see below).
+CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 4096)
 CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
 CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
+# When a final answer is cut off by the output-token limit (finish_reason
+# "length"), Seizu transparently asks the model to continue and stitches the
+# pieces into one seamless response. These bound that loop. Set MAX_CONTINUATIONS
+# to 0 to disable auto-continuation (falling back to the manual "Continue
+# response" button). MAX_RESPONSE_CHARS is a hard ceiling on the stitched length
+# (0 disables it); the loop also stops as soon as a continuation adds no new text.
+CHAT_LLM_MAX_CONTINUATIONS = int_env("CHAT_LLM_MAX_CONTINUATIONS", 2)
+CHAT_LLM_MAX_RESPONSE_CHARS = int_env("CHAT_LLM_MAX_RESPONSE_CHARS", 60_000)
 # Maximum prior messages/characters sent to the LLM. Checkpoints may retain
 # more messages for UI history; this separate cap controls model cost, latency,
 # and provider context pressure.
@@ -325,6 +343,27 @@ CHAT_LLM_MAX_AUTO_ACTIONS = int_env("CHAT_LLM_MAX_AUTO_ACTIONS", 12)
 # batch. Tool handlers are async, so this uses asyncio concurrency rather than
 # a threadpool for the normal Neo4j/store I/O path.
 CHAT_LLM_MAX_PARALLEL_TOOL_CALLS = int_env("CHAT_LLM_MAX_PARALLEL_TOOL_CALLS", 4)
+
+# Plan -> dispatch -> verify orchestration for complex chat requests. When off,
+# every turn takes the existing single-agent (gather -> act) path; the router
+# node short-circuits to "simple" with no extra LLM call, so behavior is
+# unchanged. When on, a cheap router classifies each turn and routes multi-step
+# requests through a planner, a dispatcher that runs scoped sub-agent workers
+# (parallel when steps are independent), and a verify gate with bounded retry.
+CHAT_ORCHESTRATOR_ENABLED = bool_env("CHAT_ORCHESTRATOR_ENABLED", False)
+# Maximum number of steps the planner may emit for one orchestrated turn.
+CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
+# Maximum verify-driven retry cycles before the orchestrator synthesizes an
+# answer from whatever steps passed. Bounds self-correction so a persistently
+# failing step cannot loop forever.
+CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+# Maximum independent steps the dispatcher runs concurrently in one batch.
+CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Per-step tool-call budget for an orchestrator worker. Higher than the
+# interactive CHAT_LLM_MAX_AUTO_ACTIONS because a worker is a focused sub-agent
+# that may need to discover, validate, and then apply changes across several
+# resources in one step (e.g. validate+explain+update each tool in a toolset).
+CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
 
 # Standard provider API key env vars. These are intentionally not exposed via
 # GET /api/v1/config.

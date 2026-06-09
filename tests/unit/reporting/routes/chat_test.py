@@ -269,6 +269,39 @@ def test_history_message_metadata_marks_output_limit_notice():
     )
 
 
+def test_history_message_metadata_keeps_orchestration_detail_kinds():
+    message = type(
+        "Message",
+        (),
+        {
+            "response_metadata": {
+                "seizu_details": [
+                    {"kind": "routing", "title": "Routing", "status": "completed", "route": "orchestrate"},
+                    {"kind": "plan", "title": "Plan", "status": "completed"},
+                    {"kind": "step", "title": "Step: gather", "status": "completed", "step_id": "s1"},
+                    {
+                        "kind": "tool",
+                        "title": "Tool: github_security__org_overview",
+                        "status": "completed",
+                        "step_id": "s1",
+                    },
+                    {"kind": "verify", "title": "Verify: gather", "status": "completed", "step_id": "s1"},
+                    {"kind": "bogus", "title": "ignored"},
+                ]
+            }
+        },
+    )()
+    metadata = chat._history_message_metadata(message, "assistant", "An orchestrated answer.")
+
+    assert metadata is not None
+    details = metadata["details"]
+    assert [d["kind"] for d in details] == ["routing", "plan", "step", "tool", "verify"]
+    # step_id and route survive so the UI can rebuild the hierarchy on reload.
+    assert details[0]["route"] == "orchestrate"
+    assert details[2]["step_id"] == "s1"
+    assert details[3]["step_id"] == "s1"
+
+
 def test_history_message_metadata_prefers_seizu_output_limit_over_text():
     """seizu_output_limit in response_metadata takes precedence over text matching."""
     message = type(

@@ -141,7 +141,10 @@ describe('ChatInterface', () => {
     });
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    jest.useRealTimers();
+  });
 
   it('persists the active session id and configures the chat stream request body', async () => {
     renderChat();
@@ -362,9 +365,17 @@ describe('ChatInterface', () => {
     });
 
     await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith(undefined, {
-        body: { resume_confirmation_id: 'confirm-1' },
-      });
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'resume-confirm-1',
+          role: 'user',
+          metadata: { seizu_hidden: true },
+          parts: [],
+        }),
+        {
+          body: { resume_confirmation_id: 'confirm-1' },
+        },
+      );
     });
     expect(touchSession).toHaveBeenCalledWith('thread-1');
   });
@@ -683,12 +694,78 @@ describe('ChatInterface', () => {
     expect(screen.getByText('{"labels":["CVE"]}')).toBeVisible();
   });
 
-  it('renders streaming Markdown in token batches and leaves the live tail as text', async () => {
-    const streamedText = [
-      '# Findings',
-      '',
-      Array.from({ length: 54 }, (_, index) => `word${index}`).join(' '),
-    ].join('\n');
+  it('renders orchestration detail parts (plan/step/verify) in the details block', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-routing',
+              data: { kind: 'routing', title: 'Routing', status: 'completed' },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-plan',
+              data: { kind: 'plan', title: 'Plan', status: 'completed' },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-step',
+              data: {
+                kind: 'step',
+                title: 'Step: gather data',
+                status: 'completed',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-verify',
+              data: {
+                kind: 'verify',
+                title: 'Verify: gather data',
+                status: 'completed',
+              },
+            },
+            { type: 'text', text: 'Synthesized answer.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // All four orchestration kinds are surfaced (count chip = 4).
+    expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
+    });
+    expect(screen.getByText('Routing')).toBeVisible();
+    expect(screen.getByText('Plan')).toBeVisible();
+    expect(screen.getByText('Step: gather data')).toBeVisible();
+    expect(screen.getByText('Verify: gather data')).toBeVisible();
+  });
+
+  it('formats settled blocks as Markdown and leaves the in-progress block plain', async () => {
+    // A block followed by a blank line is settled and parsed once; the still-
+    // growing final block stays plain text (raw markup) until it settles. This is
+    // what keeps streaming incremental — settled blocks never re-parse or flicker.
+    const streamedText = ['# Findings', '', '**bold** in progress'].join('\n');
     mockUseChat.mockReturnValue({
       id: 'chat-id',
       messages: [
@@ -714,10 +791,49 @@ describe('ChatInterface', () => {
     renderChat();
     await act(async () => {});
 
+    // Settled block parsed into Markdown.
     expect(
-      screen.getByRole('heading', { name: 'Findings', level: 2 }),
+      screen.getByRole('heading', { name: 'Findings' }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/word52 word53/)).toBeInTheDocument();
+    // In-progress block stays plain (raw markup visible, no <strong>).
+    expect(screen.getByText(/\*\*bold\*\* in progress/)).toBeInTheDocument();
+  });
+
+  it('keeps an open code fence in the plain-text tail without mis-parsing it', async () => {
+    // A fenced code block that straddles a blank line is still open, so it must
+    // stay in the in-progress tail rather than being split into broken blocks.
+    const streamedText = ['Intro paragraph.', '', '```python', 'x = 1'].join(
+      '\n',
+    );
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [{ type: 'text', text: streamedText }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // The settled prose block renders as Markdown.
+    expect(screen.getByText('Intro paragraph.')).toBeInTheDocument();
+    // The open fence streams verbatim in the tail (backticks visible).
+    expect(screen.getByText(/```python/)).toBeInTheDocument();
   });
 
   it('renders assistant responses with Markdoc in untrusted URL mode', async () => {
