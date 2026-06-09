@@ -17,9 +17,30 @@ from reporting.schema.mcp_config import (
 def test_cypher_parameter_names_extracts_refs_ignoring_strings_and_comments():
     cypher = (
         "MATCH (n:CVE) WHERE n.id = $cve_id // not a param: $nope\n"
-        "AND n.note = 'mentions $ignored' AND n.x = $`odd name` RETURN n LIMIT $limit"
+        "AND n.note = 'mentions $ignored' "
+        'AND n.other = "also $ignored" '
+        "AND n.`$quoted_identifier` = $`odd name` "
+        "/* block $ignored */ RETURN n LIMIT $limit"
     )
     assert cypher_parameter_names(cypher) == {"cve_id", "odd name", "limit"}
+
+
+def test_cypher_parameter_names_handles_escaped_quotes_and_unterminated_input():
+    cypher = (
+        "RETURN 'escaped \\' $ignored', "
+        '"escaped \\" $also_ignored", '
+        "'doubled '' $ignored_too', $visible, $`quoted `` name`, "
+        "/* unterminated $ignored"
+    )
+    assert cypher_parameter_names(cypher) == {"visible", "quoted ` name"}
+
+
+def test_cypher_parameter_names_scans_adversarial_input_in_linear_time():
+    repeated = "a/*" * 50_000
+    escaped_quotes = '\\"' * 50_000
+    cypher = f"RETURN '{escaped_quotes}', '{repeated}', $kept"
+
+    assert cypher_parameter_names(cypher) == {"kept"}
 
 
 def test_undeclared_cypher_parameters_flags_missing_declarations():

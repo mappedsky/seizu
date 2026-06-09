@@ -189,3 +189,131 @@ def test_public_ui_origin_returns_path_only_when_resource_url_has_no_scheme(mock
     mocker.patch("reporting.services.action_confirmations.settings.MCP_RESOURCE_URL", "not-a-url")
     url = action_confirmations.public_confirmation_url("abc123")
     assert url == "/app/confirmations/abc123"
+
+
+def test_bearer_session_key_and_batch_payload_are_stable(mocker):
+    mocker.patch("reporting.services.action_confirmations.settings.SEIZU_PUBLIC_URL", "https://seizu.example.com")
+    confirmation = _confirmation().model_copy(update={"batch_id": "batch-1"})
+
+    assert action_confirmations.bearer_session_key("token") == action_confirmations.bearer_session_key("token")
+    assert action_confirmations.bearer_session_key("token") != action_confirmations.bearer_session_key("other")
+    payload = action_confirmations.confirmation_required_payload(confirmation)
+    assert payload["batch_id"] == "batch-1"
+    assert payload["batch_url"] == "https://seizu.example.com/app/confirmations/batch/batch-1"
+
+
+async def test_decide_confirmation_returns_none_when_missing(mocker):
+    mocker.patch(
+        "reporting.services.action_confirmations.report_store.get_action_confirmation",
+        return_value=None,
+    )
+
+    assert (
+        await action_confirmations.decide_confirmation(
+            confirmation_id="missing",
+            user_id="user-1",
+            decision="approved",
+        )
+        is None
+    )
+
+
+async def test_decide_confirmation_surfaces_expired_and_already_decided(mocker):
+    get_confirmation = mocker.patch(
+        "reporting.services.action_confirmations.report_store.get_action_confirmation",
+        return_value=_confirmation().model_copy(update={"expires_at": _PAST}),
+    )
+    decide = mocker.patch(
+        "reporting.services.action_confirmations.report_store.decide_action_confirmation",
+    )
+
+    expired = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert expired is not None and expired.status == "expired"
+    decide.assert_not_awaited()
+
+    get_confirmation.return_value = _confirmation("denied")
+    denied = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert denied is not None and denied.status == "denied"
+    decide.assert_not_awaited()
+
+
+async def test_decide_confirmation_returns_successful_write(mocker):
+    pending = _confirmation()
+    approved = pending.model_copy(update={"status": "approved"})
+    mocker.patch(
+        "reporting.services.action_confirmations.report_store.get_action_confirmation",
+        return_value=pending,
+    )
+    decide = mocker.patch(
+        "reporting.services.action_confirmations.report_store.decide_action_confirmation",
+        return_value=approved,
+    )
+
+    result = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+
+    assert result == approved
+    decide.assert_awaited_once_with(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+
+
+async def test_decide_confirmation_refetches_after_write_race(mocker):
+    pending = _confirmation()
+    get_confirmation = mocker.patch(
+        "reporting.services.action_confirmations.report_store.get_action_confirmation",
+        side_effect=[pending, None],
+    )
+    mocker.patch(
+        "reporting.services.action_confirmations.report_store.decide_action_confirmation",
+        return_value=None,
+    )
+
+    result = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="denied",
+    )
+
+    assert result is None
+    assert get_confirmation.await_count == 2
+
+
+async def test_decide_confirmation_refetches_expiry_or_concurrent_decision(mocker):
+    pending = _confirmation()
+    get_confirmation = mocker.patch(
+        "reporting.services.action_confirmations.report_store.get_action_confirmation",
+        side_effect=[pending, pending.model_copy(update={"expires_at": _PAST})],
+    )
+    mocker.patch(
+        "reporting.services.action_confirmations.report_store.decide_action_confirmation",
+        return_value=None,
+    )
+
+    expired = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert expired is not None and expired.status == "expired"
+
+    get_confirmation.side_effect = [pending, pending.model_copy(update={"status": "denied"})]
+    denied = await action_confirmations.decide_confirmation(
+        confirmation_id="confirm-1",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert denied is not None and denied.status == "denied"

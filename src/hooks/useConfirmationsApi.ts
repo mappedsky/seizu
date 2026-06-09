@@ -99,7 +99,10 @@ export function useConfirmationsApi(threadId?: string | null): {
         { headers: authHeaders() },
       );
       if (!res.ok) throw new Error('Failed to fetch confirmations');
-      const data = (await res.json()) as ConfirmationListResponse;
+      const data = (await res.json()) as Partial<ConfirmationListResponse>;
+      if (!Array.isArray(data.confirmations)) {
+        throw new Error('Invalid confirmation list response');
+      }
       setConfirmations((current) =>
         sameConfirmations(current, data.confirmations)
           ? current

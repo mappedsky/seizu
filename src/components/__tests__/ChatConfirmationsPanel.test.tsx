@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import type { ActionConfirmation } from 'src/hooks/useConfirmationsApi';
@@ -48,6 +48,8 @@ function renderPanel({
 }
 
 describe('ChatConfirmationsPanel', () => {
+  afterEach(cleanup);
+
   it('renders as a collapsed icon by default', () => {
     renderPanel();
 

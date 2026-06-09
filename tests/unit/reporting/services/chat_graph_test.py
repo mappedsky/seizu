@@ -219,6 +219,32 @@ def test_balanced_brace_objects_ignores_braces_inside_strings():
     assert chat_graph._balanced_brace_objects(text) == ['{"text": "a } brace in a string", "n": 1}']
 
 
+def test_chat_result_parsers_handle_invalid_and_confirmation_payloads():
+    assert chat_graph._blocked_tool_call_reason_label(ChatBlockReason.CONFIRMATION_REQUIRED) == "confirmation required"
+    assert chat_graph._blocked_tool_call_reason_label(None) == "blocked"
+
+    assert chat_graph._confirmation_status("not json") is None
+    assert chat_graph._confirmation_status("[]") is None
+    assert chat_graph._confirmation_status('{"confirmation_required": true, "status": "pending"}') == "pending"
+
+    assert chat_graph._blocked_tool_call_body(" plain failure ") == "plain failure"
+    assert (
+        chat_graph._blocked_tool_call_body('{"confirmation_required": true, "status": "denied"}')
+        == "Action was denied for this confirmation window."
+    )
+    assert chat_graph._blocked_tool_call_body("{}") == "{}"
+
+    assert chat_graph._tool_result_error_text("not json") is None
+    assert chat_graph._tool_result_error_text("[]") is None
+    assert chat_graph._tool_result_error_text('{"error": "failed"}') == "failed"
+
+    assert chat_graph._json_objects_from_text("") == []
+    assert chat_graph._json_objects_from_text("[1, 2]") == []
+    assert chat_graph._balanced_brace_objects(r'{"text": "escaped \\\" quote", "ok": true}') == [
+        r'{"text": "escaped \\\" quote", "ok": true}'
+    ]
+
+
 async def test_invoke_structured_output_retries_when_first_response_lacks_json():
     class _Decision(BaseModel):
         ok: bool
@@ -2627,6 +2653,163 @@ def test_aws_config_with_s3_endpoint_uses_path_style(mocker):
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://localhost:9000")
     config = chat_graph._aws_config()
     assert config.s3 == {"addressing_style": "path"}
+
+
+def test_validate_chat_llm_config_accepts_mock_and_rejects_missing_model(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
+    chat_graph.validate_chat_llm_config()
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "litellm")
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "")
+    with pytest.raises(ValueError, match="CHAT_LLM_MODEL is required"):
+        chat_graph.validate_chat_llm_config()
+
+
+def test_get_chat_model_builds_litellm_streaming_client(mocker):
+    model = object()
+    model_factory = mocker.patch("langchain_litellm.ChatLiteLLM", return_value=model)
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "gpt-4o")
+    mocker.patch("reporting.settings.CHAT_LLM_TEMPERATURE", 0.2)
+    mocker.patch("reporting.settings.CHAT_LLM_TIMEOUT_SECONDS", 45.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_RETRIES", 3)
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 2048)
+    mocker.patch("reporting.settings.CHAT_LLM_API_KEY", "chat-key")
+    mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://llm.example.com")
+    chat_graph.get_chat_model.cache_clear()
+
+    try:
+        assert chat_graph.get_chat_model() is model
+    finally:
+        chat_graph.get_chat_model.cache_clear()
+
+    model_factory.assert_called_once_with(
+        model="openai/gpt-4o",
+        temperature=0.2,
+        request_timeout=45.0,
+        max_retries=3,
+        streaming=True,
+        max_tokens=2048,
+        api_key="chat-key",
+        api_base="https://llm.example.com",
+    )
+
+
+def test_legacy_provider_api_key_prefers_gemini_then_google(mocker):
+    mocker.patch("reporting.settings.GEMINI_API_KEY", "gemini-key")
+    mocker.patch("reporting.settings.GOOGLE_API_KEY", "google-key")
+    assert chat_graph._legacy_provider_api_key("gemini") == "gemini-key"
+
+    mocker.patch("reporting.settings.GEMINI_API_KEY", "")
+    assert chat_graph._legacy_provider_api_key("gemini") == "google-key"
+    assert chat_graph._legacy_provider_api_key("unknown") == ""
+
+
+def test_build_checkpointer_forwards_ttl_and_s3_offload_settings(mocker):
+    saver = object()
+    saver_factory = mocker.patch("reporting.services.chat_graph.DynamoDBSaver", return_value=saver)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 3600)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_BUCKET", "chat-checkpoints")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://minio:9000")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_KEY_PREFIX", "threads/")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
+    mocker.patch("reporting.settings.DYNAMODB_REGION", "us-east-1")
+    mocker.patch("reporting.settings.DYNAMODB_ENDPOINT_URL", "http://dynamodb:8000")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
+
+    assert chat_graph._build_checkpointer() is saver
+    saver_factory.assert_called_once_with(
+        table_name="chat-table",
+        region_name="us-east-1",
+        endpoint_url="http://dynamodb:8000",
+        boto_config=mocker.ANY,
+        ttl_seconds=3600,
+        enable_checkpoint_compression=True,
+        s3_offload_config={
+            "bucket_name": "chat-checkpoints",
+            "endpoint_url": "http://minio:9000",
+            "key_prefix": "threads/",
+        },
+    )
+
+
+async def test_initialize_chat_checkpoints_respects_create_table_setting(mocker):
+    initialize = mocker.patch("reporting.services.chat_graph._initialize_chat_checkpoints_sync")
+    to_thread = mocker.patch("reporting.services.chat_graph.asyncio.to_thread", new=mocker.AsyncMock())
+
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_CREATE_TABLE", False)
+    await chat_graph.initialize_chat_checkpoints()
+    to_thread.assert_not_awaited()
+
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_CREATE_TABLE", True)
+    await chat_graph.initialize_chat_checkpoints()
+    to_thread.assert_awaited_once_with(initialize)
+
+
+def test_initialize_chat_checkpoints_creates_missing_table_and_ttl(mocker):
+    class _Waiter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def wait(self, **kwargs):
+            self.calls.append(kwargs)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.created = []
+            self.ttl = []
+            self.waiter = _Waiter()
+
+        def describe_table(self, **_kwargs):
+            raise chat_graph.ClientError(
+                {"Error": {"Code": "ResourceNotFoundException", "Message": "missing"}},
+                "DescribeTable",
+            )
+
+        def create_table(self, **kwargs):
+            self.created.append(kwargs)
+
+        def get_waiter(self, name):
+            assert name == "table_exists"
+            return self.waiter
+
+        def update_time_to_live(self, **kwargs):
+            self.ttl.append(kwargs)
+
+    client = _Client()
+    mocker.patch(
+        "reporting.services.chat_graph._build_checkpointer",
+        return_value=type("_Saver", (), {"client": client})(),
+    )
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 3600)
+
+    chat_graph._initialize_chat_checkpoints_sync()
+
+    assert client.created[0]["TableName"] == "chat-table"
+    assert client.waiter.calls == [{"TableName": "chat-table"}]
+    assert client.ttl == [
+        {
+            "TableName": "chat-table",
+            "TimeToLiveSpecification": {"Enabled": True, "AttributeName": "ttl"},
+        }
+    ]
+
+
+def test_initialize_chat_checkpoints_accepts_existing_table(mocker):
+    client = mocker.Mock()
+    mocker.patch(
+        "reporting.services.chat_graph._build_checkpointer",
+        return_value=type("_Saver", (), {"client": client})(),
+    )
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 0)
+
+    chat_graph._initialize_chat_checkpoints_sync()
+
+    client.describe_table.assert_called_once_with(TableName="chat-table")
+    client.create_table.assert_not_called()
+    client.update_time_to_live.assert_not_called()
 
 
 def test_collapse_ephemeral_continuations_discards_orphaned_continuation():

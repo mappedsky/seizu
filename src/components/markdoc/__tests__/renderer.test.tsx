@@ -130,6 +130,19 @@ describe('MarkdocRenderer', () => {
     expect(summary?.textContent).not.toContain('data-x');
   });
 
+  it('removes executable summary elements before rendering text', () => {
+    render(
+      <MarkdocRenderer
+        source={
+          '<details><summary>Safe<script>alert("x")</script><style>bad</style> title</summary>body</details>'
+        }
+      />,
+    );
+
+    expect(screen.getByText('Safe title')).toBeInTheDocument();
+    expect(screen.queryByText(/alert/)).not.toBeInTheDocument();
+  });
+
   it('renders the continuation tag as a divider', () => {
     render(
       <MarkdocRenderer source={'Before\n\n{% continuation /%}\n\nAfter'} />,

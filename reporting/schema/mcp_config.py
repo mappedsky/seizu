@@ -119,21 +119,94 @@ class ToolParamDef(BaseModel):
         return _coerce_decimal(v)
 
 
-# Cypher parameter references: $name or $`quoted name`.
-_CYPHER_PARAM_RE = re.compile(r"\$(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))")
+def _skip_cypher_quoted(cypher: str, start: int, quote: str) -> int:
+    """Return the first index after a quoted Cypher string or identifier."""
+    index = start + 1
+    while index < len(cypher):
+        char = cypher[index]
+        if char == "\\" and quote != "`":
+            index += 2
+            continue
+        if char == quote:
+            if index + 1 < len(cypher) and cypher[index + 1] == quote:
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(cypher)
+
+
+def _is_cypher_parameter_start(char: str) -> bool:
+    return char == "_" or "A" <= char <= "Z" or "a" <= char <= "z"
+
+
+def _is_cypher_parameter_char(char: str) -> bool:
+    return _is_cypher_parameter_start(char) or "0" <= char <= "9"
+
+
+def _read_quoted_cypher_parameter(cypher: str, start: int) -> tuple[str | None, int]:
+    """Read a parameter after ``$``, unescaping doubled identifier backticks."""
+    characters: list[str] = []
+    index = start + 1
+    while index < len(cypher):
+        char = cypher[index]
+        if char != "`":
+            characters.append(char)
+            index += 1
+            continue
+        if index + 1 < len(cypher) and cypher[index + 1] == "`":
+            characters.append("`")
+            index += 2
+            continue
+        return ("".join(characters) or None), index + 1
+    return None, len(cypher)
 
 
 def cypher_parameter_names(cypher: str) -> set[str]:
     """The parameter names a Cypher query references ($name / $`name`).
 
-    String literals and comments are stripped first so a ``$`` inside them is not
-    mistaken for a parameter reference.
+    A single-pass scan ignores string literals, quoted identifiers, and comments.
+    This keeps runtime linear for user-provided queries.
     """
-    no_block = re.sub(r"/\*.*?\*/", " ", cypher, flags=re.DOTALL)
-    no_line = re.sub(r"//[^\n]*", " ", no_block)
-    no_double = re.sub(r'"(?:\\.|[^"\\])*"', " ", no_line)
-    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", " ", no_double)
-    return {match.group(1) or match.group(2) for match in _CYPHER_PARAM_RE.finditer(cleaned)}
+    names: set[str] = set()
+    index = 0
+
+    while index < len(cypher):
+        char = cypher[index]
+        next_char = cypher[index + 1] if index + 1 < len(cypher) else ""
+
+        if char == "/" and next_char == "*":
+            close_index = cypher.find("*/", index + 2)
+            index = len(cypher) if close_index == -1 else close_index + 2
+            continue
+        if char == "/" and next_char == "/":
+            newline_index = cypher.find("\n", index + 2)
+            index = len(cypher) if newline_index == -1 else newline_index + 1
+            continue
+        if char in ("'", '"', "`"):
+            index = _skip_cypher_quoted(cypher, index, char)
+            continue
+        if char != "$" or not next_char:
+            index += 1
+            continue
+
+        if next_char == "`":
+            name, index = _read_quoted_cypher_parameter(cypher, index + 1)
+            if name is not None:
+                names.add(name)
+            continue
+
+        if _is_cypher_parameter_start(next_char):
+            name_end = index + 2
+            while name_end < len(cypher) and _is_cypher_parameter_char(cypher[name_end]):
+                name_end += 1
+            names.add(cypher[index + 1 : name_end])
+            index = name_end
+            continue
+
+        index += 1
+
+    return names
 
 
 def undeclared_cypher_parameters(cypher: str, parameters: list[ToolParamDef]) -> list[str]:

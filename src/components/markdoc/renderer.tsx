@@ -70,6 +70,12 @@ function MarkdocDetails({
   summary?: string;
   children?: React.ReactNode;
 }) {
+  let decodedSummary = summary;
+  try {
+    decodedSummary = decodeURIComponent(summary);
+  } catch {
+    // Directly authored Markdoc may contain a literal percent sign.
+  }
   return (
     <Box
       component="details"
@@ -93,7 +99,7 @@ function MarkdocDetails({
           '&:hover': { opacity: 0.8 },
         }}
       >
-        {summary}
+        {decodedSummary}
       </Typography>
       <Box sx={{ pb: 0.5 }}>{children}</Box>
     </Box>
@@ -141,14 +147,19 @@ function MarkdocContinuation() {
 // so this conversion is the safe way to support them.
 // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
 const DETAILS_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
-// Strips HTML tags including those whose attributes contain ">", which the
-// simpler [^>]+ form would mis-handle (e.g. <b onclick="a>b">).
-const HTML_TAG_RE = /<(?:[^"'>]|"[^"]*"|'[^']*')*>/g;
 // Matches the <details> opener through </summary>; body closing is found by
 // taking the last raw </details> before the next raw <details> opener. That
 // preserves inline "</details>" text in the body while still supporting
 // multiple sibling HTML details blocks.
 const DETAILS_OPEN_RE = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>/i;
+
+function detailsSummaryText(source: string): string {
+  const parsed = new DOMParser().parseFromString(source, 'text/html');
+  parsed.querySelectorAll('script, style').forEach((element) => {
+    element.remove();
+  });
+  return parsed.body.textContent ?? '';
+}
 
 function findDetailsCloseTag(
   text: string,
@@ -183,11 +194,8 @@ function preprocessDetailsBlocks(source: string): string {
       remaining = afterSummary;
     } else {
       const rawSummary = match[1];
-      const summaryText = rawSummary
-        .replace(HTML_TAG_RE, '')
+      const summaryText = detailsSummaryText(rawSummary)
         .replace(DETAILS_CONTROL_RE, '')
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
         .trim();
       // Escape Markdoc tag openers in the body so LLM content cannot inject
       // registered tags (e.g. {% /details %} to escape the block, or
@@ -195,7 +203,7 @@ function preprocessDetailsBlocks(source: string): string {
       const body = afterSummary
         .slice(0, closeTag.index)
         .replace(/\{%/g, '\\{%');
-      result += `{% details summary="${summaryText}" %}\n${body.trim()}\n{% /details %}`;
+      result += `{% details summary="${encodeURIComponent(summaryText)}" %}\n${body.trim()}\n{% /details %}`;
       remaining = afterSummary.slice(closeTag.index + closeTag.length);
     }
   }

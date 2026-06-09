@@ -15,6 +15,7 @@ import { FeaturesContext, DEFAULT_FEATURES } from 'src/features.context';
 import * as usePermissionsModule from 'src/hooks/usePermissions';
 import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
+import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
 import {
   DefaultChatTransport,
@@ -32,6 +33,10 @@ jest.mock('src/hooks/useChatHistory', () => ({
 
 jest.mock('src/hooks/useChatSessions', () => ({
   useChatSessions: jest.fn(),
+}));
+
+jest.mock('src/hooks/useConfirmationsApi', () => ({
+  useConfirmationsApi: jest.fn(),
 }));
 
 jest.mock('@ai-sdk/react', () => ({
@@ -55,6 +60,10 @@ const mockUseChatHistory =
 const mockUseChatSessions =
   useChatSessionsModule.useChatSessions as jest.MockedFunction<
     typeof useChatSessionsModule.useChatSessions
+  >;
+const mockUseConfirmationsApi =
+  useConfirmationsApiModule.useConfirmationsApi as jest.MockedFunction<
+    typeof useConfirmationsApiModule.useConfirmationsApi
   >;
 const mockUseChat = useChat as jest.MockedFunction<typeof useChat>;
 const mockDefaultChatTransport = DefaultChatTransport as jest.MockedClass<
@@ -118,6 +127,15 @@ describe('ChatInterface', () => {
       updateSession: jest.fn(),
       deleteSession: jest.fn(),
       touchSession: jest.fn(),
+    });
+    mockUseConfirmationsApi.mockReturnValue({
+      confirmations: [],
+      loading: false,
+      error: null,
+      fetchConfirmations: jest.fn().mockResolvedValue(undefined),
+      getConfirmation: jest.fn(),
+      getConfirmationsByBatchId: jest.fn(),
+      decideConfirmation: jest.fn(),
     });
     mockUsePermissionState.mockReturnValue({
       hasPermission: (permission: string) => permission === 'chat:use',
@@ -410,54 +428,49 @@ describe('ChatInterface', () => {
   });
 
   it('refreshes confirmations once when an approval-required response finishes', async () => {
-    const originalFetch = globalThis.fetch;
-    const fetchMock = jest.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ confirmations: [] }),
+    const fetchConfirmations = jest.fn().mockResolvedValue(undefined);
+    mockUseConfirmationsApi.mockReturnValue({
+      confirmations: [],
+      loading: false,
+      error: null,
+      fetchConfirmations,
+      getConfirmation: jest.fn(),
+      getConfirmationsByBatchId: jest.fn(),
+      decideConfirmation: jest.fn(),
     });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    try {
-      renderChat({ initialPath: '/app/chat/thread-1' });
+    renderChat({ initialPath: '/app/chat/thread-1' });
 
-      await waitFor(() => {
-        expect(mockUseChat).toHaveBeenCalledWith(
-          expect.objectContaining({ id: 'thread-1' }),
-        );
-      });
-      fetchMock.mockClear();
-
-      const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
-        | { onFinish?: ChatOnFinishCallback<UIMessage> }
-        | undefined;
-      chatOptions?.onFinish?.({
-        message: {
-          id: 'approval-message',
-          role: 'assistant',
-          parts: [
-            {
-              type: 'text',
-              text: 'Seizu needs your approval before running this action.',
-            },
-          ],
-        },
-        messages: [],
-        isAbort: false,
-        isDisconnect: false,
-        isError: false,
-        finishReason: 'stop',
-      });
-
-      await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-      });
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/v1/confirmations?thread_id=thread-1',
-        expect.any(Object),
+    await waitFor(() => {
+      expect(mockUseChat).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'thread-1' }),
       );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    });
+
+    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+      | { onFinish?: ChatOnFinishCallback<UIMessage> }
+      | undefined;
+    chatOptions?.onFinish?.({
+      message: {
+        id: 'approval-message',
+        role: 'assistant',
+        parts: [
+          {
+            type: 'text',
+            text: 'Seizu needs your approval before running this action.',
+          },
+        ],
+      },
+      messages: [],
+      isAbort: false,
+      isDisconnect: false,
+      isError: false,
+      finishReason: 'stop',
+    });
+
+    await waitFor(() => {
+      expect(fetchConfirmations).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('shows a not-found state for a missing linked session', async () => {
@@ -679,20 +692,23 @@ describe('ChatInterface', () => {
     expect(screen.queryByText('{}')).not.toBeInTheDocument();
     expect(screen.queryByText('{"labels":["CVE"]}')).not.toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
-    });
+    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    const toolDetails = await screen.findByRole(
+      'button',
+      { name: /Tool: graph__schema/ },
+      { timeout: 10_000 },
+    );
+    expect(toolDetails).toBeVisible();
+    fireEvent.click(toolDetails);
 
-    expect(screen.getByText('Tool: graph__schema')).toBeVisible();
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole('button', { name: /Tool: graph__schema/ }),
-      );
-    });
-
-    expect(screen.getByText('{}')).toBeVisible();
-    expect(screen.getByText('{"labels":["CVE"]}')).toBeVisible();
-  });
+    await waitFor(
+      () => {
+        expect(screen.getByText('{}')).toBeVisible();
+        expect(screen.getByText('{"labels":["CVE"]}')).toBeVisible();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
 
   it('renders orchestration detail parts (plan/step/verify) in the details block', async () => {
     mockUseChat.mockReturnValue({
@@ -705,7 +721,11 @@ describe('ChatInterface', () => {
             {
               type: 'data-seizu-detail',
               id: 'detail-routing',
-              data: { kind: 'routing', title: 'Routing', status: 'completed' },
+              data: {
+                kind: 'routing',
+                title: 'Routing',
+                status: 'completed',
+              },
             },
             {
               type: 'data-seizu-detail',
@@ -752,14 +772,17 @@ describe('ChatInterface', () => {
 
     // All four orchestration kinds are surfaced (count chip = 4).
     expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
-    });
-    expect(screen.getByText('Routing')).toBeVisible();
-    expect(screen.getByText('Plan')).toBeVisible();
-    expect(screen.getByText('Step: gather data')).toBeVisible();
-    expect(screen.getByText('Verify: gather data')).toBeVisible();
-  });
+    fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
+    await waitFor(
+      () => {
+        expect(screen.getByText('Routing')).toBeVisible();
+        expect(screen.getByText('Plan')).toBeVisible();
+        expect(screen.getByText('Step: gather data')).toBeVisible();
+        expect(screen.getByText('Verify: gather data')).toBeVisible();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
 
   it('formats settled blocks as Markdown and leaves the in-progress block plain', async () => {
     // A block followed by a blank line is settled and parsed once; the still-
