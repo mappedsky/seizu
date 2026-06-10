@@ -98,13 +98,31 @@ LangGraph chat history can use DynamoDB or PostgreSQL independently of the repor
 
 * ``CHAT_CHECKPOINT_BACKEND``: checkpoint backend. Supported values: ``dynamodb`` (default), ``postgres``
 * ``CHAT_CHECKPOINT_CREATE_TABLE``: create or migrate the configured checkpoint tables during startup; default: ``false``
-* ``CHAT_CHECKPOINT_DATABASE_URL``: checkpoint database URL without credentials. Defaults to ``SQL_DATABASE_URL``. Credential-bearing URLs remain supported. The current ``postgres`` backend requires a PostgreSQL URL. A dedicated database is recommended so checkpoint migrations, retention, backups, and deletion remain isolated from application tables.
+
+#### DynamoDB checkpoint configuration
+
+Used when ``CHAT_CHECKPOINT_BACKEND=dynamodb``. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).
+
+* ``CHAT_CHECKPOINT_TABLE_NAME``: name of the DynamoDB checkpoint table; default: ``seizu-chat-checkpoints``
+* ``CHAT_CHECKPOINT_TTL_SECONDS``: checkpoint lifetime in seconds. Set to ``0`` to disable automatic expiration; default: ``0``
+* ``CHAT_CHECKPOINT_ENABLE_COMPRESSION``: compress serialized checkpoint payloads; default: ``true``
+* ``CHAT_CHECKPOINT_S3_BUCKET``: S3 bucket used to offload checkpoint payloads larger than 350 KB; default: ``""``
+* ``CHAT_CHECKPOINT_S3_ENDPOINT_URL``: override the S3 endpoint URL (for example, ``http://minio:9000`` for local development); default: ``""`` (uses the AWS endpoint)
+* ``CHAT_CHECKPOINT_S3_KEY_PREFIX``: object key prefix for checkpoint payloads stored in S3; default: ``seizu/langgraph``
+
+#### SQL checkpoint configuration
+
+Used when ``CHAT_CHECKPOINT_BACKEND=postgres``. The current SQL checkpointer requires PostgreSQL.
+
+* ``CHAT_CHECKPOINT_DATABASE_URL``: checkpoint database URL without credentials. A dedicated database is recommended so checkpoint migrations, retention, backups, and deletion remain isolated from application tables. Credential-bearing URLs remain supported for backward compatibility. Example:
+
+  * ``postgresql://host:5432/seizu-chat-checkpoints``
+
+  default: ``SQL_DATABASE_URL``
 * ``CHAT_CHECKPOINT_DATABASE_USER``: optional checkpoint username. Defaults to ``SQL_DATABASE_USER``.
 * ``CHAT_CHECKPOINT_DATABASE_PASSWORD``: optional checkpoint password. Defaults to ``SQL_DATABASE_PASSWORD`` and can be managed as an independent secret.
 * ``CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE``: minimum async database connections per application process; default: ``1``
 * ``CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE``: maximum async database connections per application process; default: ``10``
-
-The DynamoDB checkpoint settings are ``CHAT_CHECKPOINT_TABLE_NAME``, ``CHAT_CHECKPOINT_TTL_SECONDS``, ``CHAT_CHECKPOINT_ENABLE_COMPRESSION``, ``CHAT_CHECKPOINT_S3_BUCKET``, ``CHAT_CHECKPOINT_S3_ENDPOINT_URL``, and ``CHAT_CHECKPOINT_S3_KEY_PREFIX``. The S3 options offload checkpoint payloads larger than 350 KB.
 
 For local development, ``make sqlmodel_enable`` selects both the SQLModel report store and PostgreSQL chat checkpoints. Compose idempotently creates a dedicated ``seizu-chat-checkpoints`` database before starting Seizu. ``make sqlmodel_disable`` restores both to DynamoDB.
 
