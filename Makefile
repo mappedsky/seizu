@@ -5,8 +5,8 @@ args = `arg="$(filter-out $@,$(MAKECMDGOALS))" && echo $${arg:-${1}}`
 
 # Automatically include --profile auth if auth is enabled in .env
 AUTH_PROFILE := $(shell grep -q 'DEVELOPMENT_ONLY_REQUIRE_AUTH=true' .env 2>/dev/null && echo '--profile auth' || echo '')
-# Automatically include --profile sqlmodel if the sqlmodel backend is selected in .env
-SQL_PROFILE := $(shell grep -q 'REPORT_STORE_BACKEND=sqlmodel' .env 2>/dev/null && echo '--profile sqlmodel' || echo '')
+# Automatically include --profile sqlmodel if either PostgreSQL-backed store is selected in .env
+SQL_PROFILE := $(shell grep -Eq '^(REPORT_STORE_BACKEND=sqlmodel|CHAT_CHECKPOINT_BACKEND=postgres)$$' .env 2>/dev/null && echo '--profile sqlmodel' || echo '')
 COMPOSE_PROFILES := $(AUTH_PROFILE) $(SQL_PROFILE)
 
 .PHONY: uv_sync
@@ -187,14 +187,20 @@ sqlmodel_enable:
 	@grep -q 'REPORT_STORE_BACKEND=' .env 2>/dev/null \
 		&& perl -pi -e 's/REPORT_STORE_BACKEND=.*/REPORT_STORE_BACKEND=sqlmodel/' .env \
 		|| echo 'REPORT_STORE_BACKEND=sqlmodel' >> .env
-	@echo "SQLModel backend enabled in .env. Run 'make down && make up' to apply."
+	@grep -q 'CHAT_CHECKPOINT_BACKEND=' .env 2>/dev/null \
+		&& perl -pi -e 's/CHAT_CHECKPOINT_BACKEND=.*/CHAT_CHECKPOINT_BACKEND=postgres/' .env \
+		|| echo 'CHAT_CHECKPOINT_BACKEND=postgres' >> .env
+	@echo "SQLModel report store and PostgreSQL chat checkpoints enabled in .env. Run 'make down && make up' to apply."
 
 .PHONY: sqlmodel_disable
 sqlmodel_disable:
 	@grep -q 'REPORT_STORE_BACKEND=' .env 2>/dev/null \
 		&& perl -pi -e 's/REPORT_STORE_BACKEND=.*/REPORT_STORE_BACKEND=dynamodb/' .env \
 		|| echo 'REPORT_STORE_BACKEND=dynamodb' >> .env
-	@echo "DynamoDB backend restored in .env. Run 'make down && make up' to apply."
+	@grep -q 'CHAT_CHECKPOINT_BACKEND=' .env 2>/dev/null \
+		&& perl -pi -e 's/CHAT_CHECKPOINT_BACKEND=.*/CHAT_CHECKPOINT_BACKEND=dynamodb/' .env \
+		|| echo 'CHAT_CHECKPOINT_BACKEND=dynamodb' >> .env
+	@echo "DynamoDB report store and chat checkpoints restored in .env. Run 'make down && make up' to apply."
 
 .PHONY: restart
 restart:

@@ -1,9 +1,9 @@
 import logging
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import neo4j.exceptions
-from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Record
+from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Query, Record
 
 from reporting import settings
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
@@ -57,10 +57,79 @@ async def run_query(cypher: str, parameters: dict = None) -> list[Record]:
     results = []
     driver = _get_async_neo4j_client()
     async with driver.session() as session:
-        query_results = await session.run(cypher, parameters=parameters, timeout=settings.NEO4J_QUERY_TIMEOUT)
+        # The transaction timeout must travel as part of the Query object — the
+        # driver's session.run() has no `timeout` kwarg, so passing one was
+        # silently sent as a query parameter (`$timeout`) and NOT enforced,
+        # leaving heavy/unindexed queries to run unbounded. Wrapped here, the
+        # server terminates the transaction after NEO4J_QUERY_TIMEOUT seconds.
+        query = Query(cypher, timeout=settings.NEO4J_QUERY_TIMEOUT)
+        query_results = await session.run(query, parameters=parameters)
         async for result in query_results:
             results.append(result)
     return results
+
+
+async def explain_query(cypher: str) -> dict[str, Any]:
+    """Return Neo4j's query plan for ``EXPLAIN <cypher>`` without executing it.
+
+    EXPLAIN produces the plan only — it never runs the query (unlike PROFILE).
+    Callers must validate *cypher* first (so disallowed constructs are rejected
+    before it reaches the planner) and pass a bare query: the validator rejects a
+    leading EXPLAIN/PROFILE, so prefixing EXPLAIN here is always plan-only.
+    """
+    driver = _get_async_neo4j_client()
+    async with driver.session() as session:
+        query = Query(f"EXPLAIN {cypher}", timeout=settings.NEO4J_QUERY_TIMEOUT)
+        result = await session.run(query)
+        summary = await result.consume()
+    return summary.plan or {}
+
+
+_LABELS_QUERY = "CALL db.labels() YIELD label RETURN label ORDER BY label"
+_RELS_QUERY = "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS type ORDER BY type"
+_PROPS_QUERY = "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey AS key ORDER BY key"
+_INDEXES_QUERY = "SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, state ORDER BY name"
+
+
+async def _fetch_indexes() -> list[dict[str, Any]]:
+    try:
+        results = await run_query(_INDEXES_QUERY)
+    except neo4j.exceptions.Neo4jError:
+        # SHOW INDEXES needs catalog privileges (and a recent Neo4j); degrade to
+        # an empty list rather than failing the whole schema fetch.
+        logger.warning("SHOW INDEXES failed; returning schema without indexes", exc_info=True)
+        return []
+    return [
+        {
+            "name": str(record["name"]),
+            "type": str(record["type"]),
+            "entity_type": str(record["entityType"]),
+            "labels_or_types": [str(value) for value in (record["labelsOrTypes"] or [])],
+            "properties": [str(value) for value in (record["properties"] or [])],
+            "state": str(record["state"]),
+        }
+        for record in results
+    ]
+
+
+async def fetch_graph_schema() -> dict[str, Any]:
+    """Introspect the graph: node labels, relationship types, property keys, indexes.
+
+    Runs privileged catalog queries (incl. SHOW INDEXES) directly — the user query
+    validator intentionally blocks these for ad-hoc user queries, so they are only
+    reachable through this server-side path. Shared by the schema route and the
+    graph__schema built-in tool.
+    """
+    labels = await run_query(_LABELS_QUERY)
+    rels = await run_query(_RELS_QUERY)
+    props = await run_query(_PROPS_QUERY)
+    indexes = await _fetch_indexes()
+    return {
+        "labels": [str(record["label"]) for record in labels],
+        "relationship_types": [str(record["type"]) for record in rels],
+        "property_keys": [str(record["key"]) for record in props],
+        "indexes": indexes,
+    }
 
 
 async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Record]:
@@ -77,7 +146,11 @@ async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Rec
 
 async def run_tx(tx: AsyncTransaction, cypher: str, parameters: dict = None) -> list[Record]:
     results = []
-    query_results = await tx.run(cypher, parameters=parameters, timeout=settings.NEO4J_QUERY_TIMEOUT)
+    # tx.run() takes no transaction timeout — for an explicit transaction the
+    # timeout is fixed when it is begun (session.begin_transaction(timeout=...)),
+    # so a caller wanting a bound must set it there. Passing `timeout=` here would
+    # only add a stray query parameter, never an enforced timeout.
+    query_results = await tx.run(cypher, parameters=parameters)
     async for result in query_results:
         results.append(result)
     return results

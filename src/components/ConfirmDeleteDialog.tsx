@@ -2,13 +2,13 @@ import type { ReactNode } from 'react';
 import {
   Alert,
   Button,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogContentText,
   DialogTitle,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 
 // Standard destructive confirmation dialog (maxWidth="xs"). Body is passed as
 // children so callers can highlight the target name with <strong>.
@@ -55,7 +55,7 @@ export default function ConfirmDeleteDialog({
           onClick={onConfirm}
           disabled={deleting}
         >
-          {deleting ? <CircularProgress size={20} /> : confirmLabel}
+          {deleting ? <ConstellationSpinner size={20} /> : confirmLabel}
         </Button>
       </DialogActions>
     </Dialog>

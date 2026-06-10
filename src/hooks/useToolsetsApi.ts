@@ -113,7 +113,15 @@ function getApiHeaders(accessToken: string | null): Record<string, string> {
   return headers;
 }
 
-function mcpNameForTool(tool: ToolItem): string {
+/**
+ * The fully-qualified MCP slug for a tool — `toolset__tool` for user tools, or
+ * the decoded `group__action` for built-ins. This is the exact name the tool is
+ * callable by (in chat, the MCP server, and the CLI).
+ */
+export function mcpNameForTool(tool: {
+  tool_id: string;
+  toolset_id: string;
+}): string {
   if (tool.tool_id.startsWith('__builtin_') && tool.tool_id.endsWith('__')) {
     return tool.tool_id.slice('__builtin_'.length, -2);
   }

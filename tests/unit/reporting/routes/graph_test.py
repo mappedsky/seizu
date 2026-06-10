@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import neo4j.exceptions
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -38,14 +39,24 @@ def _make_record(data: dict) -> object:
     return mock
 
 
-async def test_get_graph_schema_returns_all_three(mocker):
+async def test_get_graph_schema_returns_labels_rels_props_and_indexes(mocker):
     label_rec = _make_record({"label": "Person"})
     rel_rec = _make_record({"type": "KNOWS"})
     prop_rec = _make_record({"key": "name"})
+    index_rec = _make_record(
+        {
+            "name": "person_name",
+            "type": "RANGE",
+            "entityType": "NODE",
+            "labelsOrTypes": ["Person"],
+            "properties": ["name"],
+            "state": "ONLINE",
+        }
+    )
 
     mock_run = mocker.patch(
         "reporting.routes.graph.reporting_neo4j.run_query",
-        new=AsyncMock(side_effect=[[label_rec], [rel_rec], [prop_rec]]),
+        new=AsyncMock(side_effect=[[label_rec], [rel_rec], [prop_rec], [index_rec]]),
     )
 
     app = _make_app()
@@ -57,13 +68,23 @@ async def test_get_graph_schema_returns_all_three(mocker):
     assert body["labels"] == ["Person"]
     assert body["relationship_types"] == ["KNOWS"]
     assert body["property_keys"] == ["name"]
-    assert mock_run.call_count == 3
+    assert body["indexes"] == [
+        {
+            "name": "person_name",
+            "type": "RANGE",
+            "entity_type": "NODE",
+            "labels_or_types": ["Person"],
+            "properties": ["name"],
+            "state": "ONLINE",
+        }
+    ]
+    assert mock_run.call_count == 4
 
 
 async def test_get_graph_schema_empty_database(mocker):
     mocker.patch(
         "reporting.routes.graph.reporting_neo4j.run_query",
-        new=AsyncMock(side_effect=[[], [], []]),
+        new=AsyncMock(side_effect=[[], [], [], []]),
     )
 
     app = _make_app()
@@ -75,6 +96,28 @@ async def test_get_graph_schema_empty_database(mocker):
     assert body["labels"] == []
     assert body["relationship_types"] == []
     assert body["property_keys"] == []
+    assert body["indexes"] == []
+
+
+async def test_get_graph_schema_degrades_when_show_indexes_unavailable(mocker):
+    # SHOW INDEXES needs catalog privileges; if it fails the rest of the schema
+    # must still return, with an empty index list.
+    label_rec = _make_record({"label": "Person"})
+    rel_rec = _make_record({"type": "KNOWS"})
+    prop_rec = _make_record({"key": "name"})
+    mocker.patch(
+        "reporting.routes.graph.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=[[label_rec], [rel_rec], [prop_rec], neo4j.exceptions.ClientError("no permission")]),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/graph/schema")
+
+    assert ret.status_code == 200
+    body = ret.json()
+    assert body["labels"] == ["Person"]
+    assert body["indexes"] == []
 
 
 async def test_get_graph_schema_requires_query_execute_permission():
@@ -84,10 +127,38 @@ async def test_get_graph_schema_requires_query_execute_permission():
     assert ret.status_code == 403
 
 
+async def test_get_graph_schema_returns_500_on_neo4j_error(mocker):
+    mocker.patch(
+        "reporting.routes.graph.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=neo4j.exceptions.ServiceUnavailable("down")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/graph/schema")
+
+    assert ret.status_code == 500
+    assert "error" in ret.json()
+
+
+async def test_get_graph_schema_returns_500_on_generic_error(mocker):
+    mocker.patch(
+        "reporting.routes.graph.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=RuntimeError("unexpected")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/graph/schema")
+
+    assert ret.status_code == 500
+    assert "error" in ret.json()
+
+
 async def test_get_graph_schema_does_not_save_history(mocker):
     mocker.patch(
         "reporting.routes.graph.reporting_neo4j.run_query",
-        new=AsyncMock(side_effect=[[], [], []]),
+        new=AsyncMock(side_effect=[[], [], [], []]),
     )
     mock_save = mocker.patch(
         "reporting.services.report_store.save_query_history",

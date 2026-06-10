@@ -5,10 +5,10 @@ import {
   Button,
   Card,
   CardContent,
-  CircularProgress,
   TextField,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import PlayArrow from '@mui/icons-material/PlayArrow';
 import CypherGraph from 'src/components/reports/CypherGraph';
 import QueryConsoleSchemaPanel from 'src/components/QueryConsoleSchemaPanel';
@@ -17,6 +17,7 @@ import {
   useFetchHistoryItem,
   QueryHistoryItem,
 } from 'src/hooks/useQueryHistory';
+import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 import { pageContentSx } from 'src/theme/layout';
 
 const QUERY_CONSOLE_SCHEMA_PANEL_STORAGE_KEY =
@@ -27,6 +28,7 @@ export default function QueryConsole() {
   const navigate = useNavigate();
   const location = useLocation();
   const fetchHistoryItem = useFetchHistoryItem();
+  const { authReady } = useAuthHeaders();
   const [queryText, setQueryText] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState<string | undefined>(
     undefined,
@@ -66,6 +68,7 @@ export default function QueryConsole() {
   useEffect(() => {
     const h = new URLSearchParams(location.search).get('h');
     if (!h) return;
+    if (!authReady) return;
     if (justPushedRef.current === h) {
       justPushedRef.current = null;
       return;
@@ -81,7 +84,7 @@ export default function QueryConsole() {
     return () => {
       cancelled = true;
     };
-  }, [location.search, fetchHistoryItem]);
+  }, [authReady, location.search, fetchHistoryItem]);
 
   const queryTextRef = useRef(queryText);
   queryTextRef.current = queryText;
@@ -170,7 +173,7 @@ export default function QueryConsole() {
   if (permissionsLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

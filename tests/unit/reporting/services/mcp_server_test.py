@@ -9,6 +9,7 @@ from mcp import types as mcp_types
 
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef, ToolsetListItem
+from reporting.schema.report_config import User
 from reporting.services import mcp_server as mcp_module
 from reporting.services.mcp_server import (
     _build_mcp_server,
@@ -315,6 +316,110 @@ async def test_call_tool_query_execution_error():
 
 
 # ---------------------------------------------------------------------------
+# call_tool — graph__validate_query
+# ---------------------------------------------------------------------------
+
+
+async def test_call_tool_validate_query_valid():
+    from reporting.services.query_validator import ValidationResult
+
+    run_query = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=[], warnings=["uses an unindexed scan"]),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query", run_query),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__validate_query", {"query": "MATCH (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["valid"] is True
+        assert data["errors"] == []
+        assert data["warnings"] == ["uses an unindexed scan"]
+    # Validation must never execute the query.
+    run_query.assert_not_called()
+
+
+async def test_call_tool_validate_query_invalid():
+    from reporting.services.query_validator import ValidationResult
+
+    with patch(
+        "reporting.services.mcp_builtins.graph.validate_query",
+        new_callable=AsyncMock,
+        return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__validate_query", {"query": "CREATE (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["valid"] is False
+        assert "Write queries are not allowed" in data["errors"]
+
+
+async def test_call_tool_validate_query_empty_query_string():
+    server = _build_mcp_server()
+    result = await _call_tool(server, "graph__validate_query", {"query": "  "})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# ---------------------------------------------------------------------------
+# call_tool — graph__explain
+# ---------------------------------------------------------------------------
+
+
+async def test_call_tool_explain_returns_plan():
+    from reporting.services.query_validator import ValidationResult
+
+    plan = {"operatorType": "NodeByLabelScan", "identifiers": ["n"], "children": []}
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=[], warnings=["unindexed scan"]),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query",
+            new_callable=AsyncMock,
+            return_value=plan,
+        ),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__explain", {"query": "MATCH (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert data["plan"] == plan
+        assert data["warnings"] == ["unindexed scan"]
+
+
+async def test_call_tool_explain_blocks_invalid_query_before_planning():
+    from reporting.services.query_validator import ValidationResult
+
+    explain = AsyncMock()
+    with (
+        patch(
+            "reporting.services.mcp_builtins.graph.validate_query",
+            new_callable=AsyncMock,
+            return_value=ValidationResult(errors=["Write queries are not allowed"], warnings=[]),
+        ),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.explain_query", explain),
+    ):
+        server = _build_mcp_server()
+        result = await _call_tool(server, "graph__explain", {"query": "CREATE (n) RETURN n"})
+        data = json.loads(result[0].text)
+        assert "Write queries are not allowed" in data["errors"]
+    # A rejected query must never reach the planner.
+    explain.assert_not_called()
+
+
+async def test_call_tool_explain_empty_query_string():
+    server = _build_mcp_server()
+    result = await _call_tool(server, "graph__explain", {"query": "  "})
+    data = json.loads(result[0].text)
+    assert "error" in data
+
+
+# ---------------------------------------------------------------------------
 # call_tool — graph__schema
 # ---------------------------------------------------------------------------
 
@@ -327,6 +432,16 @@ async def test_call_tool_schema_success():
             [{"label": "Person"}],
             [{"type": "KNOWS"}],
             [{"key": "name"}],
+            [
+                {
+                    "name": "person_name",
+                    "type": "RANGE",
+                    "entityType": "NODE",
+                    "labelsOrTypes": ["Person"],
+                    "properties": ["name"],
+                    "state": "ONLINE",
+                }
+            ],
         ],
     ):
         server = _build_mcp_server()
@@ -335,6 +450,16 @@ async def test_call_tool_schema_success():
         assert data["labels"] == ["Person"]
         assert data["relationship_types"] == ["KNOWS"]
         assert data["property_keys"] == ["name"]
+        assert data["indexes"] == [
+            {
+                "name": "person_name",
+                "type": "RANGE",
+                "entity_type": "NODE",
+                "labels_or_types": ["Person"],
+                "properties": ["name"],
+                "state": "ONLINE",
+            }
+        ]
 
 
 async def test_call_tool_schema_error():
@@ -987,6 +1112,187 @@ async def test_auth_middleware_passes_non_http_scope():
     await middleware(scope, AsyncMock(), AsyncMock())
 
     inner.assert_called_once()
+
+
+async def test_build_dev_current_user_uses_configured_identity():
+    from reporting.services.mcp_server import _build_dev_current_user
+
+    user = User(
+        user_id="dev-user",
+        sub="developer@example.com",
+        iss="dev",
+        email="developer@example.com",
+        display_name=None,
+        created_at=_NOW,
+        last_login=_NOW,
+    )
+    with (
+        patch.object(mcp_module.settings, "DEVELOPMENT_ONLY_AUTH_USER_EMAIL", "developer@example.com"),
+        patch.object(
+            mcp_module.report_store,
+            "get_or_create_user",
+            new=AsyncMock(return_value=user),
+        ) as get_user,
+    ):
+        current_user = await _build_dev_current_user()
+
+    assert current_user.user == user
+    assert current_user.permissions == ALL_PERMISSIONS
+    get_user.assert_awaited_once_with(
+        sub="developer@example.com",
+        iss="dev",
+        email="developer@example.com",
+        display_name=None,
+        preferred_username=None,
+    )
+
+
+async def test_build_current_user_from_jwt_resolves_profile_and_permissions():
+    from reporting.services.mcp_server import _build_current_user_from_jwt
+
+    user = User(
+        user_id="user-1",
+        sub="subject-1",
+        iss="https://issuer.example.com",
+        email="user@example.com",
+        display_name="User One",
+        preferred_username="user1",
+        created_at=_NOW,
+        last_login=_NOW,
+    )
+    permissions = frozenset({"chat:use"})
+    with (
+        patch.object(mcp_module.report_store, "get_or_create_user", new=AsyncMock(return_value=user)) as get_user,
+        patch(
+            "reporting.authnz.permissions.resolve_permissions",
+            new=AsyncMock(return_value=permissions),
+        ),
+    ):
+        current_user = await _build_current_user_from_jwt(
+            {
+                "sub": "subject-1",
+                "iss": "https://issuer.example.com",
+                "email": "user@example.com",
+                "preferred_username": "user1",
+                "name": "User One",
+                "iat": 1_700_000_000,
+                "exp": 1_700_003_600,
+            }
+        )
+
+    assert current_user.user == user
+    assert current_user.permissions == permissions
+    assert current_user.jwt_claims["token_iat"] is not None
+    assert current_user.jwt_claims["token_exp"] is not None
+    get_user.assert_awaited_once_with(
+        sub="subject-1",
+        iss="https://issuer.example.com",
+        email="user@example.com",
+        display_name="User One",
+        preferred_username="user1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"iss": "issuer"}, "sub"),
+        ({"sub": "subject"}, "iss"),
+        ({"sub": "subject", "iss": "issuer", "email": 123}, "email"),
+        ({"sub": "subject", "iss": "issuer", "preferred_username": 123}, "preferred_username"),
+    ],
+)
+async def test_build_current_user_from_jwt_rejects_invalid_identity_claims(payload, message):
+    from reporting.services.mcp_server import _build_current_user_from_jwt
+
+    with pytest.raises(ValueError, match=message):
+        await _build_current_user_from_jwt(payload)
+
+
+@pytest.mark.parametrize(
+    ("authorization", "token_error"),
+    [
+        (b"Basic abc", None),
+        (b"Bearer invalid", mcp_module.jwt.InvalidTokenError("bad token")),
+    ],
+)
+async def test_auth_middleware_rejects_invalid_authorization(authorization, token_error):
+    from reporting.services.mcp_server import _MCPAuthMiddleware
+
+    inner = AsyncMock()
+    middleware = _MCPAuthMiddleware(inner)
+    validate = AsyncMock(side_effect=token_error) if token_error else AsyncMock()
+    with (
+        patch.object(mcp_module.settings, "DEVELOPMENT_ONLY_REQUIRE_AUTH", True),
+        patch.object(mcp_module, "validate_bearer_token", validate),
+    ):
+        sent = []
+
+        async def capture_send(message):
+            sent.append(message)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/mcp",
+                "headers": [(b"authorization", authorization)],
+                "query_string": b"",
+            },
+            AsyncMock(return_value={"type": "http.request", "body": b""}),
+            capture_send,
+        )
+
+    inner.assert_not_called()
+    assert next(message for message in sent if message["type"] == "http.response.start")["status"] == 401
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected_session_source"),
+    [
+        ([(b"authorization", b"Bearer valid"), (b"mcp-session-id", b"session-1")], "session-1"),
+        ([(b"authorization", b"Bearer valid")], "user-1"),
+    ],
+)
+async def test_auth_middleware_sets_authenticated_context(headers, expected_session_source):
+    from reporting.authnz import CurrentUser
+    from reporting.services.action_confirmations import bearer_session_key
+    from reporting.services.mcp_server import _MCPAuthMiddleware
+
+    user = User(
+        user_id="user-1",
+        sub="subject",
+        iss="issuer",
+        email="user@example.com",
+        display_name=None,
+        created_at=_NOW,
+        last_login=_NOW,
+    )
+    current_user = CurrentUser(user=user, jwt_claims={}, permissions=frozenset({"chat:use"}))
+    captured = {}
+
+    async def inner(scope, receive, send):
+        captured["permissions"] = mcp_module._mcp_permissions.get()
+        captured["user"] = mcp_module._mcp_current_user.get()
+        captured["session"] = mcp_module._mcp_session_key.get()
+
+    middleware = _MCPAuthMiddleware(inner)
+    with (
+        patch.object(mcp_module.settings, "DEVELOPMENT_ONLY_REQUIRE_AUTH", True),
+        patch.object(mcp_module, "validate_bearer_token", new=AsyncMock(return_value={"sub": "subject"})),
+        patch.object(mcp_module, "_build_current_user_from_jwt", new=AsyncMock(return_value=current_user)),
+    ):
+        await middleware(
+            {"type": "http", "method": "POST", "path": "/mcp", "headers": headers},
+            AsyncMock(),
+            AsyncMock(),
+        )
+
+    assert captured == {
+        "permissions": frozenset({"chat:use"}),
+        "user": current_user,
+        "session": bearer_session_key(expected_session_source),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ dependencies = [
     "gunicorn>=25.0.0",
     "httpx>=0.28.0",
     "keyring>=25.0.0",
+    "langchain-litellm>=0.6.0",
+    "litellm>=1.87.0",
     "mcp>=1.27.0",
     "neo4j>=6.0.0",
     "pyjwt[crypto]>=2.12.0",
@@ -36,6 +38,10 @@ dependencies = [
     "sqlmodel>=0.0.38",
     "typer>=0.25.0",
     "uvicorn>=0.46.0",
+    "langgraph-checkpoint-aws>=1.0.7",
+    "langgraph>=1.2.1",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "psycopg[binary]>=3.3.4",
 ]
 
 [project.scripts]

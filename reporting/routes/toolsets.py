@@ -35,7 +35,7 @@ from reporting.services.mcp_builtins.synthetic import (
     group_name_from_toolset_id,
     is_builtin_toolset_id,
 )
-from reporting.services.query_validator import validate_query
+from reporting.services.query_validator import validate_tool_cypher
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -235,7 +235,7 @@ async def create_tool(
     _reject_builtin_mutation(toolset_id)
     if await report_store.get_tool(body.tool_id):
         raise HTTPException(status_code=409, detail="Tool already exists")
-    validation = await validate_query(body.cypher)
+    validation = await validate_tool_cypher(body.cypher, body.parameters)
     if validation.has_errors:
         return JSONResponse(
             content={
@@ -301,7 +301,7 @@ async def update_tool(
     existing = await report_store.get_tool(tool_id)
     if not existing or existing.toolset_id != toolset_id:
         raise HTTPException(status_code=404, detail="Tool not found")
-    validation = await validate_query(body.cypher)
+    validation = await validate_tool_cypher(body.cypher, body.parameters)
     if validation.has_errors:
         return JSONResponse(
             content={

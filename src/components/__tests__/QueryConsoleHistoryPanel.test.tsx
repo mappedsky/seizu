@@ -38,6 +38,7 @@ function mockHook(
     loading: false,
     error: null,
     data: null,
+    authReady: true,
     fetchHistory,
     ...overrides,
   });

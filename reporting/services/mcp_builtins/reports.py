@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.report_config import (
     CloneReportRequest,
     CreateReportRequest,
@@ -168,6 +169,49 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
     return updated.model_dump()
 
 
+async def _confirm_report_version(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    report_id = str(args["report_id"])
+    return ActionConfirmationTarget(action="update", resource_type="report", resource_id=report_id)
+
+
+async def _confirm_report_visibility(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    report_id = str(args["report_id"])
+    body = UpdateReportVisibilityRequest.model_validate({k: v for k, v in args.items() if k != "report_id"})
+    if body.access is None:
+        return None
+    action = "publish" if body.access.scope == "public" else "unpublish"
+    return ActionConfirmationTarget(action=action, resource_type="report", resource_id=report_id)
+
+
+async def _confirm_report_delete(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(action="delete", resource_type="report", resource_id=str(args["report_id"]))
+
+
+async def _confirm_report_pin(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    body = PinReportRequest.model_validate({k: v for k, v in args.items() if k != "report_id"})
+    return ActionConfirmationTarget(
+        action="pin" if body.pinned else "unpin",
+        resource_type="report",
+        resource_id=str(args["report_id"]),
+    )
+
+
+async def _confirm_report_dashboard(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(action="set_dashboard", resource_type="report", resource_id=str(args["report_id"]))
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -207,6 +251,9 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_create,
             requires_user=True,
+            # Confirmation exception: creates a new private report and does not
+            # mutate existing resources.
+            chat_safe_without_confirmation=True,
         ),
         BuiltinTool(
             name="reports__create_version",
@@ -220,6 +267,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_create_version,
             requires_user=True,
+            confirmation=_confirm_report_version,
         ),
         BuiltinTool(
             name="reports__update_visibility",
@@ -233,6 +281,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_update_visibility,
             requires_user=True,
+            confirmation=_confirm_report_visibility,
         ),
         BuiltinTool(
             name="reports__delete",
@@ -245,6 +294,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.REPORTS_DELETE.value],
             handler=_delete,
+            confirmation=_confirm_report_delete,
         ),
         BuiltinTool(
             name="reports__pin",
@@ -257,6 +307,7 @@ GROUP_DEF = BuiltinGroup(
             ),
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_pin,
+            confirmation=_confirm_report_pin,
         ),
         BuiltinTool(
             name="reports__set_dashboard",
@@ -269,6 +320,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.REPORTS_SET_DASHBOARD.value],
             handler=_set_dashboard,
+            confirmation=_confirm_report_dashboard,
         ),
         BuiltinTool(
             name="reports__list_versions",
@@ -312,6 +364,9 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_clone,
             requires_user=True,
+            # Confirmation exception: clones into a new private report and does
+            # not mutate the source report.
+            chat_safe_without_confirmation=True,
         ),
     ],
 )

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.services.report_store import sql as sql_module
@@ -93,13 +94,16 @@ def test_get_engine_uses_command_timeout_for_postgres(mocker):
         "reporting.services.report_store.sql.create_async_engine",
         return_value=engine_mock,
     )
-    mocker.patch("reporting.settings.SQL_DATABASE_URL", "postgresql://user:pass@localhost:5432/seizu")
+    mocker.patch("reporting.settings.SQL_DATABASE_URL", "postgresql://localhost:5432/seizu")
+    mocker.patch("reporting.settings.SQL_DATABASE_USER", "user")
+    mocker.patch("reporting.settings.SQL_DATABASE_PASSWORD", "p@ssword")
     mocker.patch("reporting.settings.SQL_STATEMENT_TIMEOUT", 31)
 
     result = sql_module._get_engine()
 
     assert result is engine_mock
-    assert create_engine.call_args.args == ("postgresql+asyncpg://user:pass@localhost:5432/seizu",)
+    url = create_engine.call_args.args[0]
+    assert url.render_as_string(hide_password=False) == "postgresql+asyncpg://user:p%40ssword@localhost:5432/seizu"
     assert create_engine.call_args.kwargs["connect_args"] == {"command_timeout": 31}
 
 
@@ -108,8 +112,286 @@ def test_get_engine_uses_command_timeout_for_postgres(mocker):
 # ---------------------------------------------------------------------------
 
 
+def _action_confirmation(
+    confirmation_id: str,
+    status: str,
+    created_at: str,
+    *,
+    session_key: str = "session-1",
+    expires_at: str = "2099-01-01T00:30:00+00:00",
+) -> ActionConfirmation:
+    return ActionConfirmation.model_validate(
+        {
+            "confirmation_id": confirmation_id,
+            "user_id": "user-1",
+            "source": "mcp",
+            "session_key": session_key,
+            "tool_name": "reports__delete",
+            "action": "delete",
+            "resource_type": "report",
+            "resource_id": "report-1",
+            "arguments": {"report_id": "report-1"},
+            "arguments_hash": "hash-1",
+            "status": status,
+            "created_at": created_at,
+            "expires_at": expires_at,
+        }
+    )
+
+
 async def test_list_reports_empty(store):
     assert await store.list_reports() == []
+
+
+# ---------------------------------------------------------------------------
+# Chat sessions
+# ---------------------------------------------------------------------------
+
+
+async def test_chat_session_list_empty(store):
+    assert await store.list_chat_sessions("user-1", limit=10) == []
+
+
+async def test_chat_session_create_and_get(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="thread-abc",
+    )
+    item = await store.create_chat_session("user-1", title="My session")
+    assert item.thread_id == "thread-abc"
+    assert item.title == "My session"
+
+    fetched = await store.get_chat_session("user-1", "thread-abc")
+    assert fetched is not None
+    assert fetched.title == "My session"
+
+
+async def test_chat_session_get_not_found(store):
+    assert await store.get_chat_session("user-1", "no-such-thread") is None
+
+
+async def test_chat_session_list_returns_sessions(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        side_effect=["t1", "t2"],
+    )
+    await store.create_chat_session("user-1", title="First")
+    await store.create_chat_session("user-1", title="Second")
+    sessions = await store.list_chat_sessions("user-1", limit=10)
+    assert len(sessions) == 2
+    assert {s.title for s in sessions} == {"First", "Second"}
+
+
+async def test_chat_session_touch_updates_timestamp(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="t1",
+    )
+    await store.create_chat_session("user-1", title="Test")
+    result = await store.touch_chat_session("user-1", "t1")
+    assert result is not None
+    assert result.thread_id == "t1"
+
+
+async def test_chat_session_touch_missing_returns_none(store):
+    result = await store.touch_chat_session("user-1", "no-such")
+    assert result is None
+
+
+async def test_chat_session_update_title(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="t1",
+    )
+    await store.create_chat_session("user-1", title="Old")
+    result = await store.update_chat_session_title("user-1", "t1", "New")
+    assert result is not None
+    assert result.title == "New"
+
+
+async def test_chat_session_update_title_missing_returns_none(store):
+    result = await store.update_chat_session_title("user-1", "no-such", "New")
+    assert result is None
+
+
+async def test_chat_session_delete(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="t1",
+    )
+    await store.create_chat_session("user-1", title="To delete")
+    assert await store.delete_chat_session("user-1", "t1") is True
+    assert await store.get_chat_session("user-1", "t1") is None
+
+
+async def test_chat_session_delete_missing_returns_false(store):
+    assert await store.delete_chat_session("user-1", "no-such") is False
+
+
+# ---------------------------------------------------------------------------
+# Action confirmation — additional coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_get_action_confirmation_not_found(store):
+    result = await store.get_action_confirmation("no-such", user_id="user-1")
+    assert result is None
+
+
+async def test_list_batch_action_confirmations_empty(store):
+    result = await store.list_batch_action_confirmations("user-1", "batch-1")
+    assert result == []
+
+
+async def test_list_batch_action_confirmations_returns_items(store):
+    conf = _action_confirmation(
+        confirmation_id="c1",
+        status="pending",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+    conf2 = conf.model_copy(update={"confirmation_id": "c2", "batch_id": "batch-1"})
+    conf_with_batch = conf.model_copy(update={"batch_id": "batch-1"})
+    await store.create_action_confirmation(conf_with_batch)
+    await store.create_action_confirmation(conf2)
+    result = await store.list_batch_action_confirmations("user-1", "batch-1")
+    assert any(r.batch_id == "batch-1" for r in result)
+
+
+async def test_decide_action_confirmation_approves(store):
+    conf = _action_confirmation(
+        confirmation_id="c1",
+        status="pending",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+    await store.create_action_confirmation(conf)
+    decided = await store.decide_action_confirmation(
+        confirmation_id="c1",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert decided is not None
+    assert decided.status == "approved"
+
+
+async def test_decide_action_confirmation_not_found(store):
+    result = await store.decide_action_confirmation(
+        confirmation_id="no-such",
+        user_id="user-1",
+        decision="approved",
+    )
+    assert result is None
+
+
+async def test_claim_action_confirmation_for_execution(store):
+    conf = _action_confirmation(
+        confirmation_id="c1",
+        status="approved",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+    await store.create_action_confirmation(conf)
+    # Force status to approved (bypassing decide) by updating directly
+    await store.decide_action_confirmation(
+        confirmation_id="c1",
+        user_id="user-1",
+        decision="approved",
+    )
+    claimed = await store.claim_action_confirmation_for_execution("c1", "user-1")
+    assert claimed is not None
+    assert claimed.status == "executed"
+
+
+async def test_claim_action_confirmation_for_execution_not_found(store):
+    result = await store.claim_action_confirmation_for_execution("no-such", "user-1")
+    assert result is None
+
+
+async def test_find_action_confirmation_grant_returns_none_when_missing(store):
+    result = await store.find_action_confirmation_grant(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        action="delete",
+        resource_type="report",
+        resource_id="report-1",
+        arguments_hash="hash-1",
+    )
+    assert result is None
+
+
+async def test_find_action_confirmation_grant_returns_approved(store):
+    conf = _action_confirmation(
+        confirmation_id="c1",
+        status="pending",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+    await store.create_action_confirmation(conf)
+    await store.decide_action_confirmation(
+        confirmation_id="c1",
+        user_id="user-1",
+        decision="approved",
+    )
+    result = await store.find_action_confirmation_grant(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        tool_name="reports__delete",
+        action="delete",
+        resource_type="report",
+        resource_id="report-1",
+        arguments_hash="hash-1",
+    )
+    assert result is not None
+    assert result.status == "approved"
+
+
+async def test_action_confirmation_session_status_list_returns_pending(store):
+    await store.create_action_confirmation(
+        _action_confirmation(
+            confirmation_id="pending-session",
+            status="pending",
+            created_at="2024-01-01T00:00:00+00:00",
+        )
+    )
+
+    result = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
+
+    assert [item.confirmation_id for item in result] == ["pending-session"]
+
+
+async def test_create_action_confirmation_replaces_expired_pending_dedup(store):
+    await store.create_action_confirmation(
+        _action_confirmation(
+            confirmation_id="expired-pending",
+            status="pending",
+            created_at="2020-01-01T00:00:00+00:00",
+            expires_at="2020-01-01T00:30:00+00:00",
+        )
+    )
+    replacement = _action_confirmation(
+        confirmation_id="replacement-pending",
+        status="pending",
+        created_at="2024-01-01T00:00:00+00:00",
+    )
+
+    result = await store.create_action_confirmation(replacement)
+
+    assert result.confirmation_id == "replacement-pending"
+    pending = await store.list_action_confirmations(
+        user_id="user-1",
+        source="mcp",
+        session_key="session-1",
+        status="pending",
+    )
+    assert [item.confirmation_id for item in pending] == ["replacement-pending"]
+    expired = await store.get_action_confirmation("expired-pending", user_id="user-1")
+    assert expired is not None
+    assert expired.status == "expired"
 
 
 async def test_list_reports_returns_created_reports(store, mocker):

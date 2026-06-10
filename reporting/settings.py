@@ -1,6 +1,6 @@
 from importlib import resources
 
-from reporting.utils.settings import bool_env, int_env, list_env, str_env
+from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 
 def _parse_kv_pairs(items: list[str]) -> dict[str, str]:
@@ -275,11 +275,160 @@ DYNAMODB_CREATE_TABLE = bool_env("DYNAMODB_CREATE_TABLE", False)
 SNOWFLAKE_MACHINE_ID = int_env("SNOWFLAKE_MACHINE_ID", 1)
 # Report storage backend. Supported values: "dynamodb" (default), "sqlmodel".
 REPORT_STORE_BACKEND = str_env("REPORT_STORE_BACKEND", "dynamodb")
-# SQLAlchemy database URL used when REPORT_STORE_BACKEND=sqlmodel.
+# SQLAlchemy database URL used when REPORT_STORE_BACKEND=sqlmodel. Keep
+# credentials out of this value and provide them through SQL_DATABASE_USER and
+# SQL_DATABASE_PASSWORD so secret managers can manage only the password.
+# Credential-bearing URLs remain supported for backward compatibility.
 # Any SQLAlchemy-compatible URL works (PostgreSQL, SQLite, MySQL, etc.).
-# Example: postgresql://seizu:seizu@postgres:5432/seizu
+# Example: postgresql://postgres:5432/seizu
 # Example: sqlite:///./seizu.db
 SQL_DATABASE_URL = str_env("SQL_DATABASE_URL", "")
+# Optional credentials overlaid on SQL_DATABASE_URL.
+SQL_DATABASE_USER = str_env("SQL_DATABASE_USER", "")
+SQL_DATABASE_PASSWORD = str_env("SQL_DATABASE_PASSWORD", "")
+
+# Master switch for the chat assistant. When false the chat routes are not
+# registered, checkpoint storage is not initialized, and the frontend hides the
+# Chat UI (surfaced via GET /api/v1/config -> features.chat).
+CHAT_ENABLED = bool_env("CHAT_ENABLED", True)
+
+# LLM provider sentinel for the chat assistant. "mock" keeps local/dev chat
+# deterministic and keyless; any other value routes through LiteLLM, so the
+# supported provider/model surface is whatever LiteLLM supports rather than a
+# fixed allowlist. Legacy values ("openai", "anthropic", "gemini", "deepseek")
+# still work and namespace a bare CHAT_LLM_MODEL; new deployments can leave this
+# at "litellm" and set a fully-qualified CHAT_LLM_MODEL instead.
+CHAT_LLM_PROVIDER = str_env("CHAT_LLM_PROVIDER", "mock")
+# LiteLLM model identifier for the chat assistant. Required whenever
+# CHAT_LLM_PROVIDER is not "mock"; Seizu fails fast at startup if a real provider
+# is selected without one. Prefer a provider-namespaced string
+# (e.g. "openai/gpt-4o", "anthropic/claude-3-5-sonnet-latest",
+# "gemini/gemini-2.0-flash", "deepseek/deepseek-reasoner"). A bare model name is
+# namespaced using the legacy CHAT_LLM_PROVIDER value.
+CHAT_LLM_MODEL = str_env("CHAT_LLM_MODEL", "")
+# Optional API key override passed to LiteLLM. If empty, the legacy
+# provider-specific env vars below are used, then LiteLLM's own per-provider
+# environment lookup applies (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.).
+CHAT_LLM_API_KEY = str_env("CHAT_LLM_API_KEY", "")
+# Optional OpenAI-compatible base URL (LiteLLM api_base). Set this to point chat
+# at a self-hosted LiteLLM proxy or other gateway/private endpoint; it now
+# applies regardless of which model/provider is selected.
+CHAT_LLM_BASE_URL = str_env("CHAT_LLM_BASE_URL", "")
+# Generation controls for real chat providers.
+CHAT_LLM_TEMPERATURE = float_env("CHAT_LLM_TEMPERATURE", 0.2)
+# Per-call output token cap. Kept generous so most answers finish in one shot;
+# replies still truncated by it are auto-continued server-side (see below).
+CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 4096)
+CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
+CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
+# When a final answer is cut off by the output-token limit (finish_reason
+# "length"), Seizu transparently asks the model to continue and stitches the
+# pieces into one seamless response. These bound that loop. Set MAX_CONTINUATIONS
+# to 0 to disable auto-continuation (falling back to the manual "Continue
+# response" button). MAX_RESPONSE_CHARS is a hard ceiling on the stitched length
+# (0 disables it); the loop also stops as soon as a continuation adds no new text.
+CHAT_LLM_MAX_CONTINUATIONS = int_env("CHAT_LLM_MAX_CONTINUATIONS", 2)
+CHAT_LLM_MAX_RESPONSE_CHARS = int_env("CHAT_LLM_MAX_RESPONSE_CHARS", 60_000)
+# Maximum prior messages/characters sent to the LLM. Checkpoints may retain
+# more messages for UI history; this separate cap controls model cost, latency,
+# and provider context pressure.
+CHAT_LLM_CONTEXT_MAX_MESSAGES = int_env("CHAT_LLM_CONTEXT_MAX_MESSAGES", 80)
+CHAT_LLM_CONTEXT_MAX_CHARS = int_env("CHAT_LLM_CONTEXT_MAX_CHARS", 120_000)
+# Optional full prompt override. Leave empty to use Seizu's provider-aware
+# security-dashboard prompt.
+CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")
+# When true, the model sees available skills first and lets rendered skills
+# disclose which tools to use. When false, the model sees both chat-safe tools
+# and skills up front, matching the normal MCP list-tools/list-prompts shape.
+CHAT_LLM_PROGRESSIVE_DISCLOSURE = bool_env("CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
+# Maximum model-requested structured skill/tool calls the chat agent will execute
+# during one assistant turn. This bounds progressive skill rendering plus
+# follow-on tool calls so a model cannot loop indefinitely.
+CHAT_LLM_MAX_AUTO_ACTIONS = int_env("CHAT_LLM_MAX_AUTO_ACTIONS", 12)
+# Maximum model-requested tool calls to run concurrently during one auto-action
+# batch. Tool handlers are async, so this uses asyncio concurrency rather than
+# a threadpool for the normal Neo4j/store I/O path.
+CHAT_LLM_MAX_PARALLEL_TOOL_CALLS = int_env("CHAT_LLM_MAX_PARALLEL_TOOL_CALLS", 4)
+
+# Plan -> dispatch -> verify orchestration for complex chat requests. When off,
+# every turn takes the existing single-agent (gather -> act) path; the router
+# node short-circuits to "simple" with no extra LLM call, so behavior is
+# unchanged. When on, a cheap router classifies each turn and routes multi-step
+# requests through a planner, a dispatcher that runs scoped sub-agent workers
+# (parallel when steps are independent), and a verify gate with bounded retry.
+CHAT_ORCHESTRATOR_ENABLED = bool_env("CHAT_ORCHESTRATOR_ENABLED", False)
+# Maximum number of steps the planner may emit for one orchestrated turn.
+CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
+# Maximum verify-driven retry cycles before the orchestrator synthesizes an
+# answer from whatever steps passed. Bounds self-correction so a persistently
+# failing step cannot loop forever.
+CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+# Maximum independent steps the dispatcher runs concurrently in one batch.
+CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Per-step tool-call budget for an orchestrator worker. Higher than the
+# interactive CHAT_LLM_MAX_AUTO_ACTIONS because a worker is a focused sub-agent
+# that may need to discover, validate, and then apply changes across several
+# resources in one step (e.g. validate+explain+update each tool in a toolset).
+CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
+
+# Standard provider API key env vars. These are intentionally not exposed via
+# GET /api/v1/config.
+OPENAI_API_KEY = str_env("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = str_env("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = str_env("GEMINI_API_KEY", "")
+GOOGLE_API_KEY = str_env("GOOGLE_API_KEY", "")
+DEEPSEEK_API_KEY = str_env("DEEPSEEK_API_KEY", "")
+
+# LangGraph checkpoint backend. Supported values: "dynamodb" (default),
+# "postgres". The PostgreSQL checkpointer is independent of the report store,
+# though the development Makefile switchers change both together.
+CHAT_CHECKPOINT_BACKEND = str_env("CHAT_CHECKPOINT_BACKEND", "dynamodb")
+# PostgreSQL connection URL used when CHAT_CHECKPOINT_BACKEND=postgres. Defaults
+# to SQL_DATABASE_URL so SQL-backed deployments can share one database. Keep
+# credentials separate using the settings below; credential-bearing URLs remain
+# supported for backward compatibility.
+# The LangGraph PostgreSQL checkpointer requires PostgreSQL; SQLite/MySQL URLs
+# supported by the report store are not valid here.
+CHAT_CHECKPOINT_DATABASE_URL = str_env("CHAT_CHECKPOINT_DATABASE_URL", "") or SQL_DATABASE_URL
+# Optional checkpoint-specific credentials. Empty values inherit the main SQL
+# credentials, allowing one secret to be shared or independently overridden.
+CHAT_CHECKPOINT_DATABASE_USER = str_env("CHAT_CHECKPOINT_DATABASE_USER", "") or SQL_DATABASE_USER
+CHAT_CHECKPOINT_DATABASE_PASSWORD = str_env("CHAT_CHECKPOINT_DATABASE_PASSWORD", "") or SQL_DATABASE_PASSWORD
+# Per-process async PostgreSQL connection pool bounds for chat checkpoints.
+CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 1)
+CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 10)
+# Dedicated DynamoDB table used by LangGraph to persist chat checkpoints when
+# CHAT_CHECKPOINT_BACKEND=dynamodb.
+CHAT_CHECKPOINT_TABLE_NAME = str_env("CHAT_CHECKPOINT_TABLE_NAME", "seizu-chat-checkpoints")
+# When true, create/migrate the configured LangGraph checkpoint storage at startup.
+CHAT_CHECKPOINT_CREATE_TABLE = bool_env("CHAT_CHECKPOINT_CREATE_TABLE", False)
+# DynamoDB-only optional checkpoint TTL in seconds. Empty/0 disables automatic expiry.
+CHAT_CHECKPOINT_TTL_SECONDS = int_env("CHAT_CHECKPOINT_TTL_SECONDS", 0)
+# DynamoDB-only compression for serialized checkpoint payloads.
+CHAT_CHECKPOINT_ENABLE_COMPRESSION = bool_env("CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
+# S3 bucket used by langgraph-checkpoint-aws for payloads larger than 350KB.
+CHAT_CHECKPOINT_S3_BUCKET = str_env("CHAT_CHECKPOINT_S3_BUCKET", "")
+# Optional S3 endpoint override, e.g. http://minio:9000 for local development.
+CHAT_CHECKPOINT_S3_ENDPOINT_URL = str_env("CHAT_CHECKPOINT_S3_ENDPOINT_URL", "")
+# Optional S3 object prefix for checkpoint offload isolation.
+CHAT_CHECKPOINT_S3_KEY_PREFIX = str_env("CHAT_CHECKPOINT_S3_KEY_PREFIX", "seizu/langgraph")
+# Maximum persisted LangGraph messages per chat thread. Older turns are removed
+# from checkpoint state after each non-ephemeral turn.
+CHAT_MAX_PERSISTED_MESSAGES = int_env("CHAT_MAX_PERSISTED_MESSAGES", 200)
+# Default number of messages returned by GET /api/v1/chat/history.
+CHAT_HISTORY_LIMIT = int_env("CHAT_HISTORY_LIMIT", 100)
+# Maximum rows returned to chat from a single MCP tool call. Normal MCP calls are
+# unaffected; this caps model/UI context growth on the chat path.
+CHAT_TOOL_RESULT_MAX_ROWS = int_env("CHAT_TOOL_RESULT_MAX_ROWS", 100)
+# Maximum serialized bytes returned to chat from a single MCP tool call.
+CHAT_TOOL_RESULT_MAX_BYTES = int_env("CHAT_TOOL_RESULT_MAX_BYTES", 200_000)
+
+# Maximum lifetime for an approved or denied mutating-action confirmation.
+ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
+
+# Optional public browser origin used when MCP clients need to show a user an
+# approval URL. When unset, Seizu derives the origin from MCP_RESOURCE_URL.
+SEIZU_PUBLIC_URL = str_env("SEIZU_PUBLIC_URL", "")
 
 # The JWT claim that contains the user's Seizu role name.
 # Configure your OIDC provider to embed the role (e.g. "seizu-admin") directly

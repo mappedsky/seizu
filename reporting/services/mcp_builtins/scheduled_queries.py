@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.report_config import CreateScheduledQueryRequest
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
@@ -21,6 +22,28 @@ def _require_user(current_user: CurrentUser | None) -> CurrentUser:
 
 def _id_prop() -> dict[str, Any]:
     return {"scheduled_query_id": {"type": "string"}}
+
+
+async def _confirm_create(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(
+        action="create", resource_type="scheduled_query", resource_id=str(args.get("name", "new"))
+    )
+
+
+async def _confirm_update(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(
+        action="update",
+        resource_type="scheduled_query",
+        resource_id=str(args["scheduled_query_id"]),
+    )
+
+
+async def _confirm_delete(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(
+        action="delete",
+        resource_type="scheduled_query",
+        resource_id=str(args["scheduled_query_id"]),
+    )
 
 
 async def _list(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -141,6 +164,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SCHEDULED_QUERIES_WRITE.value],
             handler=_create,
             requires_user=True,
+            confirmation=_confirm_create,
         ),
         BuiltinTool(
             name="scheduled_queries__update",
@@ -154,6 +178,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SCHEDULED_QUERIES_WRITE.value],
             handler=_update,
             requires_user=True,
+            confirmation=_confirm_update,
         ),
         BuiltinTool(
             name="scheduled_queries__delete",
@@ -166,6 +191,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.SCHEDULED_QUERIES_DELETE.value],
             handler=_delete,
+            confirmation=_confirm_delete,
         ),
         BuiltinTool(
             name="scheduled_queries__list_versions",

@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import BUILTIN_ROLES, Permission
+from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.rbac import CreateRoleRequest, UpdateRoleRequest
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
@@ -19,6 +20,18 @@ def _require_user(current_user: CurrentUser | None) -> CurrentUser:
 
 def _role_id_prop() -> dict[str, Any]:
     return {"role_id": {"type": "string"}}
+
+
+async def _confirm_create(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(action="create", resource_type="role", resource_id=str(args.get("name", "new")))
+
+
+async def _confirm_update(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(action="update", resource_type="role", resource_id=str(args["role_id"]))
+
+
+async def _confirm_delete(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(action="delete", resource_type="role", resource_id=str(args["role_id"]))
 
 
 async def _list_builtin(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -138,6 +151,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.ROLES_WRITE.value],
             handler=_create,
             requires_user=True,
+            confirmation=_confirm_create,
         ),
         BuiltinTool(
             name="roles__update",
@@ -151,6 +165,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.ROLES_WRITE.value],
             handler=_update,
             requires_user=True,
+            confirmation=_confirm_update,
         ),
         BuiltinTool(
             name="roles__delete",
@@ -163,6 +178,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.ROLES_DELETE.value],
             handler=_delete,
+            confirmation=_confirm_delete,
         ),
         BuiltinTool(
             name="roles__list_versions",

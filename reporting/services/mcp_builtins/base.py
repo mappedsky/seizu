@@ -21,8 +21,10 @@ from typing import Any
 from pydantic import BaseModel
 
 from reporting.authnz import CurrentUser
+from reporting.schema.confirmations import ActionConfirmationTarget
 
 BuiltinHandler = Callable[[dict[str, Any], CurrentUser | None], Awaitable[Any]]
+ConfirmationResolver = Callable[[dict[str, Any], CurrentUser | None], Awaitable[ActionConfirmationTarget | None]]
 
 
 @dataclass
@@ -38,6 +40,8 @@ class BuiltinTool:
     # Whether the tool needs a resolved CurrentUser (writes that record
     # created_by/updated_by).  Handlers that need a user raise if it's None.
     requires_user: bool = False
+    confirmation: ConfirmationResolver | None = None
+    chat_safe_without_confirmation: bool = False
 
 
 def model_input_schema(

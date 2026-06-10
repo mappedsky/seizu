@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.mcp_config import (
     CreateSkillRequest,
     CreateSkillsetRequest,
@@ -31,6 +32,49 @@ def _skillset_id_prop() -> dict[str, Any]:
 
 def _skill_id_prop() -> dict[str, Any]:
     return {"skill_id": {"type": "string"}}
+
+
+def _target(action: str, resource_type: str, resource_id: Any) -> ActionConfirmationTarget:
+    return ActionConfirmationTarget(action=action, resource_type=resource_type, resource_id=str(resource_id))
+
+
+async def _confirm_skillset_create(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("create", "skillset", args.get("skillset_id", "new"))
+
+
+async def _confirm_skillset_update(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("update", "skillset", args["skillset_id"])
+
+
+async def _confirm_skillset_delete(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    return _target("delete", "skillset", args["skillset_id"])
+
+
+async def _confirm_skill_create(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("create", "skill", args.get("skill_id", "new"))
+
+
+async def _confirm_skill_update(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("update", "skill", args["skill_id"])
+
+
+async def _confirm_skill_delete(
+    args: dict[str, Any], current_user: CurrentUser | None
+) -> ActionConfirmationTarget | None:
+    return _target("delete", "skill", args["skill_id"])
 
 
 async def _list_skillsets(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -236,6 +280,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SKILLSETS_WRITE.value],
             handler=_create_skillset,
             requires_user=True,
+            confirmation=_confirm_skillset_create,
         ),
         BuiltinTool(
             name="skillsets__update",
@@ -249,6 +294,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SKILLSETS_WRITE.value],
             handler=_update_skillset,
             requires_user=True,
+            confirmation=_confirm_skillset_update,
         ),
         BuiltinTool(
             name="skillsets__delete",
@@ -257,6 +303,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": _skillset_id_prop(), "required": ["skillset_id"]},
             required_permissions=[Permission.SKILLSETS_DELETE.value],
             handler=_delete_skillset,
+            confirmation=_confirm_skillset_delete,
         ),
         BuiltinTool(
             name="skillsets__list_versions",
@@ -310,6 +357,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SKILLS_WRITE.value],
             handler=_create_skill,
             requires_user=True,
+            confirmation=_confirm_skill_create,
         ),
         BuiltinTool(
             name="skillsets__update_skill",
@@ -323,6 +371,7 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SKILLS_WRITE.value],
             handler=_update_skill,
             requires_user=True,
+            confirmation=_confirm_skill_update,
         ),
         BuiltinTool(
             name="skillsets__delete_skill",
@@ -335,6 +384,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.SKILLS_DELETE.value],
             handler=_delete_skill,
+            confirmation=_confirm_skill_delete,
         ),
         BuiltinTool(
             name="skillsets__render_skill",
