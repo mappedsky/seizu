@@ -700,7 +700,29 @@ def _user_from_item(item: dict) -> User:
         created_at=item["created_at"],
         last_login=item.get("last_login", item.get("last_seen_at", "")),
         archived_at=item.get("archived_at"),
+        role=item.get("role"),
     )
+
+
+def _sync_user_role(table: Any, user_id: str, role: str | None) -> User:
+    """Write the observed role claim to the user profile and return the user.
+
+    ``role`` is reserved in DynamoDB expressions, hence the alias.
+    """
+    if role is None:
+        update = "REMOVE #role"
+        kwargs: dict[str, Any] = {}
+    else:
+        update = "SET #role = :r"
+        kwargs = {"ExpressionAttributeValues": {":r": role}}
+    resp = table.update_item(
+        Key={"PK": _user_pk(user_id), "SK": _SK_METADATA},
+        UpdateExpression=update,
+        ExpressionAttributeNames={"#role": "role"},
+        ReturnValues="ALL_NEW",
+        **kwargs,
+    )
+    return _user_from_item(resp["Attributes"])
 
 
 def _strip_none(value: Any) -> Any:
@@ -1504,6 +1526,7 @@ class DynamoDBReportStore(ReportStore):
         email: str | None = None,
         display_name: str | None = None,
         preferred_username: str | None = None,
+        role: str | None = None,
     ) -> User:
         """Get an existing user by (iss, sub), or create one on first login."""
 
@@ -1522,7 +1545,10 @@ class DynamoDBReportStore(ReportStore):
                 profile_resp = table.get_item(
                     Key={"PK": _user_pk(user_id), "SK": _SK_METADATA},
                 )
-                return _user_from_item(profile_resp["Item"])
+                user = _user_from_item(profile_resp["Item"])
+                if user.role != role:
+                    user = _sync_user_role(table, user_id, role)
+                return user
 
             user_id = generate_report_id()
             profile_item = _strip_none(
@@ -1538,6 +1564,7 @@ class DynamoDBReportStore(ReportStore):
                     "created_at": now,
                     "last_login": now,
                     "archived_at": None,
+                    "role": role,
                 }
             )
             new_lookup_item = {
@@ -1572,6 +1599,7 @@ class DynamoDBReportStore(ReportStore):
                 created_at=now,
                 last_login=now,
                 archived_at=None,
+                role=role,
             )
 
         return await asyncio.to_thread(_op)

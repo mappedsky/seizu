@@ -1190,6 +1190,7 @@ async def test_build_current_user_from_jwt_resolves_profile_and_permissions():
         email="user@example.com",
         display_name="User One",
         preferred_username="user1",
+        role=None,
     )
 
 

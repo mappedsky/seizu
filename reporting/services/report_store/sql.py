@@ -90,6 +90,7 @@ class UserRecord(SQLModel, table=True):  # type: ignore
     created_at: str
     last_login: str
     archived_at: str | None = None
+    role: str | None = None
 
 
 class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
@@ -445,6 +446,7 @@ def _user_from_record(record: UserRecord) -> User:
         created_at=record.created_at,
         last_login=record.last_login,
         archived_at=record.archived_at,
+        role=record.role,
     )
 
 
@@ -491,6 +493,7 @@ class SQLModelReportStore(ReportStore):
                 # more SQL schema drift here.
                 if conn.dialect.name == "postgresql":
                     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_username VARCHAR"))
+                    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR"))
                     await conn.execute(text("ALTER TABLE users ALTER COLUMN email DROP NOT NULL"))
                     await conn.execute(
                         text("ALTER TABLE action_confirmations ADD COLUMN IF NOT EXISTS batch_id VARCHAR")
@@ -509,6 +512,8 @@ class SQLModelReportStore(ReportStore):
                     column_names = {row[1] for row in columns}
                     if "preferred_username" not in column_names:
                         await conn.execute(text("ALTER TABLE users ADD COLUMN preferred_username VARCHAR"))
+                    if "role" not in column_names:
+                        await conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR"))
                     ac_columns = await conn.execute(text("PRAGMA table_info(action_confirmations)"))
                     ac_column_names = {row[1] for row in ac_columns}
                     if "batch_id" not in ac_column_names:
@@ -1094,6 +1099,7 @@ class SQLModelReportStore(ReportStore):
         email: str | None = None,
         display_name: str | None = None,
         preferred_username: str | None = None,
+        role: str | None = None,
     ) -> User:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
@@ -1112,6 +1118,7 @@ class SQLModelReportStore(ReportStore):
                     created_at=now,
                     last_login=now,
                     archived_at=None,
+                    role=role,
                 )
                 session.add(record)
                 try:
@@ -1123,6 +1130,11 @@ class SQLModelReportStore(ReportStore):
                     record = result.scalars().first()
                     if not record:
                         raise
+            if record.role != role:
+                record.role = role
+                session.add(record)
+                await session.commit()
+                await session.refresh(record)
         return _user_from_record(record)
 
     async def update_user_profile(

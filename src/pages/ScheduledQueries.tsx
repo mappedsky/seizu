@@ -136,7 +136,25 @@ interface ActionConfigFieldProps {
   onChange: (val: unknown) => void;
 }
 
-function ActionConfigField({ field, value, onChange }: ActionConfigFieldProps) {
+function ActionConfigField(props: ActionConfigFieldProps) {
+  if (props.field.warning) {
+    return (
+      <Box>
+        <Alert severity="warning" sx={{ mb: 1 }}>
+          {props.field.warning}
+        </Alert>
+        <ActionConfigFieldControl {...props} />
+      </Box>
+    );
+  }
+  return <ActionConfigFieldControl {...props} />;
+}
+
+function ActionConfigFieldControl({
+  field,
+  value,
+  onChange,
+}: ActionConfigFieldProps) {
   const label = field.required ? `${field.label} *` : field.label;
 
   if (field.type === 'boolean') {

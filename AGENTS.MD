@@ -4,9 +4,10 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What is Seizu?
 
-Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Two runtimes:
+Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Three runtimes:
 - **FastAPI web app** (`reporting/`) — serves the React frontend and REST API (ASGI, Gunicorn + UvicornWorker).
-- **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log); reads from the database, not the YAML config.
+- **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log, statsd, temporal); reads from the database, not the YAML config.
+- **Temporal worker** (`reporting/temporal_worker.py`) — hosts Temporal workflows/activities started by the `temporal` scheduled query action (see the Temporal Workflows section).
 
 ## Running Commands with Docker
 
@@ -164,7 +165,18 @@ DynamoDB key design: per report `#METADATA`/`#LATEST`/`VERSION#<n>`; per schedul
 
 ### Scheduled Query Action Plugins
 
-In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`). Schemas served via `GET /api/v1/config` as `scheduled_query_action_schemas`.
+In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`; optional `warning` renders an alert above the field, and a **required boolean must be `True`** to validate — used for explicit acknowledgements). Schemas served via `GET /api/v1/config` as `scheduled_query_action_schemas`.
+
+### Temporal Workflows
+
+The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a workflow with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**.
+
+Security model (don't weaken without explicit sign-off):
+- **Identity:** workflows run as the scheduled query's *creator*. `reporting/authnz/headless.py:resolve_stored_user()` rebuilds their permissions from the last role claim seen on an authenticated request (`User.role`, synced by `get_or_create_user`); archived users hard-stop.
+- **Confirmation bypass:** each `WorkflowSpec` in `reporting/temporal_workflows/WORKFLOW_REGISTRY` declares the confirmation-gated tools it may run headlessly (server-side only, never user input). `mcp_runtime.call_tool_for_chat(confirmation_bypass_tools=...)` executes declared tools with an AUDIT log and fails every other confirmation-gated tool closed; the action config requires an acknowledgement checkbox (`accept_confirmation_bypass`). Creator RBAC and `chat_safe_only` still apply.
+- The AI session is the regular chat graph driven headlessly (`graph.astream` with `confirmation_bypass_tools` in the configurable); sessions persist as the creator's `ChatSessionItem`s and are visible in their chat UI.
+
+Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMPORAL_WORKER_ENABLED`, `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`, `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS`. Docs: `docs/root/install/temporal-workflows.md`.
 
 ### Docker Services
 
@@ -173,6 +185,8 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 | `seizu` | FastAPI backend + static frontend |
 | `seizu-node` | Bun dev server |
 | `seizu-scheduled-queries` | Scheduled query worker |
+| `seizu-temporal-worker` | Temporal workflow worker |
+| `temporal` | Temporal dev server (`server start-dev`, in-memory; UI `:8233`) |
 | `neo4j` | Graph database |
 | `dynamodb` | DynamoDB Local (default backend) |
 | `minio` (+ `minio-create-bucket`) | S3-compatible store for chat checkpoint offload |
@@ -181,7 +195,7 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 | `authentik-*` | OIDC provider (`auth` profile) |
 | `cartography` | Graph data sync (`nostart` profile) |
 
-Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`.
+Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`, Temporal UI `:8233`.
 
 **Dockerfile stages:** `base` (Python + uv + `pyproject.toml`/`uv.lock`, no deps) → `dev` (`uv sync --frozen --all-groups --all-packages --no-install-workspace`; used by compose `target: dev`) ; `nodebuilder` (`oven/bun`, builds frontend) ; `production` (`uv sync --frozen --no-dev --package seizu --no-install-workspace` + built frontend; `publish.yml` builds this, so pytest/pre-commit never ship).
 

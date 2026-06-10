@@ -233,9 +233,27 @@ SCHEDULED_QUERY_MODULES = list_env(
         "reporting.scheduled_query_modules.sqs",
         "reporting.scheduled_query_modules.slack",
         "reporting.scheduled_query_modules.statsd",
+        "reporting.scheduled_query_modules.temporal",
     ],
 )
 # NOTE: scheduled query module settings are defined within the modules themselves
+
+# Temporal server address (host:port of the frontend/gRPC endpoint), e.g.
+# "temporal:7233" in docker compose.
+TEMPORAL_ADDRESS = str_env("TEMPORAL_ADDRESS", "localhost:7233")
+# Temporal namespace workflows run in. The start-dev server provides "default".
+TEMPORAL_NAMESPACE = str_env("TEMPORAL_NAMESPACE", "default")
+# Task queue the Seizu temporal worker polls and the scheduled query temporal
+# action submits workflows to.
+TEMPORAL_TASK_QUEUE = str_env("TEMPORAL_TASK_QUEUE", "seizu-workflows")
+# Whether the temporal worker process (python -m reporting.temporal_worker)
+# should run. Lets the same image/deployment disable the worker via env.
+TEMPORAL_WORKER_ENABLED = bool_env("TEMPORAL_WORKER_ENABLED", True)
+# Maximum number of scheduled query result rows forwarded into a workflow
+# (Temporal payloads are capped at ~2MB; excess rows are dropped with a warning).
+TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS", 200)
+# Per-activity timeout in seconds for AI chat sessions run by workflows.
+TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
 
 # Timeout in seconds for the overall FastAPI request handling. Requests that
 # exceed this limit receive a 504 response.

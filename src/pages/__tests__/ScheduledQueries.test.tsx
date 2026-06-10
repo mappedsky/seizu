@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ScheduledQueries from 'src/pages/ScheduledQueries';
@@ -106,5 +112,55 @@ describe('ScheduledQueries', () => {
     await waitFor(() =>
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/config'),
     );
+  });
+
+  it('renders the action config field warning in the edit dialog', async () => {
+    const warning =
+      'This workflow runs headlessly WITHOUT interactive confirmation.';
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        scheduled_query_action_types: ['temporal'],
+        scheduled_query_action_schemas: {
+          temporal: [
+            {
+              name: 'accept_confirmation_bypass',
+              label: 'I accept',
+              type: 'boolean',
+              required: true,
+              default: false,
+              warning,
+            },
+          ],
+        },
+      }),
+    } as Response);
+    mockUseScheduledQueriesList.mockReturnValue({
+      scheduledQueries: [
+        {
+          ...SCHEDULED_QUERY,
+          actions: [
+            {
+              action_type: 'temporal',
+              action_config: { workflow: 'cve_repo_report' },
+            },
+          ],
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+
+    render(<ScheduledQueries />, { wrapper: Wrapper });
+    await waitFor(() =>
+      expect(global.fetch).toHaveBeenCalledWith('/api/v1/config'),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByText('Edit'));
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.getByLabelText('I accept *')).toBeInTheDocument();
   });
 });

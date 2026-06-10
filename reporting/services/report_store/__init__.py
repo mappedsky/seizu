@@ -161,6 +161,7 @@ async def get_or_create_user(
     email: str | None = None,
     display_name: str | None = None,
     preferred_username: str | None = None,
+    role: str | None = None,
 ) -> User:
     return await get_store().get_or_create_user(
         sub=sub,
@@ -168,6 +169,7 @@ async def get_or_create_user(
         email=email,
         display_name=display_name,
         preferred_username=preferred_username,
+        role=role,
     )
 
 

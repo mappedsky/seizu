@@ -198,6 +198,23 @@ Requires the following environment variables (see [StatsD configuration](backend
             - severity
 ```
 
+### temporal
+
+The `temporal` action starts a [Temporal](https://temporal.io/) workflow with the query results. See [Temporal workflows](temporal-workflows.html) for the full architecture, including the AI-session workflow that evaluates CVEs per repository.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| workflow | Yes | The registered workflow to start (e.g. `cve_repo_report`). |
+| accept\_confirmation\_bypass | Yes | Acknowledgement checkbox. Workflows run headlessly as the scheduled query's creator and execute their declared mutating tools without interactive confirmation; the action is invalid until this is checked. |
+| max\_rows | No | Result rows beyond this limit are dropped before starting the workflow. Default: `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`. |
+| query\_return\_attribute | No | The attribute in each result row to forward. Default: `details` |
+
+Requires the following environment variables:
+
+- `TEMPORAL_ADDRESS`: host:port of the Temporal frontend (gRPC).
+- `TEMPORAL_NAMESPACE`: Temporal namespace (default `default`).
+- `TEMPORAL_TASK_QUEUE`: task queue shared with the Seizu temporal worker (default `seizu-workflows`).
+
 ### log
 
 The `log` action logs query results using Python's standard logger. Intended for development and testing; not enabled by default.

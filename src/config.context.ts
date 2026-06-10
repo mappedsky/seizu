@@ -94,6 +94,7 @@ export interface ActionConfigFieldDef {
   description?: string;
   default?: unknown;
   options?: string[];
+  warning?: string;
 }
 
 export interface SeizuConfig {

@@ -1,0 +1,189 @@
+"""Scheduled query action that starts a Temporal workflow with the results.
+
+The workflow runs headlessly as the scheduled query's creator and may execute
+its declared confirmation-bypass tools without interactive approval (see
+``reporting.temporal_workflows.WORKFLOW_REGISTRY``), which is why the action
+config requires an explicit acknowledgement checkbox.
+
+``temporalio`` is imported lazily inside functions so the web process can
+import this module for its action schema without pulling in the SDK.
+"""
+
+import asyncio
+import logging
+from typing import Any
+
+from reporting import settings
+from reporting.schema.report_config import ActionConfigFieldDef
+from reporting.schema.reporting_config import ScheduledQueryAction
+from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowSpec, get_workflow_spec
+
+logger = logging.getLogger(__name__)
+
+
+def action_name() -> str:
+    return "temporal"
+
+
+def _workflow_descriptions() -> str:
+    return " ".join(
+        f"{name}: bypasses confirmation for {', '.join(sorted(spec.confirmation_bypass_tools)) or 'no tools'}."
+        for name, spec in sorted(WORKFLOW_REGISTRY.items())
+    )
+
+
+def action_config_schema() -> list[ActionConfigFieldDef]:
+    return [
+        ActionConfigFieldDef(
+            name="workflow",
+            label="Workflow",
+            type="select",
+            required=True,
+            options=sorted(WORKFLOW_REGISTRY),
+            description=f"Temporal workflow to start with the query results. {_workflow_descriptions()}",
+        ),
+        ActionConfigFieldDef(
+            name="accept_confirmation_bypass",
+            label="I understand and accept that this workflow runs without interactive confirmation",
+            type="boolean",
+            required=True,
+            default=False,
+            warning=(
+                "This workflow runs headlessly as this scheduled query's creator and executes its"
+                " declared mutating tools WITHOUT interactive confirmation. The creator's RBAC"
+                " permissions still apply, and tools outside the declared list fail closed."
+            ),
+        ),
+        ActionConfigFieldDef(
+            name="max_rows",
+            label="Max result rows",
+            type="number",
+            required=False,
+            default=settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS,
+            description="Result rows beyond this limit are dropped before starting the workflow (payload size cap).",
+        ),
+        ActionConfigFieldDef(
+            name="query_return_attribute",
+            label="Query return attribute",
+            type="string",
+            required=False,
+            description="Top-level attribute of each result row that contains the data map.",
+            default="details",
+        ),
+    ]
+
+
+async def setup() -> None:
+    return
+
+
+def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, results: list[dict[str, Any]]) -> None:
+    if not results:
+        return
+    # handle_results runs via asyncio.to_thread (no loop in this thread), so a
+    # private event loop per dispatch is safe; the Temporal client binds to it.
+    asyncio.run(_start_workflow(scheduled_query_id, action, results))
+
+
+def _project_rows(
+    scheduled_query_id: str,
+    action: ScheduledQueryAction,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    attr = action.action_config.get("query_return_attribute", "details")
+    max_rows = action.action_config.get("max_rows") or settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS
+    rows = [result[attr] for result in results if isinstance(result.get(attr), dict)]
+    if len(rows) > int(max_rows):
+        logger.warning(
+            "Truncating scheduled query results for workflow",
+            extra={
+                "scheduled_query_id": scheduled_query_id,
+                "result_count": len(rows),
+                "max_rows": int(max_rows),
+            },
+        )
+        rows = rows[: int(max_rows)]
+    return rows
+
+
+def _validated_spec(scheduled_query_id: str, action: ScheduledQueryAction) -> WorkflowSpec | None:
+    """Defense in depth against records written before validation existed."""
+    if action.action_config.get("accept_confirmation_bypass") is not True:
+        logger.error(
+            "Refusing to start workflow: confirmation bypass not accepted",
+            extra={"scheduled_query_id": scheduled_query_id},
+        )
+        return None
+    workflow_name = action.action_config.get("workflow")
+    spec = get_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
+    if spec is None:
+        logger.error(
+            "Refusing to start unknown workflow",
+            extra={"scheduled_query_id": scheduled_query_id, "workflow": workflow_name},
+        )
+    return spec
+
+
+async def _start_workflow(
+    scheduled_query_id: str,
+    action: ScheduledQueryAction,
+    results: list[dict[str, Any]],
+) -> None:
+    import temporalio.client
+    import temporalio.exceptions
+
+    from reporting.services import report_store
+    from reporting.temporal_workflows.shared import CveRepoReportInput
+
+    spec = _validated_spec(scheduled_query_id, action)
+    if spec is None:
+        return
+
+    item = await report_store.get_scheduled_query(scheduled_query_id)
+    if item is None:
+        logger.error(
+            "Scheduled query not found; cannot resolve creator identity",
+            extra={"scheduled_query_id": scheduled_query_id},
+        )
+        return
+
+    rows = _project_rows(scheduled_query_id, action, results)
+    workflow_input = CveRepoReportInput(
+        scheduled_query_id=scheduled_query_id,
+        creator_user_id=item.created_by,
+        rows=rows,
+        confirmation_bypass_tools=sorted(spec.confirmation_bypass_tools),
+        chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
+    )
+    # last_scheduled_at identifies this run (the lock sets it before the query
+    # executes), making redelivery of the same run idempotent.
+    workflow_id = f"seizu:{spec.name}:{scheduled_query_id}:{item.last_scheduled_at}"
+
+    client = await temporalio.client.Client.connect(
+        settings.TEMPORAL_ADDRESS,
+        namespace=settings.TEMPORAL_NAMESPACE,
+    )
+    try:
+        await client.start_workflow(
+            spec.name,
+            workflow_input,
+            id=workflow_id,
+            task_queue=settings.TEMPORAL_TASK_QUEUE,
+        )
+    except temporalio.exceptions.WorkflowAlreadyStartedError:
+        logger.info(
+            "Workflow already started for this run",
+            extra={"scheduled_query_id": scheduled_query_id, "workflow_id": workflow_id},
+        )
+        return
+    logger.info(
+        "Started workflow",
+        extra={
+            "type": "AUDIT",
+            "scheduled_query_id": scheduled_query_id,
+            "workflow_id": workflow_id,
+            "workflow": spec.name,
+            "creator_user_id": item.created_by,
+            "row_count": len(rows),
+        },
+    )

@@ -154,12 +154,17 @@ class ReportStore(ABC):
         email: str | None = None,
         display_name: str | None = None,
         preferred_username: str | None = None,
+        role: str | None = None,
     ) -> User:
         """Get an existing user by (iss, sub), or create one on first login.
 
-        Existing users are returned as-is; no fields are updated.
-        Profile updates (email drift, last_login) are done separately via
-        ``update_user_profile``, called only from the ``/api/v1/me`` route.
+        Existing users are returned as-is, with one security-relevant
+        exception: ``role`` is the role claim observed on this request and is
+        synced (written only on drift, including clearing to None when the
+        claim is absent) so headless callers can later resolve the user's
+        permissions without a token. Other profile updates (email drift,
+        last_login) are done separately via ``update_user_profile``, called
+        only from the ``/api/v1/me`` route.
         Returns the User model.
         """
 

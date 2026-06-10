@@ -1,0 +1,54 @@
+"""Workflow/activity payload dataclasses and deterministic helpers.
+
+Imported by workflow code inside the Temporal sandbox — keep this module free
+of I/O and heavy imports (dataclasses and pure functions only).
+"""
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class CveRepoReportInput:
+    scheduled_query_id: str
+    creator_user_id: str
+    # Projected query result rows (the per-row data map, e.g. the "details"
+    # attribute), each expected to carry a "repo" key.
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    # The workflow's declared bypass list, resolved from WORKFLOW_REGISTRY by
+    # the action module — never from user-supplied action config.
+    confirmation_bypass_tools: list[str] = field(default_factory=list)
+    chat_timeout_seconds: int = 600
+
+
+@dataclass
+class RepoChatInput:
+    repo: str
+    cves: list[dict[str, Any]]
+    creator_user_id: str
+    scheduled_query_id: str
+    confirmation_bypass_tools: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RepoChatResult:
+    repo: str
+    thread_id: str | None
+    summary: str
+    error: str | None = None
+
+
+@dataclass
+class CveRepoReportResult:
+    per_repo: list[RepoChatResult] = field(default_factory=list)
+
+
+def group_rows_by_repo(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group result rows by their "repo" key; rows without one are dropped."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        repo = row.get("repo")
+        if not isinstance(repo, str) or not repo:
+            continue
+        grouped.setdefault(repo, []).append(row)
+    return grouped

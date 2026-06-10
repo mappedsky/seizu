@@ -449,6 +449,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             current_user,
             session_key=_client_thread_id_from_config(config),
             batch_id=batch_id,
+            confirmation_bypass=_confirmation_bypass_from_config(config),
         )
         for result in results:
             detail_data = _tool_call_detail_data(result)
@@ -1542,15 +1543,28 @@ async def _run_tool_call_batch(
     current_user: CurrentUser | None,
     session_key: str | None = None,
     batch_id: str | None = None,
+    confirmation_bypass: frozenset[str] | None = None,
 ) -> list[ToolCallResult]:
     max_parallel = settings.CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
 
     async def run_one(request: ToolCallRequest) -> ToolCallResult:
         if semaphore is None:
-            return await _run_tool_call(request, current_user, session_key=session_key, batch_id=batch_id)
+            return await _run_tool_call(
+                request,
+                current_user,
+                session_key=session_key,
+                batch_id=batch_id,
+                confirmation_bypass=confirmation_bypass,
+            )
         async with semaphore:
-            return await _run_tool_call(request, current_user, session_key=session_key, batch_id=batch_id)
+            return await _run_tool_call(
+                request,
+                current_user,
+                session_key=session_key,
+                batch_id=batch_id,
+                confirmation_bypass=confirmation_bypass,
+            )
 
     return list(await asyncio.gather(*(run_one(request) for request in requests)))
 
@@ -1599,6 +1613,7 @@ async def _run_tool_call(
     *,
     session_key: str | None = None,
     batch_id: str | None = None,
+    confirmation_bypass: frozenset[str] | None = None,
 ) -> ToolCallResult:
     if request.spec.kind == "skill":
         string_arguments = {key: str(value) for key, value in request.arguments.items()}
@@ -1616,18 +1631,33 @@ async def _run_tool_call(
             tools_required=outcome.tools_required,
         )
 
-    outcome = await mcp_runtime.call_tool_for_chat(
-        current_user,
-        request.name,
-        request.arguments,
-        gate_permission=Permission.CHAT_TOOLS_CALL,
-        chat_safe_only=True,
-        result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
-        result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
-        confirmation_source="chat",
-        confirmation_session_key=session_key,
-        confirmation_batch_id=batch_id,
-    )
+    if confirmation_bypass is not None:
+        # Headless turn (no interactive approver): the declared bypass set
+        # replaces the confirmation flow; undeclared mutating tools fail closed
+        # inside mcp_runtime.
+        outcome = await mcp_runtime.call_tool_for_chat(
+            current_user,
+            request.name,
+            request.arguments,
+            gate_permission=Permission.CHAT_TOOLS_CALL,
+            chat_safe_only=True,
+            result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
+            result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+            confirmation_bypass_tools=confirmation_bypass,
+        )
+    else:
+        outcome = await mcp_runtime.call_tool_for_chat(
+            current_user,
+            request.name,
+            request.arguments,
+            gate_permission=Permission.CHAT_TOOLS_CALL,
+            chat_safe_only=True,
+            result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
+            result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+            confirmation_source="chat",
+            confirmation_session_key=session_key,
+            confirmation_batch_id=batch_id,
+        )
     return ToolCallResult(
         request=request,
         content=_idempotent_success_content(request, outcome.text),
@@ -2329,6 +2359,24 @@ def _client_thread_id_from_config(config: RunnableConfig) -> str | None:
         return None
     thread_id = configurable.get("client_thread_id")
     return thread_id if isinstance(thread_id, str) else None
+
+
+def _confirmation_bypass_from_config(config: RunnableConfig) -> frozenset[str] | None:
+    """Declared confirmation-bypass tool names for headless (workflow) turns.
+
+    Present (possibly empty) only when the graph is driven by a headless
+    caller that has no interactive approver; interactive chat leaves it unset
+    and keeps the confirmation flow.
+    """
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    bypass = configurable.get("confirmation_bypass_tools")
+    if bypass is None:
+        return None
+    if isinstance(bypass, (list, tuple, set, frozenset)):
+        return frozenset(name for name in bypass if isinstance(name, str))
+    return None
 
 
 def _resume_confirmation_id(messages: list[Any]) -> str | None:

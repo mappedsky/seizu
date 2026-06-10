@@ -22,4 +22,9 @@ def validate_action_configs(actions: list[dict[str, Any]]) -> str | None:
             value = action_config.get(field.name)
             if value is None or value == "" or value == []:
                 return f"Action type '{action_type}' is missing required field '{field.name}'."
+            # A required boolean is an explicit acknowledgement (e.g. the
+            # temporal action's confirmation-bypass acceptance): it must be
+            # checked, not merely present.
+            if field.type == "boolean" and value is not True:
+                return f"Action type '{action_type}' requires '{field.name}' to be accepted."
     return None

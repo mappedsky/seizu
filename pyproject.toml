@@ -36,6 +36,7 @@ dependencies = [
     "slack-sdk>=3.41.0",
     "snowflake-id>=1.0.2",
     "sqlmodel>=0.0.38",
+    "temporalio>=1.9.0",
     "typer>=0.25.0",
     "uvicorn>=0.46.0",
     "langgraph-checkpoint-aws>=1.0.7",
@@ -48,6 +49,7 @@ dependencies = [
 seizu = "seizu_cli.main:app"
 seizu-server = "reporting.cli:main"
 seizu-scheduled-queries = "reporting.scheduled_queries:main"
+seizu-temporal-worker = "reporting.temporal_worker:main"
 
 [dependency-groups]
 dev = [

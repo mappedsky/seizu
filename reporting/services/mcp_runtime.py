@@ -254,6 +254,7 @@ async def call_tool_for_chat(
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
+    confirmation_bypass_tools: frozenset[str] | None = None,
 ) -> ChatActionOutcome:
     """Chat-oriented tool call returning the body together with a block reason.
 
@@ -261,6 +262,12 @@ async def call_tool_for_chat(
     needs to distinguish authorization failures from a tool's natural output
     so it can stop the turn instead of letting the model retry. The block
     reason is the structured replacement for matching error strings.
+
+    ``confirmation_bypass_tools`` puts the call in headless mode (no
+    interactive approver, e.g. a Temporal workflow session): confirmation-
+    gated tools named in the set execute without confirmation, every other
+    confirmation-gated tool fails closed. Pass the workflow's declared bypass
+    list, never user-supplied input.
     """
     content, blocked = await _call_tool_core(
         current_user,
@@ -274,6 +281,7 @@ async def call_tool_for_chat(
         confirmation_source=confirmation_source,
         confirmation_session_key=confirmation_session_key,
         confirmation_batch_id=confirmation_batch_id,
+        confirmation_bypass_tools=confirmation_bypass_tools,
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
 
@@ -291,6 +299,7 @@ async def _call_tool_core(
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
+    confirmation_bypass_tools: frozenset[str] | None = None,
 ) -> tuple[list[TextContent], ChatBlockReason | None]:
     args = arguments or {}
     perms = _permissions(current_user, permissions)
@@ -316,7 +325,31 @@ async def _call_tool_core(
         missing_args = _missing_required_arguments(builtin.input_schema, args)
         if missing_args:
             return text_response({"error": f"Missing required argument(s): {', '.join(missing_args)}"}), None
-        if builtin.confirmation is not None and confirmation_source is not None:
+        if builtin.confirmation is not None and confirmation_bypass_tools is not None:
+            # Headless mode (e.g. a Temporal workflow session): there is no
+            # interactive approver, so only tools in the workflow's declared
+            # bypass list may run; everything else fails closed.
+            if name not in confirmation_bypass_tools:
+                return text_response(
+                    {
+                        "error": f"Tool '{name}' requires interactive confirmation and is not"
+                        " in this workflow's declared bypass list"
+                    }
+                ), ChatBlockReason.CONFIRMATION_REQUIRED
+            if current_user is None:
+                return text_response(
+                    {"error": "Confirmation bypass requires an authenticated user"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            logger.info(
+                "Confirmation bypassed by workflow declaration",
+                extra={
+                    "type": "AUDIT",
+                    "tool": name,
+                    "user": current_user.user.user_id,
+                    "source": "workflow",
+                },
+            )
+        elif builtin.confirmation is not None and confirmation_source is not None:
             # Fail-closed: a mutating tool was reached via a source that requires
             # confirmation but no session key is available to scope the record.
             if confirmation_session_key is None:
