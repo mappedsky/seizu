@@ -8,12 +8,7 @@ updates:
       day: "monday"
       time: "07:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    groups:
-      python-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "bun"
     directory: "/"
@@ -22,12 +17,7 @@ updates:
       day: "monday"
       time: "07:30"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    groups:
-      frontend-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "pip"
     directory: "/docs"
@@ -36,12 +26,7 @@ updates:
       day: "monday"
       time: "08:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
-    groups:
-      docs-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -50,12 +35,7 @@ updates:
       day: "monday"
       time: "08:30"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
-    groups:
-      github-actions-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -64,7 +44,7 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "docker"
     directory: "/.config/dev/dynamodb"
@@ -73,7 +53,7 @@ updates:
       day: "monday"
       time: "09:15"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "docker-compose"
     directory: "/"
@@ -82,7 +62,7 @@ updates:
       day: "monday"
       time: "09:30"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "pre-commit"
     directory: "/"
@@ -91,9 +71,4 @@ updates:
       day: "monday"
       time: "10:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 3
-    groups:
-      pre-commit-minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+    open-pull-requests-limit: 0
