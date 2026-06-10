@@ -41,6 +41,15 @@ def int_env(var_name: str, default: int = 0) -> int:
     return int(getenv(var_name, default))
 
 
+def float_env(var_name: str, default: float = 0.0) -> float:
+    """
+    Get an environment variable coerced to a float.
+    This has the same arguments as bool_env. If a value cannot be coerced to a
+    float, a ValueError will be raised.
+    """
+    return float(getenv(var_name, default))
+
+
 def str_env(var_name: str, default: str = "") -> str:
     """
     Get an environment variable as a string.

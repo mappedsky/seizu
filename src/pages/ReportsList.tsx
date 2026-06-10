@@ -9,7 +9,6 @@ import {
   Box,
   Button,
   Chip,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -20,6 +19,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import Add from '@mui/icons-material/Add';
 import BadgeIcon from '@mui/icons-material/Badge';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -555,7 +555,7 @@ function ReportsList() {
             onClick={handleCreate}
             disabled={creating || !newName.trim()}
           >
-            {creating ? <CircularProgress size={20} /> : 'Create'}
+            {creating ? <ConstellationSpinner size={20} /> : 'Create'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -593,7 +593,7 @@ function ReportsList() {
             onClick={handleCloneConfirm}
             disabled={cloning || !cloneName.trim()}
           >
-            {cloning ? <CircularProgress size={20} /> : 'Clone'}
+            {cloning ? <ConstellationSpinner size={20} /> : 'Clone'}
           </Button>
         </DialogActions>
       </Dialog>

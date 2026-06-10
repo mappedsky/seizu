@@ -2,6 +2,8 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from reporting.schema.chat import ChatSessionItem
+from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
     SkillsetListItem,
@@ -60,6 +62,11 @@ def get_store() -> ReportStore:
 
 async def initialize() -> None:
     await get_store().initialize()
+
+
+def generate_id() -> str:
+    """Return a new Snowflake ID from the configured store backend."""
+    return get_store().generate_id()
 
 
 async def list_reports(user_id: str | None = None) -> list[ReportListItem]:
@@ -617,3 +624,112 @@ async def list_role_versions(role_id: str) -> list[RoleVersion]:
 
 async def get_role_version(role_id: str, version: int) -> RoleVersion | None:
     return await get_store().get_role_version(role_id, version)
+
+
+# ---------------------------------------------------------------------------
+# Chat session convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def list_chat_sessions(user_id: str, limit: int) -> list[ChatSessionItem]:
+    return await get_store().list_chat_sessions(user_id, limit=limit)
+
+
+async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
+    return await get_store().get_chat_session(user_id, thread_id)
+
+
+async def create_chat_session(user_id: str, title: str) -> ChatSessionItem:
+    return await get_store().create_chat_session(user_id, title)
+
+
+async def touch_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
+    return await get_store().touch_chat_session(user_id, thread_id)
+
+
+async def update_chat_session_title(user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
+    return await get_store().update_chat_session_title(user_id, thread_id, title)
+
+
+async def delete_chat_session(user_id: str, thread_id: str) -> bool:
+    return await get_store().delete_chat_session(user_id, thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Action confirmation convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def create_action_confirmation(confirmation: ActionConfirmation) -> ActionConfirmation:
+    return await get_store().create_action_confirmation(confirmation)
+
+
+async def get_action_confirmation(
+    confirmation_id: str,
+    user_id: str | None = None,
+) -> ActionConfirmation | None:
+    return await get_store().get_action_confirmation(confirmation_id, user_id=user_id)
+
+
+async def list_action_confirmations(
+    user_id: str,
+    source: ConfirmationSource,
+    session_key: str,
+    status: str | None = None,
+) -> list[ActionConfirmation]:
+    return await get_store().list_action_confirmations(
+        user_id=user_id,
+        source=source,
+        session_key=session_key,
+        status=status,
+    )
+
+
+async def list_batch_action_confirmations(user_id: str, batch_id: str) -> list[ActionConfirmation]:
+    return await get_store().list_batch_action_confirmations(user_id=user_id, batch_id=batch_id)
+
+
+async def decide_action_confirmation(
+    confirmation_id: str,
+    user_id: str,
+    decision: ConfirmationDecision,
+) -> ActionConfirmation | None:
+    return await get_store().decide_action_confirmation(
+        confirmation_id=confirmation_id,
+        user_id=user_id,
+        decision=decision,
+    )
+
+
+async def claim_action_confirmation_for_execution(
+    confirmation_id: str,
+    user_id: str,
+) -> ActionConfirmation | None:
+    return await get_store().claim_action_confirmation_for_execution(
+        confirmation_id=confirmation_id,
+        user_id=user_id,
+    )
+
+
+async def find_action_confirmation_grant(
+    user_id: str,
+    source: ConfirmationSource,
+    session_key: str,
+    tool_name: str,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    arguments_hash: str,
+    statuses: tuple[str, ...] = ("approved", "denied"),
+) -> ActionConfirmation | None:
+    return await get_store().find_action_confirmation_grant(
+        user_id=user_id,
+        source=source,
+        session_key=session_key,
+        tool_name=tool_name,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        arguments_hash=arguments_hash,
+        statuses=statuses,
+    )

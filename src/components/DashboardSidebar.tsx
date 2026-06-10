@@ -5,6 +5,7 @@ import Dashboard from '@mui/icons-material/Dashboard';
 import Insights from '@mui/icons-material/Insights';
 import Article from '@mui/icons-material/Article';
 import Terminal from '@mui/icons-material/Terminal';
+import Chat from '@mui/icons-material/Chat';
 import Schedule from '@mui/icons-material/Schedule';
 import Extension from '@mui/icons-material/Extension';
 import Psychology from '@mui/icons-material/Psychology';
@@ -13,6 +14,7 @@ import NavItem, { NavItemData } from 'src/components/NavItem';
 import Hidden from 'src/components/Hidden';
 import { useReportsList } from 'src/hooks/useReportsApi';
 import { usePermissions } from 'src/hooks/usePermissions';
+import { useFeature } from 'src/features.context';
 import {
   DASHBOARD_SIDEBAR_EXPANDED_WIDTH,
   DASHBOARD_SIDEBAR_WIDTH_VAR,
@@ -32,6 +34,8 @@ function DashboardSidebar({
   const theme = useTheme();
   const { reports } = useReportsList();
   const hasPermission = usePermissions();
+  const chatEnabled = useFeature('chat');
+  const canUseChat = chatEnabled && hasPermission('chat:use');
   const logoSrc = collapsed
     ? theme.palette.mode === 'dark'
       ? '/static/images/logo-mark.svg'
@@ -46,7 +50,6 @@ function DashboardSidebar({
       title: report.name,
       icon: Article,
     }));
-
   const items: NavItemData[] = [
     {
       href: '/app/dashboard',
@@ -65,6 +68,15 @@ function DashboardSidebar({
             href: '/app/query-console',
             icon: Terminal,
             title: 'Query Console',
+          },
+        ]
+      : []),
+    ...(canUseChat
+      ? [
+          {
+            href: '/app/chat',
+            icon: Chat,
+            title: 'Chat',
           },
         ]
       : []),

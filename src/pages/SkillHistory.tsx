@@ -26,6 +26,7 @@ import {
   SkillVersion,
   useSkillMutations,
   useSkillVersionsList,
+  mcpNameForSkill,
 } from 'src/hooks/useSkillsetsApi';
 import { useToolCatalog } from 'src/hooks/useToolsetsApi';
 import ListTable, {
@@ -58,6 +59,18 @@ function SkillVersionDetailDialog({
       <DialogTitle>{version.name}</DialogTitle>
       <DialogContent dividers>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Box>
+            <Typography
+              variant="subtitle2"
+              color="text.secondary"
+              sx={{ mb: 0.5 }}
+            >
+              Slug
+            </Typography>
+            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+              {mcpNameForSkill(version)}
+            </Typography>
+          </Box>
           <Box>
             <Typography
               variant="subtitle2"

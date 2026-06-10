@@ -20,6 +20,21 @@ async def test_config(mocker):
     assert "schema" not in ret_json
 
 
+async def test_config_features_chat_enabled_by_default(mocker):
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/config")
+    assert ret.json()["features"]["chat"] is True
+
+
+async def test_config_features_reflect_chat_disabled(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", False)
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/config")
+    assert ret.json()["features"]["chat"] is False
+
+
 async def test_config_auth_required_true(mocker):
     mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
     app = _make_app()

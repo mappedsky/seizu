@@ -29,7 +29,17 @@ class ValidationResponse(BaseModel):
     warnings: list[str]
 
 
+class GraphIndex(BaseModel):
+    name: str
+    type: str
+    entity_type: str
+    labels_or_types: list[str]
+    properties: list[str]
+    state: str
+
+
 class GraphSchemaResponse(BaseModel):
     labels: list[str]
     relationship_types: list[str]
     property_keys: list[str]
+    indexes: list[GraphIndex] = []

@@ -10,6 +10,7 @@ import {
   ToolVersion,
   useToolVersionsList,
   useToolMutations,
+  mcpNameForTool,
 } from 'src/hooks/useToolsetsApi';
 import ListTable, {
   ListTableColumn,
@@ -33,6 +34,7 @@ const commentColumnSx = { ...listTableSecondaryCellSx, width: '28%' };
 function toolVersionViewData(version: ToolVersion): ToolViewData {
   return {
     name: version.name,
+    slug: mcpNameForTool(version),
     version: version.version,
     description: version.description,
     cypher: version.cypher,

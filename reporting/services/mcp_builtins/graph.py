@@ -11,20 +11,9 @@ from reporting.services.query_validator import validate_query
 
 GROUP = "graph"
 
-_LABELS_QUERY = "CALL db.labels() YIELD label RETURN label ORDER BY label"
-_RELS_QUERY = "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS type ORDER BY type"
-_PROPS_QUERY = "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey AS key ORDER BY key"
-
 
 async def _handle_schema(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
-    labels_results = await reporting_neo4j.run_query(_LABELS_QUERY)
-    rels_results = await reporting_neo4j.run_query(_RELS_QUERY)
-    props_results = await reporting_neo4j.run_query(_PROPS_QUERY)
-    return {
-        "labels": [r["label"] for r in labels_results],
-        "relationship_types": [r["type"] for r in rels_results],
-        "property_keys": [r["key"] for r in props_results],
-    }
+    return await reporting_neo4j.fetch_graph_schema()
 
 
 async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -39,6 +28,32 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     return {"results": serialized, "warnings": validation.warnings}
 
 
+async def _handle_validate_query(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    cypher = str(args.get("query", "")).strip()
+    if not cypher:
+        return {"error": "query parameter is required"}
+    validation = await validate_query(cypher)
+    return {
+        "valid": not validation.has_errors,
+        "errors": validation.errors,
+        "warnings": validation.warnings,
+    }
+
+
+async def _handle_explain(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    cypher = str(args.get("query", "")).strip()
+    if not cypher:
+        return {"error": "query parameter is required"}
+    # Validate before planning so the same guards as graph__query apply (no
+    # writes, no disallowed procedures/SSRF) — EXPLAIN must not become a way to
+    # plan a query the validator would otherwise reject.
+    validation = await validate_query(cypher)
+    if validation.has_errors:
+        return {"errors": validation.errors, "warnings": validation.warnings}
+    plan = await reporting_neo4j.explain_query(cypher)
+    return {"plan": plan, "warnings": validation.warnings}
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -46,7 +61,10 @@ GROUP_DEF = BuiltinGroup(
             name="graph__schema",
             group=GROUP,
             description=(
-                "Returns the available node labels, relationship types, and property keys in the Neo4j graph database."
+                "Returns the available node labels, relationship types, property keys, and indexes "
+                "(name, type, entity type, labels/types, properties, state) in the Neo4j graph database. "
+                "Use the indexes to write queries that match on indexed labels/properties instead of "
+                "scanning the whole graph."
             ),
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.QUERY_EXECUTE.value],
@@ -72,6 +90,52 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.QUERY_EXECUTE.value],
             handler=_handle_query,
+        ),
+        BuiltinTool(
+            name="graph__validate_query",
+            group=GROUP,
+            description=(
+                "Validate a read-only Cypher query without executing it. Returns "
+                "{valid, errors, warnings}: errors block (write operations, disallowed "
+                "procedures, syntax), warnings do not. Use this to check a query before "
+                "saving it as a toolset tool — toolset tools reject write/invalid Cypher, "
+                "so validating first lets you fix issues before the (mutating) create call."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A read-only Cypher query to validate.",
+                    }
+                },
+                "required": ["query"],
+            },
+            required_permissions=[Permission.QUERY_EXECUTE.value],
+            handler=_handle_validate_query,
+        ),
+        BuiltinTool(
+            name="graph__explain",
+            group=GROUP,
+            description=(
+                "Return Neo4j's execution plan for a read-only Cypher query without running it. "
+                "The query is validated first (same guards as graph__query — writes and disallowed "
+                "procedures are rejected), then EXPLAIN is run and the planner's plan is returned as "
+                "{plan, warnings}. Use the plan (operator types, estimated rows, index usage) to check "
+                "that a query hits indexes and avoids full scans before saving or running it."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "A read-only Cypher query to plan with EXPLAIN.",
+                    }
+                },
+                "required": ["query"],
+            },
+            required_permissions=[Permission.QUERY_EXECUTE.value],
+            handler=_handle_explain,
         ),
     ],
 )

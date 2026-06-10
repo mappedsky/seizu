@@ -13,6 +13,7 @@
 //      `html: true` on the renderer.
 import * as React from 'react';
 import Markdoc, { Tag, nodes } from '@markdoc/markdoc';
+import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Paper from '@mui/material/Paper';
 import Table from '@mui/material/Table';
@@ -21,6 +22,8 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
+import Typography from '@mui/material/Typography';
+import { brand } from 'src/theme/brand';
 
 function MarkdocTable({ children }: { children?: React.ReactNode }) {
   return (
@@ -60,6 +63,154 @@ function MarkdocCell({ children }: { children?: React.ReactNode }) {
   );
 }
 
+function MarkdocDetails({
+  summary = '',
+  children,
+}: {
+  summary?: string;
+  children?: React.ReactNode;
+}) {
+  let decodedSummary = summary;
+  try {
+    decodedSummary = decodeURIComponent(summary);
+  } catch {
+    // Directly authored Markdoc may contain a literal percent sign.
+  }
+  return (
+    <Box
+      component="details"
+      sx={{
+        border: 1,
+        borderColor: 'divider',
+        borderRadius: 1,
+        my: 1.25,
+        px: 1.5,
+      }}
+    >
+      <Typography
+        component="summary"
+        sx={{
+          cursor: 'pointer',
+          fontWeight: 600,
+          fontSize: 'inherit',
+          lineHeight: 'inherit',
+          py: 1,
+          userSelect: 'none',
+          '&:hover': { opacity: 0.8 },
+        }}
+      >
+        {decodedSummary}
+      </Typography>
+      <Box sx={{ pb: 0.5 }}>{children}</Box>
+    </Box>
+  );
+}
+
+function MarkdocContinuation() {
+  return (
+    <Box
+      aria-hidden="true"
+      sx={{
+        alignItems: 'center',
+        color: (theme) =>
+          theme.palette.mode === 'dark' ? brand.starlight : brand.starlightDark,
+        display: 'flex',
+        gap: 1,
+        my: 1.5,
+        '&::before, &::after': {
+          borderTop: 2,
+          borderColor: 'currentColor',
+          content: '""',
+          flex: 1,
+        },
+      }}
+    >
+      <Typography
+        component="span"
+        sx={{
+          color: 'inherit',
+          fontFamily: '"JetBrains Mono", monospace',
+          fontSize: '0.8em',
+          fontWeight: 700,
+          lineHeight: 1,
+        }}
+      >
+        ...
+      </Typography>
+    </Box>
+  );
+}
+
+// Preprocesses LLM-generated <details>/<summary> HTML blocks into Markdoc
+// {% details %} tag syntax so they render as collapsible sections.  Raw HTML
+// is blocked by Markdoc's html:false setting (intentional security constraint),
+// so this conversion is the safe way to support them.
+// eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+const DETAILS_CONTROL_RE = /[\u0000-\u001F\u007F]/g;
+// Matches the <details> opener through </summary>; body closing is found by
+// taking the last raw </details> before the next raw <details> opener. That
+// preserves inline "</details>" text in the body while still supporting
+// multiple sibling HTML details blocks.
+const DETAILS_OPEN_RE = /<details[^>]*>\s*<summary[^>]*>([\s\S]*?)<\/summary>/i;
+
+function detailsSummaryText(source: string): string {
+  const parsed = new DOMParser().parseFromString(source, 'text/html');
+  parsed.querySelectorAll('script, style').forEach((element) => {
+    element.remove();
+  });
+  return parsed.body.textContent ?? '';
+}
+
+function findDetailsCloseTag(
+  text: string,
+): { index: number; length: number } | null {
+  const nextOpenIndex = text.indexOf('<details');
+  const searchEnd = nextOpenIndex === -1 ? text.length : nextOpenIndex;
+  const closeIndex = text.lastIndexOf('</details>', searchEnd);
+  return closeIndex === -1
+    ? null
+    : { index: closeIndex, length: '</details>'.length };
+}
+
+function preprocessDetailsBlocks(source: string): string {
+  let result = '';
+  let remaining = source;
+
+  for (;;) {
+    const match = DETAILS_OPEN_RE.exec(remaining);
+    if (!match) {
+      result += remaining;
+      break;
+    }
+
+    const afterSummary = remaining.slice(match.index + match[0].length);
+    const closeTag = findDetailsCloseTag(afterSummary);
+
+    result += remaining.slice(0, match.index);
+
+    if (!closeTag) {
+      // No matching closing tag — leave this occurrence unchanged.
+      result += match[0];
+      remaining = afterSummary;
+    } else {
+      const rawSummary = match[1];
+      const summaryText = detailsSummaryText(rawSummary)
+        .replace(DETAILS_CONTROL_RE, '')
+        .trim();
+      // Escape Markdoc tag openers in the body so LLM content cannot inject
+      // registered tags (e.g. {% /details %} to escape the block, or
+      // {% continuation /%} to insert a spurious divider).
+      const body = afterSummary
+        .slice(0, closeTag.index)
+        .replace(/\{%/g, '\\{%');
+      result += `{% details summary="${encodeURIComponent(summaryText)}" %}\n${body.trim()}\n{% /details %}`;
+      remaining = afterSummary.slice(closeTag.index + closeTag.length);
+    }
+  }
+
+  return result;
+}
+
 const markdocComponents = {
   MuiLink: Link,
   MuiTable: MarkdocTable,
@@ -68,6 +219,8 @@ const markdocComponents = {
   MuiTableRow: TableRow,
   MuiTableHeadCell: MarkdocHeadCell,
   MuiTableCell: MarkdocCell,
+  MuiDetails: MarkdocDetails,
+  MuiContinuation: MarkdocContinuation,
 };
 
 const headingNode = {
@@ -188,12 +341,22 @@ const URL_CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]/g;
 function safeSubstitutedUrl(url: string): string {
   const normalized = url.replace(URL_CONTROL_CHARS_RE, '').trim();
   if (!normalized) return '#';
+  if (normalized.startsWith('//')) return '#';
   // Relative URLs (no scheme) are always safe — they resolve under the
   // current page's origin.
   if (!SCHEME_RE.test(normalized)) return normalized;
   if (ALLOWED_SUBSTITUTED_PROTO_RE.test(normalized)) return normalized;
   if (SAFE_DATA_IMAGE_RE.test(normalized)) return normalized;
   return '#';
+}
+
+function safeUntrustedUrl(url: string, { image }: { image: boolean }): string {
+  const normalized = url.replace(URL_CONTROL_CHARS_RE, '').trim();
+  if (!normalized) return '#';
+  if (normalized.startsWith('//')) return '#';
+  if (!SCHEME_RE.test(normalized)) return normalized;
+  if (image) return /^https?:/i.test(normalized) ? normalized : '#';
+  return ALLOWED_SUBSTITUTED_PROTO_RE.test(normalized) ? normalized : '#';
 }
 
 function substituteUrlVars(
@@ -226,6 +389,9 @@ const linkNode = {
         config.variables ?? {},
       );
       if (changed) attributes.href = safeSubstitutedUrl(value);
+      else if (config.untrustedUrls) {
+        attributes.href = safeUntrustedUrl(attributes.href, { image: false });
+      }
     }
     return new Tag(
       'MuiLink',
@@ -245,8 +411,15 @@ const imageNode = {
         config.variables ?? {},
       );
       if (changed) attributes.src = safeSubstitutedUrl(value);
+      else if (config.untrustedUrls) {
+        attributes.src = safeUntrustedUrl(attributes.src, { image: true });
+      }
     }
-    return new Tag('img', attributes);
+    return new Tag('img', {
+      loading: 'lazy',
+      referrerPolicy: 'no-referrer',
+      ...attributes,
+    });
   },
 };
 
@@ -264,22 +437,43 @@ const markdocNodes = {
   td: { ...nodes.td, render: 'MuiTableCell' },
 };
 
+const markdocTags = {
+  continuation: {
+    render: 'MuiContinuation',
+    selfClosing: true,
+  },
+  details: {
+    render: 'MuiDetails',
+    attributes: {
+      summary: { type: String, default: '' },
+    },
+  },
+};
+
 export interface MarkdocRendererProps {
   source: string;
   variables?: Record<string, string>;
+  untrustedUrls?: boolean;
 }
 
-export function MarkdocRenderer({ source, variables }: MarkdocRendererProps) {
+export function MarkdocRenderer({
+  source,
+  variables,
+  untrustedUrls = false,
+}: MarkdocRendererProps) {
   const rendered = React.useMemo(() => {
-    const ast = Markdoc.parse(source ?? '');
+    const processedSource = preprocessDetailsBlocks(source ?? '');
+    const ast = Markdoc.parse(processedSource);
     const content = Markdoc.transform(ast, {
       variables: variables ?? {},
       nodes: markdocNodes,
+      tags: markdocTags,
+      untrustedUrls,
     });
     return Markdoc.renderers.react(content, React, {
       components: markdocComponents,
     });
-  }, [source, variables]);
+  }, [source, variables, untrustedUrls]);
 
   return <>{rendered}</>;
 }

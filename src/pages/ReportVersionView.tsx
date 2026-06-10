@@ -5,11 +5,11 @@ import {
   Alert,
   Box,
   Button,
-  CircularProgress,
   Divider,
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
 import NavigateNextIcon from '@mui/icons-material/NavigateNext';
@@ -86,7 +86,7 @@ function ReportVersionView() {
   ) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }
@@ -211,11 +211,7 @@ function ReportVersionView() {
             <Button
               variant="contained"
               startIcon={
-                restoring ? (
-                  <CircularProgress size={16} color="inherit" />
-                ) : (
-                  <RestoreIcon />
-                )
+                restoring ? <ConstellationSpinner size={16} /> : <RestoreIcon />
               }
               onClick={handleRestore}
               disabled={restoring || nextVersion === null || !canWrite}

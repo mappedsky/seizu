@@ -1,6 +1,5 @@
-import { useState, useCallback, useContext, useRef } from 'react';
-import { AuthContext } from 'src/auth.context';
-import { AuthConfigContext } from 'src/authConfig.context';
+import { useState, useCallback } from 'react';
+import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 
 export interface QueryHistoryItem {
   history_id: string;
@@ -23,8 +22,7 @@ interface HistoryState {
 }
 
 export function useQueryHistory() {
-  const { accessToken } = useContext(AuthContext);
-  const { auth_required } = useContext(AuthConfigContext);
+  const { authReady, checkAuthReady, authHeaders } = useAuthHeaders();
   const [state, setState] = useState<HistoryState>({
     loading: false,
     error: null,
@@ -33,16 +31,11 @@ export function useQueryHistory() {
 
   const fetchHistory = useCallback(
     (page: number = 1, perPage: number = 20) => {
-      if (auth_required && !accessToken) return;
+      if (!checkAuthReady()) return;
       setState((s) => ({ ...s, loading: true, error: null }));
 
-      const headers: Record<string, string> = {};
-      if (accessToken) {
-        headers.Authorization = `Bearer ${accessToken}`;
-      }
-
       fetch(`/api/v1/query-history?page=${page}&per_page=${perPage}`, {
-        headers,
+        headers: authHeaders(),
       })
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -55,31 +48,23 @@ export function useQueryHistory() {
           setState({ loading: false, error: err, data: null });
         });
     },
-    [accessToken, auth_required],
+    [authHeaders, checkAuthReady],
   );
 
-  return { ...state, fetchHistory };
+  return { ...state, authReady, fetchHistory };
 }
 
 export function useFetchHistoryItem(): (
   historyId: string,
 ) => Promise<QueryHistoryItem | null> {
-  const { accessToken } = useContext(AuthContext);
-  const { auth_required } = useContext(AuthConfigContext);
-  const accessTokenRef = useRef(accessToken);
-  accessTokenRef.current = accessToken;
-  const authRequiredRef = useRef(auth_required);
-  authRequiredRef.current = auth_required;
+  const { checkAuthReady, authHeaders } = useAuthHeaders();
 
   return useCallback(
     async (historyId: string): Promise<QueryHistoryItem | null> => {
-      if (authRequiredRef.current && !accessTokenRef.current) return null;
-      const headers: Record<string, string> = {};
-      if (accessTokenRef.current)
-        headers.Authorization = `Bearer ${accessTokenRef.current}`;
+      if (!checkAuthReady()) return null;
       try {
         const res = await fetch(`/api/v1/query-history/${historyId}`, {
-          headers,
+          headers: authHeaders(),
         });
         if (!res.ok) return null;
         return res.json() as Promise<QueryHistoryItem>;
@@ -87,6 +72,6 @@ export function useFetchHistoryItem(): (
         return null;
       }
     },
-    [],
+    [authHeaders, checkAuthReady],
   );
 }

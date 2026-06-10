@@ -7,11 +7,26 @@ from pydantic import BaseModel, Field, field_validator
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
+# The MCP name is "{parent}__{child}" (toolset__tool / skillset__skill) and the
+# provider tool-call APIs cap names at 64 chars. Capping each component at 31
+# keeps every combination provider-safe (31 + len("__") + 31 == 64) without
+# coupling the parent and child budgets, so a long toolset id can't silently
+# push a tool past the limit and into an opaque hashed name.
+MAX_SLUG_COMPONENT_LEN = 31
+
 
 def validate_lower_snake_id(value: str) -> str:
-    """Validate immutable user-supplied IDs used in MCP names."""
+    """Validate lower_snake_case identifiers such as parameter names."""
     if not LOWER_SNAKE_ID_RE.fullmatch(value):
         raise ValueError("must be lower_snake_case matching ^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+    return value
+
+
+def validate_mcp_slug_component(value: str) -> str:
+    """Validate immutable user-supplied IDs used as MCP name components."""
+    validate_lower_snake_id(value)
+    if len(value) > MAX_SLUG_COMPONENT_LEN:
+        raise ValueError(f"must be at most {MAX_SLUG_COMPONENT_LEN} characters so the full MCP name stays under 64")
     return value
 
 
@@ -102,6 +117,107 @@ class ToolParamDef(BaseModel):
     @classmethod
     def coerce_default(cls, v: Any) -> Any:
         return _coerce_decimal(v)
+
+
+def _skip_cypher_quoted(cypher: str, start: int, quote: str) -> int:
+    """Return the first index after a quoted Cypher string or identifier."""
+    index = start + 1
+    while index < len(cypher):
+        char = cypher[index]
+        if char == "\\" and quote != "`":
+            index += 2
+            continue
+        if char == quote:
+            if index + 1 < len(cypher) and cypher[index + 1] == quote:
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return len(cypher)
+
+
+def _is_cypher_parameter_start(char: str) -> bool:
+    return char == "_" or "A" <= char <= "Z" or "a" <= char <= "z"
+
+
+def _is_cypher_parameter_char(char: str) -> bool:
+    return _is_cypher_parameter_start(char) or "0" <= char <= "9"
+
+
+def _read_quoted_cypher_parameter(cypher: str, start: int) -> tuple[str | None, int]:
+    """Read a parameter after ``$``, unescaping doubled identifier backticks."""
+    characters: list[str] = []
+    index = start + 1
+    while index < len(cypher):
+        char = cypher[index]
+        if char != "`":
+            characters.append(char)
+            index += 1
+            continue
+        if index + 1 < len(cypher) and cypher[index + 1] == "`":
+            characters.append("`")
+            index += 2
+            continue
+        return ("".join(characters) or None), index + 1
+    return None, len(cypher)
+
+
+def cypher_parameter_names(cypher: str) -> set[str]:
+    """The parameter names a Cypher query references ($name / $`name`).
+
+    A single-pass scan ignores string literals, quoted identifiers, and comments.
+    This keeps runtime linear for user-provided queries.
+    """
+    names: set[str] = set()
+    index = 0
+
+    while index < len(cypher):
+        char = cypher[index]
+        next_char = cypher[index + 1] if index + 1 < len(cypher) else ""
+
+        if char == "/" and next_char == "*":
+            close_index = cypher.find("*/", index + 2)
+            index = len(cypher) if close_index == -1 else close_index + 2
+            continue
+        if char == "/" and next_char == "/":
+            newline_index = cypher.find("\n", index + 2)
+            index = len(cypher) if newline_index == -1 else newline_index + 1
+            continue
+        if char in ("'", '"', "`"):
+            index = _skip_cypher_quoted(cypher, index, char)
+            continue
+        if char != "$" or not next_char:
+            index += 1
+            continue
+
+        if next_char == "`":
+            name, index = _read_quoted_cypher_parameter(cypher, index + 1)
+            if name is not None:
+                names.add(name)
+            continue
+
+        if _is_cypher_parameter_start(next_char):
+            name_end = index + 2
+            while name_end < len(cypher) and _is_cypher_parameter_char(cypher[name_end]):
+                name_end += 1
+            names.add(cypher[index + 1 : name_end])
+            index = name_end
+            continue
+
+        index += 1
+
+    return names
+
+
+def undeclared_cypher_parameters(cypher: str, parameters: list[ToolParamDef]) -> list[str]:
+    """Cypher ``$parameters`` not declared in the tool's parameter list.
+
+    A tool whose query references ``$x`` without declaring ``x`` fails at call
+    time with a Neo4j ParameterMissing error, so this must be rejected when the
+    tool is created or updated.
+    """
+    declared = {param.name for param in parameters}
+    return sorted(name for name in cypher_parameter_names(cypher) if name not in declared)
 
 
 class ToolsetListItem(BaseModel):
@@ -276,7 +392,7 @@ class CreateToolsetRequest(BaseModel):
     @field_validator("toolset_id")
     @classmethod
     def validate_toolset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolsetRequest(BaseModel):
@@ -301,7 +417,7 @@ class CreateToolRequest(BaseModel):
     @field_validator("tool_id")
     @classmethod
     def validate_tool_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateToolRequest(BaseModel):
@@ -478,7 +594,7 @@ class CreateSkillsetRequest(BaseModel):
     @field_validator("skillset_id")
     @classmethod
     def validate_skillset_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
 
 class UpdateSkillsetRequest(BaseModel):
@@ -505,7 +621,7 @@ class CreateSkillRequest(BaseModel):
     @field_validator("skill_id")
     @classmethod
     def validate_skill_id(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
+        return validate_mcp_slug_component(v)
 
     @field_validator("triggers")
     @classmethod
@@ -551,11 +667,25 @@ class RenderSkillResponse(BaseModel):
     text: str
 
 
-_SKILL_VAR_RE = re.compile(r"\{%\s*\$([a-z][a-z0-9_]*)\s*%\}")
+# Matches {% $param_name %} variable references.  A preceding backslash
+# (\{% $name %}) marks a literal/escaped tag that must not be validated or
+# substituted; the negative lookbehind skips those, and _unescape_skill_vars
+# strips the backslash after substitution is complete.
+_SKILL_VAR_RE = re.compile(r"(?<!\\)\{%\s*\$([a-z][a-z0-9_]*)\s*%\}")
+_SKILL_VAR_ESCAPED_RE = re.compile(r"\\(\{%\s*\$[a-z][a-z0-9_]*\s*%\})")
+
+
+def _unescape_skill_vars(text: str) -> str:
+    """Strip the leading backslash from escaped variable tags after substitution."""
+    return _SKILL_VAR_ESCAPED_RE.sub(r"\1", text)
 
 
 def template_placeholders(template: str) -> set[str]:
-    """Return ``{% $param_name %}`` placeholders used by a skill template."""
+    """Return ``{% $param_name %}`` placeholders used by a skill template.
+
+    Escaped tags (``\\{% $name %}``) are excluded — they are literal text,
+    not variable references.
+    """
     return {m.group(1) for m in _SKILL_VAR_RE.finditer(template)}
 
 
@@ -596,6 +726,7 @@ def render_skill_template(
         return None, errors
 
     rendered = _SKILL_VAR_RE.sub(lambda m: str(values.get(m.group(1), "")), template)
+    rendered = _unescape_skill_vars(rendered)
     return rendered, []
 
 

@@ -19,6 +19,7 @@ export type ToolViewData = Pick<
   'name' | 'description' | 'cypher' | 'parameters' | 'enabled'
 > & {
   version?: number;
+  slug?: string;
   effective_enabled?: boolean | null;
   disabled_reason?: string | null;
 };
@@ -57,6 +58,14 @@ export default function ToolDetailDialog({ open, onClose, data }: Props) {
       secondary={data.version !== undefined ? `v${data.version}` : undefined}
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {data.slug && (
+          <DetailSection title="Slug">
+            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+              {data.slug}
+            </Typography>
+          </DetailSection>
+        )}
+
         <DetailSection title="Status">
           <Chip
             label={statusLabel}

@@ -2,10 +2,20 @@ import { useCallback, useContext, useState } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
 
+export interface GraphIndex {
+  name: string;
+  type: string;
+  entity_type: string;
+  labels_or_types: string[];
+  properties: string[];
+  state: string;
+}
+
 export interface GraphSchema {
   labels: string[];
   relationship_types: string[];
   property_keys: string[];
+  indexes?: GraphIndex[];
 }
 
 interface GraphSchemaState {

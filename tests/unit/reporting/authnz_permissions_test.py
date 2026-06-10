@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock
 
+from reporting.authnz import CurrentUser, sync_user_profile
 from reporting.authnz.permissions import (
     ADMIN_PERMISSIONS,
     ALL_PERMISSIONS,
@@ -11,6 +12,7 @@ from reporting.authnz.permissions import (
     Permission,
     resolve_permissions,
 )
+from reporting.schema.report_config import User
 
 # ---------------------------------------------------------------------------
 # Role hierarchy
@@ -28,6 +30,9 @@ def test_editor_is_subset_of_admin():
 def test_viewer_can_read_but_not_execute_adhoc():
     assert Permission.REPORTS_READ in VIEWER_PERMISSIONS
     assert Permission.TOOLS_CALL in VIEWER_PERMISSIONS
+    assert Permission.CHAT_USE in VIEWER_PERMISSIONS
+    assert Permission.CHAT_TOOLS_CALL not in VIEWER_PERMISSIONS
+    assert Permission.CHAT_SKILLS_CALL not in VIEWER_PERMISSIONS
     assert Permission.QUERY_EXECUTE not in VIEWER_PERMISSIONS
     assert Permission.QUERY_VALIDATE not in VIEWER_PERMISSIONS
     assert Permission.QUERY_HISTORY_READ not in VIEWER_PERMISSIONS
@@ -57,6 +62,8 @@ def test_editor_cannot_manage_toolsets_or_scheduled_queries():
 def test_admin_has_all_admin_permissions():
     assert Permission.TOOLSETS_WRITE in ADMIN_PERMISSIONS
     assert Permission.TOOLSETS_DELETE in ADMIN_PERMISSIONS
+    assert Permission.CHAT_TOOLS_CALL in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SKILLS_CALL in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_WRITE in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_DELETE in ADMIN_PERMISSIONS
     assert Permission.ROLES_WRITE in ADMIN_PERMISSIONS
@@ -204,3 +211,42 @@ async def test_resolve_permissions_ignores_wrong_claim_name(mocker):
     # Should get Viewer (default), not Admin
     assert "reports:read" in perms
     assert "toolsets:write" not in perms
+
+
+# ---------------------------------------------------------------------------
+# sync_user_profile
+# ---------------------------------------------------------------------------
+
+_FAKE_USER = User(
+    user_id="user-1",
+    sub="sub",
+    iss="https://idp.example.com",
+    email="u@example.com",
+    created_at="2024-01-01T00:00:00+00:00",
+    last_login="2024-01-01T00:00:00+00:00",
+)
+
+
+async def test_sync_user_profile_calls_update_and_returns_updated_current_user(mocker):
+    updated_user = _FAKE_USER.model_copy(update={"email": "new@example.com"})
+    mock_update = mocker.patch(
+        "reporting.services.report_store.update_user_profile",
+        new=AsyncMock(return_value=updated_user),
+    )
+    current = CurrentUser(
+        user=_FAKE_USER,
+        jwt_claims={"email": "new@example.com", "display_name": "New Name"},
+        permissions=VIEWER_PERMISSIONS,
+    )
+
+    result = await sync_user_profile(current)
+
+    mock_update.assert_awaited_once_with(
+        user_id="user-1",
+        email="new@example.com",
+        display_name="New Name",
+        preferred_username=None,
+        token_iat=None,
+    )
+    assert result.user.email == "new@example.com"
+    assert result.permissions == VIEWER_PERMISSIONS

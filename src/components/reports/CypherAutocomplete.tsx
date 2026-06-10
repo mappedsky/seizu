@@ -1,10 +1,6 @@
 import { useEffect, useRef } from 'react';
-import {
-  CircularProgress,
-  Typography,
-  TextField,
-  Autocomplete,
-} from '@mui/material';
+import { Typography, TextField, Autocomplete } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { useLazyCypherQuery } from 'src/hooks/useCypherQuery';
 import { setQueryStringValue } from 'src/components/QueryString';
 
@@ -75,7 +71,7 @@ export default function CypherAutocomplete({
         variant="outlined"
         slotProps={{
           input: {
-            endAdornment: <CircularProgress size={16} />,
+            endAdornment: <ConstellationSpinner size={16} />,
           },
         }}
       />

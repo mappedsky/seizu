@@ -83,6 +83,77 @@ describe('MarkdocRenderer', () => {
     expect(a?.className).toContain('MuiLink-underlineHover');
   });
 
+  it('renders an LLM <details> block converted from HTML', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source={
+          '<details><summary>Title</summary>\n\nBody content here.\n\n</details>'
+        }
+      />,
+    );
+    expect(container.querySelector('details')).not.toBeNull();
+    expect(container.textContent).toContain('Title');
+    expect(container.textContent).toContain('Body content here.');
+  });
+
+  it('does not truncate <details> body at an embedded </details> string', () => {
+    const source =
+      '<details><summary>Example</summary>\n' +
+      'See the closing tag: </details> and more content here.\n' +
+      '</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.textContent).toContain('See the closing tag:');
+    expect(container.textContent).toContain('and more content here.');
+  });
+
+  it('does not let injected {% /details %} escape the <details> block boundary', () => {
+    // Without Markdoc-tag escaping, {% /details %} closes the block prematurely and
+    // {% details summary="injected" %} opens a second block, yielding two details
+    // elements.  With escaping, all body content stays inside one block.
+    const source =
+      '<details><summary>s</summary>' +
+      '{% /details %} outside {% details summary="injected" %}' +
+      '</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.querySelectorAll('details').length).toBe(1);
+    expect(container.textContent).toContain('outside');
+  });
+
+  it('handles HTML attribute with > inside summary without corrupting text', () => {
+    const source =
+      '<details><summary><b data-x="a>b">label</b></summary>body</details>';
+    const { container } = render(<MarkdocRenderer source={source} />);
+    expect(container.querySelector('details')).not.toBeNull();
+    // The summary should contain the text content, not raw HTML fragments.
+    const summary = container.querySelector('summary');
+    expect(summary?.textContent).not.toContain('<b');
+    expect(summary?.textContent).not.toContain('data-x');
+  });
+
+  it('removes executable summary elements before rendering text', () => {
+    render(
+      <MarkdocRenderer
+        source={
+          '<details><summary>Safe<script>alert("x")</script><style>bad</style> title</summary>body</details>'
+        }
+      />,
+    );
+
+    expect(screen.getByText('Safe title')).toBeInTheDocument();
+    expect(screen.queryByText(/alert/)).not.toBeInTheDocument();
+  });
+
+  it('renders the continuation tag as a divider', () => {
+    render(
+      <MarkdocRenderer source={'Before\n\n{% continuation /%}\n\nAfter'} />,
+    );
+
+    expect(screen.getByText('Before')).toBeInTheDocument();
+    expect(screen.getByText('After')).toBeInTheDocument();
+    expect(screen.getByText('...')).toBeInTheDocument();
+    expect(screen.queryByText('{% continuation /%}')).not.toBeInTheDocument();
+  });
+
   it('does not render nested paragraphs when conditionals return block content', () => {
     const { container } = render(
       <MarkdocRenderer
@@ -210,12 +281,7 @@ describe('MarkdocRenderer', () => {
         variables={{ url: '//evil.example.com/x' }}
       />,
     );
-    // The substituted URL has no scheme, so it's treated as a relative path and
-    // kept verbatim. Browsers will resolve protocol-relative URLs under the
-    // current origin's protocol, which is intentional and what `/path` does too.
-    expect(container.querySelector('a')?.getAttribute('href')).toBe(
-      '//evil.example.com/x',
-    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
   });
 
   it('allows mailto and tel after substitution', () => {
@@ -246,6 +312,42 @@ describe('MarkdocRenderer', () => {
     expect(container.querySelector('a')?.getAttribute('href')).toBe(
       'slack://channel/T01',
     );
+  });
+
+  it('blocks non-browser static link schemes in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer source="[chat](slack://channel/T01)" untrustedUrls />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
+  });
+
+  it('blocks protocol-relative static links in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer source="[chat](//evil.example.com/x)" untrustedUrls />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('#');
+  });
+
+  it('allows https static links in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source="[home](https://example.com/path)"
+        untrustedUrls
+      />,
+    );
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/path',
+    );
+  });
+
+  it('blocks non-http static image URLs in untrusted URL mode', () => {
+    const { container } = render(
+      <MarkdocRenderer
+        source="![pixel](data:image/png;base64,AAAA)"
+        untrustedUrls
+      />,
+    );
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('#');
   });
 
   it('preserves non-substituted link URLs unchanged', () => {
