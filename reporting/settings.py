@@ -389,14 +389,14 @@ CHAT_CHECKPOINT_BACKEND = str_env("CHAT_CHECKPOINT_BACKEND", "dynamodb")
 # supported for backward compatibility.
 # The LangGraph PostgreSQL checkpointer requires PostgreSQL; SQLite/MySQL URLs
 # supported by the report store are not valid here.
-CHAT_CHECKPOINT_POSTGRES_URL = str_env("CHAT_CHECKPOINT_POSTGRES_URL", "") or SQL_DATABASE_URL
+CHAT_CHECKPOINT_DATABASE_URL = str_env("CHAT_CHECKPOINT_DATABASE_URL", "") or SQL_DATABASE_URL
 # Optional checkpoint-specific credentials. Empty values inherit the main SQL
 # credentials, allowing one secret to be shared or independently overridden.
-CHAT_CHECKPOINT_POSTGRES_USER = str_env("CHAT_CHECKPOINT_POSTGRES_USER", "") or SQL_DATABASE_USER
-CHAT_CHECKPOINT_POSTGRES_PASSWORD = str_env("CHAT_CHECKPOINT_POSTGRES_PASSWORD", "") or SQL_DATABASE_PASSWORD
+CHAT_CHECKPOINT_DATABASE_USER = str_env("CHAT_CHECKPOINT_DATABASE_USER", "") or SQL_DATABASE_USER
+CHAT_CHECKPOINT_DATABASE_PASSWORD = str_env("CHAT_CHECKPOINT_DATABASE_PASSWORD", "") or SQL_DATABASE_PASSWORD
 # Per-process async PostgreSQL connection pool bounds for chat checkpoints.
-CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE = int_env("CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE", 1)
-CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE", 10)
+CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 1)
+CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 10)
 # Dedicated DynamoDB table used by LangGraph to persist chat checkpoints when
 # CHAT_CHECKPOINT_BACKEND=dynamodb.
 CHAT_CHECKPOINT_TABLE_NAME = str_env("CHAT_CHECKPOINT_TABLE_NAME", "seizu-chat-checkpoints")

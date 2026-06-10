@@ -2764,14 +2764,14 @@ def test_chat_checkpoint_backend_normalizes_postgres_aliases_and_rejects_unknown
 
 def test_postgres_checkpoint_url_accepts_postgres_and_converts_asyncpg(mocker):
     mocker.patch(
-        "reporting.settings.CHAT_CHECKPOINT_POSTGRES_URL",
+        "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
         "postgresql+asyncpg://db/seizu",
     )
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_USER", "user")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_PASSWORD", "p@ssword")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_USER", "user")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_PASSWORD", "p@ssword")
     assert chat_graph._postgres_checkpoint_url() == "postgresql://user:p%40ssword@db/seizu"
 
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_URL", "sqlite:///seizu.db")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_URL", "sqlite:///seizu.db")
     with pytest.raises(ValueError, match="must be a PostgreSQL URL"):
         chat_graph._postgres_checkpoint_url()
 
@@ -2789,13 +2789,13 @@ async def test_initialize_postgres_chat_checkpoints_builds_pool_and_graph(mocker
     build_graph = mocker.patch("reporting.services.chat_graph.build_chat_graph", return_value=graph)
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "postgres")
     mocker.patch(
-        "reporting.settings.CHAT_CHECKPOINT_POSTGRES_URL",
+        "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
         "postgresql://postgres:5432/seizu",
     )
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_USER", "user")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_PASSWORD", "pass")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE", 2)
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE", 8)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_USER", "user")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_PASSWORD", "pass")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 2)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 8)
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_CREATE_TABLE", True)
     chat_graph._chat_checkpoint_pool = None
     chat_graph._chat_graph = None
@@ -2829,13 +2829,13 @@ async def test_initialize_postgres_chat_checkpoints_builds_pool_and_graph(mocker
 async def test_initialize_postgres_chat_checkpoints_rejects_invalid_pool_bounds(mocker):
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "postgres")
     mocker.patch(
-        "reporting.settings.CHAT_CHECKPOINT_POSTGRES_URL",
+        "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
         "postgresql://postgres:5432/seizu",
     )
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_USER", "user")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_PASSWORD", "pass")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE", 5)
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE", 2)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_USER", "user")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_PASSWORD", "pass")
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 5)
+    mocker.patch("reporting.settings.CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 2)
     chat_graph._chat_checkpoint_pool = None
     chat_graph._chat_graph = None
 
@@ -2844,8 +2844,18 @@ async def test_initialize_postgres_chat_checkpoints_rejects_invalid_pool_bounds(
 
 
 async def test_setup_postgres_checkpointer_serializes_migrations(mocker):
+    waiting_cursor = mocker.Mock()
+    waiting_cursor.fetchone = mocker.AsyncMock(return_value={"acquired": False})
+    acquired_cursor = mocker.Mock()
+    acquired_cursor.fetchone = mocker.AsyncMock(return_value={"acquired": True})
     connection = mocker.Mock()
-    connection.execute = mocker.AsyncMock()
+    connection.execute = mocker.AsyncMock(
+        side_effect=[
+            waiting_cursor,
+            acquired_cursor,
+            None,
+        ]
+    )
     connection_context = mocker.MagicMock()
     connection_context.__aenter__ = mocker.AsyncMock(return_value=connection)
     connection_context.__aexit__ = mocker.AsyncMock(return_value=False)
@@ -2854,13 +2864,16 @@ async def test_setup_postgres_checkpointer_serializes_migrations(mocker):
     saver = mocker.Mock()
     saver.setup = mocker.AsyncMock()
     saver_factory = mocker.patch("reporting.services.chat_graph.AsyncPostgresSaver", return_value=saver)
+    sleep = mocker.patch("reporting.services.chat_graph.asyncio.sleep", new=mocker.AsyncMock())
 
     await chat_graph._setup_postgres_checkpointer(pool)
 
     saver_factory.assert_called_once_with(connection)
     saver.setup.assert_awaited_once_with()
+    sleep.assert_awaited_once_with(0.1)
     assert connection.execute.await_args_list == [
-        mocker.call("SELECT pg_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0))"),
+        mocker.call("SELECT pg_try_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0)) AS acquired"),
+        mocker.call("SELECT pg_try_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0)) AS acquired"),
         mocker.call("SELECT pg_advisory_unlock(hashtextextended('seizu-chat-checkpoint-setup', 0))"),
     ]
 

@@ -96,6 +96,40 @@ services:
       retries: 5
     networks:
       database:
+  postgres-create-chat-checkpoint-db:
+    image: postgres:18-alpine
+    profiles:
+      - sqlmodel
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${SQL_DATABASE_USER:-seizu}
+      PGPASSWORD: ${SQL_DATABASE_PASSWORD:-seizu}
+      CHAT_CHECKPOINT_DATABASE_URL: ${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      CHAT_CHECKPOINT_DATABASE_USER: ${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+    command:
+      - sh
+      - -ec
+      - |
+        database_url="$${CHAT_CHECKPOINT_DATABASE_URL%%\?*}"
+        database="$${database_url##*/}"
+        psql --dbname=postgres \
+          --set=checkpoint_database="$$database" \
+          --set=checkpoint_owner="$${CHAT_CHECKPOINT_DATABASE_USER}" <<'SQL'
+        SELECT format(
+          'CREATE DATABASE %I OWNER %I',
+          :'checkpoint_database',
+          :'checkpoint_owner'
+        )
+        WHERE NOT EXISTS (
+          SELECT FROM pg_database WHERE datname = :'checkpoint_database'
+        )
+        \gexec
+        SQL
+    networks:
+      database:
   # ─────────────────────────────────────────────────────────────────────────
   sqs:
     image: softwaremill/elasticmq
@@ -248,6 +282,9 @@ services:
       postgres:
         condition: service_healthy
         required: false
+      postgres-create-chat-checkpoint-db:
+        condition: service_completed_successfully
+        required: false
     environment:
       - NEO4J_URI=bolt://neo4j:7687
       - AWS_ACCESS_KEY_ID=fake
@@ -359,12 +396,11 @@ services:
       - GOOGLE_API_KEY
       - DEEPSEEK_API_KEY
       - CHAT_CHECKPOINT_BACKEND
-      - CHAT_CHECKPOINT_POSTGRES_URL
-      - CHAT_CHECKPOINT_POSTGRES_URL=${CHAT_CHECKPOINT_POSTGRES_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
-      - CHAT_CHECKPOINT_POSTGRES_USER=${CHAT_CHECKPOINT_POSTGRES_USER:-seizu}
-      - CHAT_CHECKPOINT_POSTGRES_PASSWORD=${CHAT_CHECKPOINT_POSTGRES_PASSWORD:-seizu}
-      - CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE
-      - CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE
+      - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_PASSWORD=${CHAT_CHECKPOINT_DATABASE_PASSWORD:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+      - CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
       - CHAT_CHECKPOINT_TABLE_NAME=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_CREATE_TABLE=true
       - CHAT_CHECKPOINT_TTL_SECONDS=2592000

@@ -2671,11 +2671,11 @@ async def _initialize_postgres_chat_checkpoints() -> None:
         return
 
     url = _postgres_checkpoint_url()
-    min_size = settings.CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE
-    max_size = settings.CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE
+    min_size = settings.CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+    max_size = settings.CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
     if min_size < 0 or max_size < 1 or min_size > max_size:
         raise ValueError(
-            "CHAT_CHECKPOINT_POSTGRES_POOL_MIN_SIZE and CHAT_CHECKPOINT_POSTGRES_POOL_MAX_SIZE "
+            "CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE and CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE "
             "must satisfy 0 <= min_size <= max_size and max_size >= 1"
         )
 
@@ -2707,9 +2707,18 @@ async def _initialize_postgres_chat_checkpoints() -> None:
 async def _setup_postgres_checkpointer(pool: AsyncConnectionPool) -> None:
     # Gunicorn workers run lifespan concurrently. LangGraph records each
     # migration version with a primary-key insert, so serialize setup across
-    # workers to avoid a first-deploy migration race.
+    # workers to avoid a first-deploy migration race. Poll with the non-blocking
+    # lock function: a blocking advisory-lock query can hold a virtual
+    # transaction that conflicts with another worker's migration DDL.
     async with pool.connection() as connection:
-        await connection.execute("SELECT pg_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0))")
+        while True:
+            cursor = await connection.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0)) AS acquired"
+            )
+            row = await cursor.fetchone()
+            if row is not None and row["acquired"]:
+                break
+            await asyncio.sleep(0.1)
         try:
             await AsyncPostgresSaver(connection).setup()
         finally:
@@ -2718,12 +2727,12 @@ async def _setup_postgres_checkpointer(pool: AsyncConnectionPool) -> None:
 
 def _postgres_checkpoint_url() -> str:
     url = build_database_url(
-        settings.CHAT_CHECKPOINT_POSTGRES_URL.strip(),
-        user=settings.CHAT_CHECKPOINT_POSTGRES_USER,
-        password=settings.CHAT_CHECKPOINT_POSTGRES_PASSWORD,
+        settings.CHAT_CHECKPOINT_DATABASE_URL.strip(),
+        user=settings.CHAT_CHECKPOINT_DATABASE_USER,
+        password=settings.CHAT_CHECKPOINT_DATABASE_PASSWORD,
     )
     if url.get_backend_name() != "postgresql":
-        raise ValueError("CHAT_CHECKPOINT_POSTGRES_URL must be a PostgreSQL URL when CHAT_CHECKPOINT_BACKEND=postgres")
+        raise ValueError("CHAT_CHECKPOINT_DATABASE_URL must be a PostgreSQL URL when CHAT_CHECKPOINT_BACKEND=postgres")
     url = url.set(drivername="postgresql")
     return url.render_as_string(hide_password=False)
 
