@@ -64,6 +64,11 @@ async def initialize() -> None:
     await get_store().initialize()
 
 
+def generate_id() -> str:
+    """Return a new Snowflake ID from the configured store backend."""
+    return get_store().generate_id()
+
+
 async def list_reports(user_id: str | None = None) -> list[ReportListItem]:
     return await get_store().list_reports(user_id=user_id)
 

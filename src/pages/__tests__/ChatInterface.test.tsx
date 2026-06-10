@@ -547,7 +547,13 @@ describe('ChatInterface', () => {
         target: { value: 'Map my graph' },
       },
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    const sendButton = screen.getByRole('button', { name: 'Send' });
+    expect(
+      screen
+        .getByPlaceholderText('Ask about your security graph...')
+        .closest('.MuiInputBase-root'),
+    ).toContainElement(sendButton);
+    fireEvent.click(sendButton);
 
     await waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith({ text: 'Map my graph' });

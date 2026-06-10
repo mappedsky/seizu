@@ -6,7 +6,6 @@ import {
   Button,
   Checkbox,
   Chip,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -29,6 +28,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import AddIcon from '@mui/icons-material/Add';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -464,7 +464,7 @@ function SkillDialog({
           Cancel
         </Button>
         <Button onClick={handleSave} variant="contained" disabled={saving}>
-          {saving ? <CircularProgress size={20} /> : 'Save'}
+          {saving ? <ConstellationSpinner size={20} /> : 'Save'}
         </Button>
       </DialogActions>
     </Dialog>
@@ -905,7 +905,7 @@ function SkillRenderDialog({
           onClick={runRender}
           disabled={rendering}
         >
-          {rendering ? <CircularProgress size={20} /> : 'Render'}
+          {rendering ? <ConstellationSpinner size={20} /> : 'Render'}
         </Button>
       </DialogActions>
     </Dialog>

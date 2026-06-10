@@ -5,7 +5,6 @@ import {
   Box,
   Button,
   Chip,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -15,6 +14,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import AddIcon from '@mui/icons-material/Add';
 import PsychologyIcon from '@mui/icons-material/Psychology';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -184,7 +184,7 @@ function SkillsetDialog({
           Cancel
         </Button>
         <Button onClick={handleSave} variant="contained" disabled={saving}>
-          {saving ? <CircularProgress size={20} /> : 'Save'}
+          {saving ? <ConstellationSpinner size={20} /> : 'Save'}
         </Button>
       </DialogActions>
     </Dialog>

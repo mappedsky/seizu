@@ -8,10 +8,12 @@ import {
   useState,
 } from 'react';
 import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
 import TextField from '@mui/material/TextField';
+import Tooltip from '@mui/material/Tooltip';
 import Send from '@mui/icons-material/Send';
 import Stop from '@mui/icons-material/Stop';
 
@@ -131,6 +133,30 @@ export default memo(function ChatInput({
               placeholder="Ask about your security graph..."
               disabled={busy}
               variant="outlined"
+              slotProps={{
+                input: {
+                  endAdornment: (
+                    <InputAdornment
+                      position="end"
+                      sx={{ alignSelf: 'flex-end', mb: 0.5 }}
+                    >
+                      <Tooltip title={busy ? 'Stop response' : 'Send message'}>
+                        <span>
+                          <IconButton
+                            aria-label={busy ? 'Stop' : 'Send'}
+                            color="primary"
+                            disabled={!busy && (!input.trim() || disabled)}
+                            onClick={busy ? onStop : undefined}
+                            type={busy ? 'button' : 'submit'}
+                          >
+                            {busy ? <Stop /> : <Send />}
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </InputAdornment>
+                  ),
+                },
+              }}
               sx={{
                 flex: 1,
                 minHeight: 0,
@@ -145,34 +171,6 @@ export default memo(function ChatInput({
                 },
               }}
             />
-            <Box
-              sx={{
-                display: 'flex',
-                flexShrink: 0,
-                justifyContent: 'flex-end',
-                mt: 1,
-              }}
-            >
-              {busy ? (
-                <Button
-                  type="button"
-                  variant="contained"
-                  startIcon={<Stop />}
-                  onClick={onStop}
-                >
-                  Stop
-                </Button>
-              ) : (
-                <Button
-                  type="submit"
-                  variant="contained"
-                  startIcon={<Send />}
-                  disabled={!input.trim() || disabled}
-                >
-                  Send
-                </Button>
-              )}
-            </Box>
           </CardContent>
         </Card>
       </Box>

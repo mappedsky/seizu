@@ -16,8 +16,8 @@ _USER = User(
 )
 
 
-_CONFIRMATION_ID = "a" * 32
-_BATCH_ID = "b" * 32
+_CONFIRMATION_ID = "123456789012345678"
+_BATCH_ID = "123456789012345679"
 
 
 def _confirmation(expires_at: str = "2099-01-01T00:30:00+00:00") -> ActionConfirmation:

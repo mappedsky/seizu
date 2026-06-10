@@ -23,7 +23,6 @@ import {
   Button,
   Card,
   Chip,
-  CircularProgress,
   IconButton,
   Tooltip,
   Typography,
@@ -329,7 +328,7 @@ function DetailStatus({ status }: { status?: string }) {
       icon = <CheckCircle sx={{ fontSize: 15, color: 'success.main' }} />;
       break;
     case 'running':
-      icon = <CircularProgress size={12} thickness={6} />;
+      icon = <ConstellationSpinner size={15} />;
       break;
     case 'awaiting':
     case 'pending':
@@ -1093,7 +1092,7 @@ export default function ChatInterface() {
   if (permissionsLoading || waitingForToken) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

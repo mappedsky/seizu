@@ -171,7 +171,7 @@ export default function ConstellationSpinner({
       viewBox="0 0 140 140"
       width={size}
       height={size}
-      role="img"
+      role="progressbar"
       aria-label="Loading"
       style={{ display: 'block', overflow: 'visible' }}
     >

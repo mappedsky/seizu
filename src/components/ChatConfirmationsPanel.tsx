@@ -3,7 +3,6 @@ import {
   Badge,
   Box,
   Button,
-  CircularProgress,
   Divider,
   Drawer,
   IconButton,
@@ -17,6 +16,7 @@ import Close from '@mui/icons-material/Close';
 import GppMaybe from '@mui/icons-material/GppMaybe';
 import MenuOpen from '@mui/icons-material/MenuOpen';
 import Block from '@mui/icons-material/Block';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import type { ActionConfirmation } from 'src/hooks/useConfirmationsApi';
 
 interface ChatConfirmationsPanelProps {
@@ -85,7 +85,7 @@ export default function ChatConfirmationsPanel({
       <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', p: 1.5 }}>
         {loading ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', py: 3 }}>
-            <CircularProgress size={22} />
+            <ConstellationSpinner size={22} />
           </Box>
         ) : error ? (
           <Alert severity="error">{error}</Alert>
