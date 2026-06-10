@@ -1,6 +1,5 @@
 import hashlib
 import json
-import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -91,7 +90,7 @@ async def ensure_confirmation(
 
     now = datetime.now(tz=UTC)
     confirmation = ActionConfirmation(
-        confirmation_id=uuid.uuid4().hex,
+        confirmation_id=report_store.generate_id(),
         user_id=user_id,
         source=source,
         session_key=session_key,

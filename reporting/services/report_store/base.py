@@ -34,6 +34,10 @@ class ReportStore(ABC):
     """Abstract base class for report configuration storage backends."""
 
     @abstractmethod
+    def generate_id(self) -> str:
+        """Return a new Snowflake ID from the backend's process-wide generator."""
+
+    @abstractmethod
     async def initialize(self) -> None:
         """Perform any one-time setup required by the backend (e.g. create table)."""
 

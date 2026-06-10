@@ -14,7 +14,6 @@ import {
   Button,
   Checkbox,
   Chip,
-  CircularProgress,
   Container,
   Dialog,
   DialogActions,
@@ -35,6 +34,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import Add from '@mui/icons-material/Add';
 import CancelIcon from '@mui/icons-material/Cancel';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -730,7 +730,7 @@ const EditToolbar = memo(function EditToolbar({
         <Button
           variant="contained"
           size="small"
-          startIcon={saving ? <CircularProgress size={16} /> : <SaveIcon />}
+          startIcon={saving ? <ConstellationSpinner size={16} /> : <SaveIcon />}
           onClick={() => onSave(reportName, saveComment)}
           disabled={saving || !reportName.trim()}
         >

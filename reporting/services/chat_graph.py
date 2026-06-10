@@ -1582,7 +1582,7 @@ def _confirmation_batch_id_for_requests(requests: list[ToolCallRequest]) -> str 
     A one-action "batch" creates stale/confusing batch links after execution,
     while adding no value over the confirmation panel's single-item approval.
     """
-    return uuid.uuid4().hex if len(requests) > 1 else None
+    return report_store.generate_id() if len(requests) > 1 else None
 
 
 async def _run_tool_call(

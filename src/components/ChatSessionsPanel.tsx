@@ -3,7 +3,6 @@ import {
   Alert,
   Box,
   Button,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -16,6 +15,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import AddIcon from '@mui/icons-material/Add';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -199,7 +199,7 @@ function ChatSessionsPanel({
           <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
             {loading ? (
               <Box sx={{ display: 'flex', justifyContent: 'center', p: 2 }}>
-                <CircularProgress size={20} />
+                <ConstellationSpinner size={20} />
               </Box>
             ) : sessions.length === 0 ? (
               <Box sx={{ color: 'text.secondary', p: 1.5 }}>
@@ -276,7 +276,7 @@ function ChatSessionsPanel({
             disabled={!renameValue.trim() || renaming}
             onClick={() => void handleConfirmRename()}
           >
-            {renaming ? <CircularProgress size={20} /> : 'Rename'}
+            {renaming ? <ConstellationSpinner size={20} /> : 'Rename'}
           </Button>
         </DialogActions>
       </Dialog>

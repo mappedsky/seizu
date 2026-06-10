@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
   Box,
-  CircularProgress,
   List,
   ListItemButton,
   Pagination,
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ErrorIcon from '@mui/icons-material/Error';
 import { useQueryHistory, QueryHistoryItem } from 'src/hooks/useQueryHistory';
 
@@ -46,7 +46,7 @@ export default function QueryConsoleHistoryPanel({
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', pt: 3 }}>
-        <CircularProgress size={24} />
+        <ConstellationSpinner size={24} />
       </Box>
     );
   }

@@ -5,10 +5,10 @@ import {
   Button,
   Card,
   CardContent,
-  CircularProgress,
   TextField,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import PlayArrow from '@mui/icons-material/PlayArrow';
 import CypherGraph from 'src/components/reports/CypherGraph';
 import QueryConsoleSchemaPanel from 'src/components/QueryConsoleSchemaPanel';
@@ -173,7 +173,7 @@ export default function QueryConsole() {
   if (permissionsLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { Box, CircularProgress, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import ErrorIcon from '@mui/icons-material/Error';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 
 // Standard loading/error gate for list views: a centered spinner while
 // loading, an error icon + message on failure, otherwise the content.
@@ -21,7 +22,7 @@ export default function ListViewState({
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

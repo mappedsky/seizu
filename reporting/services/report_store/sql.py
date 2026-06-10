@@ -473,6 +473,9 @@ class SQLModelReportStore(ReportStore):
     Configured via the ``SQL_DATABASE_URL`` setting.
     """
 
+    def generate_id(self) -> str:
+        return generate_report_id()
+
     async def initialize(self) -> None:
         """Create all tables if they do not already exist."""
         try:

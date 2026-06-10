@@ -1,13 +1,7 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import {
-  Alert,
-  Box,
-  Button,
-  CircularProgress,
-  Paper,
-  Typography,
-} from '@mui/material';
+import { Alert, Box, Button, Paper, Typography } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Block from '@mui/icons-material/Block';
 import { AuthConfigContext } from 'src/authConfig.context';
@@ -83,7 +77,7 @@ export default function ConfirmationPage() {
   if (waitingForToken || loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

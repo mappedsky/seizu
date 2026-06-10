@@ -8,7 +8,7 @@ function makeConfirmation(
   overrides: Partial<ActionConfirmation>,
 ): ActionConfirmation {
   return {
-    confirmation_id: 'a'.repeat(32),
+    confirmation_id: '123456789012345678',
     source: 'mcp',
     tool_name: 'toolsets__update_tool',
     action: 'update',

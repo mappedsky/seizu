@@ -9,7 +9,6 @@ import {
   Box,
   Button,
   Chip,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -24,6 +23,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import Error from '@mui/icons-material/Error';
 import EditIcon from '@mui/icons-material/Edit';
@@ -189,7 +189,7 @@ function Reports() {
   if ((loading && !displayedReport) || permissionsLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }
@@ -210,7 +210,7 @@ function Reports() {
   if (displayedQueryCapabilities === undefined) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }
@@ -266,7 +266,7 @@ function Reports() {
                         ? 'Unpublish'
                         : 'Publish',
                     icon: updatingAccess ? (
-                      <CircularProgress size={18} />
+                      <ConstellationSpinner size={18} />
                     ) : displayedAccessScope === 'public' ? (
                       <LockIcon fontSize="small" />
                     ) : (
@@ -404,7 +404,7 @@ function Reports() {
             onClick={handleCloneConfirm}
             disabled={cloning || !cloneName.trim()}
           >
-            {cloning ? <CircularProgress size={20} /> : 'Clone'}
+            {cloning ? <ConstellationSpinner size={20} /> : 'Clone'}
           </Button>
         </DialogActions>
       </Dialog>

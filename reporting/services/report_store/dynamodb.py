@@ -808,6 +808,9 @@ def _update_user_profile_internal(
 class DynamoDBReportStore(ReportStore):
     """ReportStore implementation backed by Amazon DynamoDB."""
 
+    def generate_id(self) -> str:
+        return generate_report_id()
+
     async def initialize(self) -> None:
         """Create the DynamoDB table if it does not already exist.
 

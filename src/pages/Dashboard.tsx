@@ -1,10 +1,5 @@
-import {
-  Box,
-  CircularProgress,
-  IconButton,
-  Tooltip,
-  Typography,
-} from '@mui/material';
+import { Box, IconButton, Tooltip, Typography } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import RefreshIcon from '@mui/icons-material/Refresh';
 
 import ReportView from 'src/components/ReportView';
@@ -17,7 +12,7 @@ function Dashboard() {
   if (loading || (report && queryCapabilities === undefined)) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

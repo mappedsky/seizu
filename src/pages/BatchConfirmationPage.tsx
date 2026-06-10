@@ -5,11 +5,11 @@ import {
   Box,
   Button,
   Chip,
-  CircularProgress,
   Divider,
   Paper,
   Typography,
 } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import CheckCircle from '@mui/icons-material/CheckCircle';
 import Block from '@mui/icons-material/Block';
 import { AuthConfigContext } from 'src/authConfig.context';
@@ -94,7 +94,7 @@ function ConfirmationCard({
             onClick={() => onDecide(confirmation.confirmation_id, 'approved')}
             startIcon={
               isDeciding && deciding === confirmation.confirmation_id ? (
-                <CircularProgress size={16} />
+                <ConstellationSpinner size={16} />
               ) : (
                 <CheckCircle />
               )
@@ -198,7 +198,7 @@ export default function BatchConfirmationPage() {
   if (waitingForToken || loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

@@ -1,13 +1,7 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Helmet } from 'react-helmet';
-import {
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  Tooltip,
-  Typography,
-} from '@mui/material';
+import { Box, Button, Chip, Tooltip, Typography } from '@mui/material';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import HistoryIcon from '@mui/icons-material/History';
 import RestoreIcon from '@mui/icons-material/Restore';
@@ -192,7 +186,7 @@ function RoleHistory() {
   if (permissionsLoading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+        <ConstellationSpinner size={48} />
       </Box>
     );
   }

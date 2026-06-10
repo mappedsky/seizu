@@ -1561,7 +1561,7 @@ async def test_chat_tool_create_already_exists_is_idempotent_success(mocker):
     assert "already completed" in data["message"]
 
 
-def test_confirmation_batch_id_only_for_multiple_requests():
+def test_confirmation_batch_id_only_for_multiple_requests(mocker):
     request = chat_graph.ToolCallRequest(
         id="call_1",
         name="reports__delete",
@@ -1575,9 +1575,12 @@ def test_confirmation_batch_id_only_for_multiple_requests():
     )
 
     assert chat_graph._confirmation_batch_id_for_requests([request]) is None
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.generate_id",
+        return_value="123456789012345678",
+    )
     batch_id = chat_graph._confirmation_batch_id_for_requests([request, request])
-    assert isinstance(batch_id, str)
-    assert len(batch_id) == 32
+    assert batch_id == "123456789012345678"
 
 
 async def test_pending_confirmation_response_uses_chat_panel_not_url():
