@@ -94,13 +94,16 @@ def test_get_engine_uses_command_timeout_for_postgres(mocker):
         "reporting.services.report_store.sql.create_async_engine",
         return_value=engine_mock,
     )
-    mocker.patch("reporting.settings.SQL_DATABASE_URL", "postgresql://user:pass@localhost:5432/seizu")
+    mocker.patch("reporting.settings.SQL_DATABASE_URL", "postgresql://localhost:5432/seizu")
+    mocker.patch("reporting.settings.SQL_DATABASE_USER", "user")
+    mocker.patch("reporting.settings.SQL_DATABASE_PASSWORD", "p@ssword")
     mocker.patch("reporting.settings.SQL_STATEMENT_TIMEOUT", 31)
 
     result = sql_module._get_engine()
 
     assert result is engine_mock
-    assert create_engine.call_args.args == ("postgresql+asyncpg://user:pass@localhost:5432/seizu",)
+    url = create_engine.call_args.args[0]
+    assert url.render_as_string(hide_password=False) == "postgresql+asyncpg://user:p%40ssword@localhost:5432/seizu"
     assert create_engine.call_args.kwargs["connect_args"] == {"command_timeout": 31}
 
 

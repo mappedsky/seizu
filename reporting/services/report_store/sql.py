@@ -33,6 +33,7 @@ from reporting.schema.report_config import (
     User,
 )
 from reporting.services.report_store.base import ReportStore
+from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -450,14 +451,18 @@ def _user_from_record(record: UserRecord) -> User:
 def _get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
-        url = settings.SQL_DATABASE_URL
+        url = build_database_url(
+            settings.SQL_DATABASE_URL,
+            user=settings.SQL_DATABASE_USER,
+            password=settings.SQL_DATABASE_PASSWORD,
+        )
         connect_args: dict[str, Any] = {}
-        if url.startswith("postgresql://"):
-            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if url.get_backend_name() == "postgresql":
+            url = url.set(drivername="postgresql+asyncpg")
             connect_args["command_timeout"] = settings.SQL_STATEMENT_TIMEOUT
-        elif url.startswith("sqlite:"):
+        elif url.get_backend_name() == "sqlite":
             # sqlite+aiosqlite for async sqlite (not commonly used in prod)
-            url = url.replace("sqlite:", "sqlite+aiosqlite:", 1)
+            url = url.set(drivername="sqlite+aiosqlite")
         _engine = create_async_engine(url, connect_args=connect_args)
     return _engine
 
@@ -470,7 +475,7 @@ def _get_engine() -> AsyncEngine:
 class SQLModelReportStore(ReportStore):
     """ReportStore implementation backed by any SQLAlchemy-compatible database.
 
-    Configured via the ``SQL_DATABASE_URL`` setting.
+    Configured via the ``SQL_DATABASE_*`` settings.
     """
 
     def generate_id(self) -> str:
