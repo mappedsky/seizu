@@ -20,11 +20,14 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph_checkpoint_aws import DynamoDBSaver
 from mcp.types import Prompt, Tool
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -43,6 +46,7 @@ from reporting.services.chat_messages import (
     tag_message,
 )
 from reporting.services.mcp_runtime import ChatBlockReason
+from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,10 @@ class ChatModel(Protocol):
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]: ...
+
+
+_chat_graph: ChatGraph | None = None
+_chat_checkpoint_pool: AsyncConnectionPool | None = None
 
 
 @dataclass(frozen=True)
@@ -2496,9 +2504,15 @@ def build_chat_graph(checkpointer: Any) -> ChatGraph:
     return graph.compile(checkpointer=checkpointer)
 
 
-@lru_cache(maxsize=1)
 def get_chat_graph() -> ChatGraph:
-    return build_chat_graph(_build_checkpointer())
+    global _chat_graph
+    if _chat_graph is not None:
+        return _chat_graph
+    backend = _chat_checkpoint_backend()
+    if backend == "postgres":
+        raise RuntimeError("PostgreSQL chat checkpoints were not initialized during application startup")
+    _chat_graph = build_chat_graph(_build_dynamodb_checkpointer())
+    return _chat_graph
 
 
 @lru_cache(maxsize=1)
@@ -2598,7 +2612,19 @@ def validate_chat_llm_config() -> None:
     _litellm_model_id(provider)
 
 
-def _build_checkpointer() -> DynamoDBSaver:
+def _chat_checkpoint_backend() -> Literal["dynamodb", "postgres"]:
+    backend = settings.CHAT_CHECKPOINT_BACKEND.strip().lower()
+    if backend == "dynamodb":
+        return "dynamodb"
+    if backend in {"postgres", "postgresql", "sql"}:
+        return "postgres"
+    raise ValueError(
+        f"Unknown chat checkpoint backend: {settings.CHAT_CHECKPOINT_BACKEND!r}. "
+        "Supported values are 'dynamodb' and 'postgres'."
+    )
+
+
+def _build_dynamodb_checkpointer() -> DynamoDBSaver:
     # DynamoDBSaver is boto3-based (no async DynamoDB saver ships in
     # langgraph-checkpoint-aws), but its async methods wrap the sync calls in
     # run_in_executor, so checkpoint I/O is offloaded to a threadpool and does
@@ -2623,12 +2649,96 @@ def _build_checkpointer() -> DynamoDBSaver:
 
 
 async def initialize_chat_checkpoints() -> None:
-    if settings.CHAT_CHECKPOINT_CREATE_TABLE:
+    backend = _chat_checkpoint_backend()
+    if backend == "dynamodb" and settings.CHAT_CHECKPOINT_CREATE_TABLE:
         await asyncio.to_thread(_initialize_chat_checkpoints_sync)
+    elif backend == "postgres":
+        await _initialize_postgres_chat_checkpoints()
+
+
+async def close_chat_checkpoints() -> None:
+    global _chat_checkpoint_pool, _chat_graph
+    pool = _chat_checkpoint_pool
+    _chat_checkpoint_pool = None
+    _chat_graph = None
+    if pool is not None:
+        await pool.close()
+
+
+async def _initialize_postgres_chat_checkpoints() -> None:
+    global _chat_checkpoint_pool, _chat_graph
+    if _chat_checkpoint_pool is not None:
+        return
+
+    url = _postgres_checkpoint_url()
+    min_size = settings.CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+    max_size = settings.CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
+    if min_size < 0 or max_size < 1 or min_size > max_size:
+        raise ValueError(
+            "CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE and CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE "
+            "must satisfy 0 <= min_size <= max_size and max_size >= 1"
+        )
+
+    pool = AsyncConnectionPool(
+        conninfo=url,
+        min_size=min_size,
+        max_size=max_size,
+        open=False,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+    try:
+        await pool.open()
+        await pool.wait()
+        if settings.CHAT_CHECKPOINT_CREATE_TABLE:
+            await _setup_postgres_checkpointer(pool)
+        checkpointer = AsyncPostgresSaver(pool)
+    except Exception:
+        await pool.close()
+        raise
+
+    _chat_checkpoint_pool = pool
+    _chat_graph = build_chat_graph(checkpointer)
+
+
+async def _setup_postgres_checkpointer(pool: AsyncConnectionPool) -> None:
+    # Gunicorn workers run lifespan concurrently. LangGraph records each
+    # migration version with a primary-key insert, so serialize setup across
+    # workers to avoid a first-deploy migration race. Poll with the non-blocking
+    # lock function: a blocking advisory-lock query can hold a virtual
+    # transaction that conflicts with another worker's migration DDL.
+    async with pool.connection() as connection:
+        while True:
+            cursor = await connection.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0)) AS acquired"
+            )
+            row = await cursor.fetchone()
+            if row is not None and row["acquired"]:
+                break
+            await asyncio.sleep(0.1)
+        try:
+            await AsyncPostgresSaver(connection).setup()
+        finally:
+            await connection.execute("SELECT pg_advisory_unlock(hashtextextended('seizu-chat-checkpoint-setup', 0))")
+
+
+def _postgres_checkpoint_url() -> str:
+    url = build_database_url(
+        settings.CHAT_CHECKPOINT_DATABASE_URL.strip(),
+        user=settings.CHAT_CHECKPOINT_DATABASE_USER,
+        password=settings.CHAT_CHECKPOINT_DATABASE_PASSWORD,
+    )
+    if url.get_backend_name() != "postgresql":
+        raise ValueError("CHAT_CHECKPOINT_DATABASE_URL must be a PostgreSQL URL when CHAT_CHECKPOINT_BACKEND=postgres")
+    url = url.set(drivername="postgresql")
+    return url.render_as_string(hide_password=False)
 
 
 def _initialize_chat_checkpoints_sync() -> None:
-    checkpointer = _build_checkpointer()
+    checkpointer = _build_dynamodb_checkpointer()
     client = checkpointer.client
     table_name = settings.CHAT_CHECKPOINT_TABLE_NAME
 

@@ -275,11 +275,17 @@ DYNAMODB_CREATE_TABLE = bool_env("DYNAMODB_CREATE_TABLE", False)
 SNOWFLAKE_MACHINE_ID = int_env("SNOWFLAKE_MACHINE_ID", 1)
 # Report storage backend. Supported values: "dynamodb" (default), "sqlmodel".
 REPORT_STORE_BACKEND = str_env("REPORT_STORE_BACKEND", "dynamodb")
-# SQLAlchemy database URL used when REPORT_STORE_BACKEND=sqlmodel.
+# SQLAlchemy database URL used when REPORT_STORE_BACKEND=sqlmodel. Keep
+# credentials out of this value and provide them through SQL_DATABASE_USER and
+# SQL_DATABASE_PASSWORD so secret managers can manage only the password.
+# Credential-bearing URLs remain supported for backward compatibility.
 # Any SQLAlchemy-compatible URL works (PostgreSQL, SQLite, MySQL, etc.).
-# Example: postgresql://seizu:seizu@postgres:5432/seizu
+# Example: postgresql://postgres:5432/seizu
 # Example: sqlite:///./seizu.db
 SQL_DATABASE_URL = str_env("SQL_DATABASE_URL", "")
+# Optional credentials overlaid on SQL_DATABASE_URL.
+SQL_DATABASE_USER = str_env("SQL_DATABASE_USER", "")
+SQL_DATABASE_PASSWORD = str_env("SQL_DATABASE_PASSWORD", "")
 
 # Master switch for the chat assistant. When false the chat routes are not
 # registered, checkpoint storage is not initialized, and the frontend hides the
@@ -373,13 +379,32 @@ GEMINI_API_KEY = str_env("GEMINI_API_KEY", "")
 GOOGLE_API_KEY = str_env("GOOGLE_API_KEY", "")
 DEEPSEEK_API_KEY = str_env("DEEPSEEK_API_KEY", "")
 
-# Dedicated DynamoDB table used by LangGraph to persist chat checkpoints.
+# LangGraph checkpoint backend. Supported values: "dynamodb" (default),
+# "postgres". The PostgreSQL checkpointer is independent of the report store,
+# though the development Makefile switchers change both together.
+CHAT_CHECKPOINT_BACKEND = str_env("CHAT_CHECKPOINT_BACKEND", "dynamodb")
+# PostgreSQL connection URL used when CHAT_CHECKPOINT_BACKEND=postgres. Defaults
+# to SQL_DATABASE_URL so SQL-backed deployments can share one database. Keep
+# credentials separate using the settings below; credential-bearing URLs remain
+# supported for backward compatibility.
+# The LangGraph PostgreSQL checkpointer requires PostgreSQL; SQLite/MySQL URLs
+# supported by the report store are not valid here.
+CHAT_CHECKPOINT_DATABASE_URL = str_env("CHAT_CHECKPOINT_DATABASE_URL", "") or SQL_DATABASE_URL
+# Optional checkpoint-specific credentials. Empty values inherit the main SQL
+# credentials, allowing one secret to be shared or independently overridden.
+CHAT_CHECKPOINT_DATABASE_USER = str_env("CHAT_CHECKPOINT_DATABASE_USER", "") or SQL_DATABASE_USER
+CHAT_CHECKPOINT_DATABASE_PASSWORD = str_env("CHAT_CHECKPOINT_DATABASE_PASSWORD", "") or SQL_DATABASE_PASSWORD
+# Per-process async PostgreSQL connection pool bounds for chat checkpoints.
+CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 1)
+CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 10)
+# Dedicated DynamoDB table used by LangGraph to persist chat checkpoints when
+# CHAT_CHECKPOINT_BACKEND=dynamodb.
 CHAT_CHECKPOINT_TABLE_NAME = str_env("CHAT_CHECKPOINT_TABLE_NAME", "seizu-chat-checkpoints")
-# When true, create the LangGraph checkpoint table at startup if missing.
+# When true, create/migrate the configured LangGraph checkpoint storage at startup.
 CHAT_CHECKPOINT_CREATE_TABLE = bool_env("CHAT_CHECKPOINT_CREATE_TABLE", False)
-# Optional checkpoint TTL in seconds. Empty/0 disables automatic expiry.
+# DynamoDB-only optional checkpoint TTL in seconds. Empty/0 disables automatic expiry.
 CHAT_CHECKPOINT_TTL_SECONDS = int_env("CHAT_CHECKPOINT_TTL_SECONDS", 0)
-# Compress serialized checkpoint payloads before storing them.
+# DynamoDB-only compression for serialized checkpoint payloads.
 CHAT_CHECKPOINT_ENABLE_COMPRESSION = bool_env("CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
 # S3 bucket used by langgraph-checkpoint-aws for payloads larger than 350KB.
 CHAT_CHECKPOINT_S3_BUCKET = str_env("CHAT_CHECKPOINT_S3_BUCKET", "")

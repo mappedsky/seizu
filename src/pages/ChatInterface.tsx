@@ -421,6 +421,11 @@ const ChatMessageDetails = memo(
   }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const tree = useMemo(() => buildDetailTree(details), [details]);
+    const [expanded, setExpanded] = useState(Boolean(isStreaming));
+
+    useEffect(() => {
+      setExpanded(Boolean(isStreaming));
+    }, [isStreaming]);
 
     // Follow the content while it streams, but only when the user is already near
     // the bottom — never yank them away from something they scrolled up to read.
@@ -437,7 +442,8 @@ const ChatMessageDetails = memo(
         disableGutters
         elevation={0}
         square
-        defaultExpanded={isStreaming}
+        expanded={expanded}
+        onChange={(_event, nextExpanded) => setExpanded(nextExpanded)}
         slotProps={{ transition: { timeout: 0 } }}
         sx={{
           bgcolor: 'background.paper',

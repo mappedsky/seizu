@@ -71,16 +71,18 @@ const mockDefaultChatTransport = DefaultChatTransport as jest.MockedClass<
 >;
 const theme = createTheme();
 
-function renderChat({
-  accessToken = 'token-123',
-  chatEnabled = true,
-  initialPath = '/app/chat',
-}: {
+type ChatRenderOptions = {
   accessToken?: string | null;
   chatEnabled?: boolean;
   initialPath?: string;
-} = {}) {
-  return render(
+};
+
+function chatTree({
+  accessToken = 'token-123',
+  chatEnabled = true,
+  initialPath = '/app/chat',
+}: ChatRenderOptions = {}) {
+  return (
     <MemoryRouter initialEntries={[initialPath]}>
       <AuthConfigContext.Provider
         value={{
@@ -102,8 +104,12 @@ function renderChat({
           </AuthContext.Provider>
         </FeaturesContext.Provider>
       </AuthConfigContext.Provider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderChat(options: ChatRenderOptions = {}) {
+  return render(chatTree(options));
 }
 
 describe('ChatInterface', () => {
@@ -715,6 +721,69 @@ describe('ChatInterface', () => {
       { timeout: 10_000 },
     );
   }, 15_000);
+
+  it('collapses streaming details when the response completes', async () => {
+    const messages = [
+      {
+        id: 'assistant-message',
+        role: 'assistant' as const,
+        parts: [
+          {
+            type: 'data-seizu-detail' as const,
+            id: 'detail-1',
+            data: {
+              kind: 'tool',
+              title: 'Tool: graph__schema',
+              status: 'completed',
+              arguments: '{}',
+              body: '{"labels":["CVE"]}',
+            },
+          },
+          { type: 'text' as const, text: 'Schema has CVEs.' },
+        ],
+      },
+    ];
+    const chatResult = (status: 'streaming' | 'ready') => ({
+      id: 'chat-id',
+      messages,
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status,
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    mockUseChat.mockReturnValue(chatResult('streaming'));
+    const { rerender } = renderChat();
+    await act(async () => {});
+
+    expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+
+    mockUseChat.mockReturnValue(chatResult('ready'));
+    rerender(chatTree());
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
+        'aria-expanded',
+        'false',
+      ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
 
   it('renders orchestration detail parts (plan/step/verify) in the details block', async () => {
     mockUseChat.mockReturnValue({

@@ -35,7 +35,11 @@ from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
 from reporting.services import report_store
-from reporting.services.chat_graph import initialize_chat_checkpoints, validate_chat_llm_config
+from reporting.services.chat_graph import (
+    close_chat_checkpoints,
+    initialize_chat_checkpoints,
+    validate_chat_llm_config,
+)
 
 _CSP_NONCE_PLACEHOLDER = "{{ csp_nonce() }}"
 
@@ -265,12 +269,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.CHAT_ENABLED:
         validate_chat_llm_config()
         await initialize_chat_checkpoints()
-    mcp_session_manager = getattr(app.state, "mcp_session_manager", None)
-    if mcp_session_manager is not None:
-        async with mcp_session_manager.run():
+    try:
+        mcp_session_manager = getattr(app.state, "mcp_session_manager", None)
+        if mcp_session_manager is not None:
+            async with mcp_session_manager.run():
+                yield
+        else:
             yield
-    else:
-        yield
+    finally:
+        if settings.CHAT_ENABLED:
+            await close_chat_checkpoints()
 
 
 def create_app() -> FastAPI:

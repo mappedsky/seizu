@@ -72,9 +72,9 @@ services:
       "
     networks:
       database:
-  # ── PostgreSQL (sqlmodel report store backend) ───────────────────────────
+  # ── PostgreSQL (sqlmodel report store + chat checkpoint backend) ─────────
   # Use `make sqlmodel_enable && make down && make up` to activate this backend.
-  # make up includes --profile sqlmodel automatically when REPORT_STORE_BACKEND=sqlmodel.
+  # make up includes --profile sqlmodel when either PostgreSQL backend is selected.
   postgres:
     image: postgres:18-alpine
     profiles:
@@ -94,6 +94,40 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      database:
+  postgres-create-chat-checkpoint-db:
+    image: postgres:18-alpine
+    profiles:
+      - sqlmodel
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${SQL_DATABASE_USER:-seizu}
+      PGPASSWORD: ${SQL_DATABASE_PASSWORD:-seizu}
+      CHAT_CHECKPOINT_DATABASE_URL: ${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      CHAT_CHECKPOINT_DATABASE_USER: ${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+    command:
+      - sh
+      - -ec
+      - |
+        database_url="$${CHAT_CHECKPOINT_DATABASE_URL%%\?*}"
+        database="$${database_url##*/}"
+        psql --dbname=postgres \
+          --set=checkpoint_database="$$database" \
+          --set=checkpoint_owner="$${CHAT_CHECKPOINT_DATABASE_USER}" <<'SQL'
+        SELECT format(
+          'CREATE DATABASE %I OWNER %I',
+          :'checkpoint_database',
+          :'checkpoint_owner'
+        )
+        WHERE NOT EXISTS (
+          SELECT FROM pg_database WHERE datname = :'checkpoint_database'
+        )
+        \gexec
+        SQL
     networks:
       database:
   # ─────────────────────────────────────────────────────────────────────────
@@ -248,6 +282,9 @@ services:
       postgres:
         condition: service_healthy
         required: false
+      postgres-create-chat-checkpoint-db:
+        condition: service_completed_successfully
+        required: false
     environment:
       - NEO4J_URI=bolt://neo4j:7687
       - AWS_ACCESS_KEY_ID=fake
@@ -264,7 +301,9 @@ services:
       - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
       - DYNAMODB_REGION=us-east-1
       - DYNAMODB_CREATE_TABLE=true
-      - SQL_DATABASE_URL=postgresql://seizu:seizu@postgres:5432/seizu
+      - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
+      - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
+      - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
     command: python -m reporting.scheduled_queries
     volumes:
       - .:/home/seizu/seizu
@@ -356,6 +395,12 @@ services:
       - GEMINI_API_KEY
       - GOOGLE_API_KEY
       - DEEPSEEK_API_KEY
+      - CHAT_CHECKPOINT_BACKEND
+      - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_PASSWORD=${CHAT_CHECKPOINT_DATABASE_PASSWORD:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+      - CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
       - CHAT_CHECKPOINT_TABLE_NAME=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_CREATE_TABLE=true
       - CHAT_CHECKPOINT_TTL_SECONDS=2592000
@@ -363,8 +408,10 @@ services:
       - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
       - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
-      # SQLModel — PostgreSQL URL for the sqlmodel backend
-      - SQL_DATABASE_URL=postgresql://seizu:seizu@postgres:5432/seizu
+      # SQLModel — non-secret URL plus separately managed credentials
+      - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
+      - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
+      - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
       # MCP server — set MCP_ENABLED=false to disable the endpoint
       - MCP_ENABLED=true
       # MCP OAuth metadata — authorization/token endpoints are derived automatically
