@@ -205,7 +205,7 @@ services:
     networks:
       auth:
   authentik-server:
-    image: ghcr.io/goauthentik/server:2026.2.3
+    image: ghcr.io/goauthentik/server:2026.5.2
     profiles:
       - auth
     restart: unless-stopped
@@ -248,7 +248,7 @@ services:
       auth:
       proxy:
   authentik-worker:
-    image: ghcr.io/goauthentik/server:2026.2.3
+    image: ghcr.io/goauthentik/server:2026.5.2
     profiles:
       - auth
     restart: unless-stopped
