@@ -37,6 +37,9 @@ interface ChatSessionsPanelProps {
   onNewSession: () => void;
   onDeleteSession: (threadId: string) => Promise<void>;
   onRenameSession: (threadId: string, title: string) => Promise<void>;
+  // Rendered below the sessions list when the panel is open (e.g. the
+  // scheduled chats section).
+  footer?: React.ReactNode;
 }
 
 function ChatSessionsPanel({
@@ -49,6 +52,7 @@ function ChatSessionsPanel({
   onNewSession,
   onDeleteSession,
   onRenameSession,
+  footer,
 }: ChatSessionsPanelProps) {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
@@ -239,6 +243,7 @@ function ChatSessionsPanel({
             )}
           </Box>
         )}
+        {open && footer}
       </Box>
 
       {/* Rename dialog */}

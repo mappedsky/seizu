@@ -4,9 +4,10 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What is Seizu?
 
-Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Three runtimes:
+Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Four runtimes:
 - **FastAPI web app** (`reporting/`) — serves the React frontend and REST API (ASGI, Gunicorn + UvicornWorker).
 - **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log, statsd, temporal); reads from the database, not the YAML config.
+- **Scheduled chats worker** (`reporting/scheduled_chats.py`) — runs recurring headless agent sessions managed from the chat sidebar (see Headless Agent Runs).
 - **Temporal worker** (`reporting/temporal_worker.py`) — hosts Temporal workflows/activities started by the `temporal` scheduled query action (see the Temporal Workflows section).
 
 ## Running Commands with Docker
@@ -169,11 +170,15 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 
 ### Headless Agent Runs & Confirmation Bypass
 
-`reporting/services/headless_chat.py:run_headless_chat()` drives a full chat-agent turn for a stored user (session persists as their `ChatSessionItem`, visible in their chat UI). Used by the `agent_chat` action and Temporal activities. Security model (don't weaken without explicit sign-off):
-- **Identity:** headless runs execute as the scheduled query's *creator*. `reporting/authnz/headless.py:resolve_stored_user()` rebuilds their permissions from the last role claim seen on an authenticated request (`User.role`, synced by `get_or_create_user`); archived users hard-stop.
+`reporting/services/headless_chat.py:run_headless_chat()` drives a full chat-agent turn for a stored user (session persists as their `ChatSessionItem`, visible in their chat UI). Used by scheduled chats and Temporal activities. Security model (don't weaken without explicit sign-off):
+- **Identity:** headless runs execute as the schedule/scheduled-query *creator*. `reporting/authnz/headless.py:resolve_stored_user()` rebuilds their permissions from the last role claim seen on an authenticated request (`User.role`, synced by `get_or_create_user`); archived users hard-stop.
 - **Confirmation bypass is permission-based:** `chat:bypass_permissions` (Editor+). `mcp_runtime.call_tool_for_chat(bypass_confirmations=True)` re-checks the permission and AUDIT-logs every bypassed execution; without the permission the call is blocked. Headless runs without bypass keep the normal confirmation flow (mutating tools fail closed for the run). Creator RBAC and `chat_safe_only` always apply.
-- The same permission gates the chat UI "Bypass confirmations" toggle (`ChatStreamRequest.bypass_confirmations`, 403 without it; default off) and configuring the `agent_chat` action.
+- The same permission gates the chat UI "Bypass confirmations" toggle (`ChatStreamRequest.bypass_confirmations`, 403 without it; default off).
 - Headless turns get a system-prompt addendum (`_HEADLESS_PROMPT_ADDENDUM` in chat_graph) telling the model nobody can answer: don't ask for confirmation, follow the skills, summarize blocks instead of retrying.
+
+### Scheduled Chats
+
+Recurring headless agent runs (prompt + trigger, no Cypher) managed from the chat sidebar's Schedules section; `chat:schedule` (Editor+) gates the CRUD routes (`/api/v1/chat/schedules`, registered when `CHAT_ENABLED` + `CHAT_SCHEDULES_ENABLED`) and the UI (`features.chat_schedules` → `useFeature('chat_schedules')`). Schedules are per-user (`created_by` owner; list/get/update/delete are owner-scoped, 404 otherwise) and stored without version history (`ScheduledChatItem` in `reporting/schema/chat.py`; both store backends + lock/record methods mirror scheduled queries). The worker (`reporting/scheduled_chats.py`, compose `seizu-scheduled-chats`) polls every `CHAT_SCHEDULES_POLL_SECONDS`, supports frequency-minutes and `watch_scans` triggers (reuses `check_watch_scan_triggered`), claims runs via `acquire_scheduled_chat_lock`, and runs `headless_chat.run_headless_chat` as the owner. Settings: `CHAT_SCHEDULES_ENABLED`, `CHAT_SCHEDULES_POLL_SECONDS`, `CHAT_SCHEDULE_TIMEOUT_SECONDS`. Docs: `docs/root/install/chat-schedules.md`.
 
 ### Temporal Workflows
 
@@ -188,6 +193,7 @@ Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMP
 | `seizu` | FastAPI backend + static frontend |
 | `seizu-node` | Bun dev server |
 | `seizu-scheduled-queries` | Scheduled query worker |
+| `seizu-scheduled-chats` | Scheduled chats worker (headless agent runs) |
 | `seizu-temporal-worker` | Temporal workflow worker |
 | `temporal` | Temporal dev server (`server start-dev`, in-memory; UI `:8233`) |
 | `neo4j` | Graph database |

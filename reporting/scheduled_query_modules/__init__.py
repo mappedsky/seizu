@@ -60,16 +60,6 @@ class ModuleInterface:
         return []
 
     @staticmethod
-    def required_permission() -> str | None:
-        """
-        Permission required to configure this action on a scheduled query, or
-        None when any user who can write scheduled queries may use it.
-        Enforced at create/update; the frontend hides action types the user
-        cannot configure.
-        """
-        return None
-
-    @staticmethod
     def handle_results(
         scheduled_query_id: str,
         action: ScheduledQueryAction,
@@ -141,25 +131,3 @@ def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
         except Exception:
             pass
     return schemas
-
-
-def get_action_permissions() -> dict[str, str]:
-    """Return required_permission() for available modules that declare one.
-
-    Imports without calling setup(), so this is safe to call from the web process.
-    Modules without the (optional) hook simply don't appear.
-    """
-    seen: set = set()
-    permissions: dict[str, str] = {}
-    for module_name in _BUILTIN_MODULES + list(settings.SCHEDULED_QUERY_MODULES):
-        if module_name in seen:
-            continue
-        seen.add(module_name)
-        try:
-            module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
-            required = getattr(module, "required_permission", lambda: None)()
-            if required:
-                permissions[module.action_name()] = required
-        except Exception:
-            pass
-    return permissions

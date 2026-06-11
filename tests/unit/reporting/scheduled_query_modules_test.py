@@ -3,19 +3,10 @@ from reporting.scheduled_query_modules import get_action_schemas
 
 
 async def test_load_modules(mocker):
-    # agent_chat.setup() initializes the chat checkpointer; keep the test hermetic.
-    mocker.patch("reporting.services.chat_graph.initialize_chat_checkpoints", mocker.AsyncMock())
     await scheduled_query_modules.load_modules()
-    assert list(scheduled_query_modules._MODULES.keys()) == ["sqs", "slack", "statsd", "temporal", "agent_chat"]
-    assert scheduled_query_modules.get_module_names() == ["sqs", "slack", "statsd", "temporal", "agent_chat"]
+    assert list(scheduled_query_modules._MODULES.keys()) == ["sqs", "slack", "statsd", "temporal"]
+    assert scheduled_query_modules.get_module_names() == ["sqs", "slack", "statsd", "temporal"]
     assert scheduled_query_modules.get_module("sqs") is not None
-
-
-def test_get_action_permissions():
-    permissions = scheduled_query_modules.get_action_permissions()
-    assert permissions.get("agent_chat") == "chat:bypass_permissions"
-    assert "temporal" not in permissions
-    assert "log" not in permissions
 
 
 def test_get_action_schemas_returns_builtin_schemas():

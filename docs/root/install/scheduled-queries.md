@@ -214,20 +214,7 @@ Requires the following environment variables:
 - `TEMPORAL_NAMESPACE`: Temporal namespace (default `default`).
 - `TEMPORAL_TASK_QUEUE`: task queue shared with the Seizu temporal worker (default `seizu-workflows`).
 
-### agent_chat
-
-The `agent_chat` action runs the chat agent headlessly with a configured prompt; the query results are appended to the prompt as JSON context. The session runs as the scheduled query's creator and persists in their chat UI, so the full transcript is reviewable afterwards.
-
-> **Permissions:** configuring this action requires the `chat:bypass_permissions` permission (`seizu-editor` and above). Users without it do not see the action type in the form, and the API rejects it. At run time, action confirmations are bypassed only while the creator's stored role still grants that permission; otherwise confirmation-gated tools fail closed for the run.
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| prompt | Yes | Instructions for the headless agent run. |
-| session\_title | No | Chat session title prefix. Default: the scheduled query name. |
-| max\_rows | No | Result rows beyond this limit are dropped from the prompt context. Default: `AGENT_CHAT_MAX_RESULT_ROWS`. |
-| query\_return\_attribute | No | The attribute in each result row to include. Default: `details` |
-
-The worker running this action needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) since it drives real chat sessions; see `.env.example`.
+> Looking for recurring AI agent runs? Those are **scheduled chats**, managed from the chat sidebar rather than as a scheduled query action — the agent uses its own tools to query the graph, so no Cypher is needed. See [Scheduled chats](chat-schedules.html).
 
 ### log
 

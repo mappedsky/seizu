@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -655,6 +655,67 @@ async def update_chat_session_title(user_id: str, thread_id: str, title: str) ->
 
 async def delete_chat_session(user_id: str, thread_id: str) -> bool:
     return await get_store().delete_chat_session(user_id, thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled chat convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def list_scheduled_chats(user_id: str | None = None) -> list[ScheduledChatItem]:
+    return await get_store().list_scheduled_chats(user_id=user_id)
+
+
+async def get_scheduled_chat(sc_id: str) -> ScheduledChatItem | None:
+    return await get_store().get_scheduled_chat(sc_id)
+
+
+async def create_scheduled_chat(
+    name: str,
+    prompt: str,
+    frequency: int | None,
+    watch_scans: list[dict[str, Any]],
+    enabled: bool,
+    created_by: str,
+) -> ScheduledChatItem:
+    return await get_store().create_scheduled_chat(
+        name=name,
+        prompt=prompt,
+        frequency=frequency,
+        watch_scans=watch_scans,
+        enabled=enabled,
+        created_by=created_by,
+    )
+
+
+async def update_scheduled_chat(
+    sc_id: str,
+    name: str,
+    prompt: str,
+    frequency: int | None,
+    watch_scans: list[dict[str, Any]],
+    enabled: bool,
+) -> ScheduledChatItem | None:
+    return await get_store().update_scheduled_chat(
+        sc_id=sc_id,
+        name=name,
+        prompt=prompt,
+        frequency=frequency,
+        watch_scans=watch_scans,
+        enabled=enabled,
+    )
+
+
+async def delete_scheduled_chat(sc_id: str) -> bool:
+    return await get_store().delete_scheduled_chat(sc_id)
+
+
+async def acquire_scheduled_chat_lock(sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+    return await get_store().acquire_scheduled_chat_lock(sc_id, expected_last_scheduled_at)
+
+
+async def record_scheduled_chat_result(sc_id: str, status: str, error: str | None = None) -> None:
+    await get_store().record_scheduled_chat_result(sc_id, status, error=error)
 
 
 # ---------------------------------------------------------------------------

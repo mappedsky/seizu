@@ -13,7 +13,7 @@ import botocore.exceptions
 from snowflake import SnowflakeGenerator
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -58,6 +58,7 @@ _SK_DASHBOARD_POINTER = "#POINTER"
 _PK_USER_LOOKUP = "USER_LOOKUP"
 # Scheduled queries — list index PK for listing all scheduled queries.
 _PK_SCHEDULED_QUERY_LIST = "SCHEDULED_QUERY_LIST"
+_PK_SCHEDULED_CHAT_LIST = "SCHEDULED_CHAT_LIST"
 # Toolsets — list index PK for listing all toolsets.
 _PK_TOOLSET_LIST = "TOOLSET_LIST"
 # Skillsets — list index PK for listing all skillsets.
@@ -471,6 +472,28 @@ def _role_version_from_item(item: dict) -> RoleVersion:
 
 def _sq_pk(sq_id: str) -> str:
     return f"SQ#{sq_id}"
+
+
+def _scheduled_chat_pk(sc_id: str) -> str:
+    return f"SCHEDULED_CHAT#{sc_id}"
+
+
+def _scheduled_chat_from_item(item: dict) -> ScheduledChatItem:
+    return ScheduledChatItem(
+        scheduled_chat_id=item["scheduled_chat_id"],
+        name=item["name"],
+        prompt=item["prompt"],
+        frequency=item.get("frequency"),
+        watch_scans=item.get("watch_scans", []),
+        enabled=item.get("enabled", True),
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+        created_by=item["created_by"],
+        last_run_status=item.get("last_run_status"),
+        last_run_at=item.get("last_run_at"),
+        last_errors=item.get("last_errors", []),
+        last_scheduled_at=item.get("last_scheduled_at"),
+    )
 
 
 def _toolset_pk(toolset_id: str) -> str:
@@ -1513,6 +1536,180 @@ class DynamoDBReportStore(ReportStore):
             )
             table.update_item(
                 Key={"PK": _PK_SCHEDULED_QUERY_LIST, "SK": _sq_pk(sq_id)},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+            )
+
+        await asyncio.to_thread(_op)
+
+    async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
+        def _op() -> list[ScheduledChatItem]:
+            table = _get_table()
+            resp = table.query(
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _PK_SCHEDULED_CHAT_LIST},
+            )
+            items = [_scheduled_chat_from_item(item) for item in resp.get("Items", [])]
+            if user_id is not None:
+                items = [item for item in items if item.created_by == user_id]
+            return items
+
+        return await asyncio.to_thread(_op)
+
+    async def get_scheduled_chat(self, sc_id: str) -> ScheduledChatItem | None:
+        def _op() -> ScheduledChatItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            if not item:
+                return None
+            return _scheduled_chat_from_item(item)
+
+        return await asyncio.to_thread(_op)
+
+    async def create_scheduled_chat(
+        self,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        created_by: str,
+    ) -> ScheduledChatItem:
+        sc_id = generate_report_id()
+        now = datetime.now(tz=UTC).isoformat()
+        base = _strip_none(
+            {
+                "scheduled_chat_id": sc_id,
+                "name": name,
+                "prompt": prompt,
+                "frequency": frequency,
+                "watch_scans": _floats_to_decimal(watch_scans),
+                "enabled": enabled,
+                "created_at": now,
+                "updated_at": now,
+                "created_by": created_by,
+            }
+        )
+
+        def _op() -> ScheduledChatItem:
+            table = _get_table()
+            table.put_item(Item={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA, **base})
+            table.put_item(Item={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id), **base})
+            return _scheduled_chat_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def update_scheduled_chat(
+        self,
+        sc_id: str,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+    ) -> ScheduledChatItem | None:
+        now = datetime.now(tz=UTC).isoformat()
+
+        def _op() -> ScheduledChatItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return None
+            base = _strip_none(
+                {
+                    **{k: v for k, v in existing.items() if k not in ("PK", "SK")},
+                    "name": name,
+                    "prompt": prompt,
+                    "frequency": frequency,
+                    "watch_scans": _floats_to_decimal(watch_scans),
+                    "enabled": enabled,
+                    "updated_at": now,
+                }
+            )
+            if frequency is None:
+                base.pop("frequency", None)
+            table.put_item(Item={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA, **base})
+            table.put_item(Item={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id), **base})
+            return _scheduled_chat_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def delete_scheduled_chat(self, sc_id: str) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            if not resp.get("Item"):
+                return False
+            table.delete_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            table.delete_item(Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)})
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+            update_expr = "SET last_scheduled_at = :new_val"
+            expr_values: dict[str, Any] = {":new_val": now}
+
+            if expected_last_scheduled_at is None:
+                condition = "attribute_not_exists(last_scheduled_at)"
+            else:
+                condition = "last_scheduled_at = :expected"
+                expr_values[":expected"] = expected_last_scheduled_at
+
+            try:
+                table.update_item(
+                    Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                    UpdateExpression=update_expr,
+                    ExpressionAttributeValues=expr_values,
+                    ConditionExpression=condition,
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return False
+                raise
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues={":new_val": now},
+            )
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
+        def _op() -> None:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            if not item:
+                return
+
+            if status == "failure" and error:
+                errors = list(item.get("last_errors", []))
+                errors.insert(0, {"timestamp": now, "error": error})
+                errors = errors[:5]
+            elif status == "success":
+                errors = []
+            else:
+                errors = list(item.get("last_errors", []))
+
+            update_expr = "SET last_run_status = :status, last_run_at = :now, last_errors = :errors"
+            expr_values = {":status": status, ":now": now, ":errors": errors}
+
+            table.update_item(
+                Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+            )
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
                 UpdateExpression=update_expr,
                 ExpressionAttributeValues=expr_values,
             )

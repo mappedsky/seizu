@@ -5,25 +5,17 @@ from typing import Any
 from reporting import scheduled_query_modules
 
 
-def validate_action_configs(actions: list[dict[str, Any]], permissions: frozenset[str] | None = None) -> str | None:
+def validate_action_configs(actions: list[dict[str, Any]]) -> str | None:
     """Validate each action's config against the module's declared schema.
-
-    When ``permissions`` is provided, action types whose module declares a
-    ``required_permission`` are rejected unless the permission is held (e.g.
-    ``agent_chat`` requires ``chat:bypass_permissions``).
 
     Returns an error message string if validation fails, or None if valid.
     """
     schemas = scheduled_query_modules.get_action_schemas()
-    action_permissions = scheduled_query_modules.get_action_permissions()
     for action in actions:
         action_type = action.get("action_type", "")
         action_config = action.get("action_config", {})
         if action_type not in schemas:
             return f"Unknown action type '{action_type}'. Valid types: {sorted(schemas)}."
-        required = action_permissions.get(action_type)
-        if required and permissions is not None and required not in permissions:
-            return f"Action type '{action_type}' requires the '{required}' permission."
         for field in schemas[action_type]:
             if not field.required:
                 continue

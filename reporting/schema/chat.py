@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -55,3 +55,48 @@ class CreateChatSessionRequest(BaseModel):
 
 class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+
+class ScheduledChatItem(BaseModel):
+    """A scheduled chat record: a recurring headless agent run owned by a user.
+
+    The worker runs the prompt as the owner; each run creates a regular chat
+    session in the owner's session list.
+    """
+
+    scheduled_chat_id: str
+    name: str
+    prompt: str
+    # Minutes between runs (frequency trigger), or None when watch_scans is used.
+    frequency: int | None = None
+    # SyncMetadata filters (same shape as scheduled query watch_scans): run
+    # when a matching Cartography scan completes after the last run.
+    watch_scans: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+    created_at: str
+    updated_at: str
+    created_by: str
+    last_run_status: str | None = None
+    last_run_at: str | None = None
+    last_errors: list[dict[str, str]] = Field(default_factory=list)
+    last_scheduled_at: str | None = None
+
+
+class CreateScheduledChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=32000)
+    frequency: int | None = Field(default=None, ge=1)
+    watch_scans: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def require_trigger(self) -> "CreateScheduledChatRequest":
+        if not self.frequency and not self.watch_scans:
+            raise ValueError("frequency or watch_scans is required")
+        return self
+
+
+class ScheduledChatsResponse(BaseModel):
+    schedules: list[ScheduledChatItem]

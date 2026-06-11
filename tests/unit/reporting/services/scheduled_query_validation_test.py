@@ -19,15 +19,7 @@ def _schemas():
                 required=True,
                 default=False,
             ),
-        ],
-        "agent_chat": [
-            ActionConfigFieldDef(
-                name="prompt",
-                label="Prompt",
-                type="text",
-                required=True,
-            ),
-        ],
+        ]
     }
 
 
@@ -35,10 +27,6 @@ def _patch_schemas(mocker):
     mocker.patch(
         "reporting.scheduled_query_modules.get_action_schemas",
         return_value=_schemas(),
-    )
-    mocker.patch(
-        "reporting.scheduled_query_modules.get_action_permissions",
-        return_value={"agent_chat": "chat:bypass_permissions"},
     )
 
 
@@ -83,30 +71,4 @@ def test_valid_config_passes(mocker):
             }
         ]
     )
-    assert error is None
-
-
-def test_permission_gated_action_rejected_without_permission(mocker):
-    _patch_schemas(mocker)
-    error = validate_action_configs(
-        [{"action_type": "agent_chat", "action_config": {"prompt": "do it"}}],
-        permissions=frozenset({"scheduled_queries:write"}),
-    )
-    assert error is not None
-    assert "chat:bypass_permissions" in error
-
-
-def test_permission_gated_action_allowed_with_permission(mocker):
-    _patch_schemas(mocker)
-    error = validate_action_configs(
-        [{"action_type": "agent_chat", "action_config": {"prompt": "do it"}}],
-        permissions=frozenset({"scheduled_queries:write", "chat:bypass_permissions"}),
-    )
-    assert error is None
-
-
-def test_permission_gate_skipped_when_permissions_not_provided(mocker):
-    """Callers that don't pass permissions (e.g. internal paths) skip the gate."""
-    _patch_schemas(mocker)
-    error = validate_action_configs([{"action_type": "agent_chat", "action_config": {"prompt": "do it"}}])
     assert error is None

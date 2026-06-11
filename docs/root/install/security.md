@@ -49,7 +49,7 @@ Use built-in roles conservatively:
 | Role | Use |
 |------|-----|
 | `seizu-viewer` | Read reports and dashboard. No ad-hoc query console or query history access. |
-| `seizu-editor` | Viewer plus report authoring, chat tool/skill use (`chat:tools:call`, `chat:skills:call`), and chat confirmation bypass (`chat:bypass_permissions`). |
+| `seizu-editor` | Viewer plus report authoring, chat tool/skill use (`chat:tools:call`, `chat:skills:call`), chat confirmation bypass (`chat:bypass_permissions`), and scheduled chats (`chat:schedule`). |
 | `seizu-admin` | Editor plus toolsets, tools, skillsets, skills, scheduled queries, roles, and administrative objects. |
 
 Recommended settings:

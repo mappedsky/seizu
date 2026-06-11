@@ -26,8 +26,10 @@ class Permission(StrEnum):
     CHAT_TOOLS_CALL = "chat:tools:call"
     CHAT_SKILLS_CALL = "chat:skills:call"
     # Allows running chat (interactive or headless) with action confirmations
-    # bypassed, and configuring scheduled query actions that do so.
+    # bypassed.
     CHAT_BYPASS_PERMISSIONS = "chat:bypass_permissions"
+    # Allows managing scheduled chats (recurring headless agent runs).
+    CHAT_SCHEDULE = "chat:schedule"
 
     # Toolsets
     TOOLSETS_READ = "toolsets:read"
@@ -97,6 +99,7 @@ EDITOR_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.CHAT_TOOLS_CALL,
         Permission.CHAT_SKILLS_CALL,
         Permission.CHAT_BYPASS_PERMISSIONS,
+        Permission.CHAT_SCHEDULE,
     }
 )
 

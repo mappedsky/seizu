@@ -163,37 +163,4 @@ describe('ScheduledQueries', () => {
     expect(await screen.findByText(warning)).toBeInTheDocument();
     expect(screen.getByLabelText('I accept *')).toBeInTheDocument();
   });
-
-  it('hides permission-gated action types from users without the permission', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        scheduled_query_action_types: ['slack', 'agent_chat'],
-        scheduled_query_action_schemas: {},
-        scheduled_query_action_permissions: {
-          agent_chat: 'chat:bypass_permissions',
-        },
-      }),
-    } as Response);
-
-    render(<ScheduledQueries />, { wrapper: Wrapper });
-    await waitFor(() =>
-      expect(global.fetch).toHaveBeenCalledWith('/api/v1/config'),
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    fireEvent.click(await screen.findByText('Edit'));
-
-    // The mocked permissions grant only scheduled_queries:*, so agent_chat
-    // must be filtered out of the action type select (identified by its
-    // current value, the existing slack action).
-    const comboboxes = await screen.findAllByRole('combobox');
-    const actionTypeSelect = comboboxes.find((c) => c.textContent === 'slack');
-    expect(actionTypeSelect).toBeDefined();
-    fireEvent.mouseDown(actionTypeSelect as HTMLElement);
-    const options = await screen.findAllByRole('option');
-    const labels = options.map((o) => o.textContent);
-    expect(labels).toContain('slack');
-    expect(labels).not.toContain('agent_chat');
-  });
 });

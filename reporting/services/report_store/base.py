@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -581,6 +581,61 @@ class ReportStore(ABC):
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
         """Delete a session. Returns False if not found."""
+
+    # ------------------------------------------------------------------
+    # Scheduled chats
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
+        """Return scheduled chats, optionally filtered to one owner.
+
+        The worker lists all schedules (user_id=None); the API lists only the
+        requesting user's own schedules.
+        """
+
+    @abstractmethod
+    async def get_scheduled_chat(self, sc_id: str) -> ScheduledChatItem | None:
+        """Return a scheduled chat, or None if it does not exist."""
+
+    @abstractmethod
+    async def create_scheduled_chat(
+        self,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        created_by: str,
+    ) -> ScheduledChatItem:
+        """Create a scheduled chat owned by created_by."""
+
+    @abstractmethod
+    async def update_scheduled_chat(
+        self,
+        sc_id: str,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+    ) -> ScheduledChatItem | None:
+        """Replace a scheduled chat's configuration. Returns None if not found."""
+
+    @abstractmethod
+    async def delete_scheduled_chat(self, sc_id: str) -> bool:
+        """Delete a scheduled chat. Returns False if not found."""
+
+    @abstractmethod
+    async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+        """Atomically claim a run by compare-and-setting last_scheduled_at.
+
+        Returns False when another worker already claimed this run.
+        """
+
+    @abstractmethod
+    async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
+        """Record a run outcome (last_run_status/last_run_at/last_errors)."""
 
     # ------------------------------------------------------------------
     # Action confirmations

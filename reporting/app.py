@@ -336,6 +336,10 @@ def create_app() -> FastAPI:
 
     if settings.CHAT_ENABLED:
         app.include_router(chat_routes.router)
+        if settings.CHAT_SCHEDULES_ENABLED:
+            from reporting.routes import chat_schedules as chat_schedules_routes
+
+            app.include_router(chat_schedules_routes.router)
 
     # MCP server — wired in as a pure ASGI middleware so it intercepts
     # /api/v1/mcp* before FastAPI's router.  This avoids a Starlette 1.0.0

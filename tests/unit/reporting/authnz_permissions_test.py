@@ -259,3 +259,9 @@ def test_chat_bypass_permissions_role_membership():
     assert Permission.CHAT_BYPASS_PERMISSIONS in EDITOR_PERMISSIONS
     assert Permission.CHAT_BYPASS_PERMISSIONS in ADMIN_PERMISSIONS
     assert Permission.CHAT_BYPASS_PERMISSIONS not in VIEWER_PERMISSIONS
+
+
+def test_chat_schedule_role_membership():
+    assert Permission.CHAT_SCHEDULE in EDITOR_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE not in VIEWER_PERMISSIONS

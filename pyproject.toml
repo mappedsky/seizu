@@ -49,6 +49,7 @@ dependencies = [
 seizu = "seizu_cli.main:app"
 seizu-server = "reporting.cli:main"
 seizu-scheduled-queries = "reporting.scheduled_queries:main"
+seizu-scheduled-chats = "reporting.scheduled_chats:main"
 seizu-temporal-worker = "reporting.temporal_worker:main"
 
 [dependency-groups]

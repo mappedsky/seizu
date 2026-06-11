@@ -56,6 +56,7 @@ import {
 import { useFeature } from 'src/features.context';
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import ChatInput from 'src/components/ChatInput';
+import ChatSchedulesSection from 'src/components/ChatSchedulesSection';
 import ChatSessionsPanel from 'src/components/ChatSessionsPanel';
 import ChatConfirmationsPanel from 'src/components/ChatConfirmationsPanel';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -576,9 +577,13 @@ export default function ChatInterface() {
 
   const canUseChat = hasPermission('chat:use');
   const canBypassConfirmations = hasPermission('chat:bypass_permissions');
+  const canScheduleChats = hasPermission('chat:schedule');
+  const chatSchedulesEnabled = useFeature('chat_schedules');
   const waitingForToken = auth_required && !accessToken;
   const sessionsFeedEnabled =
     chatEnabled && !permissionsLoading && !waitingForToken && canUseChat;
+  const showSchedules =
+    chatSchedulesEnabled && canScheduleChats && sessionsFeedEnabled;
 
   const {
     sessions,
@@ -1152,6 +1157,7 @@ export default function ChatInterface() {
           onNewSession={() => void handleNewSession()}
           onDeleteSession={handleDeleteSession}
           onRenameSession={updateSession}
+          footer={showSchedules ? <ChatSchedulesSection enabled /> : undefined}
         />
         <Box
           sx={{
@@ -1184,6 +1190,7 @@ export default function ChatInterface() {
         onNewSession={() => void handleNewSession()}
         onDeleteSession={handleDeleteSession}
         onRenameSession={updateSession}
+        footer={showSchedules ? <ChatSchedulesSection enabled /> : undefined}
       />
 
       {/* Main chat area */}

@@ -1,9 +1,9 @@
 """Run a chat-agent session headlessly on behalf of a stored user.
 
-Shared by the headless agent surfaces — the ``agent_chat`` scheduled query
-action and Temporal workflow activities. The session persists as a regular
-``ChatSessionItem`` owned by the acting user, so the full transcript is
-reviewable in their chat UI afterwards.
+Shared by the headless agent surfaces — scheduled chats and Temporal workflow
+activities. The session persists as a regular ``ChatSessionItem`` owned by
+the acting user, so the full transcript is reviewable in their chat UI
+afterwards.
 
 Confirmations: when the acting user holds ``chat:bypass_permissions``, the
 turn runs with action confirmations bypassed (mcp_runtime re-checks the

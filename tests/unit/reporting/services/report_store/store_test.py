@@ -83,6 +83,13 @@ def mock_store():
         "acquire_scheduled_query_lock": True,
         "record_scheduled_query_result": None,
         "delete_scheduled_query": True,
+        "list_scheduled_chats": [],
+        "get_scheduled_chat": None,
+        "create_scheduled_chat": None,
+        "update_scheduled_chat": None,
+        "delete_scheduled_chat": True,
+        "acquire_scheduled_chat_lock": True,
+        "record_scheduled_chat_result": None,
         "list_scheduled_query_versions": [],
         "get_scheduled_query_version": None,
         "list_toolsets": [],
@@ -441,3 +448,54 @@ async def test_facade_delegates_remaining_methods(mock_store):
     mock_store.list_role_versions.assert_awaited_once_with("r1")
     await report_store.get_role_version("r1", 1)
     mock_store.get_role_version.assert_awaited_once_with("r1", 1)
+
+
+async def test_scheduled_chat_facade_delegates(mock_store):
+    await report_store.list_scheduled_chats(user_id="u1")
+    mock_store.list_scheduled_chats.assert_awaited_once_with(user_id="u1")
+
+    await report_store.get_scheduled_chat("sc1")
+    mock_store.get_scheduled_chat.assert_awaited_once_with("sc1")
+
+    await report_store.create_scheduled_chat(
+        name="Digest",
+        prompt="Summarize",
+        frequency=1440,
+        watch_scans=[],
+        enabled=True,
+        created_by="u1",
+    )
+    mock_store.create_scheduled_chat.assert_awaited_once_with(
+        name="Digest",
+        prompt="Summarize",
+        frequency=1440,
+        watch_scans=[],
+        enabled=True,
+        created_by="u1",
+    )
+
+    await report_store.update_scheduled_chat(
+        sc_id="sc1",
+        name="Digest",
+        prompt="Summarize",
+        frequency=None,
+        watch_scans=[{"grouptype": "CVEMetadata"}],
+        enabled=False,
+    )
+    mock_store.update_scheduled_chat.assert_awaited_once_with(
+        sc_id="sc1",
+        name="Digest",
+        prompt="Summarize",
+        frequency=None,
+        watch_scans=[{"grouptype": "CVEMetadata"}],
+        enabled=False,
+    )
+
+    await report_store.delete_scheduled_chat("sc1")
+    mock_store.delete_scheduled_chat.assert_awaited_once_with("sc1")
+
+    await report_store.acquire_scheduled_chat_lock("sc1", None)
+    mock_store.acquire_scheduled_chat_lock.assert_awaited_once_with("sc1", None)
+
+    await report_store.record_scheduled_chat_result("sc1", "failure", error="boom")
+    mock_store.record_scheduled_chat_result.assert_awaited_once_with("sc1", "failure", error="boom")

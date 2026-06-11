@@ -61,7 +61,7 @@ async def _get(args: dict[str, Any], current_user: CurrentUser | None) -> dict[s
 async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
     body = CreateScheduledQueryRequest.model_validate(args)
-    err = validate_action_configs(body.actions, permissions=user.permissions)
+    err = validate_action_configs(body.actions)
     if err:
         return {"error": err}
     validation = await validate_query(body.cypher)
@@ -84,7 +84,7 @@ async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dic
     user = _require_user(current_user)
     sq_id = args["scheduled_query_id"]
     body = CreateScheduledQueryRequest.model_validate({k: v for k, v in args.items() if k != "scheduled_query_id"})
-    err = validate_action_configs(body.actions, permissions=user.permissions)
+    err = validate_action_configs(body.actions)
     if err:
         return {"error": err}
     validation = await validate_query(body.cypher)

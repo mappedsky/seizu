@@ -100,7 +100,4 @@ export interface ActionConfigFieldDef {
 export interface SeizuConfig {
   scheduled_query_action_types: string[];
   scheduled_query_action_schemas: Record<string, ActionConfigFieldDef[]>;
-  // Action types that require a permission to configure (e.g. agent_chat ->
-  // chat:bypass_permissions); the UI hides them from users who lack it.
-  scheduled_query_action_permissions?: Record<string, string>;
 }

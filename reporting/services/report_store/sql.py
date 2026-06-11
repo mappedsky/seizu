@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlmodel import Field, SQLModel, col, select
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -273,6 +273,23 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     title: str = ""
     created_at: str
     updated_at: str
+
+
+class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "scheduled_chats"
+    scheduled_chat_id: str = Field(primary_key=True)
+    name: str
+    prompt: str
+    frequency: int | None = None
+    watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    enabled: bool = True
+    created_at: str
+    updated_at: str
+    created_by: str = Field(index=True)
+    last_run_status: str | None = None
+    last_run_at: str | None = None
+    last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    last_scheduled_at: str | None = None
 
 
 class ActionConfirmationRecord(SQLModel, table=True):  # type: ignore
@@ -1091,6 +1108,135 @@ class SQLModelReportStore(ReportStore):
             await session.delete(record)
             await session.commit()
         return True
+
+    def _scheduled_chat_from_record(self, record: ScheduledChatRecord) -> ScheduledChatItem:
+        return ScheduledChatItem(
+            scheduled_chat_id=record.scheduled_chat_id,
+            name=record.name,
+            prompt=record.prompt,
+            frequency=record.frequency,
+            watch_scans=record.watch_scans or [],
+            enabled=record.enabled,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            created_by=record.created_by,
+            last_run_status=record.last_run_status,
+            last_run_at=record.last_run_at,
+            last_errors=record.last_errors or [],
+            last_scheduled_at=record.last_scheduled_at,
+        )
+
+    async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = select(ScheduledChatRecord)
+            if user_id is not None:
+                stmt = stmt.where(ScheduledChatRecord.created_by == user_id)
+            result = await session.execute(stmt)
+            return [self._scheduled_chat_from_record(r) for r in result.scalars().all()]
+
+    async def get_scheduled_chat(self, sc_id: str) -> ScheduledChatItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
+            if not record:
+                return None
+            return self._scheduled_chat_from_record(record)
+
+    async def create_scheduled_chat(
+        self,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        created_by: str,
+    ) -> ScheduledChatItem:
+        sc_id = generate_report_id()
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = ScheduledChatRecord(
+                scheduled_chat_id=sc_id,
+                name=name,
+                prompt=prompt,
+                frequency=frequency,
+                watch_scans=watch_scans,
+                enabled=enabled,
+                created_at=now,
+                updated_at=now,
+                created_by=created_by,
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return self._scheduled_chat_from_record(record)
+
+    async def update_scheduled_chat(
+        self,
+        sc_id: str,
+        name: str,
+        prompt: str,
+        frequency: int | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+    ) -> ScheduledChatItem | None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
+            if not record:
+                return None
+            record.name = name
+            record.prompt = prompt
+            record.frequency = frequency
+            record.watch_scans = watch_scans
+            record.enabled = enabled
+            record.updated_at = now
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return self._scheduled_chat_from_record(record)
+
+    async def delete_scheduled_chat(self, sc_id: str) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
+            if not record:
+                return False
+            await session.delete(record)
+            await session.commit()
+        return True
+
+    async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            if expected_last_scheduled_at is None:
+                condition = and_(
+                    ScheduledChatRecord.scheduled_chat_id == sc_id,
+                    ScheduledChatRecord.last_scheduled_at == null(),
+                )
+            else:
+                condition = and_(
+                    ScheduledChatRecord.scheduled_chat_id == sc_id,
+                    ScheduledChatRecord.last_scheduled_at == expected_last_scheduled_at,
+                )
+            stmt = update(ScheduledChatRecord).where(condition).values(last_scheduled_at=now)
+            result = await session.execute(stmt)
+            await session.commit()
+        return result.rowcount == 1
+
+    async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
+            if not record:
+                return
+            record.last_run_status = status
+            record.last_run_at = now
+            if status == "failure" and error:
+                errors = list(record.last_errors or [])
+                errors.insert(0, {"timestamp": now, "error": error})
+                record.last_errors = errors[:5]
+            elif status == "success":
+                record.last_errors = []
+            session.add(record)
+            await session.commit()
 
     async def get_or_create_user(
         self,
