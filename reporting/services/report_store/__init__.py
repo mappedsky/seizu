@@ -673,7 +673,7 @@ async def get_scheduled_chat(sc_id: str) -> ScheduledChatItem | None:
 async def create_scheduled_chat(
     name: str,
     prompt: str,
-    frequency: int | None,
+    schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
     created_by: str,
@@ -681,7 +681,7 @@ async def create_scheduled_chat(
     return await get_store().create_scheduled_chat(
         name=name,
         prompt=prompt,
-        frequency=frequency,
+        schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
         created_by=created_by,
@@ -692,7 +692,7 @@ async def update_scheduled_chat(
     sc_id: str,
     name: str,
     prompt: str,
-    frequency: int | None,
+    schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
 ) -> ScheduledChatItem | None:
@@ -700,7 +700,7 @@ async def update_scheduled_chat(
         sc_id=sc_id,
         name=name,
         prompt=prompt,
-        frequency=frequency,
+        schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
     )

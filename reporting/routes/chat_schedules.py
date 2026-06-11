@@ -45,7 +45,7 @@ async def create_scheduled_chat(
     item = await report_store.create_scheduled_chat(
         name=body.name,
         prompt=body.prompt,
-        frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         created_by=current.user.user_id,
@@ -78,7 +78,7 @@ async def update_scheduled_chat(
         sc_id=sc_id,
         name=body.name,
         prompt=body.prompt,
-        frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
     )

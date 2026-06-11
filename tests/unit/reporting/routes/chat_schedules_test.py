@@ -23,7 +23,7 @@ def _schedule(created_by: str = "test-user-id") -> ScheduledChatItem:
         scheduled_chat_id="sc-1",
         name="Daily digest",
         prompt="Summarize new findings",
-        frequency=1440,
+        schedule={"type": "daily", "days_of_week": [0], "hour": 9},
         watch_scans=[],
         enabled=True,
         created_at=_NOW,
@@ -72,14 +72,24 @@ async def test_create_scheduled_chat(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/chat/schedules",
-            json={"name": "Daily digest", "prompt": "Summarize new findings", "frequency": 1440},
+            json={
+                "name": "Daily digest",
+                "prompt": "Summarize new findings",
+                "schedule": {"type": "daily", "days_of_week": [0, 2], "hour": 9},
+            },
         )
 
     assert response.status_code == 201
     create_mock.assert_awaited_once_with(
         name="Daily digest",
         prompt="Summarize new findings",
-        frequency=1440,
+        schedule={
+            "type": "daily",
+            "interval_hours": None,
+            "days_of_week": [0, 2],
+            "hour": 9,
+            "days_of_month": [],
+        },
         watch_scans=[],
         enabled=True,
         created_by="test-user-id",
@@ -133,7 +143,7 @@ async def test_update_scheduled_chat(mocker):
         sc_id="sc-1",
         name="Daily digest",
         prompt="Summarize",
-        frequency=None,
+        schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
     )

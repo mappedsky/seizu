@@ -18,8 +18,14 @@ A schedule has:
 |-------|-------------|
 | name | Display name; also used as the chat session title prefix for each run. |
 | prompt | Instructions for the agent. It runs headlessly as you, with your permissions, and can use chat tools to query the graph, render skills, and (with `chat:bypass_permissions`) create or update resources. |
-| trigger | **Fixed frequency** (every N minutes) or **Watch scans** (run when matching Cartography `SyncMetadata` records update — same semantics as scheduled query `watch_scans`). |
+| trigger | A **schedule** or **watch scans** (run when matching Cartography `SyncMetadata` records update — same semantics as scheduled query `watch_scans`). |
 | enabled | Whether the worker runs this schedule. |
+
+Schedules repeat **hourly**, **daily**, or **monthly** (all times UTC):
+
+- **Hourly** — every N hours, anchored to the last run; a new hourly schedule runs immediately.
+- **Daily** — on selected days of the week at a chosen hour. A new schedule waits for its first selected occurrence (creating "Mondays at 09:00" on a Tuesday first runs the following Monday).
+- **Monthly** — on selected days of the month (1–31) at 00:00. Months that don't have a selected day run on their **last day** instead (31 → Apr 30, Feb 28/29); the form warns when you select day 29, 30, or 31. Days that collapse to the same date (e.g. 30 and 31 in April) run once, not twice.
 
 The list shows each schedule's trigger and the status of its last run; run errors are recorded on the schedule (last five).
 

@@ -7,11 +7,23 @@ export interface ScheduledChatWatchScan {
   groupid?: string;
 }
 
+export interface ChatScheduleSpec {
+  type: 'hourly' | 'daily' | 'monthly';
+  // hourly: run every N hours.
+  interval_hours?: number | null;
+  // daily: 0=Monday .. 6=Sunday.
+  days_of_week?: number[];
+  // daily: hour of day (UTC).
+  hour?: number;
+  // monthly: days 1-31; months without a selected day run on their last day.
+  days_of_month?: number[];
+}
+
 export interface ScheduledChat {
   scheduled_chat_id: string;
   name: string;
   prompt: string;
-  frequency: number | null;
+  schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
   created_at: string;
@@ -25,7 +37,7 @@ export interface ScheduledChat {
 export interface ScheduledChatRequest {
   name: string;
   prompt: string;
-  frequency: number | null;
+  schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
 }

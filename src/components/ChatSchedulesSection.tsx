@@ -11,13 +11,18 @@ import {
   FormControlLabel,
   FormLabel,
   IconButton,
+  InputLabel,
   List,
   ListItem,
   ListItemButton,
+  MenuItem,
   Radio,
   RadioGroup,
+  Select,
   Switch,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -30,11 +35,21 @@ import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import {
+  ChatScheduleSpec,
   ScheduledChat,
   ScheduledChatRequest,
   ScheduledChatWatchScan,
   useChatSchedules,
 } from 'src/hooks/useChatSchedules';
+
+// weekday() order: 0=Monday .. 6=Sunday.
+const DAY_OF_WEEK_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const DAYS_OF_MONTH = Array.from({ length: 31 }, (_, i) => i + 1);
+const HOURS = Array.from({ length: 24 }, (_, i) => i);
+
+function formatHour(hour: number): string {
+  return `${String(hour).padStart(2, '0')}:00`;
+}
 
 interface ScheduleDialogProps {
   open: boolean;
@@ -51,11 +66,21 @@ function ScheduleDialog({
 }: ScheduleDialogProps) {
   const [name, setName] = useState(initial?.name ?? '');
   const [prompt, setPrompt] = useState(initial?.prompt ?? '');
-  const [triggerType, setTriggerType] = useState<'frequency' | 'watch_scans'>(
-    initial?.watch_scans?.length ? 'watch_scans' : 'frequency',
+  const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
+    initial?.watch_scans?.length ? 'watch_scans' : 'schedule',
   );
-  const [frequency, setFrequency] = useState<string>(
-    String(initial?.frequency ?? 1440),
+  const [scheduleType, setScheduleType] = useState<ChatScheduleSpec['type']>(
+    initial?.schedule?.type ?? 'daily',
+  );
+  const [intervalHours, setIntervalHours] = useState<string>(
+    String(initial?.schedule?.interval_hours ?? 1),
+  );
+  const [daysOfWeek, setDaysOfWeek] = useState<number[]>(
+    initial?.schedule?.days_of_week ?? [],
+  );
+  const [hour, setHour] = useState<number>(initial?.schedule?.hour ?? 9);
+  const [daysOfMonth, setDaysOfMonth] = useState<number[]>(
+    initial?.schedule?.days_of_month ?? [],
   );
   const [watchScans, setWatchScans] = useState<ScheduledChatWatchScan[]>(
     initial?.watch_scans?.length ? initial.watch_scans : [{}],
@@ -76,11 +101,33 @@ function ScheduleDialog({
     );
   };
 
-  const frequencyValid =
-    triggerType !== 'frequency' ||
-    (Number.isFinite(Number(frequency)) && Number(frequency) >= 1);
+  const intervalValid =
+    Number.isFinite(Number(intervalHours)) && Number(intervalHours) >= 1;
+  const scheduleValid =
+    triggerType !== 'schedule' ||
+    (scheduleType === 'hourly' && intervalValid) ||
+    (scheduleType === 'daily' && daysOfWeek.length > 0) ||
+    (scheduleType === 'monthly' && daysOfMonth.length > 0);
   const canSave =
-    Boolean(name.trim()) && Boolean(prompt.trim()) && frequencyValid;
+    Boolean(name.trim()) && Boolean(prompt.trim()) && scheduleValid;
+  const monthEndDays = daysOfMonth.filter((day) => day >= 29);
+
+  const buildSchedule = (): ChatScheduleSpec => {
+    if (scheduleType === 'hourly') {
+      return { type: 'hourly', interval_hours: Number(intervalHours) };
+    }
+    if (scheduleType === 'daily') {
+      return {
+        type: 'daily',
+        days_of_week: [...daysOfWeek].sort((a, b) => a - b),
+        hour,
+      };
+    }
+    return {
+      type: 'monthly',
+      days_of_month: [...daysOfMonth].sort((a, b) => a - b),
+    };
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -89,7 +136,7 @@ function ScheduleDialog({
       await onSave({
         name: name.trim(),
         prompt: prompt.trim(),
-        frequency: triggerType === 'frequency' ? Number(frequency) : null,
+        schedule: triggerType === 'schedule' ? buildSchedule() : null,
         watch_scans:
           triggerType === 'watch_scans'
             ? watchScans.filter(
@@ -142,13 +189,13 @@ function ScheduleDialog({
               row
               value={triggerType}
               onChange={(e) =>
-                setTriggerType(e.target.value as 'frequency' | 'watch_scans')
+                setTriggerType(e.target.value as 'schedule' | 'watch_scans')
               }
             >
               <FormControlLabel
-                value="frequency"
+                value="schedule"
                 control={<Radio size="small" />}
-                label="Fixed frequency"
+                label="Schedule"
               />
               <FormControlLabel
                 value="watch_scans"
@@ -157,19 +204,117 @@ function ScheduleDialog({
               />
             </RadioGroup>
           </FormControl>
-          {triggerType === 'frequency' ? (
-            <TextField
-              label="Frequency (minutes)"
-              type="number"
-              value={frequency}
-              onChange={(e) => setFrequency(e.target.value)}
-              size="small"
-              sx={{ width: 220 }}
-              error={!frequencyValid}
-              helperText={
-                frequencyValid ? undefined : 'Must be at least 1 minute'
-              }
-            />
+          {triggerType === 'schedule' ? (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <FormControl size="small" sx={{ width: 220 }}>
+                <InputLabel>Repeats</InputLabel>
+                <Select
+                  label="Repeats"
+                  value={scheduleType}
+                  onChange={(e) =>
+                    setScheduleType(e.target.value as ChatScheduleSpec['type'])
+                  }
+                >
+                  <MenuItem value="hourly">Hourly</MenuItem>
+                  <MenuItem value="daily">Daily</MenuItem>
+                  <MenuItem value="monthly">Monthly</MenuItem>
+                </Select>
+              </FormControl>
+              {scheduleType === 'hourly' ? (
+                <TextField
+                  label="Every (hours)"
+                  type="number"
+                  value={intervalHours}
+                  onChange={(e) => setIntervalHours(e.target.value)}
+                  size="small"
+                  sx={{ width: 220 }}
+                  error={!intervalValid}
+                  helperText={
+                    intervalValid ? undefined : 'Must be at least 1 hour'
+                  }
+                />
+              ) : null}
+              {scheduleType === 'daily' ? (
+                <>
+                  <Box>
+                    <FormLabel sx={{ fontSize: 13 }}>Days of week</FormLabel>
+                    <ToggleButtonGroup
+                      value={daysOfWeek}
+                      onChange={(_e, value: number[]) => setDaysOfWeek(value)}
+                      size="small"
+                      sx={{ display: 'flex', flexWrap: 'wrap', mt: 0.5 }}
+                    >
+                      {DAY_OF_WEEK_LABELS.map((label, day) => (
+                        <ToggleButton key={label} value={day} sx={{ px: 1.5 }}>
+                          {label}
+                        </ToggleButton>
+                      ))}
+                    </ToggleButtonGroup>
+                    {daysOfWeek.length === 0 ? (
+                      <Typography
+                        variant="caption"
+                        color="error"
+                        sx={{ display: 'block', mt: 0.5 }}
+                      >
+                        Select at least one day
+                      </Typography>
+                    ) : null}
+                  </Box>
+                  <FormControl size="small" sx={{ width: 220 }}>
+                    <InputLabel>Hour of day (UTC)</InputLabel>
+                    <Select
+                      label="Hour of day (UTC)"
+                      value={hour}
+                      onChange={(e) => setHour(Number(e.target.value))}
+                    >
+                      {HOURS.map((h) => (
+                        <MenuItem key={h} value={h}>
+                          {formatHour(h)}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </>
+              ) : null}
+              {scheduleType === 'monthly' ? (
+                <Box>
+                  <FormLabel sx={{ fontSize: 13 }}>Days of month</FormLabel>
+                  <ToggleButtonGroup
+                    value={daysOfMonth}
+                    onChange={(_e, value: number[]) => setDaysOfMonth(value)}
+                    size="small"
+                    sx={{ display: 'flex', flexWrap: 'wrap', mt: 0.5 }}
+                  >
+                    {DAYS_OF_MONTH.map((day) => (
+                      <ToggleButton
+                        key={day}
+                        value={day}
+                        sx={{ minWidth: 40, px: 0 }}
+                      >
+                        {day}
+                      </ToggleButton>
+                    ))}
+                  </ToggleButtonGroup>
+                  {daysOfMonth.length === 0 ? (
+                    <Typography
+                      variant="caption"
+                      color="error"
+                      sx={{ display: 'block', mt: 0.5 }}
+                    >
+                      Select at least one day
+                    </Typography>
+                  ) : null}
+                  {monthEndDays.length > 0 ? (
+                    <Alert severity="warning" sx={{ mt: 1 }}>
+                      Some months do not have day
+                      {monthEndDays.length > 1 ? 's' : ''}{' '}
+                      {monthEndDays.join(', ')}; in those months the chat runs
+                      on the last day of the month instead.
+                    </Alert>
+                  ) : null}
+                </Box>
+              ) : null}
+            </Box>
           ) : (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
               {watchScans.map((scan, i) => (
@@ -250,9 +395,23 @@ function ScheduleDialog({
   );
 }
 
+function describeSchedule(schedule: ChatScheduleSpec): string {
+  if (schedule.type === 'hourly') {
+    const hours = schedule.interval_hours ?? 1;
+    return hours === 1 ? 'Hourly' : `Every ${hours} h`;
+  }
+  if (schedule.type === 'daily') {
+    const days = (schedule.days_of_week ?? [])
+      .map((day) => DAY_OF_WEEK_LABELS[day])
+      .join(', ');
+    return `${days} at ${formatHour(schedule.hour ?? 0)} UTC`;
+  }
+  return `Monthly on ${(schedule.days_of_month ?? []).join(', ')}`;
+}
+
 function scheduleSubtitle(schedule: ScheduledChat): string {
-  const trigger = schedule.frequency
-    ? `Every ${schedule.frequency} min`
+  const trigger = schedule.schedule
+    ? describeSchedule(schedule.schedule)
     : 'On scan updates';
   if (!schedule.enabled) return `${trigger} · disabled`;
   if (schedule.last_run_status)

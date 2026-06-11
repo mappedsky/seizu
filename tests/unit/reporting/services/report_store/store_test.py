@@ -460,7 +460,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     await report_store.create_scheduled_chat(
         name="Digest",
         prompt="Summarize",
-        frequency=1440,
+        schedule={"type": "hourly", "interval_hours": 4},
         watch_scans=[],
         enabled=True,
         created_by="u1",
@@ -468,7 +468,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     mock_store.create_scheduled_chat.assert_awaited_once_with(
         name="Digest",
         prompt="Summarize",
-        frequency=1440,
+        schedule={"type": "hourly", "interval_hours": 4},
         watch_scans=[],
         enabled=True,
         created_by="u1",
@@ -478,7 +478,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         sc_id="sc1",
         name="Digest",
         prompt="Summarize",
-        frequency=None,
+        schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
     )
@@ -486,7 +486,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         sc_id="sc1",
         name="Digest",
         prompt="Summarize",
-        frequency=None,
+        schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
     )

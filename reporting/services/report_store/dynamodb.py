@@ -483,7 +483,7 @@ def _scheduled_chat_from_item(item: dict) -> ScheduledChatItem:
         scheduled_chat_id=item["scheduled_chat_id"],
         name=item["name"],
         prompt=item["prompt"],
-        frequency=item.get("frequency"),
+        schedule=item.get("schedule"),
         watch_scans=item.get("watch_scans", []),
         enabled=item.get("enabled", True),
         created_at=item["created_at"],
@@ -1571,7 +1571,7 @@ class DynamoDBReportStore(ReportStore):
         self,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         created_by: str,
@@ -1583,7 +1583,7 @@ class DynamoDBReportStore(ReportStore):
                 "scheduled_chat_id": sc_id,
                 "name": name,
                 "prompt": prompt,
-                "frequency": frequency,
+                "schedule": _floats_to_decimal(schedule) if schedule else None,
                 "watch_scans": _floats_to_decimal(watch_scans),
                 "enabled": enabled,
                 "created_at": now,
@@ -1605,7 +1605,7 @@ class DynamoDBReportStore(ReportStore):
         sc_id: str,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
     ) -> ScheduledChatItem | None:
@@ -1622,14 +1622,14 @@ class DynamoDBReportStore(ReportStore):
                     **{k: v for k, v in existing.items() if k not in ("PK", "SK")},
                     "name": name,
                     "prompt": prompt,
-                    "frequency": frequency,
+                    "schedule": _floats_to_decimal(schedule) if schedule else None,
                     "watch_scans": _floats_to_decimal(watch_scans),
                     "enabled": enabled,
                     "updated_at": now,
                 }
             )
-            if frequency is None:
-                base.pop("frequency", None)
+            if schedule is None:
+                base.pop("schedule", None)
             table.put_item(Item={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA, **base})
             table.put_item(Item={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id), **base})
             return _scheduled_chat_from_item(base)

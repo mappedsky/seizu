@@ -280,7 +280,7 @@ class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     scheduled_chat_id: str = Field(primary_key=True)
     name: str
     prompt: str
-    frequency: int | None = None
+    schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     created_at: str
@@ -512,6 +512,7 @@ class SQLModelReportStore(ReportStore):
                     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_username VARCHAR"))
                     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR"))
                     await conn.execute(text("ALTER TABLE users ALTER COLUMN email DROP NOT NULL"))
+                    await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS schedule JSON"))
                     await conn.execute(
                         text("ALTER TABLE action_confirmations ADD COLUMN IF NOT EXISTS batch_id VARCHAR")
                     )
@@ -531,6 +532,10 @@ class SQLModelReportStore(ReportStore):
                         await conn.execute(text("ALTER TABLE users ADD COLUMN preferred_username VARCHAR"))
                     if "role" not in column_names:
                         await conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR"))
+                    sc_columns = await conn.execute(text("PRAGMA table_info(scheduled_chats)"))
+                    sc_column_names = {row[1] for row in sc_columns}
+                    if sc_column_names and "schedule" not in sc_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN schedule JSON"))
                     ac_columns = await conn.execute(text("PRAGMA table_info(action_confirmations)"))
                     ac_column_names = {row[1] for row in ac_columns}
                     if "batch_id" not in ac_column_names:
@@ -1114,7 +1119,7 @@ class SQLModelReportStore(ReportStore):
             scheduled_chat_id=record.scheduled_chat_id,
             name=record.name,
             prompt=record.prompt,
-            frequency=record.frequency,
+            schedule=record.schedule,
             watch_scans=record.watch_scans or [],
             enabled=record.enabled,
             created_at=record.created_at,
@@ -1145,7 +1150,7 @@ class SQLModelReportStore(ReportStore):
         self,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         created_by: str,
@@ -1157,7 +1162,7 @@ class SQLModelReportStore(ReportStore):
                 scheduled_chat_id=sc_id,
                 name=name,
                 prompt=prompt,
-                frequency=frequency,
+                schedule=schedule,
                 watch_scans=watch_scans,
                 enabled=enabled,
                 created_at=now,
@@ -1174,7 +1179,7 @@ class SQLModelReportStore(ReportStore):
         sc_id: str,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
     ) -> ScheduledChatItem | None:
@@ -1185,7 +1190,7 @@ class SQLModelReportStore(ReportStore):
                 return None
             record.name = name
             record.prompt = prompt
-            record.frequency = frequency
+            record.schedule = schedule
             record.watch_scans = watch_scans
             record.enabled = enabled
             record.updated_at = now

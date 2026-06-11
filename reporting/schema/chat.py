@@ -57,6 +57,43 @@ class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class ChatScheduleSpec(BaseModel):
+    """When a scheduled chat runs. All times are UTC.
+
+    - ``hourly``: every ``interval_hours`` hours, anchored to the last run
+      (a new schedule runs immediately).
+    - ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at
+      ``hour``.
+    - ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a
+      month doesn't have runs on that month's last day instead (e.g. 31 in
+      April runs on the 30th).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["hourly", "daily", "monthly"]
+    interval_hours: int | None = Field(default=None, ge=1, le=720)
+    days_of_week: list[int] = Field(default_factory=list)
+    hour: int = Field(default=0, ge=0, le=23)
+    days_of_month: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_type_fields(self) -> "ChatScheduleSpec":
+        if self.type == "hourly" and not self.interval_hours:
+            raise ValueError("interval_hours is required for hourly schedules")
+        if self.type == "daily":
+            if not self.days_of_week:
+                raise ValueError("days_of_week is required for daily schedules")
+            if any(day < 0 or day > 6 for day in self.days_of_week):
+                raise ValueError("days_of_week values must be 0 (Monday) through 6 (Sunday)")
+        if self.type == "monthly":
+            if not self.days_of_month:
+                raise ValueError("days_of_month is required for monthly schedules")
+            if any(day < 1 or day > 31 for day in self.days_of_month):
+                raise ValueError("days_of_month values must be 1 through 31")
+        return self
+
+
 class ScheduledChatItem(BaseModel):
     """A scheduled chat record: a recurring headless agent run owned by a user.
 
@@ -67,8 +104,8 @@ class ScheduledChatItem(BaseModel):
     scheduled_chat_id: str
     name: str
     prompt: str
-    # Minutes between runs (frequency trigger), or None when watch_scans is used.
-    frequency: int | None = None
+    # When to run (hourly/daily/monthly), or None when watch_scans is used.
+    schedule: ChatScheduleSpec | None = None
     # SyncMetadata filters (same shape as scheduled query watch_scans): run
     # when a matching Cartography scan completes after the last run.
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
@@ -87,14 +124,14 @@ class CreateScheduledChatRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=32000)
-    frequency: int | None = Field(default=None, ge=1)
+    schedule: ChatScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
 
     @model_validator(mode="after")
     def require_trigger(self) -> "CreateScheduledChatRequest":
-        if not self.frequency and not self.watch_scans:
-            raise ValueError("frequency or watch_scans is required")
+        if not self.schedule and not self.watch_scans:
+            raise ValueError("schedule or watch_scans is required")
         return self
 
 

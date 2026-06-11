@@ -603,7 +603,7 @@ class ReportStore(ABC):
         self,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         created_by: str,
@@ -616,7 +616,7 @@ class ReportStore(ABC):
         sc_id: str,
         name: str,
         prompt: str,
-        frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
     ) -> ScheduledChatItem | None:
