@@ -94,6 +94,8 @@ EDITOR_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.QUERY_EXECUTE,
         Permission.QUERY_VALIDATE,
         Permission.QUERY_HISTORY_READ,
+        Permission.CHAT_TOOLS_CALL,
+        Permission.CHAT_SKILLS_CALL,
         Permission.CHAT_BYPASS_PERMISSIONS,
     }
 )
@@ -111,8 +113,6 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLSETS_DELETE,
         Permission.SKILLS_WRITE,
         Permission.SKILLS_DELETE,
-        Permission.CHAT_TOOLS_CALL,
-        Permission.CHAT_SKILLS_CALL,
         Permission.ROLES_WRITE,
         Permission.ROLES_DELETE,
     }
