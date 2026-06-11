@@ -3073,17 +3073,23 @@ async def test_empty_synthesis_response_marked_broken(mocker):
     assert not finish_reason_events
 
 
-def test_confirmation_bypass_from_config():
-    helper = chat_graph._confirmation_bypass_from_config
-    assert helper({}) is None
-    assert helper({"configurable": {}}) is None
-    assert helper({"configurable": {"confirmation_bypass_tools": ()}}) == frozenset()
-    assert helper({"configurable": {"confirmation_bypass_tools": ("a", "b")}}) == frozenset({"a", "b"})
-    assert helper({"configurable": {"confirmation_bypass_tools": ["a", 1]}}) == frozenset({"a"})
-    assert helper({"configurable": {"confirmation_bypass_tools": "not-a-collection"}}) is None
+def test_bypass_confirmations_from_config():
+    helper = chat_graph._bypass_confirmations_from_config
+    assert helper({}) is False
+    assert helper({"configurable": {}}) is False
+    assert helper({"configurable": {"bypass_confirmations": True}}) is True
+    assert helper({"configurable": {"bypass_confirmations": False}}) is False
+    assert helper({"configurable": {"bypass_confirmations": "yes"}}) is False
 
 
-async def test_run_tool_call_headless_uses_bypass_instead_of_confirmation(mocker):
+def test_headless_from_config():
+    helper = chat_graph._headless_from_config
+    assert helper({}) is False
+    assert helper({"configurable": {"headless": True}}) is True
+    assert helper({"configurable": {"headless": False}}) is False
+
+
+async def test_run_tool_call_bypass_uses_bypass_instead_of_confirmation(mocker):
     call_tool = mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
         mocker.AsyncMock(return_value=ChatActionOutcome(text="{}", blocked=None)),
@@ -3101,11 +3107,11 @@ async def test_run_tool_call_headless_uses_bypass_instead_of_confirmation(mocker
         None,
         session_key="thread-1",
         batch_id=None,
-        confirmation_bypass=frozenset({"reports__create_version"}),
+        bypass_confirmations=True,
     )
 
     kwargs = call_tool.await_args.kwargs
-    assert kwargs["confirmation_bypass_tools"] == frozenset({"reports__create_version"})
+    assert kwargs["bypass_confirmations"] is True
     assert "confirmation_source" not in kwargs
     assert "confirmation_session_key" not in kwargs
 
@@ -3128,4 +3134,4 @@ async def test_run_tool_call_interactive_keeps_confirmation_flow(mocker):
     kwargs = call_tool.await_args.kwargs
     assert kwargs["confirmation_source"] == "chat"
     assert kwargs["confirmation_session_key"] == "thread-1"
-    assert "confirmation_bypass_tools" not in kwargs
+    assert "bypass_confirmations" not in kwargs

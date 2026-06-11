@@ -38,7 +38,6 @@ class CveRepoReportWorkflow:
                         cves=by_repo[repo],
                         creator_user_id=input.creator_user_id,
                         scheduled_query_id=input.scheduled_query_id,
-                        confirmation_bypass_tools=input.confirmation_bypass_tools,
                     ),
                     start_to_close_timeout=timedelta(seconds=input.chat_timeout_seconds + 30),
                     heartbeat_timeout=timedelta(seconds=180),

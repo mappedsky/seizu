@@ -755,14 +755,22 @@ async def test_render_prompt_for_chat_returns_none_blocked_on_success(mocker):
     assert outcome.tools_required == ("security__lookup",)
 
 
-async def test_confirmation_bypass_executes_declared_tool_without_confirmation(mocker):
-    """A headless (workflow) call with the tool in the declared bypass set runs the handler directly."""
+async def test_bypass_confirmations_executes_with_permission(mocker):
+    """With chat:bypass_permissions, bypass mode runs the handler directly and creates no confirmation."""
     delete_report = mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.delete_report",
         mocker.AsyncMock(return_value=True),
     )
     create_confirmation = mocker.patch("reporting.services.mcp_runtime.report_store.create_action_confirmation")
-    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+    current = _user(
+        frozenset(
+            {
+                Permission.CHAT_TOOLS_CALL.value,
+                Permission.REPORTS_DELETE.value,
+                Permission.CHAT_BYPASS_PERMISSIONS.value,
+            }
+        )
+    )
 
     outcome = await mcp_runtime.call_tool_for_chat(
         current,
@@ -770,7 +778,7 @@ async def test_confirmation_bypass_executes_declared_tool_without_confirmation(m
         {"report_id": "r1"},
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
-        confirmation_bypass_tools=frozenset({"reports__delete"}),
+        bypass_confirmations=True,
     )
 
     assert outcome.blocked is None
@@ -779,8 +787,8 @@ async def test_confirmation_bypass_executes_declared_tool_without_confirmation(m
     create_confirmation.assert_not_called()
 
 
-async def test_confirmation_bypass_blocks_undeclared_tool(mocker):
-    """A confirmation-gated tool outside the declared bypass set fails closed in headless mode."""
+async def test_bypass_confirmations_blocked_without_permission(mocker):
+    """Bypass mode without chat:bypass_permissions is denied and the handler never runs."""
     delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
     create_confirmation = mocker.patch("reporting.services.mcp_runtime.report_store.create_action_confirmation")
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
@@ -791,58 +799,55 @@ async def test_confirmation_bypass_blocks_undeclared_tool(mocker):
         {"report_id": "r1"},
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
-        confirmation_bypass_tools=frozenset({"reports__create_version"}),
+        bypass_confirmations=True,
     )
 
-    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
-    assert "declared bypass list" in outcome.text
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+    assert Permission.CHAT_BYPASS_PERMISSIONS.value in outcome.text
     delete_report.assert_not_called()
     create_confirmation.assert_not_called()
 
 
-async def test_confirmation_bypass_empty_set_blocks_all_gated_tools(mocker):
-    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
-    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
-
-    outcome = await mcp_runtime.call_tool_for_chat(
-        current,
-        "reports__delete",
-        {"report_id": "r1"},
-        gate_permission=Permission.CHAT_TOOLS_CALL,
-        chat_safe_only=True,
-        confirmation_bypass_tools=frozenset(),
-    )
-
-    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
-    delete_report.assert_not_called()
-
-
-async def test_confirmation_bypass_requires_authenticated_user(mocker):
+async def test_bypass_confirmations_requires_authenticated_user(mocker):
     delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
 
     outcome = await mcp_runtime.call_tool_for_chat(
         None,
         "reports__delete",
         {"report_id": "r1"},
-        permissions=frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}),
+        permissions=frozenset(
+            {
+                Permission.CHAT_TOOLS_CALL.value,
+                Permission.REPORTS_DELETE.value,
+                Permission.CHAT_BYPASS_PERMISSIONS.value,
+            }
+        ),
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
-        confirmation_bypass_tools=frozenset({"reports__delete"}),
+        bypass_confirmations=True,
     )
 
     assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
     delete_report.assert_not_called()
 
 
-async def test_confirmation_bypass_does_not_affect_interactive_path(mocker):
-    """Without a bypass set, the interactive confirmation flow is unchanged."""
+async def test_bypass_confirmations_does_not_affect_interactive_path(mocker):
+    """Without the bypass flag, the interactive confirmation flow is unchanged."""
     mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
     mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
     mocker.patch(
         "reporting.services.mcp_runtime.report_store.create_action_confirmation",
         return_value=_confirmation(),
     )
-    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+    current = _user(
+        frozenset(
+            {
+                Permission.CHAT_TOOLS_CALL.value,
+                Permission.REPORTS_DELETE.value,
+                Permission.CHAT_BYPASS_PERMISSIONS.value,
+            }
+        )
+    )
 
     outcome = await mcp_runtime.call_tool_for_chat(
         current,

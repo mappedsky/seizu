@@ -250,3 +250,9 @@ async def test_sync_user_profile_calls_update_and_returns_updated_current_user(m
     )
     assert result.user.email == "new@example.com"
     assert result.permissions == VIEWER_PERMISSIONS
+
+
+def test_chat_bypass_permissions_role_membership():
+    assert Permission.CHAT_BYPASS_PERMISSIONS in EDITOR_PERMISSIONS
+    assert Permission.CHAT_BYPASS_PERMISSIONS in ADMIN_PERMISSIONS
+    assert Permission.CHAT_BYPASS_PERMISSIONS not in VIEWER_PERMISSIONS

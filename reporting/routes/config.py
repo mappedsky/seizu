@@ -24,6 +24,9 @@ async def get_config() -> dict:
         "oidc": oidc_config,
         "scheduled_query_action_types": scheduled_query_modules.get_configured_action_names(),
         "scheduled_query_action_schemas": action_schemas,
+        # Action types that require a permission to configure; the frontend
+        # hides these from users who lack it (server enforces on create/update).
+        "scheduled_query_action_permissions": scheduled_query_modules.get_action_permissions(),
         # Feature flags consumed by the frontend to show/hide whole features.
         "features": {
             "chat": settings.CHAT_ENABLED,

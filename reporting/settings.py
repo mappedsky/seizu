@@ -234,9 +234,16 @@ SCHEDULED_QUERY_MODULES = list_env(
         "reporting.scheduled_query_modules.slack",
         "reporting.scheduled_query_modules.statsd",
         "reporting.scheduled_query_modules.temporal",
+        "reporting.scheduled_query_modules.agent_chat",
     ],
 )
 # NOTE: scheduled query module settings are defined within the modules themselves
+
+# Maximum number of scheduled query result rows appended to an agent_chat
+# action's prompt as JSON context.
+AGENT_CHAT_MAX_RESULT_ROWS = int_env("AGENT_CHAT_MAX_RESULT_ROWS", 200)
+# Timeout in seconds for one agent_chat headless agent session.
+AGENT_CHAT_TIMEOUT_SECONDS = int_env("AGENT_CHAT_TIMEOUT_SECONDS", 600)
 
 # Temporal server address (host:port of the frontend/gRPC endpoint), e.g.
 # "temporal:7233" in docker compose.

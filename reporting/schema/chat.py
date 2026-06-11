@@ -13,6 +13,10 @@ class ChatStreamRequest(BaseModel):
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Run the turn with action confirmations bypassed. Requires the
+    # chat:bypass_permissions permission (403 otherwise); every bypassed tool
+    # execution is audit-logged.
+    bypass_confirmations: bool = False
 
     @model_validator(mode="after")
     def require_message_or_resume(self) -> "ChatStreamRequest":

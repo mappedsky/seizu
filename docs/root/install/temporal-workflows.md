@@ -29,13 +29,13 @@ A workflow runs **as the user who created the scheduled query**. The worker reso
 
 ## Confirmation bypass model
 
-Interactive chat requires per-action confirmation before mutating tools run. A headless workflow has no approver, so each registered workflow **declares** the confirmation-gated tools it intends to run (`reporting/temporal_workflows/WORKFLOW_REGISTRY`). The declaration is server-side code — it is never taken from user input.
+Interactive chat requires per-action confirmation before mutating tools run. A headless workflow has no approver, so confirmations are governed by the **`chat:bypass_permissions`** permission (granted to `seizu-editor` and `seizu-admin` by default):
 
-- When configuring a `temporal` action, the form shows a warning and requires an acknowledgement checkbox (`accept_confirmation_bypass`). The scheduled query cannot be saved without it.
-- At run time, a confirmation-gated tool **in** the declared list executes with an audit log entry; any other confirmation-gated tool fails closed.
+- When the scheduled query's creator holds the permission, the workflow's AI sessions run with confirmations bypassed; every bypassed tool execution is audit-logged by `mcp_runtime`.
+- When the creator does not hold it, confirmation-gated tools fail closed for the run; the headless system-prompt addendum tells the model to note the block in its summary and move on.
 - Chat-safe gating (`chat_safe_only`) and the creator's RBAC permissions are enforced on top, unchanged.
 
-The `cve_repo_report` workflow declares only `reports__create_version` (`reports__create` is already allowed in chat without confirmation because it only creates a new private report).
+The same permission gates the chat UI's optional "Bypass confirmations" mode and the `agent_chat` scheduled query action (see the [scheduled queries documentation](scheduled-queries.html)).
 
 ## The cve_repo_report workflow
 
@@ -69,4 +69,4 @@ The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`)
 - Temporal Web UI: `http://localhost:8233` — inspect workflow runs (`seizu:cve_repo_report:<scheduled_query_id>:<run marker>`), activity retries, and results.
 - The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.
 
-To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description, declared confirmation bypasses) to `WORKFLOW_REGISTRY`. Document any new bypass on the spec — the action form surfaces it to users.
+To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description) to `WORKFLOW_REGISTRY` — the spec's description is surfaced in the action form's workflow picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.

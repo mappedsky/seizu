@@ -52,7 +52,7 @@ async def create_scheduled_query(
     current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_WRITE)),
 ) -> Any:
     """Create a new scheduled query."""
-    err = validate_action_configs(body.actions)
+    err = validate_action_configs(body.actions, permissions=current.permissions)
     if err:
         raise HTTPException(status_code=400, detail=err)
     validation = await validate_query(body.cypher)
@@ -83,7 +83,7 @@ async def update_scheduled_query(
     current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_WRITE)),
 ) -> Any:
     """Update a scheduled query."""
-    err = validate_action_configs(body.actions)
+    err = validate_action_configs(body.actions, permissions=current.permissions)
     if err:
         raise HTTPException(status_code=400, detail=err)
     validation = await validate_query(body.cypher)

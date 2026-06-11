@@ -396,6 +396,55 @@ async def test_chat_stream_requires_chat_permission(mocker):
     assert response.status_code == 403
 
 
+async def test_chat_stream_bypass_requires_permission(mocker):
+    mocker.patch("reporting.routes.chat.get_chat_graph")
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app(_current_user(frozenset({"chat:use"})))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
+        )
+
+    assert response.status_code == 403
+    assert "chat:bypass_permissions" in response.text
+
+
+async def test_chat_stream_bypass_flag_reaches_graph_config(mocker):
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app(_current_user(frozenset({"chat:use", "chat:bypass_permissions"})))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
+        )
+
+    assert response.status_code == 200
+    _input, config, _mode = fake_graph.calls[0]
+    assert config["configurable"]["bypass_confirmations"] is True
+
+
+async def test_chat_stream_bypass_defaults_off(mocker):
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 200
+    _input, config, _mode = fake_graph.calls[0]
+    assert config["configurable"]["bypass_confirmations"] is False
+
+
 async def test_chat_stream_validates_body(mocker):
     mocker.patch("reporting.routes.chat.get_chat_graph")
     _patch_chat_sessions(mocker)

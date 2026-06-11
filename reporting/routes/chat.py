@@ -65,6 +65,11 @@ async def stream_chat(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> StreamingResponse:
     """Stream a chat response as an AI SDK UI Message Stream."""
+    if body.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in current.permissions:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing permissions: {Permission.CHAT_BYPASS_PERMISSIONS.value}",
+        )
     return StreamingResponse(
         _stream_chat_response(body, current),
         media_type="text/event-stream",
@@ -157,6 +162,9 @@ async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncI
             "current_user": current,
             "thread_id": namespaced_thread_id(current, body.thread_id),
             "client_thread_id": body.thread_id,
+            # Permission re-checked in stream_chat (403) and on every bypassed
+            # call inside mcp_runtime.
+            "bypass_confirmations": body.bypass_confirmations,
         }
     }
     async for chunk in graph.astream(graph_input, config, stream_mode="custom"):

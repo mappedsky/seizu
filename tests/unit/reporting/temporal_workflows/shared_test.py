@@ -5,7 +5,7 @@ from reporting.temporal_workflows.shared import group_rows_by_repo
 def test_registry_contains_cve_repo_report():
     spec = get_workflow_spec("cve_repo_report")
     assert spec is not None
-    assert spec.confirmation_bypass_tools == frozenset({"reports__create_version"})
+    assert spec.description
 
 
 def test_registry_unknown_workflow():

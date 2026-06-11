@@ -1313,4 +1313,27 @@ describe('ChatInterface', () => {
 
     expect(screen.getByText('Assistant is working...')).toBeInTheDocument();
   });
+
+  it('hides the bypass confirmations toggle without the permission', async () => {
+    renderChat();
+    await act(async () => {});
+
+    expect(screen.queryByText('Bypass confirmations')).not.toBeInTheDocument();
+  });
+
+  it('shows the bypass confirmations toggle, default off, with the permission', async () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
+        permission === 'chat:use' || permission === 'chat:bypass_permissions',
+      loading: false,
+      currentUser: null,
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(screen.getByText('Bypass confirmations')).toBeInTheDocument();
+    const toggle = screen.getByRole('switch');
+    expect(toggle).not.toBeChecked();
+  });
 });

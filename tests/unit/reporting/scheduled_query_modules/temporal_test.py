@@ -12,7 +12,6 @@ _NOW = "2024-01-01T00:00:00+00:00"
 def _action(**overrides):
     config = {
         "workflow": "cve_repo_report",
-        "accept_confirmation_bypass": True,
         **overrides,
     }
     return ScheduledQueryAction(action_type="temporal", action_config=config)
@@ -40,15 +39,11 @@ def test_action_name():
     assert temporal.action_name() == "temporal"
 
 
-def test_action_config_schema_requires_acknowledgement():
+def test_action_config_schema():
     schema = {field.name: field for field in temporal.action_config_schema()}
     assert schema["workflow"].required is True
     assert "cve_repo_report" in (schema["workflow"].options or [])
-    accept = schema["accept_confirmation_bypass"]
-    assert accept.type == "boolean"
-    assert accept.required is True
-    assert accept.default is False
-    assert accept.warning
+    assert "accept_confirmation_bypass" not in schema
 
 
 async def test_setup():
@@ -77,20 +72,8 @@ def test_handle_results_starts_workflow(mocker):
     workflow_input = args[1]
     assert workflow_input.creator_user_id == "user-1"
     assert workflow_input.rows == [{"repo": "org/app", "cve_id": "CVE-2026-0001"}]
-    assert workflow_input.confirmation_bypass_tools == ["reports__create_version"]
     assert kwargs["id"] == f"seizu:cve_repo_report:sq-1:{_NOW}"
     assert kwargs["task_queue"] == settings.TEMPORAL_TASK_QUEUE
-
-
-def test_handle_results_refuses_without_acceptance(mocker):
-    client = _patch_client(mocker)
-    get_sq = mocker.patch("reporting.services.report_store.get_scheduled_query")
-    results = [{"details": {"repo": "org/app"}}]
-
-    temporal.handle_results("sq-1", _action(accept_confirmation_bypass=False), results)
-
-    get_sq.assert_not_called()
-    client.start_workflow.assert_not_called()
 
 
 def test_handle_results_refuses_unknown_workflow(mocker):

@@ -1972,4 +1972,3 @@ scheduled_queries:
       - action_type: temporal
         action_config:
           workflow: cve_repo_report
-          accept_confirmation_bypass: true

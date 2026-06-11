@@ -1,9 +1,8 @@
-"""Scheduled query action that starts a Temporal workflow with the results.
+"""Scheduled query action that starts a named Temporal workflow with the results.
 
-The workflow runs headlessly as the scheduled query's creator and may execute
-its declared confirmation-bypass tools without interactive approval (see
-``reporting.temporal_workflows.WORKFLOW_REGISTRY``), which is why the action
-config requires an explicit acknowledgement checkbox.
+The workflow's AI sessions run headlessly as the scheduled query's creator;
+confirmations are bypassed only when the creator holds
+``chat:bypass_permissions`` (enforced and audit-logged in mcp_runtime).
 
 ``temporalio`` is imported lazily inside functions so the web process can
 import this module for its action schema without pulling in the SDK.
@@ -26,10 +25,7 @@ def action_name() -> str:
 
 
 def _workflow_descriptions() -> str:
-    return " ".join(
-        f"{name}: bypasses confirmation for {', '.join(sorted(spec.confirmation_bypass_tools)) or 'no tools'}."
-        for name, spec in sorted(WORKFLOW_REGISTRY.items())
-    )
+    return " ".join(f"{name}: {spec.description}" for name, spec in sorted(WORKFLOW_REGISTRY.items()))
 
 
 def action_config_schema() -> list[ActionConfigFieldDef]:
@@ -41,18 +37,6 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
             required=True,
             options=sorted(WORKFLOW_REGISTRY),
             description=f"Temporal workflow to start with the query results. {_workflow_descriptions()}",
-        ),
-        ActionConfigFieldDef(
-            name="accept_confirmation_bypass",
-            label="I understand and accept that this workflow runs without interactive confirmation",
-            type="boolean",
-            required=True,
-            default=False,
-            warning=(
-                "This workflow runs headlessly as this scheduled query's creator and executes its"
-                " declared mutating tools WITHOUT interactive confirmation. The creator's RBAC"
-                " permissions still apply, and tools outside the declared list fail closed."
-            ),
         ),
         ActionConfigFieldDef(
             name="max_rows",
@@ -107,13 +91,6 @@ def _project_rows(
 
 
 def _validated_spec(scheduled_query_id: str, action: ScheduledQueryAction) -> WorkflowSpec | None:
-    """Defense in depth against records written before validation existed."""
-    if action.action_config.get("accept_confirmation_bypass") is not True:
-        logger.error(
-            "Refusing to start workflow: confirmation bypass not accepted",
-            extra={"scheduled_query_id": scheduled_query_id},
-        )
-        return None
     workflow_name = action.action_config.get("workflow")
     spec = get_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
     if spec is None:
@@ -152,7 +129,6 @@ async def _start_workflow(
         scheduled_query_id=scheduled_query_id,
         creator_user_id=item.created_by,
         rows=rows,
-        confirmation_bypass_tools=sorted(spec.confirmation_bypass_tools),
         chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
     )
     # last_scheduled_at identifies this run (the lock sets it before the query

@@ -798,6 +798,7 @@ function ScheduledQueries() {
   const [actionConfig, setActionConfig] = useState<SeizuConfig>({
     scheduled_query_action_types: [],
     scheduled_query_action_schemas: {},
+    scheduled_query_action_permissions: {},
   });
 
   useEffect(() => {
@@ -817,6 +818,8 @@ function ScheduledQueries() {
               config.scheduled_query_action_types ?? [],
             scheduled_query_action_schemas:
               config.scheduled_query_action_schemas ?? {},
+            scheduled_query_action_permissions:
+              config.scheduled_query_action_permissions ?? {},
           });
         }
       })
@@ -828,6 +831,16 @@ function ScheduledQueries() {
       cancelled = true;
     };
   }, []);
+
+  // Hide action types the user lacks the permission to configure (e.g.
+  // agent_chat requires chat:bypass_permissions); the server enforces the
+  // same rule on create/update.
+  const allowedActionTypes = useMemo(() => {
+    const required = actionConfig.scheduled_query_action_permissions ?? {};
+    return actionConfig.scheduled_query_action_types.filter(
+      (t) => !required[t] || hasPermission(required[t]),
+    );
+  }, [actionConfig, hasPermission]);
 
   const openCreate = () => {
     setEditTarget(null);
@@ -1166,7 +1179,7 @@ function ScheduledQueries() {
         onClose={() => setDialogOpen(false)}
         onSave={handleSave}
         initial={editTarget}
-        actionTypes={actionConfig.scheduled_query_action_types}
+        actionTypes={allowedActionTypes}
         actionSchemas={actionConfig.scheduled_query_action_schemas}
       />
 

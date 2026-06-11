@@ -15,9 +15,6 @@ class CveRepoReportInput:
     # Projected query result rows (the per-row data map, e.g. the "details"
     # attribute), each expected to carry a "repo" key.
     rows: list[dict[str, Any]] = field(default_factory=list)
-    # The workflow's declared bypass list, resolved from WORKFLOW_REGISTRY by
-    # the action module — never from user-supplied action config.
-    confirmation_bypass_tools: list[str] = field(default_factory=list)
     chat_timeout_seconds: int = 600
 
 
@@ -27,7 +24,6 @@ class RepoChatInput:
     cves: list[dict[str, Any]]
     creator_user_id: str
     scheduled_query_id: str
-    confirmation_bypass_tools: list[str] = field(default_factory=list)
 
 
 @dataclass

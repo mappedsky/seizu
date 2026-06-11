@@ -159,6 +159,17 @@ _MOCK_PROVIDER = "mock"
 # intercepts the call by name and never dispatches it to MCP.
 _FINAL_ANSWER_TOOL = "respond_to_user"
 
+# Appended to the system prompt for headless (automated) turns — scheduled
+# query agent runs and Temporal workflow sessions — where no human can answer.
+_HEADLESS_PROMPT_ADDENDUM = (
+    "This conversation is an automated headless run: no human is present and nobody can reply. "
+    "Never ask the user for confirmation, clarification, or approval, and never wait for input. "
+    "Carry out the task exactly as directed by the prompt and any rendered skills, making "
+    "reasonable decisions yourself where a skill leaves room. If an action is blocked because it "
+    "requires interactive confirmation, note it in your summary and move on rather than retrying. "
+    "Finish with a concise summary of what you did and found."
+)
+
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
     """Scope a client-supplied thread id to the authenticated user.
@@ -292,6 +303,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     model = get_chat_model()
     writer = get_stream_writer()
     base_system_prompt = build_system_prompt(provider, current_user)
+    if _headless_from_config(config):
+        base_system_prompt = f"{base_system_prompt}\n\n{_HEADLESS_PROMPT_ADDENDUM}"
 
     # One listing per turn — every consumer below (capability context, skill
     # specs, tool specs) works off this snapshot. No cross-turn cache: each
@@ -449,7 +462,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             current_user,
             session_key=_client_thread_id_from_config(config),
             batch_id=batch_id,
-            confirmation_bypass=_confirmation_bypass_from_config(config),
+            bypass_confirmations=_bypass_confirmations_from_config(config),
         )
         for result in results:
             detail_data = _tool_call_detail_data(result)
@@ -1543,7 +1556,7 @@ async def _run_tool_call_batch(
     current_user: CurrentUser | None,
     session_key: str | None = None,
     batch_id: str | None = None,
-    confirmation_bypass: frozenset[str] | None = None,
+    bypass_confirmations: bool = False,
 ) -> list[ToolCallResult]:
     max_parallel = settings.CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
@@ -1555,7 +1568,7 @@ async def _run_tool_call_batch(
                 current_user,
                 session_key=session_key,
                 batch_id=batch_id,
-                confirmation_bypass=confirmation_bypass,
+                bypass_confirmations=bypass_confirmations,
             )
         async with semaphore:
             return await _run_tool_call(
@@ -1563,7 +1576,7 @@ async def _run_tool_call_batch(
                 current_user,
                 session_key=session_key,
                 batch_id=batch_id,
-                confirmation_bypass=confirmation_bypass,
+                bypass_confirmations=bypass_confirmations,
             )
 
     return list(await asyncio.gather(*(run_one(request) for request in requests)))
@@ -1613,7 +1626,7 @@ async def _run_tool_call(
     *,
     session_key: str | None = None,
     batch_id: str | None = None,
-    confirmation_bypass: frozenset[str] | None = None,
+    bypass_confirmations: bool = False,
 ) -> ToolCallResult:
     if request.spec.kind == "skill":
         string_arguments = {key: str(value) for key, value in request.arguments.items()}
@@ -1631,10 +1644,9 @@ async def _run_tool_call(
             tools_required=outcome.tools_required,
         )
 
-    if confirmation_bypass is not None:
-        # Headless turn (no interactive approver): the declared bypass set
-        # replaces the confirmation flow; undeclared mutating tools fail closed
-        # inside mcp_runtime.
+    if bypass_confirmations:
+        # Bypass mode: no confirmation records are created; mcp_runtime
+        # enforces chat:bypass_permissions and audit-logs each execution.
         outcome = await mcp_runtime.call_tool_for_chat(
             current_user,
             request.name,
@@ -1643,7 +1655,7 @@ async def _run_tool_call(
             chat_safe_only=True,
             result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
             result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
-            confirmation_bypass_tools=confirmation_bypass,
+            bypass_confirmations=True,
         )
     else:
         outcome = await mcp_runtime.call_tool_for_chat(
@@ -2361,22 +2373,25 @@ def _client_thread_id_from_config(config: RunnableConfig) -> str | None:
     return thread_id if isinstance(thread_id, str) else None
 
 
-def _confirmation_bypass_from_config(config: RunnableConfig) -> frozenset[str] | None:
-    """Declared confirmation-bypass tool names for headless (workflow) turns.
+def _bypass_confirmations_from_config(config: RunnableConfig) -> bool:
+    """Whether this turn runs with action confirmations bypassed.
 
-    Present (possibly empty) only when the graph is driven by a headless
-    caller that has no interactive approver; interactive chat leaves it unset
-    and keeps the confirmation flow.
+    Set by the chat route (UI bypass mode) or by headless callers, both of
+    which verify the user holds ``chat:bypass_permissions`` first; mcp_runtime
+    re-checks the permission on every bypassed call.
     """
     configurable = config.get("configurable")
     if not isinstance(configurable, dict):
-        return None
-    bypass = configurable.get("confirmation_bypass_tools")
-    if bypass is None:
-        return None
-    if isinstance(bypass, (list, tuple, set, frozenset)):
-        return frozenset(name for name in bypass if isinstance(name, str))
-    return None
+        return False
+    return configurable.get("bypass_confirmations") is True
+
+
+def _headless_from_config(config: RunnableConfig) -> bool:
+    """Whether this turn is an automated run with no human present."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get("headless") is True
 
 
 def _resume_confirmation_id(messages: list[Any]) -> str | None:
