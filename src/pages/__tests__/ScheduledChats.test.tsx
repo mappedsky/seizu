@@ -1,11 +1,5 @@
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-} from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ScheduledChats from 'src/pages/ScheduledChats';
 import { FeaturesContext } from 'src/features.context';
@@ -33,10 +27,6 @@ const mockUsePermissions =
   >;
 const mockUseChatSchedules =
   schedulesModule.useChatSchedules as unknown as jest.Mock;
-const mockUseScheduledChatSessions =
-  schedulesModule.useScheduledChatSessions as unknown as jest.Mock;
-const mockUseSessionHistory =
-  schedulesModule.useScheduledChatSessionHistory as unknown as jest.Mock;
 
 const theme = createTheme();
 
@@ -82,23 +72,6 @@ describe('ScheduledChats', () => {
       updateSchedule: jest.fn(),
       deleteSchedule: jest.fn(),
     });
-    mockUseScheduledChatSessions.mockReturnValue(
-      jest.fn().mockResolvedValue([
-        {
-          thread_id: '12345',
-          title: 'Daily CVE digest – 2026-01-02',
-          created_at: '2026-01-02T00:00:00Z',
-          updated_at: '2026-01-02T00:00:05Z',
-        },
-      ]),
-    );
-    mockUseSessionHistory.mockReturnValue(
-      jest
-        .fn()
-        .mockResolvedValue([
-          { id: 'm1', role: 'assistant', text: 'Digest complete.' },
-        ]),
-    );
   });
 
   afterEach(() => {
@@ -116,19 +89,21 @@ describe('ScheduledChats', () => {
     expect(screen.getByText('v3')).toBeInTheDocument();
   });
 
-  it('shows the runs dialog with a read-only transcript', async () => {
-    render(<ScheduledChats />, { wrapper: Wrapper });
+  it('navigates to the detail view when a name is clicked', () => {
+    render(
+      <Routes>
+        <Route path="/app/scheduled-chats" element={<ScheduledChats />} />
+        <Route
+          path="/app/scheduled-chats/:id"
+          element={<div>view probe</div>}
+        />
+      </Routes>,
+      { wrapper: Wrapper },
+    );
 
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    fireEvent.click(await screen.findByText('View runs'));
-    await act(async () => {});
+    fireEvent.click(screen.getByText('Daily CVE digest'));
 
-    expect(screen.getByText('Runs – Daily CVE digest')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Daily CVE digest – 2026-01-02'));
-    await act(async () => {});
-
-    expect(screen.getByText('read-only')).toBeInTheDocument();
-    expect(screen.getByText('Digest complete.')).toBeInTheDocument();
+    expect(screen.getByText('view probe')).toBeInTheDocument();
   });
 
   it('hides the page content without the permission', () => {
@@ -180,11 +155,11 @@ describe('ScheduledChats', () => {
     // Owner column appears in all mode.
     expect(screen.getByText('Owner')).toBeInTheDocument();
 
-    // Filter the list down to user-2.
-    fireEvent.mouseDown(
-      screen.getByRole('combobox', { name: /filter by user/i }),
-    );
-    fireEvent.click(await screen.findByRole('option', { name: 'user-2' }));
+    // Filter the list down to user-2 via the table's facet filter menu
+    // (same UI as the reports list).
+    fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+    expect(await screen.findByText('User')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'user-2' }));
 
     expect(screen.getByText('Weekly posture')).toBeInTheDocument();
     expect(screen.queryByText('Daily CVE digest')).not.toBeInTheDocument();

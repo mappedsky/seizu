@@ -240,10 +240,21 @@ export function useScheduledChatSessions(): (
   );
 }
 
+export interface ScheduledChatRunDetail {
+  kind: string;
+  title: string;
+  status?: string;
+  arguments?: string;
+  body?: string;
+}
+
 export interface ScheduledChatTranscriptMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  metadata?: {
+    details?: ScheduledChatRunDetail[];
+  } | null;
 }
 
 export function useScheduledChatSessionHistory(): (
@@ -266,4 +277,44 @@ export function useScheduledChatSessionHistory(): (
     },
     [authHeaders, checkAuthReady],
   );
+}
+
+export function useChatSchedule(scheduleId: string | null): {
+  schedule: ScheduledChat | null;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+} {
+  const { checkAuthReady, authHeaders } = useAuthHeaders();
+  const [schedule, setSchedule] = useState<ScheduledChat | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!scheduleId || !checkAuthReady()) {
+      setLoading(false);
+      return;
+    }
+    try {
+      setError(null);
+      const res = await fetch(
+        `/api/v1/chat/schedules/${encodeURIComponent(scheduleId)}`,
+        { headers: authHeaders() },
+      );
+      if (res.status === 404) throw new Error('not found');
+      if (!res.ok) throw new Error('Failed to fetch scheduled chat');
+      setSchedule((await res.json()) as ScheduledChat);
+    } catch {
+      setError('Failed to load scheduled chat.');
+    } finally {
+      setLoading(false);
+    }
+  }, [scheduleId, authHeaders, checkAuthReady]);
+
+  useEffect(() => {
+    setLoading(true);
+    void refresh();
+  }, [refresh]);
+
+  return { schedule, loading, error, refresh };
 }

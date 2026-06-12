@@ -14,6 +14,7 @@ import ConfirmationPage from 'src/pages/ConfirmationPage';
 import ScheduledQueries from 'src/pages/ScheduledQueries';
 import ScheduledQueryHistory from 'src/pages/ScheduledQueryHistory';
 import ScheduledChats from 'src/pages/ScheduledChats';
+import ScheduledChatView from 'src/pages/ScheduledChatView';
 import ScheduledChatHistory from 'src/pages/ScheduledChatHistory';
 import Toolsets from 'src/pages/Toolsets';
 import ToolsetTools from 'src/pages/ToolsetTools';
@@ -51,6 +52,7 @@ const routes = [
         element: <ScheduledQueryHistory />,
       },
       { path: 'scheduled-chats', element: <ScheduledChats /> },
+      { path: 'scheduled-chats/:id', element: <ScheduledChatView /> },
       {
         path: 'scheduled-chats/:id/history',
         element: <ScheduledChatHistory />,
