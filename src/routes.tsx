@@ -13,6 +13,8 @@ import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
 import ConfirmationPage from 'src/pages/ConfirmationPage';
 import ScheduledQueries from 'src/pages/ScheduledQueries';
 import ScheduledQueryHistory from 'src/pages/ScheduledQueryHistory';
+import ScheduledChats from 'src/pages/ScheduledChats';
+import ScheduledChatHistory from 'src/pages/ScheduledChatHistory';
 import Toolsets from 'src/pages/Toolsets';
 import ToolsetTools from 'src/pages/ToolsetTools';
 import ToolsetHistory from 'src/pages/ToolsetHistory';
@@ -47,6 +49,11 @@ const routes = [
       {
         path: 'scheduled-queries/:id/history',
         element: <ScheduledQueryHistory />,
+      },
+      { path: 'scheduled-chats', element: <ScheduledChats /> },
+      {
+        path: 'scheduled-chats/:id/history',
+        element: <ScheduledChatHistory />,
       },
       { path: 'toolsets', element: <Toolsets /> },
       { path: 'toolsets/:toolsetId/tools', element: <ToolsetTools /> },

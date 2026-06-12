@@ -126,6 +126,19 @@ class CreateVersionRequest(BaseModel):
     config: dict[str, Any]
     comment: str | None = None
 
+    @field_validator("config")
+    @classmethod
+    def validate_report_config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Validate against the Report schema so malformed configs (wrong field
+        # names, queries as a list, markdown panels without content) are
+        # rejected with an actionable error instead of stored and rendered
+        # empty. The original dict is stored, so unknown-but-ignored extras
+        # are preserved as before.
+        from reporting.schema.reporting_config import Report
+
+        Report.model_validate(value)
+        return value
+
 
 class CloneReportRequest(BaseModel):
     """Request body for POST /api/v1/reports/<id>/clone."""

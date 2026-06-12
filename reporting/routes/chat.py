@@ -70,6 +70,11 @@ async def stream_chat(
             status_code=403,
             detail=f"Missing permissions: {Permission.CHAT_BYPASS_PERMISSIONS.value}",
         )
+    session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
+    if session is not None and session.origin == "scheduled":
+        # Scheduled-run transcripts are read-only: history stays viewable, but
+        # the conversation cannot be continued from the web UI.
+        raise HTTPException(status_code=403, detail="Scheduled chat sessions are read-only")
     return StreamingResponse(
         _stream_chat_response(body, current),
         media_type="text/event-stream",

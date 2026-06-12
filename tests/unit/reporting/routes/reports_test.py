@@ -496,7 +496,7 @@ async def test_create_version_with_query_capabilities(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.post(
             "/api/v1/reports/rid1/versions?include_query_capabilities=true",
-            json={"config": {"rows": []}},
+            json={"config": {"name": "Test Report", "rows": []}},
         )
     assert ret.status_code == 201
     assert ret.json()["query_capabilities"] == {}
@@ -548,7 +548,7 @@ async def test_create_version_success(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.post(
             "/api/v1/reports/rid1/versions",
-            json={"config": {"rows": []}, "comment": "v2"},
+            json={"config": {"name": "Test Report", "rows": []}, "comment": "v2"},
         )
     assert ret.status_code == 201
     assert ret.json()["version"] == 2
@@ -563,11 +563,14 @@ async def test_create_version_passes_fields_to_service(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.post(
             "/api/v1/reports/rid1/versions",
-            json={"config": {"rows": [{"name": "r"}]}, "comment": "update"},
+            json={
+                "config": {"name": "Test Report", "rows": [{"name": "r", "panels": []}]},
+                "comment": "update",
+            },
         )
     mock_save.assert_called_once_with(
         report_id="rid1",
-        config={"rows": [{"name": "r"}]},
+        config={"name": "Test Report", "rows": [{"name": "r", "panels": []}]},
         created_by="test-user-id",
         comment="update",
         user_id="test-user-id",
@@ -603,7 +606,7 @@ async def test_create_version_report_not_found(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.post(
             "/api/v1/reports/missing/versions",
-            json={"config": {}},
+            json={"config": {"name": "Test Report", "queries": {}, "rows": []}},
         )
     assert ret.status_code == 404
     assert "not found" in ret.json()["error"].lower()
@@ -627,7 +630,7 @@ async def test_create_version_private_report_returns_404_for_non_owner(mocker):
     )
     app = _make_app(_make_current_user(user_id="other-user"))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        ret = await client.post("/api/v1/reports/rid1/versions", json={"config": {"rows": []}})
+        ret = await client.post("/api/v1/reports/rid1/versions", json={"config": {"name": "Test Report", "rows": []}})
     assert ret.status_code == 404
 
 

@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -641,8 +641,22 @@ async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | No
     return await get_store().get_chat_session(user_id, thread_id)
 
 
-async def create_chat_session(user_id: str, title: str) -> ChatSessionItem:
-    return await get_store().create_chat_session(user_id, title)
+async def create_chat_session(
+    user_id: str,
+    title: str,
+    origin: str = "interactive",
+    scheduled_chat_id: str | None = None,
+) -> ChatSessionItem:
+    return await get_store().create_chat_session(
+        user_id,
+        title,
+        origin=origin,
+        scheduled_chat_id=scheduled_chat_id,
+    )
+
+
+async def list_scheduled_chat_sessions(user_id: str, scheduled_chat_id: str, limit: int) -> list[ChatSessionItem]:
+    return await get_store().list_scheduled_chat_sessions(user_id, scheduled_chat_id, limit)
 
 
 async def touch_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
@@ -695,6 +709,8 @@ async def update_scheduled_chat(
     schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
+    updated_by: str,
+    comment: str | None = None,
 ) -> ScheduledChatItem | None:
     return await get_store().update_scheduled_chat(
         sc_id=sc_id,
@@ -703,7 +719,17 @@ async def update_scheduled_chat(
         schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
+        updated_by=updated_by,
+        comment=comment,
     )
+
+
+async def list_scheduled_chat_versions(sc_id: str) -> list[ScheduledChatVersion]:
+    return await get_store().list_scheduled_chat_versions(sc_id)
+
+
+async def get_scheduled_chat_version(sc_id: str, version: int) -> ScheduledChatVersion | None:
+    return await get_store().get_scheduled_chat_version(sc_id, version)
 
 
 async def delete_scheduled_chat(sc_id: str) -> bool:

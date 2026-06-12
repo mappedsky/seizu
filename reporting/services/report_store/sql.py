@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlmodel import Field, SQLModel, col, select
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -273,6 +273,8 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     title: str = ""
     created_at: str
     updated_at: str
+    origin: str = "interactive"
+    scheduled_chat_id: str | None = Field(default=None, index=True)
 
 
 class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
@@ -283,13 +285,31 @@ class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
+    current_version: int = 0
     created_at: str
     updated_at: str
     created_by: str = Field(index=True)
+    updated_by: str | None = None
     last_run_status: str | None = None
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     last_scheduled_at: str | None = None
+
+
+class ScheduledChatVersionRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "scheduled_chat_versions"
+    __table_args__ = (UniqueConstraint("scheduled_chat_id", "version"),)
+    id: int | None = Field(default=None, primary_key=True)
+    scheduled_chat_id: str = Field(index=True)
+    version: int
+    name: str
+    prompt: str
+    schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    enabled: bool = True
+    created_at: str
+    created_by: str
+    comment: str | None = None
 
 
 class ActionConfirmationRecord(SQLModel, table=True):  # type: ignore
@@ -467,6 +487,17 @@ def _user_from_record(record: UserRecord) -> User:
     )
 
 
+def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionItem:
+    return ChatSessionItem(
+        thread_id=record.thread_id,
+        title=record.title,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        origin=record.origin if record.origin in ("interactive", "scheduled") else "interactive",
+        scheduled_chat_id=record.scheduled_chat_id,
+    )
+
+
 def _get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
@@ -514,6 +545,22 @@ class SQLModelReportStore(ReportStore):
                     await conn.execute(text("ALTER TABLE users ALTER COLUMN email DROP NOT NULL"))
                     await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS schedule JSON"))
                     await conn.execute(
+                        text(
+                            "ALTER TABLE scheduled_chats "
+                            "ADD COLUMN IF NOT EXISTS current_version INTEGER NOT NULL DEFAULT 0"
+                        )
+                    )
+                    await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS updated_by VARCHAR"))
+                    await conn.execute(
+                        text(
+                            "ALTER TABLE chat_sessions "
+                            "ADD COLUMN IF NOT EXISTS origin VARCHAR NOT NULL DEFAULT 'interactive'"
+                        )
+                    )
+                    await conn.execute(
+                        text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS scheduled_chat_id VARCHAR")
+                    )
+                    await conn.execute(
                         text("ALTER TABLE action_confirmations ADD COLUMN IF NOT EXISTS batch_id VARCHAR")
                     )
                     await conn.execute(
@@ -536,6 +583,20 @@ class SQLModelReportStore(ReportStore):
                     sc_column_names = {row[1] for row in sc_columns}
                     if sc_column_names and "schedule" not in sc_column_names:
                         await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN schedule JSON"))
+                    if sc_column_names and "current_version" not in sc_column_names:
+                        await conn.execute(
+                            text("ALTER TABLE scheduled_chats ADD COLUMN current_version INTEGER NOT NULL DEFAULT 0")
+                        )
+                    if sc_column_names and "updated_by" not in sc_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN updated_by VARCHAR"))
+                    cs_columns = await conn.execute(text("PRAGMA table_info(chat_sessions)"))
+                    cs_column_names = {row[1] for row in cs_columns}
+                    if cs_column_names and "origin" not in cs_column_names:
+                        await conn.execute(
+                            text("ALTER TABLE chat_sessions ADD COLUMN origin VARCHAR NOT NULL DEFAULT 'interactive'")
+                        )
+                    if cs_column_names and "scheduled_chat_id" not in cs_column_names:
+                        await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN scheduled_chat_id VARCHAR"))
                     ac_columns = await conn.execute(text("PRAGMA table_info(action_confirmations)"))
                     ac_column_names = {row[1] for row in ac_columns}
                     if "batch_id" not in ac_column_names:
@@ -1122,13 +1183,29 @@ class SQLModelReportStore(ReportStore):
             schedule=record.schedule,
             watch_scans=record.watch_scans or [],
             enabled=record.enabled,
+            current_version=record.current_version,
             created_at=record.created_at,
             updated_at=record.updated_at,
             created_by=record.created_by,
+            updated_by=record.updated_by,
             last_run_status=record.last_run_status,
             last_run_at=record.last_run_at,
             last_errors=record.last_errors or [],
             last_scheduled_at=record.last_scheduled_at,
+        )
+
+    def _scheduled_chat_version_from_record(self, record: ScheduledChatVersionRecord) -> ScheduledChatVersion:
+        return ScheduledChatVersion(
+            scheduled_chat_id=record.scheduled_chat_id,
+            version=record.version,
+            name=record.name,
+            prompt=record.prompt,
+            schedule=record.schedule,
+            watch_scans=record.watch_scans or [],
+            enabled=record.enabled,
+            created_at=record.created_at,
+            created_by=record.created_by,
+            comment=record.comment,
         )
 
     async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
@@ -1157,6 +1234,7 @@ class SQLModelReportStore(ReportStore):
     ) -> ScheduledChatItem:
         sc_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
+        version = 1
         async with AsyncSession(_get_engine()) as session:
             record = ScheduledChatRecord(
                 scheduled_chat_id=sc_id,
@@ -1165,11 +1243,27 @@ class SQLModelReportStore(ReportStore):
                 schedule=schedule,
                 watch_scans=watch_scans,
                 enabled=enabled,
+                current_version=version,
                 created_at=now,
                 updated_at=now,
                 created_by=created_by,
+                updated_by=created_by,
             )
             session.add(record)
+            session.add(
+                ScheduledChatVersionRecord(
+                    scheduled_chat_id=sc_id,
+                    version=version,
+                    name=name,
+                    prompt=prompt,
+                    schedule=schedule,
+                    watch_scans=watch_scans,
+                    enabled=enabled,
+                    created_at=now,
+                    created_by=created_by,
+                    comment=None,
+                )
+            )
             await session.commit()
             await session.refresh(record)
             return self._scheduled_chat_from_record(record)
@@ -1182,28 +1276,73 @@ class SQLModelReportStore(ReportStore):
         schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
+        updated_by: str,
+        comment: str | None = None,
     ) -> ScheduledChatItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
             record = await session.get(ScheduledChatRecord, sc_id)
             if not record:
                 return None
+            version = record.current_version + 1
             record.name = name
             record.prompt = prompt
             record.schedule = schedule
             record.watch_scans = watch_scans
             record.enabled = enabled
+            record.current_version = version
             record.updated_at = now
+            record.updated_by = updated_by
             session.add(record)
+            session.add(
+                ScheduledChatVersionRecord(
+                    scheduled_chat_id=sc_id,
+                    version=version,
+                    name=name,
+                    prompt=prompt,
+                    schedule=schedule,
+                    watch_scans=watch_scans,
+                    enabled=enabled,
+                    created_at=now,
+                    created_by=updated_by,
+                    comment=comment,
+                )
+            )
             await session.commit()
             await session.refresh(record)
             return self._scheduled_chat_from_record(record)
+
+    async def list_scheduled_chat_versions(self, sc_id: str) -> list[ScheduledChatVersion]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                select(ScheduledChatVersionRecord)
+                .where(ScheduledChatVersionRecord.scheduled_chat_id == sc_id)
+                .order_by(col(ScheduledChatVersionRecord.version).desc())
+            )
+            result = await session.execute(stmt)
+            return [self._scheduled_chat_version_from_record(r) for r in result.scalars().all()]
+
+    async def get_scheduled_chat_version(self, sc_id: str, version: int) -> ScheduledChatVersion | None:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = select(ScheduledChatVersionRecord).where(
+                ScheduledChatVersionRecord.scheduled_chat_id == sc_id,
+                ScheduledChatVersionRecord.version == version,
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return self._scheduled_chat_version_from_record(record)
 
     async def delete_scheduled_chat(self, sc_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
             record = await session.get(ScheduledChatRecord, sc_id)
             if not record:
                 return False
+            stmt = select(ScheduledChatVersionRecord).where(ScheduledChatVersionRecord.scheduled_chat_id == sc_id)
+            result = await session.execute(stmt)
+            for ver in result.scalars().all():
+                await session.delete(ver)
             await session.delete(record)
             await session.commit()
         return True
@@ -2565,20 +2704,15 @@ class SQLModelReportStore(ReportStore):
         async with AsyncSession(_get_engine()) as session:
             stmt = (
                 select(ChatSessionRecord)
-                .where(col(ChatSessionRecord.user_id) == user_id)
+                .where(
+                    col(ChatSessionRecord.user_id) == user_id,
+                    col(ChatSessionRecord.origin) == "interactive",
+                )
                 .order_by(col(ChatSessionRecord.updated_at).desc())
                 .limit(limit)
             )
             result = await session.execute(stmt)
-            return [
-                ChatSessionItem(
-                    thread_id=r.thread_id,
-                    title=r.title,
-                    created_at=r.created_at,
-                    updated_at=r.updated_at,
-                )
-                for r in result.scalars().all()
-            ]
+            return [_chat_session_from_sql_record(r) for r in result.scalars().all()]
 
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         async with AsyncSession(_get_engine()) as session:
@@ -2590,14 +2724,15 @@ class SQLModelReportStore(ReportStore):
             row = result.scalar_one_or_none()
             if row is None:
                 return None
-            return ChatSessionItem(
-                thread_id=row.thread_id,
-                title=row.title,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-            )
+            return _chat_session_from_sql_record(row)
 
-    async def create_chat_session(self, user_id: str, title: str) -> ChatSessionItem:
+    async def create_chat_session(
+        self,
+        user_id: str,
+        title: str,
+        origin: str = "interactive",
+        scheduled_chat_id: str | None = None,
+    ) -> ChatSessionItem:
         thread_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
@@ -2607,10 +2742,38 @@ class SQLModelReportStore(ReportStore):
                 title=title,
                 created_at=now,
                 updated_at=now,
+                origin=origin,
+                scheduled_chat_id=scheduled_chat_id,
             )
             session.add(record)
             await session.commit()
-            return ChatSessionItem(thread_id=thread_id, title=title, created_at=now, updated_at=now)
+            return ChatSessionItem(
+                thread_id=thread_id,
+                title=title,
+                created_at=now,
+                updated_at=now,
+                origin=origin if origin in ("interactive", "scheduled") else "interactive",
+                scheduled_chat_id=scheduled_chat_id,
+            )
+
+    async def list_scheduled_chat_sessions(
+        self,
+        user_id: str,
+        scheduled_chat_id: str,
+        limit: int,
+    ) -> list[ChatSessionItem]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                select(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.user_id) == user_id,
+                    col(ChatSessionRecord.scheduled_chat_id) == scheduled_chat_id,
+                )
+                .order_by(col(ChatSessionRecord.updated_at).desc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [_chat_session_from_sql_record(r) for r in result.scalars().all()]
 
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         now = datetime.now(tz=UTC).isoformat()
@@ -2629,12 +2792,7 @@ class SQLModelReportStore(ReportStore):
             if row is None:
                 await session.commit()
                 return None
-            item = ChatSessionItem(
-                thread_id=row.thread_id,
-                title=row.title,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-            )
+            item = _chat_session_from_sql_record(row)
             await session.commit()
             return item
 
@@ -2655,12 +2813,7 @@ class SQLModelReportStore(ReportStore):
             if row is None:
                 await session.commit()
                 return None
-            item = ChatSessionItem(
-                thread_id=row.thread_id,
-                title=row.title,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-            )
+            item = _chat_session_from_sql_record(row)
             await session.commit()
             return item
 

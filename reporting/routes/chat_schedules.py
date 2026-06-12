@@ -7,11 +7,18 @@ schedules, and the worker runs each schedule as its owner.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
-from reporting.schema.chat import CreateScheduledChatRequest, ScheduledChatItem, ScheduledChatsResponse
+from reporting.schema.chat import (
+    ChatSessionsResponse,
+    CreateScheduledChatRequest,
+    ScheduledChatItem,
+    ScheduledChatsResponse,
+    ScheduledChatVersion,
+    ScheduledChatVersionListResponse,
+)
 from reporting.services import report_store
 
 logger = logging.getLogger(__name__)
@@ -66,6 +73,18 @@ async def get_scheduled_chat(
     return await _owned_schedule(sc_id, current)
 
 
+@router.get("/api/v1/chat/schedules/{sc_id}/sessions", response_model=ChatSessionsResponse)
+async def list_scheduled_chat_sessions(
+    sc_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
+) -> ChatSessionsResponse:
+    """List the run sessions a scheduled chat has produced, newest first."""
+    await _owned_schedule(sc_id, current)
+    sessions = await report_store.list_scheduled_chat_sessions(current.user.user_id, sc_id, limit)
+    return ChatSessionsResponse(sessions=sessions)
+
+
 @router.put("/api/v1/chat/schedules/{sc_id}", response_model=ScheduledChatItem)
 async def update_scheduled_chat(
     sc_id: str,
@@ -81,6 +100,8 @@ async def update_scheduled_chat(
         schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
+        updated_by=current.user.user_id,
+        comment=body.comment,
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Scheduled chat not found")
@@ -88,6 +109,31 @@ async def update_scheduled_chat(
         "Scheduled chat updated",
         extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},
     )
+    return item
+
+
+@router.get("/api/v1/chat/schedules/{sc_id}/versions", response_model=ScheduledChatVersionListResponse)
+async def list_scheduled_chat_versions(
+    sc_id: str,
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
+) -> ScheduledChatVersionListResponse:
+    """Return version history for one of the requesting user's scheduled chats."""
+    await _owned_schedule(sc_id, current)
+    versions = await report_store.list_scheduled_chat_versions(sc_id)
+    return ScheduledChatVersionListResponse(versions=versions)
+
+
+@router.get("/api/v1/chat/schedules/{sc_id}/versions/{version}", response_model=ScheduledChatVersion)
+async def get_scheduled_chat_version(
+    sc_id: str,
+    version: int,
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
+) -> ScheduledChatVersion:
+    """Return a specific version of one of the requesting user's scheduled chats."""
+    await _owned_schedule(sc_id, current)
+    item = await report_store.get_scheduled_chat_version(sc_id, version)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Scheduled chat version not found")
     return item
 
 

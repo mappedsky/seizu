@@ -90,6 +90,9 @@ def mock_store():
         "delete_scheduled_chat": True,
         "acquire_scheduled_chat_lock": True,
         "record_scheduled_chat_result": None,
+        "list_scheduled_chat_versions": [],
+        "get_scheduled_chat_version": None,
+        "list_scheduled_chat_sessions": [],
         "list_scheduled_query_versions": [],
         "get_scheduled_query_version": None,
         "list_toolsets": [],
@@ -481,6 +484,8 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
+        updated_by="u1",
+        comment="tweak",
     )
     mock_store.update_scheduled_chat.assert_awaited_once_with(
         sc_id="sc1",
@@ -489,7 +494,18 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
+        updated_by="u1",
+        comment="tweak",
     )
+
+    await report_store.list_scheduled_chat_versions("sc1")
+    mock_store.list_scheduled_chat_versions.assert_awaited_once_with("sc1")
+
+    await report_store.get_scheduled_chat_version("sc1", 2)
+    mock_store.get_scheduled_chat_version.assert_awaited_once_with("sc1", 2)
+
+    await report_store.list_scheduled_chat_sessions("u1", "sc1", 50)
+    mock_store.list_scheduled_chat_sessions.assert_awaited_once_with("u1", "sc1", 50)
 
     await report_store.delete_scheduled_chat("sc1")
     mock_store.delete_scheduled_chat.assert_awaited_once_with("sc1")

@@ -3,7 +3,7 @@ from httpx import ASGITransport, AsyncClient
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
-from reporting.schema.chat import ScheduledChatItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.report_config import User
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -146,6 +146,8 @@ async def test_update_scheduled_chat(mocker):
         schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,
+        updated_by="test-user-id",
+        comment=None,
     )
 
 
@@ -177,3 +179,103 @@ async def test_routes_absent_when_feature_disabled(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/chat/schedules", json={})
     assert response.status_code in (404, 405)
+
+
+async def test_list_versions(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.list_scheduled_chat_versions",
+        mocker.AsyncMock(
+            return_value=[
+                ScheduledChatVersion(
+                    scheduled_chat_id="sc-1",
+                    version=1,
+                    name="Daily digest",
+                    prompt="Summarize new findings",
+                    schedule={"type": "daily", "days_of_week": [0], "hour": 9},
+                    created_at=_NOW,
+                    created_by="test-user-id",
+                )
+            ]
+        ),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules/sc-1/versions")
+
+    assert response.status_code == 200
+    assert response.json()["versions"][0]["version"] == 1
+
+
+async def test_get_version_not_found(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat_version",
+        mocker.AsyncMock(return_value=None),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules/sc-1/versions/9")
+    assert response.status_code == 404
+
+
+async def test_update_records_comment_and_author(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    update_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.update_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            "/api/v1/chat/schedules/sc-1",
+            json={
+                "name": "Daily digest",
+                "prompt": "Summarize",
+                "watch_scans": [{"grouptype": "CVEMetadata"}],
+                "comment": "tuned prompt",
+            },
+        )
+
+    assert response.status_code == 200
+    kwargs = update_mock.await_args.kwargs
+    assert kwargs["updated_by"] == "test-user-id"
+    assert kwargs["comment"] == "tuned prompt"
+
+
+async def test_list_run_sessions(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    sessions_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.list_scheduled_chat_sessions",
+        mocker.AsyncMock(
+            return_value=[
+                ChatSessionItem(
+                    thread_id="12345",
+                    title="Daily digest – 2026-06-11",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                    origin="scheduled",
+                    scheduled_chat_id="sc-1",
+                )
+            ]
+        ),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules/sc-1/sessions")
+
+    assert response.status_code == 200
+    assert response.json()["sessions"][0]["thread_id"] == "12345"
+    sessions_mock.assert_awaited_once_with("test-user-id", "sc-1", 50)

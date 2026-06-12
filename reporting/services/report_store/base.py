@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -560,15 +560,39 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def list_chat_sessions(self, user_id: str, limit: int) -> list[ChatSessionItem]:
-        """Return recent chat sessions for a user, sorted by updated_at descending."""
+        """Return recent interactive chat sessions for a user, newest first.
+
+        Sessions created by scheduled chat runs (``origin="scheduled"``) are
+        excluded.
+        """
 
     @abstractmethod
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         """Return a chat session for a user, or None if it does not exist."""
 
     @abstractmethod
-    async def create_chat_session(self, user_id: str, title: str) -> ChatSessionItem:
-        """Create a new chat session with a store-generated ID."""
+    async def create_chat_session(
+        self,
+        user_id: str,
+        title: str,
+        origin: str = "interactive",
+        scheduled_chat_id: str | None = None,
+    ) -> ChatSessionItem:
+        """Create a new chat session with a store-generated ID.
+
+        ``origin="scheduled"`` sessions are hidden from ``list_chat_sessions``
+        and are read-only in the web UI; ``scheduled_chat_id`` links them to
+        the schedule that created them.
+        """
+
+    @abstractmethod
+    async def list_scheduled_chat_sessions(
+        self,
+        user_id: str,
+        scheduled_chat_id: str,
+        limit: int,
+    ) -> list[ChatSessionItem]:
+        """Return a schedule's run sessions, newest first."""
 
     @abstractmethod
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
@@ -619,12 +643,25 @@ class ReportStore(ABC):
         schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
+        updated_by: str,
+        comment: str | None = None,
     ) -> ScheduledChatItem | None:
-        """Replace a scheduled chat's configuration. Returns None if not found."""
+        """Replace a scheduled chat's configuration, appending a new version.
+
+        Returns None if not found.
+        """
+
+    @abstractmethod
+    async def list_scheduled_chat_versions(self, sc_id: str) -> list[ScheduledChatVersion]:
+        """Return all stored versions for a scheduled chat, newest first."""
+
+    @abstractmethod
+    async def get_scheduled_chat_version(self, sc_id: str, version: int) -> ScheduledChatVersion | None:
+        """Return a specific version of a scheduled chat, or None if not found."""
 
     @abstractmethod
     async def delete_scheduled_chat(self, sc_id: str) -> bool:
-        """Delete a scheduled chat. Returns False if not found."""
+        """Delete a scheduled chat and all its versions. Returns False if not found."""
 
     @abstractmethod
     async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:

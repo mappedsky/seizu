@@ -7,6 +7,7 @@ import Article from '@mui/icons-material/Article';
 import Terminal from '@mui/icons-material/Terminal';
 import Chat from '@mui/icons-material/Chat';
 import Schedule from '@mui/icons-material/Schedule';
+import EventRepeat from '@mui/icons-material/EventRepeat';
 import Extension from '@mui/icons-material/Extension';
 import Psychology from '@mui/icons-material/Psychology';
 import AdminPanelSettings from '@mui/icons-material/AdminPanelSettings';
@@ -36,6 +37,9 @@ function DashboardSidebar({
   const hasPermission = usePermissions();
   const chatEnabled = useFeature('chat');
   const canUseChat = chatEnabled && hasPermission('chat:use');
+  const chatSchedulesEnabled = useFeature('chat_schedules');
+  const canScheduleChats =
+    chatSchedulesEnabled && hasPermission('chat:schedule');
   const logoSrc = collapsed
     ? theme.palette.mode === 'dark'
       ? '/static/images/logo-mark.svg'
@@ -85,6 +89,15 @@ function DashboardSidebar({
       icon: Schedule,
       title: 'Scheduled Queries',
     },
+    ...(canScheduleChats
+      ? [
+          {
+            href: '/app/scheduled-chats',
+            icon: EventRepeat,
+            title: 'Scheduled Chats',
+          },
+        ]
+      : []),
     {
       href: '/app/toolsets',
       icon: Extension,

@@ -104,3 +104,32 @@ async def test_run_headless_chat_without_bypass_permission(mocker):
     assert configurable["headless"] is True
     assert configurable["bypass_confirmations"] is False
     assert "disclosed_tools" not in graph.calls[0][0]
+
+
+async def test_scheduled_run_creates_scheduled_origin_session(mocker):
+    graph, _touch = _patch_store(mocker)
+    create = mocker.patch(
+        "reporting.services.report_store.create_chat_session",
+        mocker.AsyncMock(
+            return_value=ChatSessionItem(
+                thread_id="12345",
+                title="Run",
+                created_at=_NOW,
+                updated_at=_NOW,
+                origin="scheduled",
+                scheduled_chat_id="sc-1",
+            )
+        ),
+    )
+    current = _current_user(frozenset())
+
+    await headless_chat.run_headless_chat(
+        current,
+        prompt="do the thing",
+        title="Run",
+        timeout_seconds=60,
+        scheduled_chat_id="sc-1",
+    )
+
+    create.assert_awaited_once_with("user-1", "Run", origin="scheduled", scheduled_chat_id="sc-1")
+    assert graph.calls  # the session still runs normally

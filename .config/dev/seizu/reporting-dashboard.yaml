@@ -1866,8 +1866,10 @@ skillsets:
           5. Call `reports__get` for the latest config when the report already existed. Then call `reports__create_version` with a complete report config:
              - `schema_version`: 1
              - `name`: `CVE Findings – {% $repo %}`
-             - `queries`: keep any existing entries; no new queries are required.
-             - `rows`: keep existing rows and prepend one new row named with the current date containing a single full-width markdown panel (`type: markdown`, `w: 12`) that summarizes: each evaluated CVE (id, severity, score), the affected package and patched version when known, whether an open security issue confirms exposure, and a recommended remediation order.
+             - `queries`: an object mapping query names to Cypher strings (`{}` when none; never a list). Keep any existing entries; no new queries are required.
+             - `rows`: keep existing rows and prepend one new row named with the current date containing a single full-width markdown panel that summarizes: each evaluated CVE (id, severity, score), the affected package and patched version when known, whether an open security issue confirms exposure, and a recommended remediation order.
+             - A markdown panel's content MUST be in its `markdown` field, exactly this shape (no `config` or `content` keys):
+               `{"type": "markdown", "w": 12, "markdown": "## Findings..."}`
              - Pass a `comment` describing the run (for example "Automated CVE assessment").
           6. Do not delete or rewrite prior findings — the report is versioned and prior rows must be preserved.
 

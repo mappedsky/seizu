@@ -2,15 +2,17 @@
 
 ## Purpose
 
-Scheduled chats run the chat agent on a recurring schedule with a prompt you write — no Cypher required, since the agent uses its chat tools to query the graph itself. Each run creates a regular chat session in your session list, so the full transcript (tool calls included) is reviewable afterwards.
+Scheduled chats run the chat agent on a recurring schedule with a prompt you write — no Cypher required, since the agent uses its chat tools to query the graph itself. Each run records a chat session whose full transcript (tool calls included) is reviewable from the Scheduled Chats page afterwards.
 
 Typical uses: a daily digest of new critical CVEs, a weekly security posture summary, or a recurring check that files findings into a report.
 
 ## Managing scheduled chats
 
-Schedules live in the chat sidebar, in the **Schedules** section under your sessions. From there you can create, edit, enable/disable, and delete your scheduled chats. Schedules are personal: you only see and manage your own.
+Schedules live in the **Scheduled Chats** page, linked from the app sidebar. From there you can create, edit, enable/disable, and delete your scheduled chats, view each schedule's **runs**, and open its **version history**. Schedules are personal: you only see and manage your own.
 
-> **Permissions:** managing scheduled chats requires the `chat:schedule` permission (`seizu-editor` and above). The Schedules section is hidden without it, and the API rejects requests.
+> **Permissions:** managing scheduled chats requires the `chat:schedule` permission (`seizu-editor` and above). The page and sidebar link are hidden without it, and the API rejects requests.
+
+Every save creates a new configuration version; the history page (`/app/scheduled-chats/<id>/history`) lists versions with author and comment, and lets you restore an older one.
 
 A schedule has:
 
@@ -28,6 +30,10 @@ Schedules repeat **hourly**, **daily**, or **monthly** (all times UTC):
 - **Monthly** — on selected days of the month (1–31) at 00:00. Months that don't have a selected day run on their **last day** instead (31 → Apr 30, Feb 28/29); the form warns when you select day 29, 30, or 31. Days that collapse to the same date (e.g. 30 and 31 in April) run once, not twice.
 
 The list shows each schedule's trigger and the status of its last run; run errors are recorded on the schedule (last five).
+
+## Run sessions
+
+Each run creates a chat session owned by the schedule's creator, but these sessions are kept out of the chat sidebar's session list so scheduled runs don't crowd out interactive conversations. View them from the Scheduled Chats page via **View runs**, which lists a schedule's sessions and opens their transcripts. Run transcripts are **read-only**: the web UI cannot send messages to a scheduled session, and the API rejects attempts to continue one.
 
 ## How runs execute
 

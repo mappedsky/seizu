@@ -314,7 +314,7 @@ async def test_reports_create_version_success():
             "reports__create_version",
             {
                 "report_id": "r1",
-                "config": {"rows": []},
+                "config": {"name": "Test Report", "rows": []},
                 "comment": "why",
             },
         )
@@ -323,7 +323,7 @@ async def test_reports_create_version_success():
     assert data["version"] == 2
     mock_save.assert_awaited_once_with(
         report_id="r1",
-        config={"rows": []},
+        config={"name": "Test Report", "rows": []},
         created_by="u1",
         comment="why",
         user_id="u1",
@@ -424,7 +424,7 @@ async def test_reports_create_version_returns_error_for_private_report_from_non_
         result = await _call(
             server,
             "reports__create_version",
-            {"report_id": "r1", "config": {}},
+            {"report_id": "r1", "config": {"name": "Test Report"}},
             current_user=_current_user("u2"),
         )
         data = json.loads(result[0].text)
@@ -442,7 +442,7 @@ async def test_reports_create_version_returns_error_when_missing():
         result = await _call(
             server,
             "reports__create_version",
-            {"report_id": "nope", "config": {}},
+            {"report_id": "nope", "config": {"name": "Test Report"}},
         )
         data = json.loads(result[0].text)
 

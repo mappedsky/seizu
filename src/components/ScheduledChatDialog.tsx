@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { useState } from 'react';
 import {
   Alert,
   Box,
@@ -12,9 +12,6 @@ import {
   FormLabel,
   IconButton,
   InputLabel,
-  List,
-  ListItem,
-  ListItemButton,
   MenuItem,
   Radio,
   RadioGroup,
@@ -23,23 +20,16 @@ import {
   TextField,
   ToggleButton,
   ToggleButtonGroup,
-  Tooltip,
   Typography,
 } from '@mui/material';
-import AddIcon from '@mui/icons-material/Add';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
-import DeleteIcon from '@mui/icons-material/Delete';
-import EditIcon from '@mui/icons-material/Edit';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
-import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
-import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import {
   ChatScheduleSpec,
   ScheduledChat,
   ScheduledChatRequest,
   ScheduledChatWatchScan,
-  useChatSchedules,
 } from 'src/hooks/useChatSchedules';
 
 // weekday() order: 0=Monday .. 6=Sunday.
@@ -51,19 +41,33 @@ function formatHour(hour: number): string {
   return `${String(hour).padStart(2, '0')}:00`;
 }
 
-interface ScheduleDialogProps {
+export function describeSchedule(schedule: ChatScheduleSpec): string {
+  if (schedule.type === 'hourly') {
+    const hours = schedule.interval_hours ?? 1;
+    return hours === 1 ? 'Hourly' : `Every ${hours} h`;
+  }
+  if (schedule.type === 'daily') {
+    const days = (schedule.days_of_week ?? [])
+      .map((day) => DAY_OF_WEEK_LABELS[day])
+      .join(', ');
+    return `${days} at ${formatHour(schedule.hour ?? 0)} UTC`;
+  }
+  return `Monthly on ${(schedule.days_of_month ?? []).join(', ')}`;
+}
+
+interface ScheduledChatDialogProps {
   open: boolean;
   initial: ScheduledChat | null;
   onClose: () => void;
   onSave: (req: ScheduledChatRequest) => Promise<void>;
 }
 
-function ScheduleDialog({
+function ScheduledChatDialog({
   open,
   initial,
   onClose,
   onSave,
-}: ScheduleDialogProps) {
+}: ScheduledChatDialogProps) {
   const [name, setName] = useState(initial?.name ?? '');
   const [prompt, setPrompt] = useState(initial?.prompt ?? '');
   const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
@@ -86,6 +90,7 @@ function ScheduleDialog({
     initial?.watch_scans?.length ? initial.watch_scans : [{}],
   );
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -144,6 +149,7 @@ function ScheduleDialog({
               )
             : [],
         enabled,
+        ...(initial ? { comment: comment.trim() || null } : {}),
       });
       onClose();
     } catch {
@@ -377,6 +383,16 @@ function ScheduleDialog({
             }
             label="Enabled"
           />
+          {initial ? (
+            <TextField
+              label="Version comment"
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              size="small"
+              fullWidth
+              helperText="Optional note recorded in the version history."
+            />
+          ) : null}
         </Box>
       </DialogContent>
       <DialogActions>
@@ -395,197 +411,4 @@ function ScheduleDialog({
   );
 }
 
-function describeSchedule(schedule: ChatScheduleSpec): string {
-  if (schedule.type === 'hourly') {
-    const hours = schedule.interval_hours ?? 1;
-    return hours === 1 ? 'Hourly' : `Every ${hours} h`;
-  }
-  if (schedule.type === 'daily') {
-    const days = (schedule.days_of_week ?? [])
-      .map((day) => DAY_OF_WEEK_LABELS[day])
-      .join(', ');
-    return `${days} at ${formatHour(schedule.hour ?? 0)} UTC`;
-  }
-  return `Monthly on ${(schedule.days_of_month ?? []).join(', ')}`;
-}
-
-function scheduleSubtitle(schedule: ScheduledChat): string {
-  const trigger = schedule.schedule
-    ? describeSchedule(schedule.schedule)
-    : 'On scan updates';
-  if (!schedule.enabled) return `${trigger} · disabled`;
-  if (schedule.last_run_status)
-    return `${trigger} · ${schedule.last_run_status}`;
-  return trigger;
-}
-
-interface ChatSchedulesSectionProps {
-  enabled: boolean;
-}
-
-function ChatSchedulesSection({ enabled }: ChatSchedulesSectionProps) {
-  const {
-    schedules,
-    loading,
-    error,
-    createSchedule,
-    updateSchedule,
-    deleteSchedule,
-  } = useChatSchedules(enabled);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<ScheduledChat | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ScheduledChat | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-
-  const handleConfirmDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleting(true);
-    setDeleteError(null);
-    try {
-      await deleteSchedule(deleteTarget.scheduled_chat_id);
-      setDeleteTarget(null);
-    } catch {
-      setDeleteError('Failed to delete scheduled chat. Please try again.');
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const rowActions = (schedule: ScheduledChat): RowMenuAction[] => [
-    {
-      key: 'edit',
-      label: 'Edit',
-      icon: <EditIcon fontSize="small" />,
-      onClick: () => {
-        setEditTarget(schedule);
-        setDialogOpen(true);
-      },
-    },
-    {
-      key: 'delete',
-      label: 'Delete',
-      icon: <DeleteIcon fontSize="small" />,
-      onClick: () => {
-        setDeleteError(null);
-        setDeleteTarget(schedule);
-      },
-      destructive: true,
-      dividerBefore: true,
-    },
-  ];
-
-  return (
-    <Box
-      sx={{
-        borderTop: 1,
-        borderColor: 'divider',
-        flexShrink: 0,
-        maxHeight: '40%',
-        overflowY: 'auto',
-      }}
-    >
-      <Box
-        sx={{
-          alignItems: 'center',
-          display: 'flex',
-          justifyContent: 'space-between',
-          minHeight: 36,
-          px: 1.5,
-        }}
-      >
-        <Typography
-          variant="caption"
-          sx={{ color: 'text.secondary', fontWeight: 700, letterSpacing: 0.8 }}
-        >
-          SCHEDULES
-        </Typography>
-        <Tooltip title="New scheduled chat" placement="right">
-          <IconButton
-            size="small"
-            onClick={() => {
-              setEditTarget(null);
-              setDialogOpen(true);
-            }}
-            aria-label="New scheduled chat"
-          >
-            <AddIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      </Box>
-      {loading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', p: 1 }}>
-          <ConstellationSpinner size={20} />
-        </Box>
-      ) : error ? (
-        <Box sx={{ color: 'text.secondary', px: 1.5, pb: 1 }}>
-          <Typography variant="caption">{error}</Typography>
-        </Box>
-      ) : schedules.length === 0 ? (
-        <Box sx={{ color: 'text.secondary', px: 1.5, pb: 1 }}>
-          <Typography variant="caption">No scheduled chats yet.</Typography>
-        </Box>
-      ) : (
-        <List dense disablePadding>
-          {schedules.map((schedule) => (
-            <ListItem
-              key={schedule.scheduled_chat_id}
-              disablePadding
-              secondaryAction={
-                <Box sx={{ pr: 0.5 }}>
-                  <RowMenu actions={rowActions(schedule)} menuMinWidth={140} />
-                </Box>
-              }
-            >
-              <ListItemButton
-                onClick={() => {
-                  setEditTarget(schedule);
-                  setDialogOpen(true);
-                }}
-                sx={{ display: 'block', pr: 5 }}
-              >
-                <Typography variant="body2" noWrap title={schedule.name}>
-                  {schedule.name}
-                </Typography>
-                <Typography
-                  variant="caption"
-                  noWrap
-                  sx={{ color: 'text.secondary', display: 'block' }}
-                >
-                  {scheduleSubtitle(schedule)}
-                </Typography>
-              </ListItemButton>
-            </ListItem>
-          ))}
-        </List>
-      )}
-
-      {dialogOpen ? (
-        <ScheduleDialog
-          key={editTarget?.scheduled_chat_id ?? 'new'}
-          open={dialogOpen}
-          initial={editTarget}
-          onClose={() => setDialogOpen(false)}
-          onSave={(req) =>
-            editTarget
-              ? updateSchedule(editTarget.scheduled_chat_id, req)
-              : createSchedule(req)
-          }
-        />
-      ) : null}
-
-      <ConfirmDeleteDialog
-        open={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={() => void handleConfirmDelete()}
-        deleting={deleting}
-        error={deleteError}
-      >
-        Delete scheduled chat <strong>{deleteTarget?.name}</strong>? This cannot
-        be undone.
-      </ConfirmDeleteDialog>
-    </Box>
-  );
-}
-
-export default memo(ChatSchedulesSection);
+export default ScheduledChatDialog;

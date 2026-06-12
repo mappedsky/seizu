@@ -41,6 +41,12 @@ class ChatSessionItem(BaseModel):
     title: str
     created_at: str
     updated_at: str
+    # "interactive" sessions appear in the user's chat session list;
+    # "scheduled" sessions are created by scheduled chat runs, are hidden from
+    # that list, and are read-only in the web UI (viewable from the Scheduled
+    # Chats page).
+    origin: Literal["interactive", "scheduled"] = "interactive"
+    scheduled_chat_id: str | None = None
 
 
 class ChatSessionsResponse(BaseModel):
@@ -110,13 +116,30 @@ class ScheduledChatItem(BaseModel):
     # when a matching Cartography scan completes after the last run.
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
+    current_version: int = 0
     created_at: str
     updated_at: str
     created_by: str
+    updated_by: str | None = None
     last_run_status: str | None = None
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default_factory=list)
     last_scheduled_at: str | None = None
+
+
+class ScheduledChatVersion(BaseModel):
+    """A point-in-time snapshot of a scheduled chat's configuration."""
+
+    scheduled_chat_id: str
+    version: int
+    name: str
+    prompt: str
+    schedule: ChatScheduleSpec | None = None
+    watch_scans: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+    created_at: str
+    created_by: str
+    comment: str | None = None
 
 
 class CreateScheduledChatRequest(BaseModel):
@@ -127,6 +150,8 @@ class CreateScheduledChatRequest(BaseModel):
     schedule: ChatScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
+    # Version comment; only meaningful on update.
+    comment: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def require_trigger(self) -> "CreateScheduledChatRequest":
@@ -137,3 +162,7 @@ class CreateScheduledChatRequest(BaseModel):
 
 class ScheduledChatsResponse(BaseModel):
     schedules: list[ScheduledChatItem]
+
+
+class ScheduledChatVersionListResponse(BaseModel):
+    versions: list[ScheduledChatVersion]

@@ -26,12 +26,34 @@ export interface ScheduledChat {
   schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
+  current_version: number;
   created_at: string;
   updated_at: string;
   created_by: string;
+  updated_by: string | null;
   last_run_status: string | null;
   last_run_at: string | null;
   last_errors: { timestamp: string; error: string }[];
+}
+
+export interface ScheduledChatVersion {
+  scheduled_chat_id: string;
+  version: number;
+  name: string;
+  prompt: string;
+  schedule: ChatScheduleSpec | null;
+  watch_scans: ScheduledChatWatchScan[];
+  enabled: boolean;
+  created_at: string;
+  created_by: string;
+  comment: string | null;
+}
+
+export interface ScheduledChatSession {
+  thread_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ScheduledChatRequest {
@@ -40,6 +62,7 @@ export interface ScheduledChatRequest {
   schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
+  comment?: string | null;
 }
 
 interface ScheduledChatsResponse {
@@ -150,4 +173,64 @@ export function useChatSchedules(enabled: boolean): {
     updateSchedule,
     deleteSchedule,
   };
+}
+
+export function useChatScheduleVersions(scheduleId: string | null): {
+  versions: ScheduledChatVersion[];
+  loading: boolean;
+  error: string | null;
+} {
+  const { checkAuthReady, authHeaders } = useAuthHeaders();
+  const [versions, setVersions] = useState<ScheduledChatVersion[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!scheduleId || !checkAuthReady()) {
+      setLoading(false);
+      return undefined;
+    }
+    setLoading(true);
+    fetch(`/api/v1/chat/schedules/${encodeURIComponent(scheduleId)}/versions`, {
+      headers: authHeaders(),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to fetch versions');
+        return res.json() as Promise<{ versions: ScheduledChatVersion[] }>;
+      })
+      .then((data) => {
+        if (!cancelled) setVersions(data.versions);
+      })
+      .catch(() => {
+        if (!cancelled) setError('Failed to load version history.');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scheduleId, authHeaders, checkAuthReady]);
+
+  return { versions, loading, error };
+}
+
+export function useScheduledChatSessions(): (
+  scheduleId: string,
+) => Promise<ScheduledChatSession[]> {
+  const { checkAuthReady, authHeaders } = useAuthHeaders();
+  return useCallback(
+    async (scheduleId: string): Promise<ScheduledChatSession[]> => {
+      if (!checkAuthReady()) return [];
+      const res = await fetch(
+        `/api/v1/chat/schedules/${encodeURIComponent(scheduleId)}/sessions`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) throw new Error('Failed to fetch run sessions');
+      const data = (await res.json()) as { sessions: ScheduledChatSession[] };
+      return data.sessions;
+    },
+    [authHeaders, checkAuthReady],
+  );
 }

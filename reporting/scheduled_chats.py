@@ -130,6 +130,7 @@ async def run_scheduled_chat(item: ScheduledChatItem) -> None:
             prompt=item.prompt,
             title=headless_chat.session_title(item.name),
             timeout_seconds=settings.CHAT_SCHEDULE_TIMEOUT_SECONDS,
+            scheduled_chat_id=sc_id,
         )
         logger.info(
             "Scheduled chat run finished",
