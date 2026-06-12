@@ -9,10 +9,16 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  FormControl,
+  FormControlLabel,
   IconButton,
+  InputLabel,
   List,
   ListItem,
   ListItemButton,
+  MenuItem,
+  Select,
+  Switch,
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
@@ -40,11 +46,12 @@ import ScheduledChatDialog, {
   describeSchedule,
 } from 'src/components/ScheduledChatDialog';
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
-import { useChatHistory } from 'src/hooks/useChatHistory';
+import UserDisplay from 'src/components/UserDisplay';
 import {
   ScheduledChat,
   ScheduledChatSession,
   useChatSchedules,
+  useScheduledChatSessionHistory,
   useScheduledChatSessions,
 } from 'src/hooks/useChatSchedules';
 import { usePermissions } from 'src/hooks/usePermissions';
@@ -75,7 +82,7 @@ interface RunsDialogProps {
 
 function RunsDialog({ schedule, onClose }: RunsDialogProps) {
   const fetchSessions = useScheduledChatSessions();
-  const fetchHistory = useChatHistory();
+  const fetchHistory = useScheduledChatSessionHistory();
   const [sessions, setSessions] = useState<ScheduledChatSession[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transcriptSession, setTranscriptSession] =
@@ -101,18 +108,9 @@ function RunsDialog({ schedule, onClose }: RunsDialogProps) {
   const openTranscript = (session: ScheduledChatSession) => {
     setTranscriptSession(session);
     setTranscript(null);
-    void fetchHistory(session.thread_id).then((messages) => {
-      setTranscript(
-        messages.map((message) => ({
-          id: message.id,
-          role: message.role,
-          text: message.parts
-            .filter((part) => part.type === 'text')
-            .map((part) => ('text' in part ? part.text : ''))
-            .join(''),
-        })),
-      );
-    });
+    void fetchHistory(schedule.scheduled_chat_id, session.thread_id)
+      .then(setTranscript)
+      .catch(() => setTranscript([]));
   };
 
   return (
@@ -223,6 +221,10 @@ function ScheduledChats() {
   const hasPermission = usePermissions();
   const chatSchedulesEnabled = useFeature('chat_schedules');
   const canSchedule = chatSchedulesEnabled && hasPermission('chat:schedule');
+  const canReadAll = hasPermission('chat:schedule:read_all');
+  const [showAllUsers, setShowAllUsers] = useState(false);
+  const [ownerFilter, setOwnerFilter] = useState<string>('');
+  const allMode = canReadAll && showAllUsers;
   const {
     schedules,
     loading,
@@ -230,7 +232,14 @@ function ScheduledChats() {
     createSchedule,
     updateSchedule,
     deleteSchedule,
-  } = useChatSchedules(canSchedule);
+  } = useChatSchedules(canSchedule, { all: allMode });
+  const owners = Array.from(
+    new Set(schedules.map((schedule) => schedule.created_by)),
+  );
+  const visibleSchedules =
+    allMode && ownerFilter
+      ? schedules.filter((schedule) => schedule.created_by === ownerFilter)
+      : schedules;
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<ScheduledChat | null>(null);
@@ -322,6 +331,17 @@ function ScheduledChats() {
           ? describeSchedule(schedule.schedule)
           : 'On scan updates',
     },
+    ...(allMode
+      ? [
+          {
+            key: 'owner',
+            label: 'Owner',
+            hideBelow: 'sm',
+            cellSx: { ...listTableSecondaryCellSx, width: 150 },
+            render: (schedule) => <UserDisplay userId={schedule.created_by} />,
+          } satisfies ListTableColumn<ScheduledChat>,
+        ]
+      : []),
     {
       key: 'status',
       label: 'Status',
@@ -396,13 +416,59 @@ function ScheduledChats() {
             </Button>
           }
         />
+        {canReadAll ? (
+          <Box
+            sx={{
+              alignItems: 'center',
+              display: 'flex',
+              gap: 2,
+              mb: 1.5,
+            }}
+          >
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={showAllUsers}
+                  onChange={(e) => {
+                    setShowAllUsers(e.target.checked);
+                    setOwnerFilter('');
+                  }}
+                  size="small"
+                />
+              }
+              label="Show all users"
+            />
+            {allMode ? (
+              <FormControl size="small" sx={{ minWidth: 220 }}>
+                <InputLabel id="scheduled-chats-owner-filter-label">
+                  Filter by user
+                </InputLabel>
+                <Select
+                  labelId="scheduled-chats-owner-filter-label"
+                  label="Filter by user"
+                  value={ownerFilter}
+                  onChange={(e) => setOwnerFilter(e.target.value)}
+                >
+                  <MenuItem value="">
+                    <em>All users</em>
+                  </MenuItem>
+                  {owners.map((owner) => (
+                    <MenuItem key={owner} value={owner}>
+                      <UserDisplay userId={owner} />
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            ) : null}
+          </Box>
+        ) : null}
         <ListViewState
           loading={loading}
           error={error}
           errorMessage="Failed to load scheduled chats"
         >
           <ListTable
-            rows={schedules}
+            rows={visibleSchedules}
             columns={columns}
             getRowKey={(schedule) => schedule.scheduled_chat_id}
             emptyMessage="No scheduled chats yet."

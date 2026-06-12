@@ -111,7 +111,8 @@ async def test_get_hides_other_users_schedules(mocker):
         "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
         mocker.AsyncMock(return_value=_schedule(created_by="someone-else")),
     )
-    app = _make_app()
+    # Without chat:schedule:read_all, other users' schedules are invisible.
+    app = _make_app(_current_user(frozenset({"chat:schedule"})))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/chat/schedules/sc-1")
     assert response.status_code == 404
@@ -279,3 +280,124 @@ async def test_list_run_sessions(mocker):
     assert response.status_code == 200
     assert response.json()["sessions"][0]["thread_id"] == "12345"
     sessions_mock.assert_awaited_once_with("test-user-id", "sc-1", 50)
+
+
+def _admin_user() -> CurrentUser:
+    return _current_user(frozenset({"chat:use", "chat:schedule", "chat:schedule:read_all"}))
+
+
+async def test_list_all_requires_read_all_permission(mocker):
+    app = _make_app(_current_user(frozenset({"chat:schedule"})))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules?all=true")
+    assert response.status_code == 403
+    assert "chat:schedule:read_all" in response.text
+
+
+async def test_list_all_with_read_all_lists_everyone(mocker):
+    list_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.list_scheduled_chats",
+        mocker.AsyncMock(return_value=[_schedule(), _schedule(created_by="someone-else")]),
+    )
+    app = _make_app(_admin_user())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules?all=true")
+
+    assert response.status_code == 200
+    assert len(response.json()["schedules"]) == 2
+    list_mock.assert_awaited_once_with(user_id=None)
+
+
+async def test_list_filtered_by_user_with_read_all(mocker):
+    list_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.list_scheduled_chats",
+        mocker.AsyncMock(return_value=[_schedule(created_by="someone-else")]),
+    )
+    app = _make_app(_admin_user())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules?user_id=someone-else")
+
+    assert response.status_code == 200
+    list_mock.assert_awaited_once_with(user_id="someone-else")
+
+
+async def test_list_filtered_by_other_user_without_read_all_forbidden(mocker):
+    app = _make_app(_current_user(frozenset({"chat:schedule"})))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules?user_id=someone-else")
+    assert response.status_code == 403
+
+
+async def test_read_all_can_view_other_users_schedule_but_not_mutate(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule(created_by="someone-else")),
+    )
+    app = _make_app(_admin_user())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        get_response = await client.get("/api/v1/chat/schedules/sc-1")
+        delete_response = await client.delete("/api/v1/chat/schedules/sc-1")
+
+    assert get_response.status_code == 200
+    # Mutations stay owner-only even with read_all.
+    assert delete_response.status_code == 404
+
+
+async def test_run_sessions_use_owner_partition_for_read_all(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule(created_by="someone-else")),
+    )
+    sessions_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.list_scheduled_chat_sessions",
+        mocker.AsyncMock(return_value=[]),
+    )
+    app = _make_app(_admin_user())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules/sc-1/sessions")
+
+    assert response.status_code == 200
+    sessions_mock.assert_awaited_once_with("someone-else", "sc-1", 50)
+
+
+async def test_run_session_history_resolves_owner_thread(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule(created_by="someone-else")),
+    )
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_chat_session",
+        mocker.AsyncMock(
+            return_value=ChatSessionItem(
+                thread_id="12345",
+                title="run",
+                created_at=_NOW,
+                updated_at=_NOW,
+                origin="scheduled",
+                scheduled_chat_id="sc-1",
+            )
+        ),
+    )
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_user",
+        mocker.AsyncMock(
+            return_value=User(
+                user_id="someone-else",
+                sub="s",
+                iss="i",
+                created_at=_NOW,
+                last_login=_NOW,
+            )
+        ),
+    )
+    load_mock = mocker.patch(
+        "reporting.routes.chat_schedules.load_thread_messages",
+        mocker.AsyncMock(return_value=[]),
+    )
+    app = _make_app(_admin_user())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/chat/schedules/sc-1/sessions/12345/history")
+
+    assert response.status_code == 200
+    owner_arg = load_mock.await_args.args[0]
+    assert owner_arg.user.user_id == "someone-else"

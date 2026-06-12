@@ -265,3 +265,9 @@ def test_chat_schedule_role_membership():
     assert Permission.CHAT_SCHEDULE in EDITOR_PERMISSIONS
     assert Permission.CHAT_SCHEDULE in ADMIN_PERMISSIONS
     assert Permission.CHAT_SCHEDULE not in VIEWER_PERMISSIONS
+
+
+def test_chat_schedule_read_all_is_admin_only():
+    assert Permission.CHAT_SCHEDULE_READ_ALL in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE_READ_ALL not in EDITOR_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE_READ_ALL not in VIEWER_PERMISSIONS

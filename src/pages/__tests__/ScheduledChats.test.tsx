@@ -10,20 +10,21 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ScheduledChats from 'src/pages/ScheduledChats';
 import { FeaturesContext } from 'src/features.context';
 import * as schedulesModule from 'src/hooks/useChatSchedules';
-import * as historyModule from 'src/hooks/useChatHistory';
 import * as permissionsModule from 'src/hooks/usePermissions';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
 }));
 
+jest.mock('src/components/UserDisplay', () => ({
+  __esModule: true,
+  default: ({ userId }: { userId: string }) => <>{userId}</>,
+}));
+
 jest.mock('src/hooks/useChatSchedules', () => ({
   useChatSchedules: jest.fn(),
   useScheduledChatSessions: jest.fn(),
-}));
-
-jest.mock('src/hooks/useChatHistory', () => ({
-  useChatHistory: jest.fn(),
+  useScheduledChatSessionHistory: jest.fn(),
 }));
 
 const mockUsePermissions =
@@ -34,7 +35,8 @@ const mockUseChatSchedules =
   schedulesModule.useChatSchedules as unknown as jest.Mock;
 const mockUseScheduledChatSessions =
   schedulesModule.useScheduledChatSessions as unknown as jest.Mock;
-const mockUseChatHistory = historyModule.useChatHistory as unknown as jest.Mock;
+const mockUseSessionHistory =
+  schedulesModule.useScheduledChatSessionHistory as unknown as jest.Mock;
 
 const theme = createTheme();
 
@@ -90,14 +92,12 @@ describe('ScheduledChats', () => {
         },
       ]),
     );
-    mockUseChatHistory.mockReturnValue(
-      jest.fn().mockResolvedValue([
-        {
-          id: 'm1',
-          role: 'assistant',
-          parts: [{ type: 'text', text: 'Digest complete.' }],
-        },
-      ]),
+    mockUseSessionHistory.mockReturnValue(
+      jest
+        .fn()
+        .mockResolvedValue([
+          { id: 'm1', role: 'assistant', text: 'Digest complete.' },
+        ]),
     );
   });
 
@@ -138,5 +138,55 @@ describe('ScheduledChats', () => {
     expect(
       screen.getByText('Scheduled chats are not available for your account.'),
     ).toBeInTheDocument();
+  });
+
+  it('hides the all-users toggle without the read_all permission', () => {
+    render(<ScheduledChats />, { wrapper: Wrapper });
+
+    expect(screen.queryByText('Show all users')).not.toBeInTheDocument();
+  });
+
+  it('shows all users with an owner column and filter for admins', async () => {
+    mockUsePermissions.mockReturnValue(
+      (permission: string) =>
+        permission === 'chat:schedule' ||
+        permission === 'chat:schedule:read_all',
+    );
+    mockUseChatSchedules.mockReturnValue({
+      schedules: [
+        SCHEDULE,
+        {
+          ...SCHEDULE,
+          scheduled_chat_id: 'sc2',
+          name: 'Weekly posture',
+          created_by: 'user-2',
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+      createSchedule: jest.fn(),
+      updateSchedule: jest.fn(),
+      deleteSchedule: jest.fn(),
+    });
+
+    render(<ScheduledChats />, { wrapper: Wrapper });
+
+    fireEvent.click(screen.getByLabelText('Show all users'));
+    expect(mockUseChatSchedules).toHaveBeenLastCalledWith(true, {
+      all: true,
+    });
+
+    // Owner column appears in all mode.
+    expect(screen.getByText('Owner')).toBeInTheDocument();
+
+    // Filter the list down to user-2.
+    fireEvent.mouseDown(
+      screen.getByRole('combobox', { name: /filter by user/i }),
+    );
+    fireEvent.click(await screen.findByRole('option', { name: 'user-2' }));
+
+    expect(screen.getByText('Weekly posture')).toBeInTheDocument();
+    expect(screen.queryByText('Daily CVE digest')).not.toBeInTheDocument();
   });
 });

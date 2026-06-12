@@ -69,7 +69,10 @@ interface ScheduledChatsResponse {
   schedules: ScheduledChat[];
 }
 
-export function useChatSchedules(enabled: boolean): {
+export function useChatSchedules(
+  enabled: boolean,
+  options?: { all?: boolean },
+): {
   schedules: ScheduledChat[];
   loading: boolean;
   error: string | null;
@@ -82,6 +85,7 @@ export function useChatSchedules(enabled: boolean): {
   const [schedules, setSchedules] = useState<ScheduledChat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const all = options?.all === true;
 
   const refresh = useCallback(async () => {
     if (!checkAuthReady()) {
@@ -90,9 +94,10 @@ export function useChatSchedules(enabled: boolean): {
     }
     try {
       setError(null);
-      const res = await fetch('/api/v1/chat/schedules', {
-        headers: authHeaders(),
-      });
+      const res = await fetch(
+        all ? '/api/v1/chat/schedules?all=true' : '/api/v1/chat/schedules',
+        { headers: authHeaders() },
+      );
       if (!res.ok) throw new Error('Failed to fetch scheduled chats');
       const data = (await res.json()) as ScheduledChatsResponse;
       setSchedules(data.schedules);
@@ -101,7 +106,7 @@ export function useChatSchedules(enabled: boolean): {
     } finally {
       setLoading(false);
     }
-  }, [authHeaders, checkAuthReady]);
+  }, [authHeaders, checkAuthReady, all]);
 
   useEffect(() => {
     if (enabled) {
@@ -230,6 +235,34 @@ export function useScheduledChatSessions(): (
       if (!res.ok) throw new Error('Failed to fetch run sessions');
       const data = (await res.json()) as { sessions: ScheduledChatSession[] };
       return data.sessions;
+    },
+    [authHeaders, checkAuthReady],
+  );
+}
+
+export interface ScheduledChatTranscriptMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+export function useScheduledChatSessionHistory(): (
+  scheduleId: string,
+  threadId: string,
+) => Promise<ScheduledChatTranscriptMessage[]> {
+  const { checkAuthReady, authHeaders } = useAuthHeaders();
+  return useCallback(
+    async (scheduleId: string, threadId: string) => {
+      if (!checkAuthReady()) return [];
+      const res = await fetch(
+        `/api/v1/chat/schedules/${encodeURIComponent(scheduleId)}/sessions/${encodeURIComponent(threadId)}/history`,
+        { headers: authHeaders() },
+      );
+      if (!res.ok) throw new Error('Failed to fetch run transcript');
+      const data = (await res.json()) as {
+        messages: ScheduledChatTranscriptMessage[];
+      };
+      return data.messages;
     },
     [authHeaders, checkAuthReady],
   );

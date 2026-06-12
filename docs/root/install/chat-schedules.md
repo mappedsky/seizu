@@ -10,7 +10,7 @@ Typical uses: a daily digest of new critical CVEs, a weekly security posture sum
 
 Schedules live in the **Scheduled Chats** page, linked from the app sidebar. From there you can create, edit, enable/disable, and delete your scheduled chats, view each schedule's **runs**, and open its **version history**. Schedules are personal: you only see and manage your own.
 
-> **Permissions:** managing scheduled chats requires the `chat:schedule` permission (`seizu-editor` and above). The page and sidebar link are hidden without it, and the API rejects requests.
+> **Permissions:** managing scheduled chats requires the `chat:schedule` permission (`seizu-editor` and above). The page and sidebar link are hidden without it, and the API rejects requests. Holders of `chat:schedule:read_all` (`seizu-admin`) additionally get a **Show all users** toggle that lists every user's schedules with an owner column and a per-user filter, plus read access to their runs, transcripts, and version history — mutations always stay owner-only.
 
 Every save creates a new configuration version; the history page (`/app/scheduled-chats/<id>/history`) lists versions with author and comment, and lets you restore an older one.
 

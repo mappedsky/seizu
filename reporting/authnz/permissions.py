@@ -30,6 +30,9 @@ class Permission(StrEnum):
     CHAT_BYPASS_PERMISSIONS = "chat:bypass_permissions"
     # Allows managing scheduled chats (recurring headless agent runs).
     CHAT_SCHEDULE = "chat:schedule"
+    # Allows viewing every user's scheduled chats (and their runs/versions),
+    # not just one's own. Mutations stay owner-only.
+    CHAT_SCHEDULE_READ_ALL = "chat:schedule:read_all"
 
     # Toolsets
     TOOLSETS_READ = "toolsets:read"
@@ -116,6 +119,7 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLSETS_DELETE,
         Permission.SKILLS_WRITE,
         Permission.SKILLS_DELETE,
+        Permission.CHAT_SCHEDULE_READ_ALL,
         Permission.ROLES_WRITE,
         Permission.ROLES_DELETE,
     }
