@@ -20,7 +20,7 @@ A schedule has:
 |-------|-------------|
 | name | Display name; also used as the chat session title prefix for each run. |
 | prompt | Instructions for the agent. It runs headlessly as you, with your permissions, and can use chat tools to query the graph, render skills, and (with `chat:bypass_permissions`) create or update resources. |
-| trigger | A **schedule** or **watch scans** (run when matching Cartography `SyncMetadata` records update — same semantics as scheduled query `watch_scans`). |
+| trigger | A **schedule** or **watch scans** (run when matching Cartography `SyncMetadata` records update — same semantics as scheduled query `watch_scans`; the fields autocomplete from the values present in the graph). |
 | enabled | Whether the worker runs this schedule. |
 
 Schedules repeat **hourly**, **daily**, or **monthly** (all times UTC):

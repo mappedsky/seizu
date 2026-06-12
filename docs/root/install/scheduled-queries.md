@@ -129,6 +129,8 @@ Use `watch_scans` to trigger a query when Cartography SyncMetadata nodes are upd
 
 `watch_scans` works by tracking when the query last ran and comparing that time to the SyncMetadata node timestamps. A newly created query will run immediately, then only again after a matching sync is detected.
 
+In the UI, the `grouptype`, `syncedtype`, and `groupid` fields autocomplete from the distinct values present on `SyncMetadata` nodes in the graph (`GET /api/v1/sync-metadata/values`); free-form input (e.g. `.*` regexes) is still accepted.
+
 `frequency` and `watch_scans` are mutually exclusive.
 
 ## Built-in Actions

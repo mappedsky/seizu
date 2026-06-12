@@ -53,6 +53,8 @@ import { ActionConfigFieldDef, SeizuConfig } from 'src/config.context';
 import ScheduledQueryDetailDialog, {
   ScheduledQueryViewData,
 } from 'src/components/ScheduledQueryDetailDialog';
+import SyncMetadataAutocomplete from 'src/components/SyncMetadataAutocomplete';
+import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
 import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import ListTable, {
@@ -295,6 +297,7 @@ function ScheduledQueryDialog({
   const [watchScans, setWatchScans] = useState<ScheduledQueryWatchScan[]>(
     initial?.watch_scans ?? [],
   );
+  const syncValues = useSyncMetadataValues(open);
   const [params, setParams] = useState<ParamFormState[]>(
     (initial?.params ?? []).map(paramToFormState),
   );
@@ -542,31 +545,27 @@ function ScheduledQueryDialog({
                   key={i}
                   sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center' }}
                 >
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="grouptype"
                     value={ws.grouptype ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'grouptype', e.target.value)
-                    }
-                    size="small"
+                    onChange={(value) => updateWatchScan(i, 'grouptype', value)}
+                    options={syncValues.grouptypes}
                     sx={{ flex: 1 }}
                   />
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="syncedtype"
                     value={ws.syncedtype ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'syncedtype', e.target.value)
+                    onChange={(value) =>
+                      updateWatchScan(i, 'syncedtype', value)
                     }
-                    size="small"
+                    options={syncValues.syncedtypes}
                     sx={{ flex: 1 }}
                   />
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="groupid"
                     value={ws.groupid ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'groupid', e.target.value)
-                    }
-                    size="small"
+                    onChange={(value) => updateWatchScan(i, 'groupid', value)}
+                    options={syncValues.groupids}
                     sx={{ flex: 1 }}
                   />
                   <IconButton size="small" onClick={() => removeWatchScan(i)}>

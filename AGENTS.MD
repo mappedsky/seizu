@@ -84,7 +84,7 @@ FastAPI, Python 3.12, Gunicorn + UvicornWorker (ASGI). All I/O is async (neo4j a
 - `reporting/asgi.py` — `application = create_app()`.
 - `reporting/app.py` — `create_app()`; `openapi_url="/api/openapi.json"`, `docs_url="/api/docs"`; registers `secure` headers, routers, static, SPA fallback via `lifespan`; hosts the MCP/auth/CSRF ASGI middlewares.
 - `reporting/settings.py` — all config via env (Pydantic).
-- `reporting/routes/` — `config.py`, `me.py`, `query.py`, `reports.py`, `users.py`, `validate.py`, `scheduled_queries.py`, `roles.py`, `static.py` (healthcheck only).
+- `reporting/routes/` — `config.py`, `me.py`, `query.py`, `reports.py`, `users.py`, `validate.py`, `scheduled_queries.py`, `roles.py`, `sync_metadata.py` (distinct SyncMetadata values for watch-scan autocompletes), `static.py` (healthcheck only).
 - `reporting/authnz/__init__.py` — `HTTPBearer` + `Depends(get_current_user)`; `CurrentUser` dataclass (`user`, `jwt_claims`, `permissions`); `sync_user_profile` chains on it; tests override `app.dependency_overrides[get_current_user]`.
 - `reporting/services/` — async: `reporting_neo4j.py` (async driver + distributed locking), `report_store/`, `query_validator.py`.
 - `reporting/schema/reporting_config.py` — Pydantic models for the YAML config; `report_config.py` — store items + API schemas.

@@ -25,12 +25,14 @@ import {
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import SyncMetadataAutocomplete from 'src/components/SyncMetadataAutocomplete';
 import {
   ChatScheduleSpec,
   ScheduledChat,
   ScheduledChatRequest,
   ScheduledChatWatchScan,
 } from 'src/hooks/useChatSchedules';
+import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
 
 // weekday() order: 0=Monday .. 6=Sunday.
 const DAY_OF_WEEK_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -93,6 +95,7 @@ function ScheduledChatDialog({
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const syncValues = useSyncMetadataValues(open);
 
   const updateWatchScan = (
     index: number,
@@ -328,29 +331,28 @@ function ScheduledChatDialog({
                   key={i}
                   sx={{ alignItems: 'center', display: 'flex', gap: 1 }}
                 >
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="grouptype"
                     value={scan.grouptype ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'grouptype', e.target.value)
-                    }
-                    size="small"
+                    onChange={(value) => updateWatchScan(i, 'grouptype', value)}
+                    options={syncValues.grouptypes}
+                    sx={{ flex: 1 }}
                   />
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="syncedtype"
                     value={scan.syncedtype ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'syncedtype', e.target.value)
+                    onChange={(value) =>
+                      updateWatchScan(i, 'syncedtype', value)
                     }
-                    size="small"
+                    options={syncValues.syncedtypes}
+                    sx={{ flex: 1 }}
                   />
-                  <TextField
+                  <SyncMetadataAutocomplete
                     label="groupid"
                     value={scan.groupid ?? ''}
-                    onChange={(e) =>
-                      updateWatchScan(i, 'groupid', e.target.value)
-                    }
-                    size="small"
+                    onChange={(value) => updateWatchScan(i, 'groupid', value)}
+                    options={syncValues.groupids}
+                    sx={{ flex: 1 }}
                   />
                   <IconButton
                     size="small"
