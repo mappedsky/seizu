@@ -93,6 +93,7 @@ def mock_store():
         "list_scheduled_chat_versions": [],
         "get_scheduled_chat_version": None,
         "list_scheduled_chat_sessions": [],
+        "complete_chat_session_run": None,
         "list_scheduled_query_versions": [],
         "get_scheduled_query_version": None,
         "list_toolsets": [],
@@ -506,6 +507,14 @@ async def test_scheduled_chat_facade_delegates(mock_store):
 
     await report_store.list_scheduled_chat_sessions("u1", "sc1", 50)
     mock_store.list_scheduled_chat_sessions.assert_awaited_once_with("u1", "sc1", 50)
+
+    await report_store.complete_chat_session_run("u1", "thread-1", "partial", ["Planner fallback"])
+    mock_store.complete_chat_session_run.assert_awaited_once_with(
+        "u1",
+        "thread-1",
+        "partial",
+        ["Planner fallback"],
+    )
 
     await report_store.delete_scheduled_chat("sc1")
     mock_store.delete_scheduled_chat.assert_awaited_once_with("sc1")

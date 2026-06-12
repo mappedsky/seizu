@@ -36,6 +36,12 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.services import action_confirmations, mcp_runtime, report_store
+from reporting.services.chat_budget import (
+    BudgetExceeded,
+    budget_controller_from_config,
+    estimate_tokens,
+    usage_cost_usd,
+)
 from reporting.services.chat_messages import (
     CONTINUATION_MARKDOC,
     MessageTag,
@@ -63,6 +69,8 @@ class ChatState(TypedDict):
     plan: NotRequired[list[dict[str, Any]]]  # serialized PlanStep dicts
     step_results: NotRequired[list[dict[str, Any]]]  # per-step worker outputs
     iteration: NotRequired[int]  # verify-driven retry cycles consumed
+    budget: NotRequired[dict[str, Any]]  # serializable per-turn run budget ledger
+    run_errors: NotRequired[list[str]]  # non-fatal orchestration/runtime diagnostics
     # Tool names the conversation has already unlocked under progressive
     # disclosure. ``disclosed_tool_names`` is otherwise a per-turn local, so a
     # turn that ended mid-flow (rate limit, output cap) would lose the tools a
@@ -135,6 +143,10 @@ class LLMTurnResult:
     # Best-effort tool names parsed out of that leaked markup, so the retry can
     # tell the model specifically which tool it reached for and how to unlock it.
     leaked_tool_names: tuple[str, ...] = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    usage_estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -543,6 +555,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         details=detail_events,
         output_limit=response_hit_output_limit,
         broken=response_is_broken,
+        extra_metadata=_run_metadata(config, state, failed=response_is_broken),
     )
     state_update: ChatState = {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
     if progressive_disclosure and disclosed_tool_names:
@@ -550,6 +563,22 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # interrupted turn) keeps tools this conversation already unlocked.
         state_update["disclosed_tools"] = sorted(disclosed_tool_names)
     return state_update
+
+
+def _run_metadata(config: RunnableConfig, state: ChatState, *, failed: bool) -> dict[str, Any]:
+    controller = budget_controller_from_config(config)
+    if controller is not None and controller.finalizing:
+        status = "budget_exhausted"
+    else:
+        status = "failed" if failed else "completed"
+    errors = list(state.get("run_errors") or [])
+    if failed:
+        errors.append("The assistant could not produce a complete response.")
+    return {
+        "seizu_run_status": status,
+        **({"seizu_budget": controller.snapshot()} if controller is not None else {}),
+        **({"seizu_run_errors": errors} if errors else {}),
+    }
 
 
 def finalize_assistant_message(
@@ -712,6 +741,8 @@ async def _auto_continue_answer(
     finish_reason: str | None,
     config: RunnableConfig,
     writer: Callable[[dict[str, Any]], None] | None,
+    *,
+    allow_reserve: bool = False,
 ) -> tuple[str, str, bool, tuple[dict[str, Any], ...]]:
     """Auto-continue an output-limit-truncated answer, stitching the pieces.
 
@@ -743,7 +774,16 @@ async def _auto_continue_answer(
             HumanMessage(content=_continuation_prompt(prior_tail), id=f"msg_{uuid.uuid4().hex}"),
         ]
         stitch_writer, stitcher = _stitch_writer(writer, response)
-        turn = await _run_llm_tool_turn(model, system_prompt, continuation_messages, [], config, stitch_writer)
+        turn = await _run_llm_tool_turn(
+            model,
+            system_prompt,
+            continuation_messages,
+            [],
+            config,
+            stitch_writer,
+            allow_reserve=allow_reserve,
+            phase="continuation",
+        )
         added = stitcher.flush()
         details.extend(turn.details)
         finish_reason = turn.finish_reason
@@ -1057,6 +1097,10 @@ async def _run_llm_tool_turn(
     tools: list[ChatToolSpec],
     config: RunnableConfig,
     writer: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    allow_reserve: bool = False,
+    phase: str = "worker",
+    max_output_tokens: int | None = None,
 ) -> LLMTurnResult:
     """Run one LLM turn, streaming text deltas via *writer* as they arrive.
 
@@ -1071,8 +1115,22 @@ async def _run_llm_tool_turn(
     """
     runnable = model
     bind_tools = getattr(model, "bind_tools", None)
+    tool_schemas = [_langchain_tool_schema(tool) for tool in tools]
     if tools and callable(bind_tools):
-        runnable = bind_tools([_langchain_tool_schema(tool) for tool in tools])
+        runnable = bind_tools(tool_schemas)
+
+    controller = budget_controller_from_config(config)
+    estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
+    estimated_output = max_output_tokens if max_output_tokens is not None else settings.CHAT_LLM_MAX_TOKENS
+    reservation = None
+    if controller is not None:
+        reservation = await controller.reserve(
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=max(1, estimated_output),
+            estimated_cost_usd=usage_cost_usd(model, estimated_input, max(1, estimated_output)),
+            allow_reserve=allow_reserve,
+            phase=phase,
+        )
 
     merged: Any | None = None
     reasoning_detail_id = f"detail_{uuid.uuid4().hex}"
@@ -1083,41 +1141,48 @@ async def _run_llm_tool_turn(
     finish_reason: str | None = None
     stream_text = writer is not None
     markup_filter = _ToolMarkupFilter()
-    async for chunk in runnable.astream(
-        [SystemMessage(content=system_prompt), *messages],
-        config=config,
-    ):
-        finish_reason = _chunk_finish_reason(chunk) or finish_reason
-        reasoning_delta = _chunk_reasoning_delta(chunk)
-        if reasoning_delta and writer is not None:
-            reasoning_text = _truncate_text(f"{reasoning_text}{reasoning_delta}", 6000)
-            reasoning_detail_data = {
-                "kind": "thinking",
-                "title": "Thinking",
-                "status": "completed",
-                "body": reasoning_text,
-            }
-            if not reasoning_detail_started:
-                reasoning_detail_started = True
-                writer(
-                    {
-                        "kind": "detail",
-                        "id": reasoning_detail_id,
-                        "data": {
-                            "kind": "thinking",
-                            "title": "Thinking",
-                            "status": "running",
-                        },
-                    }
-                )
-        if stream_text and writer is not None:
-            delta = message_text(getattr(chunk, "content", ""))
-            if delta:
-                safe = markup_filter.feed(delta)
-                if safe:
-                    writer({"kind": "token", "content": safe})
-                    streamed += safe
-        merged = chunk if merged is None else merged + chunk
+    try:
+        invocation_kwargs = {"max_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        async for chunk in runnable.astream(
+            [SystemMessage(content=system_prompt), *messages],
+            config=config,
+            **invocation_kwargs,
+        ):
+            finish_reason = _chunk_finish_reason(chunk) or finish_reason
+            reasoning_delta = _chunk_reasoning_delta(chunk)
+            if reasoning_delta and writer is not None:
+                reasoning_text = _truncate_text(f"{reasoning_text}{reasoning_delta}", 6000)
+                reasoning_detail_data = {
+                    "kind": "thinking",
+                    "title": "Thinking",
+                    "status": "completed",
+                    "body": reasoning_text,
+                }
+                if not reasoning_detail_started:
+                    reasoning_detail_started = True
+                    writer(
+                        {
+                            "kind": "detail",
+                            "id": reasoning_detail_id,
+                            "data": {
+                                "kind": "thinking",
+                                "title": "Thinking",
+                                "status": "running",
+                            },
+                        }
+                    )
+            if stream_text and writer is not None:
+                delta = message_text(getattr(chunk, "content", ""))
+                if delta:
+                    safe = markup_filter.feed(delta)
+                    if safe:
+                        writer({"kind": "token", "content": safe})
+                        streamed += safe
+            merged = chunk if merged is None else merged + chunk
+    except Exception:
+        if controller is not None and reservation is not None:
+            await controller.release(reservation)
+        raise
     if stream_text and writer is not None:
         tail = markup_filter.flush()
         if tail:
@@ -1127,6 +1192,22 @@ async def _run_llm_tool_turn(
         writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
 
     merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
+    usage = getattr(merged, "usage_metadata", None)
+    usage_estimated = not isinstance(usage, dict) or not usage.get("total_tokens")
+    input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
+    output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
+    if usage_estimated:
+        input_tokens = estimated_input
+        output_tokens = estimate_tokens(model, "", [AIMessage(content=merged_text)], [])
+    cost_usd = usage_cost_usd(model, input_tokens, output_tokens)
+    if controller is not None and reservation is not None:
+        await controller.commit(
+            reservation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            usage_estimated=usage_estimated,
+        )
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
     leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
 
@@ -1140,12 +1221,21 @@ async def _run_llm_tool_turn(
             details=(reasoning_detail_data,) if reasoning_detail_data else (),
             tool_markup_leaked=tool_markup_leaked,
             leaked_tool_names=leaked_tool_names,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            usage_estimated=usage_estimated,
         )
     fallback = AIMessage(
         content=_strip_tool_markup(merged_text),
         tool_calls=list(getattr(merged, "tool_calls", []) or []),
         invalid_tool_calls=list(getattr(merged, "invalid_tool_calls", []) or []),
         id=getattr(merged, "id", None),
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
     )
     return LLMTurnResult(
         message=_strip_reasoning_context(fallback),
@@ -1154,6 +1244,10 @@ async def _run_llm_tool_turn(
         details=(reasoning_detail_data,) if reasoning_detail_data else (),
         tool_markup_leaked=tool_markup_leaked,
         leaked_tool_names=leaked_tool_names,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+        usage_estimated=usage_estimated,
     )
 
 
@@ -1997,6 +2091,10 @@ async def _invoke_structured_output(
     schema: type[BaseModel],
     messages: list[BaseMessage],
     config: RunnableConfig,
+    *,
+    allow_reserve: bool = False,
+    phase: str = "structured",
+    max_output_tokens: int = 1024,
 ) -> BaseModel:
     """Invoke *model* for a structured decision with a JSON fallback.
 
@@ -2006,14 +2104,39 @@ async def _invoke_structured_output(
     """
     structured = getattr(model, "with_structured_output", None)
     if callable(structured) and _structured_output_native_ok.get(id(model), True):
+        controller = budget_controller_from_config(config)
+        estimated_input = estimate_tokens(model, schema.__name__, messages, [])
+        reservation = None
         try:
+            if controller is not None:
+                reservation = await controller.reserve(
+                    estimated_input_tokens=estimated_input,
+                    estimated_output_tokens=max_output_tokens,
+                    estimated_cost_usd=usage_cost_usd(model, estimated_input, max_output_tokens),
+                    allow_reserve=allow_reserve,
+                    phase=phase,
+                )
             result = await structured(schema).ainvoke(messages, config=config)
+            output_text = _json_dump(result.model_dump() if isinstance(result, BaseModel) else result)
+            output_tokens = estimate_tokens(model, "", [AIMessage(content=output_text)], [])
+            if controller is not None and reservation is not None:
+                await controller.commit(
+                    reservation,
+                    input_tokens=estimated_input,
+                    output_tokens=output_tokens,
+                    cost_usd=usage_cost_usd(model, estimated_input, output_tokens),
+                    usage_estimated=True,
+                )
             _structured_output_native_ok[id(model)] = True
             if isinstance(result, schema):
                 return result
             if isinstance(result, dict):
                 return schema.model_validate(result)
         except Exception as exc:
+            if controller is not None and reservation is not None:
+                await controller.release(reservation)
+            if isinstance(exc, BudgetExceeded):
+                raise
             if _structured_output_unsupported(exc):
                 # Expected capability gap: log once, concisely, and stop trying
                 # the native path for this model.
@@ -2029,11 +2152,26 @@ async def _invoke_structured_output(
 
     schema_json = _json_dump(schema.model_json_schema())
     system_prompt = (
-        "Return only a valid JSON object matching this JSON schema. Do not include markdown, prose, or code fences.\n\n"
+        "Return only a valid JSON object matching this JSON schema. Do not include markdown, prose, or code fences. "
+        "Ensure the final response content contains the complete JSON object; "
+        "do not leave it only in hidden reasoning.\n\n"
         f"JSON schema:\n{schema_json}"
     )
-    turn = await _run_llm_tool_turn(model, system_prompt, messages, [], config, None)
-    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    attempt_diagnostics: list[str] = []
+    turn = await _run_llm_tool_turn(
+        model,
+        system_prompt,
+        messages,
+        [],
+        config,
+        None,
+        allow_reserve=allow_reserve,
+        phase=phase,
+        max_output_tokens=max_output_tokens,
+    )
+    response_text = message_text(turn.message.content)
+    attempt_diagnostics.append(f"chars={len(response_text)}, finish_reason={turn.finish_reason or 'unknown'}")
+    parsed = _structured_from_text(schema, response_text)
     if parsed is not None:
         return parsed
     # Reasoning models sometimes bury the object in analysis on the first ask;
@@ -2042,11 +2180,26 @@ async def _invoke_structured_output(
         "Output the JSON object only — no analysis, no explanation, no markdown code fences. "
         f"Return a single JSON object matching this schema:\n{schema_json}"
     )
-    turn = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
-    parsed = _structured_from_text(schema, message_text(turn.message.content))
+    turn = await _run_llm_tool_turn(
+        model,
+        retry_prompt,
+        messages,
+        [],
+        config,
+        None,
+        allow_reserve=allow_reserve,
+        phase=phase,
+        max_output_tokens=max_output_tokens,
+    )
+    response_text = message_text(turn.message.content)
+    attempt_diagnostics.append(f"chars={len(response_text)}, finish_reason={turn.finish_reason or 'unknown'}")
+    parsed = _structured_from_text(schema, response_text)
     if parsed is not None:
         return parsed
-    raise ValueError(f"Model did not return a JSON object for {schema.__name__}")
+    raise ValueError(
+        f"Model did not return a JSON object for {schema.__name__} "
+        f"after {len(attempt_diagnostics)} attempts ({'; '.join(attempt_diagnostics)})"
+    )
 
 
 def _structured_from_text(schema: type[BaseModel], text: str) -> BaseModel | None:
@@ -2578,15 +2731,16 @@ def get_chat_graph() -> ChatGraph:
     return _chat_graph
 
 
-@lru_cache(maxsize=1)
-def get_chat_model() -> ChatModel:
+@lru_cache(maxsize=16)
+def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
     provider = _chat_provider()
     if provider == _MOCK_PROVIDER:
         raise RuntimeError("CHAT_LLM_PROVIDER=mock does not use a real chat model")
     from langchain_litellm import ChatLiteLLM
 
+    model_id = _model_for_role(role, economy=economy)
     kwargs: dict[str, Any] = {
-        "model": _litellm_model_id(provider),
+        "model": _litellm_model_id(provider, model_id),
         "temperature": settings.CHAT_LLM_TEMPERATURE,
         "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
         "max_retries": settings.CHAT_LLM_MAX_RETRIES,
@@ -2605,6 +2759,19 @@ def get_chat_model() -> ChatModel:
     if settings.CHAT_LLM_BASE_URL:
         kwargs["api_base"] = settings.CHAT_LLM_BASE_URL
     return ChatLiteLLM(**kwargs)
+
+
+def _model_for_role(role: str, *, economy: bool = False) -> str:
+    if economy and settings.CHAT_LLM_ECONOMY_MODEL.strip():
+        return settings.CHAT_LLM_ECONOMY_MODEL.strip()
+    role_models = {
+        "planner": settings.CHAT_LLM_PLANNER_MODEL,
+        "router": settings.CHAT_LLM_PLANNER_MODEL,
+        "worker": settings.CHAT_LLM_WORKER_MODEL,
+        "verifier": settings.CHAT_LLM_VERIFIER_MODEL,
+        "synthesizer": settings.CHAT_LLM_SYNTHESIZER_MODEL,
+    }
+    return role_models.get(role, "").strip() or settings.CHAT_LLM_MODEL.strip()
 
 
 def _chat_provider() -> str:
@@ -2630,8 +2797,8 @@ _LEGACY_PROVIDER_NAMESPACE = {
 }
 
 
-def _litellm_model_id(provider: str) -> str:
-    model = settings.CHAT_LLM_MODEL.strip()
+def _litellm_model_id(provider: str, configured_model: str | None = None) -> str:
+    model = (configured_model if configured_model is not None else settings.CHAT_LLM_MODEL).strip()
     if not model:
         raise ValueError(
             "CHAT_LLM_MODEL is required when CHAT_LLM_PROVIDER is not 'mock'. Set it to a LiteLLM model "
@@ -2673,6 +2840,15 @@ def validate_chat_llm_config() -> None:
     if provider == _MOCK_PROVIDER:
         return
     _litellm_model_id(provider)
+    for configured_model in (
+        settings.CHAT_LLM_PLANNER_MODEL,
+        settings.CHAT_LLM_WORKER_MODEL,
+        settings.CHAT_LLM_VERIFIER_MODEL,
+        settings.CHAT_LLM_SYNTHESIZER_MODEL,
+        settings.CHAT_LLM_ECONOMY_MODEL,
+    ):
+        if configured_model.strip():
+            _litellm_model_id(provider, configured_model)
 
 
 def _chat_checkpoint_backend() -> Literal["dynamodb", "postgres"]:

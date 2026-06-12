@@ -75,6 +75,24 @@ async def test_run_scheduled_chat_success(mocker):
     record.assert_awaited_once_with("sc-1", "success")
 
 
+async def test_run_scheduled_chat_records_partial_budgeted_result(mocker):
+    run_chat, _lock, record = _patch_run(mocker)
+    run_chat.return_value = HeadlessChatResult(
+        thread_id="12345",
+        summary="completed required steps",
+        status="partial",
+        budget={"total_tokens": 120_000},
+    )
+
+    await scheduled_chats.run_scheduled_chat(_item())
+
+    record.assert_awaited_once_with(
+        "sc-1",
+        "partial",
+        error="Headless run ended with status: partial",
+    )
+
+
 async def test_disabled_schedule_skipped(mocker):
     run_chat, lock, _record = _patch_run(mocker)
 

@@ -110,6 +110,10 @@ describe('ScheduledChatView', () => {
           title: 'Daily CVE digest – 2026-01-02',
           created_at: '2026-01-02T00:00:00Z',
           updated_at: '2026-01-02T00:00:05Z',
+          run_status: 'partial',
+          run_errors: [
+            'Planner structured output failed; used a single-step fallback.',
+          ],
         },
       ]),
     );
@@ -167,9 +171,15 @@ describe('ScheduledChatView', () => {
     render(<ScheduledChatView />, { wrapper: Wrapper });
     await act(async () => {});
 
+    expect(screen.getByText('partial')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Daily CVE digest – 2026-01-02'));
     await act(async () => {});
 
+    expect(
+      screen.getByText(
+        'Planner structured output failed; used a single-step fallback.',
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText('Digest complete.')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Details (2)'));
 

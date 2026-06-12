@@ -47,6 +47,12 @@ Input: the scheduled query's result rows, each carrying at least a `repo` key (r
 
 A failing repository records an error in the workflow result without aborting the remaining repositories.
 
+Temporal activities use the same `run_headless_chat()` entry point as scheduled
+chats. They therefore share token/cost accounting, role-specific model
+selection, degradation behavior, terminal statuses, and the final budget
+ledger. Temporal remains optional: scheduled chats and interactive chat do not
+require a Temporal server.
+
 The seeded scheduled query **New CVEs affecting repositories** watches CVE metadata syncs (`watch_scans` on `SyncMetadata` with `grouptype: CVEMetadata`, `syncedtype: CVEMetadata`, `groupid: CVE_METADATA`) and joins recently published `CVEMetadata` against open `SecurityIssue` nodes to produce the per-repository rows.
 
 ## Configuration

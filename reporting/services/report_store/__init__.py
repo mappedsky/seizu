@@ -663,6 +663,15 @@ async def touch_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | 
     return await get_store().touch_chat_session(user_id, thread_id)
 
 
+async def complete_chat_session_run(
+    user_id: str,
+    thread_id: str,
+    status: str,
+    errors: list[str],
+) -> ChatSessionItem | None:
+    return await get_store().complete_chat_session_run(user_id, thread_id, status, errors)
+
+
 async def update_chat_session_title(user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
     return await get_store().update_chat_session_title(user_id, thread_id, title)
 

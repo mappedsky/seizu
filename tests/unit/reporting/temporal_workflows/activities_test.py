@@ -55,7 +55,14 @@ async def test_run_repo_cve_chat(mocker):
     )
     run_chat = mocker.patch(
         "reporting.services.headless_chat.run_headless_chat",
-        mocker.AsyncMock(return_value=HeadlessChatResult(thread_id="12345", summary="Report created")),
+        mocker.AsyncMock(
+            return_value=HeadlessChatResult(
+                thread_id="12345",
+                summary="Report created",
+                status="partial",
+                budget={"total_tokens": 1234},
+            )
+        ),
     )
 
     result = await ActivityEnvironment().run(run_repo_cve_chat, _input())
@@ -64,6 +71,8 @@ async def test_run_repo_cve_chat(mocker):
     assert result.thread_id == "12345"
     assert result.summary == "Report created"
     assert result.error is None
+    assert result.status == "partial"
+    assert result.budget == {"total_tokens": 1234}
 
     kwargs = run_chat.await_args.kwargs
     assert kwargs["prompt"] == "Evaluate CVEs for org/app"

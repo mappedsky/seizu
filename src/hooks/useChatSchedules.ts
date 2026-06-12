@@ -54,6 +54,8 @@ export interface ScheduledChatSession {
   title: string;
   created_at: string;
   updated_at: string;
+  run_status: string | null;
+  run_errors: string[];
 }
 
 export interface ScheduledChatRequest {
@@ -254,6 +256,8 @@ export interface ScheduledChatTranscriptMessage {
   text: string;
   metadata?: {
     details?: ScheduledChatRunDetail[];
+    run_status?: string;
+    run_errors?: string[];
   } | null;
 }
 

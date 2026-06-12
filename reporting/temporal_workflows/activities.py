@@ -70,4 +70,10 @@ async def run_repo_cve_chat(input: RepoChatInput) -> RepoChatResult:
         disclosed_tools=list(rendered.tools_required),
         on_chunk=activity.heartbeat,
     )
-    return RepoChatResult(repo=input.repo, thread_id=result.thread_id, summary=result.summary)
+    return RepoChatResult(
+        repo=input.repo,
+        thread_id=result.thread_id,
+        summary=result.summary,
+        status=result.status,
+        budget=result.budget,
+    )

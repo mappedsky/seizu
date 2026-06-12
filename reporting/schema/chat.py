@@ -47,6 +47,8 @@ class ChatSessionItem(BaseModel):
     # Chats page).
     origin: Literal["interactive", "scheduled"] = "interactive"
     scheduled_chat_id: str | None = None
+    run_status: str | None = None
+    run_errors: list[str] = Field(default_factory=list)
 
 
 class ChatSessionsResponse(BaseModel):

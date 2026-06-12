@@ -275,6 +275,8 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     updated_at: str
     origin: str = "interactive"
     scheduled_chat_id: str | None = Field(default=None, index=True)
+    run_status: str | None = None
+    run_errors: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
 
 
 class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
@@ -495,6 +497,8 @@ def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionIte
         updated_at=record.updated_at,
         origin=record.origin if record.origin in ("interactive", "scheduled") else "interactive",
         scheduled_chat_id=record.scheduled_chat_id,
+        run_status=record.run_status,
+        run_errors=record.run_errors or [],
     )
 
 
@@ -560,6 +564,10 @@ class SQLModelReportStore(ReportStore):
                     await conn.execute(
                         text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS scheduled_chat_id VARCHAR")
                     )
+                    await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS run_status VARCHAR"))
+                    await conn.execute(
+                        text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS run_errors JSON NOT NULL DEFAULT '[]'")
+                    )
                     await conn.execute(
                         text("ALTER TABLE action_confirmations ADD COLUMN IF NOT EXISTS batch_id VARCHAR")
                     )
@@ -597,6 +605,12 @@ class SQLModelReportStore(ReportStore):
                         )
                     if cs_column_names and "scheduled_chat_id" not in cs_column_names:
                         await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN scheduled_chat_id VARCHAR"))
+                    if cs_column_names and "run_status" not in cs_column_names:
+                        await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN run_status VARCHAR"))
+                    if cs_column_names and "run_errors" not in cs_column_names:
+                        await conn.execute(
+                            text("ALTER TABLE chat_sessions ADD COLUMN run_errors JSON NOT NULL DEFAULT '[]'")
+                        )
                     ac_columns = await conn.execute(text("PRAGMA table_info(action_confirmations)"))
                     ac_column_names = {row[1] for row in ac_columns}
                     if "batch_id" not in ac_column_names:
@@ -1373,7 +1387,7 @@ class SQLModelReportStore(ReportStore):
                 return
             record.last_run_status = status
             record.last_run_at = now
-            if status == "failure" and error:
+            if status != "success" and error:
                 errors = list(record.last_errors or [])
                 errors.insert(0, {"timestamp": now, "error": error})
                 record.last_errors = errors[:5]
@@ -2744,6 +2758,8 @@ class SQLModelReportStore(ReportStore):
                 updated_at=now,
                 origin=origin,
                 scheduled_chat_id=scheduled_chat_id,
+                run_status="running" if origin == "scheduled" else None,
+                run_errors=[],
             )
             session.add(record)
             await session.commit()
@@ -2754,6 +2770,8 @@ class SQLModelReportStore(ReportStore):
                 updated_at=now,
                 origin=origin if origin in ("interactive", "scheduled") else "interactive",
                 scheduled_chat_id=scheduled_chat_id,
+                run_status="running" if origin == "scheduled" else None,
+                run_errors=[],
             )
 
     async def list_scheduled_chat_sessions(
@@ -2793,6 +2811,30 @@ class SQLModelReportStore(ReportStore):
                 await session.commit()
                 return None
             item = _chat_session_from_sql_record(row)
+            await session.commit()
+            return item
+
+    async def complete_chat_session_run(
+        self,
+        user_id: str,
+        thread_id: str,
+        status: str,
+        errors: list[str],
+    ) -> ChatSessionItem | None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                update(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.user_id) == user_id,
+                    col(ChatSessionRecord.thread_id) == thread_id,
+                )
+                .values(updated_at=now, run_status=status, run_errors=errors)
+                .returning(ChatSessionRecord)
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            item = _chat_session_from_sql_record(row) if row is not None else None
             await session.commit()
             return item
 

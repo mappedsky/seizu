@@ -32,6 +32,8 @@ class RepoChatResult:
     thread_id: str | None
     summary: str
     error: str | None = None
+    status: str = "completed"
+    budget: dict[str, Any] | None = None
 
 
 @dataclass

@@ -161,6 +161,8 @@ def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
         updated_at=item["updated_at"],
         origin=origin if origin in ("interactive", "scheduled") else "interactive",
         scheduled_chat_id=item.get("scheduled_chat_id"),
+        run_status=item.get("run_status"),
+        run_errors=item.get("run_errors", []),
     )
 
 
@@ -1783,7 +1785,7 @@ class DynamoDBReportStore(ReportStore):
             if not item:
                 return
 
-            if status == "failure" and error:
+            if status != "success" and error:
                 errors = list(item.get("last_errors", []))
                 errors.insert(0, {"timestamp": now, "error": error})
                 errors = errors[:5]
@@ -3256,6 +3258,8 @@ class DynamoDBReportStore(ReportStore):
                 "updated_at": now,
                 "origin": origin,
                 "scheduled_chat_id": scheduled_chat_id,
+                "run_status": "running" if origin == "scheduled" else None,
+                "run_errors": [],
             }
         )
         list_item = {**metadata_item, "PK": list_pk, "SK": _chat_session_list_sk(now, thread_id)}
@@ -3298,6 +3302,41 @@ class DynamoDBReportStore(ReportStore):
                     item={**existing, "updated_at": now},
                     expression="SET updated_at = :updated_at",
                     values={":updated_at": now},
+                ),
+            )
+
+        return await asyncio.to_thread(_op)
+
+    async def complete_chat_session_run(
+        self,
+        user_id: str,
+        thread_id: str,
+        status: str,
+        errors: list[str],
+    ) -> ChatSessionItem | None:
+        metadata_pk = _chat_session_metadata_pk(user_id)
+        list_pk = _chat_session_list_pk(user_id)
+
+        def _op() -> ChatSessionItem | None:
+            table = _get_table()
+            return _retry_chat_session_update(
+                table,
+                metadata_pk,
+                list_pk,
+                thread_id,
+                lambda existing, now: ChatSessionUpdate(
+                    item={
+                        **existing,
+                        "updated_at": now,
+                        "run_status": status,
+                        "run_errors": list(errors),
+                    },
+                    expression=("SET updated_at = :updated_at, run_status = :run_status, run_errors = :run_errors"),
+                    values={
+                        ":updated_at": now,
+                        ":run_status": status,
+                        ":run_errors": list(errors),
+                    },
                 ),
             )
 

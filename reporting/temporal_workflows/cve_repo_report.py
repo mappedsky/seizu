@@ -46,5 +46,13 @@ class CveRepoReportWorkflow:
                 results.append(result)
             except ActivityError as exc:
                 workflow.logger.error("Repo CVE chat failed for %s: %s", repo, exc)
-                results.append(RepoChatResult(repo=repo, thread_id=None, summary="", error=str(exc)))
+                results.append(
+                    RepoChatResult(
+                        repo=repo,
+                        thread_id=None,
+                        summary="",
+                        error=str(exc),
+                        status="failed",
+                    )
+                )
         return CveRepoReportResult(per_repo=results)

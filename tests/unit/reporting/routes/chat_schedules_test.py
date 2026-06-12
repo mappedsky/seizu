@@ -269,6 +269,8 @@ async def test_list_run_sessions(mocker):
                     updated_at=_NOW,
                     origin="scheduled",
                     scheduled_chat_id="sc-1",
+                    run_status="partial",
+                    run_errors=["Planner fallback"],
                 )
             ]
         ),
@@ -279,6 +281,8 @@ async def test_list_run_sessions(mocker):
 
     assert response.status_code == 200
     assert response.json()["sessions"][0]["thread_id"] == "12345"
+    assert response.json()["sessions"][0]["run_status"] == "partial"
+    assert response.json()["sessions"][0]["run_errors"] == ["Planner fallback"]
     sessions_mock.assert_awaited_once_with("test-user-id", "sc-1", 50)
 
 

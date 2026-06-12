@@ -7,6 +7,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.report_config import User
 from reporting.services import chat_graph, chat_orchestrator
+from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import _ConfirmResolution
 from reporting.services.chat_orchestrator import _Plan, _PlannedStep, _RouteDecision, _Verdict
 
@@ -175,6 +176,29 @@ def test_init_plan_drops_dangling_and_self_dependencies():
     assert plan[0]["required_arguments"] == {"org": "mappedsky"}
     assert plan[1]["action_kind"] == "answer"
     assert all(step["status"] == "pending" for step in plan)
+
+
+async def test_planner_records_structured_output_fallback_as_run_error(mocker):
+    invoke = mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=ValueError(
+            "Model did not return a JSON object for _Plan after 2 attempts "
+            "(chars=0, finish_reason=length; chars=0, finish_reason=length)"
+        ),
+    )
+    mocker.patch("reporting.services.chat_orchestrator._list_chat_prompts", new_callable=AsyncMock, return_value=[])
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS", 4096)
+
+    result = await chat_orchestrator.planner_node(
+        {"messages": [HumanMessage(content="investigate and report")]},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    assert len(result["plan"]) == 1
+    assert result["run_errors"][0].startswith("Planner structured output failed:")
+    assert invoke.await_args.kwargs["max_output_tokens"] == 4096
 
 
 def test_merge_results_replaces_by_step_id():
@@ -501,6 +525,61 @@ async def test_worker_step_synthesizes_when_action_budget_exhausted(mocker):
     assert "ran out of budget" in result["output"]  # forced synthesis, not empty
 
 
+async def test_budgeted_headless_worker_is_not_stopped_by_per_step_action_guard(mocker):
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 2)
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    step = _step("s1")
+
+    class _PlanModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def bind_tools(self, _tools: Any) -> "_PlanModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            self.calls += 1
+            if self.calls <= 3:
+                yield AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": f"c{self.calls}"}])
+            else:
+                yield AIMessage(content="Plan step complete.")
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+        return [chat_graph.ToolCallResult(request=req, content="{}") for req in batch]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {
+            "token_limit": 1_000_000,
+            "reserve_tokens": 0,
+            "soft_limit_ratio": 1.0,
+            "max_llm_calls": 20,
+            "reserve_llm_calls": 2,
+        }
+    )
+    controller = BudgetController(ledger)
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_PlanModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {"budget_controller": controller, "headless": True}},
+        tool_specs=[spec],
+        disclosed_names={"t__one"},
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert result["tools_used"] == ["t__one", "t__one", "t__one"]
+    assert result["output"] == "Plan step complete."
+
+
 def test_orchestration_details_carry_step_hierarchy():
     plan = [_step("s1", goal="gather"), _step("s2", goal="summarize", depends_on=["s1"])]
     plan[0]["goal"] = "gather"
@@ -543,6 +622,15 @@ async def test_router_short_circuits_for_mock_provider(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
     result = await chat_orchestrator.router_node({"messages": [HumanMessage(content="hi")]}, {"configurable": {}})
     assert result == {"route": "simple"}
+
+
+def test_headless_turn_uses_same_router_decision_as_interactive(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    state = {"messages": [HumanMessage(content="inspect one repository")]}
+
+    assert chat_orchestrator._forced_route(state, {"configurable": {}}) is None
+    assert chat_orchestrator._forced_route(state, {"configurable": {"headless": True}}) is None
 
 
 async def test_router_resumes_in_flight_plan(mocker):

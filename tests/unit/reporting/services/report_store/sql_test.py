@@ -198,6 +198,31 @@ async def test_chat_session_touch_missing_returns_none(store):
     assert result is None
 
 
+async def test_scheduled_chat_session_records_run_status_and_errors(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="t1",
+    )
+    created = await store.create_chat_session(
+        "user-1",
+        title="Scheduled",
+        origin="scheduled",
+        scheduled_chat_id="sc-1",
+    )
+    assert created.run_status == "running"
+
+    result = await store.complete_chat_session_run(
+        "user-1",
+        "t1",
+        "partial",
+        ["Planner fallback"],
+    )
+
+    assert result is not None
+    assert result.run_status == "partial"
+    assert result.run_errors == ["Planner fallback"]
+
+
 async def test_chat_session_update_title(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",

@@ -234,12 +234,27 @@ function RunAccordion({
       .then(setTranscript)
       .catch(() => setError('Failed to load this run.'));
   };
+  const status = session.run_status ?? 'unknown';
+  const statusColor =
+    status === 'completed' || status === 'success'
+      ? 'success'
+      : status === 'running'
+        ? 'info'
+        : status === 'partial' || status === 'budget_exhausted'
+          ? 'warning'
+          : 'error';
 
   return (
     <Accordion disableGutters onChange={handleExpand}>
       <AccordionSummary expandIcon={<ExpandMoreIcon />}>
         <Box
-          sx={{ alignItems: 'center', display: 'flex', gap: 1, minWidth: 0 }}
+          sx={{
+            alignItems: 'center',
+            display: 'flex',
+            gap: 1,
+            minWidth: 0,
+            width: '100%',
+          }}
         >
           <ForumIcon fontSize="small" sx={{ color: 'text.secondary' }} />
           <Typography variant="body2" noWrap>
@@ -251,9 +266,21 @@ function RunAccordion({
           >
             {new Date(session.created_at).toLocaleString()}
           </Typography>
+          <Chip
+            label={status}
+            size="small"
+            variant="outlined"
+            color={statusColor}
+            sx={{ ml: 'auto', mr: 1, flexShrink: 0 }}
+          />
         </Box>
       </AccordionSummary>
       <AccordionDetails>
+        {(session.run_errors ?? []).map((runError) => (
+          <Alert key={runError} severity="error" sx={{ mb: 1 }}>
+            {runError}
+          </Alert>
+        ))}
         {error ? (
           <Alert severity="error">{error}</Alert>
         ) : transcript === null ? (

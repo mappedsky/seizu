@@ -52,4 +52,24 @@ The `seizu-scheduled-chats` worker (`python -m reporting.scheduled_chats`) polls
 | `CHAT_SCHEDULES_POLL_SECONDS` | `20` | Worker polling interval. |
 | `CHAT_SCHEDULE_TIMEOUT_SECONDS` | `600` | Timeout for one headless agent session. |
 
+Scheduled and interactive runs use the same router and chat orchestrator.
+A persisted run-level budget tracks input/output
+tokens, estimated USD cost when LiteLLM knows the model price, LLM call count,
+and usage by planner/worker step/synthesizer phase.
+`CHAT_RUN_RESERVE_PERCENT` keeps part of the budget unavailable to
+normal worker steps so final step summaries and synthesis can produce an
+explicit partial result instead of stopping mid-plan.
+
+The primary controls are `CHAT_RUN_TOKEN_BUDGET`,
+`CHAT_RUN_COST_BUDGET_USD`, `CHAT_RUN_SOFT_LIMIT_PERCENT`, and
+`CHAT_RUN_MAX_LLM_CALLS`. They apply equally to an interactive turn and the
+same prompt executed by a schedule. Optional `CHAT_LLM_*_MODEL` role overrides
+select separate planner, worker, verifier, and synthesizer models;
+`CHAT_LLM_ECONOMY_MODEL` is used for eligible work after the soft limit.
+`CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` separately controls plan generation so
+thinking models have enough output room to emit the final structured plan.
+
+Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`,
+and `failure`. The transcript metadata includes the final budget ledger.
+
 The worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`); see `.env.example`. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.

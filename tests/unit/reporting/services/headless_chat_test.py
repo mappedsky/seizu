@@ -44,7 +44,7 @@ def _patch_store(mocker):
             return_value=ChatSessionItem(thread_id="12345", title="Run", created_at=_NOW, updated_at=_NOW)
         ),
     )
-    touch = mocker.patch("reporting.services.report_store.touch_chat_session", mocker.AsyncMock())
+    complete = mocker.patch("reporting.services.report_store.complete_chat_session_run", mocker.AsyncMock())
     graph = _FakeGraph()
     mocker.patch("reporting.services.headless_chat.get_chat_graph", return_value=graph)
     mocker.patch(
@@ -56,11 +56,11 @@ def _patch_store(mocker):
             ]
         ),
     )
-    return graph, touch
+    return graph, complete
 
 
 async def test_run_headless_chat_with_bypass_permission(mocker):
-    graph, touch = _patch_store(mocker)
+    graph, complete = _patch_store(mocker)
     current = _current_user(frozenset({Permission.CHAT_BYPASS_PERMISSIONS.value}))
 
     result = await headless_chat.run_headless_chat(
@@ -73,7 +73,9 @@ async def test_run_headless_chat_with_bypass_permission(mocker):
 
     assert result.thread_id == "12345"
     assert result.summary == "done: summary"
-    touch.assert_awaited_once_with("user-1", "12345")
+    assert result.status == "completed"
+    assert result.budget is not None
+    complete.assert_awaited_once_with("user-1", "12345", "completed", [])
 
     graph_input, config, stream_mode = graph.calls[0]
     assert stream_mode == "custom"
@@ -86,10 +88,11 @@ async def test_run_headless_chat_with_bypass_permission(mocker):
     assert configurable["bypass_confirmations"] is True
     assert configurable["client_thread_id"] == "12345"
     assert configurable["thread_id"] == "user:user-1:thread:12345"
+    assert configurable["budget_controller"].snapshot() == graph_input["budget"]
 
 
 async def test_run_headless_chat_without_bypass_permission(mocker):
-    graph, _touch = _patch_store(mocker)
+    graph, _complete = _patch_store(mocker)
     current = _current_user(frozenset())
 
     await headless_chat.run_headless_chat(
@@ -107,7 +110,7 @@ async def test_run_headless_chat_without_bypass_permission(mocker):
 
 
 async def test_scheduled_run_creates_scheduled_origin_session(mocker):
-    graph, _touch = _patch_store(mocker)
+    graph, _complete = _patch_store(mocker)
     create = mocker.patch(
         "reporting.services.report_store.create_chat_session",
         mocker.AsyncMock(
@@ -133,3 +136,59 @@ async def test_scheduled_run_creates_scheduled_origin_session(mocker):
 
     create.assert_awaited_once_with("user-1", "Run", origin="scheduled", scheduled_chat_id="sc-1")
     assert graph.calls  # the session still runs normally
+
+
+async def test_run_headless_chat_records_run_warnings(mocker):
+    _graph, complete = _patch_store(mocker)
+    mocker.patch(
+        "reporting.services.headless_chat.load_thread_messages",
+        mocker.AsyncMock(
+            return_value=[
+                AIMessage(
+                    content="done",
+                    response_metadata={
+                        "seizu_run_status": "completed",
+                        "seizu_run_errors": ["Planner structured output failed: safe diagnostics"],
+                    },
+                )
+            ]
+        ),
+    )
+
+    await headless_chat.run_headless_chat(
+        _current_user(frozenset()),
+        prompt="do the thing",
+        title="Run",
+        timeout_seconds=60,
+    )
+
+    complete.assert_awaited_once_with(
+        "user-1",
+        "12345",
+        "completed",
+        ["Planner structured output failed: safe diagnostics"],
+    )
+
+
+async def test_run_headless_chat_records_failure_before_reraising(mocker):
+    graph, complete = _patch_store(mocker)
+
+    async def _failed_stream():
+        raise RuntimeError("provider unavailable")
+        yield
+
+    graph.astream = lambda *_args, **_kwargs: _failed_stream()
+
+    try:
+        await headless_chat.run_headless_chat(
+            _current_user(frozenset()),
+            prompt="do the thing",
+            title="Run",
+            timeout_seconds=60,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("run_headless_chat should re-raise the provider failure")
+
+    complete.assert_awaited_once_with("user-1", "12345", "failed", ["provider unavailable"])

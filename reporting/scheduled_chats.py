@@ -139,9 +139,19 @@ async def run_scheduled_chat(item: ScheduledChatItem) -> None:
                 "scheduled_chat_id": sc_id,
                 "thread_id": result.thread_id,
                 "user": current_user.user.user_id,
+                "status": result.status,
+                "budget": result.budget,
             },
         )
-        await report_store.record_scheduled_chat_result(sc_id, "success")
+        status = "success" if result.status == "completed" else result.status
+        if status == "success":
+            await report_store.record_scheduled_chat_result(sc_id, status)
+        else:
+            await report_store.record_scheduled_chat_result(
+                sc_id,
+                status,
+                error=f"Headless run ended with status: {result.status}",
+            )
     except HeadlessIdentityError as exc:
         logger.error("Skipping scheduled chat: %s", exc, extra={"scheduled_chat_id": sc_id})
         await _record_failure(sc_id, str(exc))

@@ -25,6 +25,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.services import report_store
+from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import (
     ChatState,
     get_chat_graph,
@@ -40,6 +41,8 @@ logger = logging.getLogger(__name__)
 class HeadlessChatResult:
     thread_id: str
     summary: str
+    status: str = "completed"
+    budget: dict[str, object] | None = None
 
 
 def session_title(prefix: str) -> str:
@@ -74,6 +77,7 @@ async def run_headless_chat(
     )
 
     graph = get_chat_graph()
+    budget_controller = BudgetController(initial_budget_ledger())
     config = {
         "configurable": {
             "current_user": current_user,
@@ -81,34 +85,79 @@ async def run_headless_chat(
             "client_thread_id": session.thread_id,
             "headless": True,
             "bypass_confirmations": bypass,
+            "budget_controller": budget_controller,
         }
     }
-    graph_input: ChatState = {"messages": [HumanMessage(content=prompt, id=f"msg_{uuid.uuid4().hex}")]}
+    graph_input: ChatState = {
+        "messages": [HumanMessage(content=prompt, id=f"msg_{uuid.uuid4().hex}")],
+        "budget": budget_controller.snapshot(),
+    }
     if disclosed_tools:
         graph_input["disclosed_tools"] = list(disclosed_tools)
 
-    logger.info(
-        "Starting headless chat session",
-        extra={
-            "type": "AUDIT",
-            "thread_id": session.thread_id,
-            "user": current_user.user.user_id,
-            "bypass_confirmations": bypass,
-        },
-    )
-    async with asyncio.timeout(timeout_seconds):
-        async for _chunk in graph.astream(graph_input, config, stream_mode="custom"):
-            if on_chunk is not None:
-                on_chunk()
+    try:
+        logger.info(
+            "Starting headless chat session",
+            extra={
+                "type": "AUDIT",
+                "thread_id": session.thread_id,
+                "user": current_user.user.user_id,
+                "bypass_confirmations": bypass,
+            },
+        )
+        async with asyncio.timeout(timeout_seconds):
+            async for _chunk in graph.astream(graph_input, config, stream_mode="custom"):
+                if on_chunk is not None:
+                    on_chunk()
 
-    summary = await _final_assistant_message(current_user, session.thread_id)
-    await report_store.touch_chat_session(current_user.user.user_id, session.thread_id)
-    return HeadlessChatResult(thread_id=session.thread_id, summary=summary)
+        final_message = await _final_assistant_message(current_user, session.thread_id)
+        summary = message_text(final_message.content) if final_message is not None else ""
+        metadata = final_message.response_metadata if final_message is not None else {}
+        status = str(metadata.get("seizu_run_status") or ("completed" if summary else "failed"))
+        run_errors = _run_errors_from_metadata(metadata)
+        if status == "failed" and not run_errors:
+            run_errors = ["The run completed without an assistant response."]
+        budget = metadata.get("seizu_budget")
+        if not isinstance(budget, dict):
+            budget = budget_controller.snapshot()
+        await report_store.complete_chat_session_run(
+            current_user.user.user_id,
+            session.thread_id,
+            status,
+            run_errors,
+        )
+        return HeadlessChatResult(thread_id=session.thread_id, summary=summary, status=status, budget=budget)
+    except BaseException as exc:
+        error = _headless_error_text(exc)
+        try:
+            await report_store.complete_chat_session_run(
+                current_user.user.user_id,
+                session.thread_id,
+                "failed",
+                [error],
+            )
+        except Exception:
+            logger.exception("Failed to record headless chat run failure", extra={"thread_id": session.thread_id})
+        raise
 
 
-async def _final_assistant_message(current_user: CurrentUser, thread_id: str) -> str:
+async def _final_assistant_message(current_user: CurrentUser, thread_id: str) -> AIMessage | None:
     messages = await load_thread_messages(current_user, thread_id, limit=settings.CHAT_HISTORY_LIMIT)
     for message in reversed(messages):
         if isinstance(message, AIMessage):
-            return message_text(message.content)
-    return ""
+            return message
+    return None
+
+
+def _run_errors_from_metadata(metadata: dict[str, object]) -> list[str]:
+    errors = metadata.get("seizu_run_errors")
+    if not isinstance(errors, list):
+        return []
+    return [error[:2000] for error in errors if isinstance(error, str) and error.strip()][:20]
+
+
+def _headless_error_text(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "The run exceeded its configured timeout."
+    text = str(exc).strip()
+    return (text or exc.__class__.__name__)[:2000]

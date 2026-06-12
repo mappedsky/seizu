@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.services import chat_graph
+from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     ChatState,
     ChatToolSpec,
@@ -89,6 +90,34 @@ logger = logging.getLogger(__name__)
 # Plan-step status lifecycle: pending -> ran (dispatcher) -> passed|failed
 # (verifier). Failed steps may be reset to pending for a bounded retry.
 
+_STEP_TOKEN_ESTIMATES = {"small": 4_000, "medium": 8_000, "large": 16_000}
+
+
+def _safe_exception_text(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        return _truncate_text(str(exc), 1000)
+    return exc.__class__.__name__
+
+
+def _budget_controller(config: RunnableConfig) -> BudgetController | None:
+    return budget_controller_from_config(config)
+
+
+def _budget_state(config: RunnableConfig) -> dict[str, Any]:
+    controller = _budget_controller(config)
+    return {"budget": controller.snapshot()} if controller is not None else {}
+
+
+def _refresh_remaining_estimate(controller: BudgetController | None, plan: list[dict[str, Any]]) -> None:
+    if controller is None:
+        return
+    unfinished = sum(
+        int(step.get("estimated_tokens") or 0)
+        for step in plan
+        if step.get("status") in ("pending", "ran", "failed", "awaiting")
+    )
+    controller.set_estimated_remaining_tokens(unfinished)
+
 
 # --- Structured-output schemas -------------------------------------------------
 
@@ -107,6 +136,8 @@ class _PlannedStep(BaseModel):
     required_action: str = ""
     required_arguments: dict[str, Any] = Field(default_factory=dict)
     success_criteria: str = ""
+    priority: Literal["required", "supporting", "optional"] = "required"
+    complexity: Literal["small", "medium", "large"] = "medium"
 
 
 class _Plan(BaseModel):
@@ -150,7 +181,9 @@ _PLANNER_PROMPT = (
     " argument out and the sub-agent will fill it). Put the same exact name in"
     " suggested_tools. Keep steps"
     " independent unless a real data dependency exists, so they can run in"
-    " parallel. Do not invent tools or mark a live-data step as answer."
+    " parallel. Mark each step priority as required, supporting, or optional,"
+    " and complexity as small, medium, or large. Do not invent tools or mark a"
+    " live-data step as answer."
 )
 
 _SYNTHESIZER_PROMPT = (
@@ -229,14 +262,28 @@ async def _structured_invoke(
     schema: type[BaseModel],
     messages: list[BaseMessage],
     config: RunnableConfig,
+    *,
+    role: str,
+    allow_reserve: bool = False,
+    max_output_tokens: int = 1024,
 ) -> BaseModel:
-    return await _invoke_structured_output(get_chat_model(), schema, messages, config)
+    controller = budget_controller_from_config(config)
+    economy = bool(controller and controller.degraded and role in ("worker", "synthesizer"))
+    return await _invoke_structured_output(
+        get_chat_model(role, economy=economy),
+        schema,
+        messages,
+        config,
+        allow_reserve=allow_reserve,
+        phase=role,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 # --- Router --------------------------------------------------------------------
 
 
-def _forced_route(state: ChatState) -> str | None:
+def _forced_route(state: ChatState, config: RunnableConfig) -> str | None:
     """Deterministic routing that must not depend on the LLM classifier.
 
     Centralizes every special-turn short-circuit in one place so neither the
@@ -266,14 +313,14 @@ def _forced_route(state: ChatState) -> str | None:
 
 async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
     """Classify the turn as simple (existing loop) or orchestrate (plan path)."""
-    forced = _forced_route(state)
+    forced = _forced_route(state, config)
     if forced is not None:
         logger.info("chat router: forced route=%s", forced)
-        return {"route": forced}
+        return {"route": forced, **_budget_state(config)}
 
     user_text = _last_user_request(state["messages"])
     if not user_text.strip():
-        return {"route": "simple"}
+        return {"route": "simple", **_budget_state(config)}
 
     writer = get_stream_writer()
     try:
@@ -283,6 +330,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
                 _RouteDecision,
                 [SystemMessage(content=_ROUTER_PROMPT), HumanMessage(content=user_text)],
                 config,
+                role="router",
             ),
         )
     except Exception:
@@ -291,7 +339,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
         # verify), so an invisible router failure looks like the agent simply
         # ignoring a multi-step request.
         logger.warning("Router structured-output failed; degrading to the single-agent path", exc_info=True)
-        return {"route": "simple"}
+        return {"route": "simple", **_budget_state(config)}
 
     # Always-on so a run can be traced without reproducing a failure: this is the
     # single fact that explains whether a turn used the orchestrator or the
@@ -308,7 +356,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
         },
         "routing",
     )
-    return {"route": decision.route}
+    return {"route": decision.route, **_budget_state(config)}
 
 
 def route_from_router(state: ChatState) -> str:
@@ -336,6 +384,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     capability = build_capability_context(skills, capability_tools)
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
 
+    run_errors: list[str] = []
     try:
         plan_result = cast(
             _Plan,
@@ -343,18 +392,28 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
                 _Plan,
                 [SystemMessage(content=planner_system), HumanMessage(content=user_text)],
                 config,
+                role="planner",
+                max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
             ),
         )
         planned = plan_result.steps[: settings.CHAT_ORCHESTRATOR_MAX_STEPS]
-    except Exception:
+    except BudgetExceeded as exc:
+        controller = _budget_controller(config)
+        if controller is not None:
+            controller.begin_finalization(str(exc))
+        planned = []
+        run_errors = [str(exc)]
+    except Exception as exc:
         logger.warning("Planner structured-output failed; falling back to a single-step plan", exc_info=True)
         planned = []
+        run_errors = [f"Planner structured output failed: {_safe_exception_text(exc)}"]
 
     if not planned:
         # Fall back to a single step so the orchestrated path still answers.
         planned = [_PlannedStep(id="s1", goal=user_text, success_criteria="Answers the user's request.")]
 
     plan = _init_plan(planned)
+    _refresh_remaining_estimate(_budget_controller(config), plan)
     _emit(
         writer,
         {
@@ -366,7 +425,13 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         },
         "plan",
     )
-    return {"plan": plan, "step_results": [], "iteration": 0}
+    return {
+        "plan": plan,
+        "step_results": [],
+        "iteration": 0,
+        "run_errors": run_errors,
+        **_budget_state(config),
+    }
 
 
 def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
@@ -385,6 +450,9 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
                 "required_action": step.required_action,
                 "required_arguments": dict(step.required_arguments),
                 "success_criteria": step.success_criteria,
+                "priority": step.priority,
+                "complexity": step.complexity,
+                "estimated_tokens": _STEP_TOKEN_ESTIMATES[step.complexity],
                 "status": "pending",
             }
         )
@@ -406,12 +474,51 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     current_user = _current_user_from_config(config)
     session_key = _client_thread_id_from_config(config)
     writer = get_stream_writer()
+    controller = _budget_controller(config)
 
     # Resume path: a prior turn paused this plan on an action confirmation inside
     # a step. Execute the now-approved action(s) and fold the result back in.
     resume_id = _resume_confirmation_id(state["messages"])
     if resume_id and any(step["status"] == "awaiting" for step in plan):
         return await _resume_awaiting_steps(plan, results, iteration, current_user, session_key, writer)
+
+    if controller is not None and controller.degraded:
+        for step in plan:
+            if step["status"] == "pending" and step.get("priority") == "optional":
+                step["status"] = "skipped"
+                results = _merge_results(
+                    results,
+                    [
+                        {
+                            "step_id": step["id"],
+                            "goal": step["goal"],
+                            "output": "",
+                            "tools_used": [],
+                            "budget_skipped": True,
+                            "verify_reason": "Optional step removed after the run crossed its soft budget limit.",
+                        }
+                    ],
+                )
+
+    if controller is not None and controller.finalizing:
+        for step in plan:
+            if step["status"] in ("pending", "failed"):
+                step["status"] = "skipped"
+                results = _merge_results(
+                    results,
+                    [
+                        {
+                            "step_id": step["id"],
+                            "goal": step["goal"],
+                            "output": "",
+                            "tools_used": [],
+                            "budget_exhausted": True,
+                            "verify_reason": controller.snapshot().get("exhaustion_reason"),
+                        }
+                    ],
+                )
+        _refresh_remaining_estimate(controller, plan)
+        return {"plan": plan, "step_results": results, "iteration": iteration, **_budget_state(config)}
 
     # Retry path: if the verifier failed retryable steps and budget remains,
     # reset them to pending (carrying the failure reason) and consume one cycle.
@@ -430,13 +537,14 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
 
     runnable = _runnable_steps(plan)
     if not runnable:
-        return {"plan": plan, "iteration": iteration}
+        _refresh_remaining_estimate(controller, plan)
+        return {"plan": plan, "step_results": results, "iteration": iteration, **_budget_state(config)}
 
     batch = runnable[: max(1, settings.CHAT_ORCHESTRATOR_MAX_PARALLEL)]
     for step in batch:
         step["status"] = "ran"
 
-    model = get_chat_model()
+    model = get_chat_model("worker", economy=bool(controller and controller.degraded))
     tool_specs = await _worker_tool_specs(current_user)
     # Progressive disclosure carries across steps: tools a skill disclosed in an
     # earlier super-step stay callable for the dependent steps that follow.
@@ -474,6 +582,8 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     update: dict[str, Any] = {"plan": plan, "step_results": merged, "iteration": iteration}
     if progressive:
         update["disclosed_tools"] = sorted(disclosed_names)
+    _refresh_remaining_estimate(controller, plan)
+    update.update(_budget_state(config))
     return update
 
 
@@ -665,31 +775,74 @@ async def _run_worker_step(
     )
 
     action_count = 0
+    step_input_tokens = 0
+    step_output_tokens = 0
+    step_cost_usd = 0.0
     output_text = ""
     blocked: ChatBlockReason | None = None
     tools_used: list[str] = []
     confirmation_blocked: list[ToolCallResult] = []
     required_action = str(step.get("required_action") or "")
     execution_error = ""
-    while action_count < settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS:
+    budget_exhausted = False
+    step_budget = int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
+    controller = _budget_controller(config)
+    action_limit = (
+        None if controller is not None and controller.enabled else settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
+    )
+    while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
-        turn = await _run_llm_tool_turn(model, system_prompt, messages, available, config, None)
+        step_degraded = step_input_tokens + step_output_tokens >= step_budget
+        active_model = (
+            get_chat_model("worker", economy=True)
+            if (step_degraded or (controller is not None and controller.degraded))
+            and settings.CHAT_LLM_ECONOMY_MODEL.strip()
+            else model
+        )
+        try:
+            turn = await _run_llm_tool_turn(
+                active_model,
+                system_prompt,
+                messages,
+                available,
+                config,
+                None,
+                phase=f"worker:{step_id}",
+            )
+        except BudgetExceeded as exc:
+            budget_exhausted = True
+            execution_error = str(exc)
+            if controller is not None:
+                controller.begin_finalization(str(exc))
+            break
+        step_input_tokens += turn.input_tokens
+        step_output_tokens += turn.output_tokens
+        step_cost_usd += turn.cost_usd
         ai_message = turn.message
         requested = _tool_call_requests(ai_message, available)
         if not requested:
             output_text = message_text(ai_message.content)
             break
-        remaining = settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS - action_count
+        remaining = len(requested) if action_limit is None else action_limit - action_count
         batch = requested[:remaining]
         batch = _apply_planned_arguments(step, batch)
         action_count += len(batch)
-        batch_results = await _run_tool_call_batch(
-            batch,
-            current_user,
-            session_key=session_key,
-            batch_id=_confirmation_batch_id_for_requests(batch),
-        )
+        if chat_graph._bypass_confirmations_from_config(config):
+            batch_results = await _run_tool_call_batch(
+                batch,
+                current_user,
+                session_key=session_key,
+                batch_id=_confirmation_batch_id_for_requests(batch),
+                bypass_confirmations=True,
+            )
+        else:
+            batch_results = await _run_tool_call_batch(
+                batch,
+                current_user,
+                session_key=session_key,
+                batch_id=_confirmation_batch_id_for_requests(batch),
+            )
         # Surface each tool/skill call as a detail tagged with this step, so the UI
         # can nest the calls under the step that made them.
         for result in batch_results:
@@ -708,7 +861,10 @@ async def _run_worker_step(
                 for result in batch_results
             ],
         ]
-        messages = _trim_inner_loop_messages(messages, max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS)
+        context_limit = settings.CHAT_LLM_CONTEXT_MAX_CHARS
+        if (controller is not None and controller.degraded) or step_degraded:
+            context_limit = max(8_000, context_limit // 4)
+        messages = _trim_inner_loop_messages(messages, max_chars=context_limit)
         for result in batch_results:
             tools_used.append(result.request.name)
             if result.blocked is not None:
@@ -733,20 +889,35 @@ async def _run_worker_step(
         execution_error = f"Step required structured action `{required_action}`, but the worker did not call it."
         output_text = ""
 
-    # The worker took tool actions but never produced a final text result — it ran
-    # out of its action budget mid-work. Synthesize a result from what it did
-    # (mirrors the single-agent path) so the step reports its progress and what
-    # remains instead of "Step produced no output".
-    if not output_text.strip() and not execution_error and blocked is None and tools_used:
-        synthesis = await _run_llm_tool_turn(
-            model,
-            f"{system_prompt}\n\n{_worker_budget_exhausted_message()}",
-            messages,
-            [],
-            config,
-            None,
+    # The worker took tool actions but never produced a final text result. This
+    # can happen at the interactive loop guard or when the shared run budget
+    # enters finalization. Summarize progress rather than returning an empty step.
+    if not output_text.strip() and blocked is None and tools_used:
+        summary_model = (
+            get_chat_model("worker", economy=True)
+            if controller is not None and controller.degraded and settings.CHAT_LLM_ECONOMY_MODEL.strip()
+            else model
         )
-        output_text = message_text(synthesis.message.content)
+        try:
+            synthesis = await _run_llm_tool_turn(
+                summary_model,
+                f"{system_prompt}\n\n{_worker_budget_exhausted_message()}",
+                messages,
+                [],
+                config,
+                None,
+                allow_reserve=budget_exhausted,
+                phase=f"worker_summary:{step_id}",
+                max_output_tokens=1024,
+            )
+            step_input_tokens += synthesis.input_tokens
+            step_output_tokens += synthesis.output_tokens
+            step_cost_usd += synthesis.cost_usd
+            output_text = message_text(synthesis.message.content)
+            if budget_exhausted:
+                execution_error = ""
+        except BudgetExceeded:
+            pass
 
     step_result: dict[str, Any] = {
         "step_id": step["id"],
@@ -755,12 +926,18 @@ async def _run_worker_step(
         "output": output_text,
         "tools_used": tools_used,
         "blocked": blocked.value if blocked is not None else None,
+        "input_tokens": step_input_tokens,
+        "output_tokens": step_output_tokens,
+        "cost_usd": step_cost_usd,
+        "estimated_tokens": step_budget,
     }
     if newly_disclosed_names:
         # Propagate to the dispatcher so dependent steps inherit the disclosure.
         step_result["disclosed_tools"] = sorted(newly_disclosed_names)
     if execution_error:
         step_result["execution_error"] = execution_error
+    if budget_exhausted:
+        step_result["budget_exhausted"] = True
     if confirmation_blocked:
         # The mutating tool created an ActionConfirmation; record what we need to
         # surface the approval prompt now and resume this step once approved.
@@ -910,7 +1087,8 @@ async def verifier_node(state: ChatState, config: RunnableConfig) -> dict[str, A
             },
             _verify_detail_id(str(step["id"])),
         )
-    return {"plan": plan, "step_results": results}
+    _refresh_remaining_estimate(_budget_controller(config), plan)
+    return {"plan": plan, "step_results": results, **_budget_state(config)}
 
 
 async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: RunnableConfig) -> tuple[bool, str]:
@@ -925,6 +1103,8 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
         return False, f"Step was blocked: {result.get('blocked')}"
     if result.get("execution_error"):
         return False, str(result["execution_error"])
+    if result.get("budget_exhausted"):
+        return False, "Step stopped because the run budget entered finalization."
     output = result.get("output") or ""
     if not output.strip():
         return False, "Step produced no output."
@@ -936,7 +1116,20 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
         f"Result:\n{_truncate_text(output, 4000)}"
     )
     try:
-        verdict = cast(_Verdict, await _structured_invoke(_Verdict, [HumanMessage(content=prompt)], config))
+        verdict = cast(
+            _Verdict,
+            await _structured_invoke(
+                _Verdict,
+                [HumanMessage(content=prompt)],
+                config,
+                role="verifier",
+            ),
+        )
+    except BudgetExceeded as exc:
+        controller = _budget_controller(config)
+        if controller is not None:
+            controller.begin_finalization(str(exc))
+        return False, str(exc)
     except Exception:
         # If verification itself fails, accept the step rather than loop.
         return True, "Verification unavailable; accepted."
@@ -964,18 +1157,46 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
     results = state.get("step_results") or []
     user_text = _last_user_request(state["messages"])
     writer = get_stream_writer()
-    model = get_chat_model()
+    controller = _budget_controller(config)
+    model = get_chat_model("synthesizer", economy=bool(controller and controller.degraded))
 
     context = _synthesis_context(plan, results)
     messages: list[BaseMessage] = [HumanMessage(content=f"User request: {user_text}\n\n{context}")]
-    turn = await _run_llm_tool_turn(model, _SYNTHESIZER_PROMPT, messages, [], config, None)
-    response = message_text(turn.message.content)
-    streamed = turn.streamed
+    try:
+        turn = await _run_llm_tool_turn(
+            model,
+            _SYNTHESIZER_PROMPT,
+            messages,
+            [],
+            config,
+            None,
+            allow_reserve=True,
+            phase="synthesizer",
+            max_output_tokens=min(settings.CHAT_LLM_MAX_TOKENS, 2048),
+        )
+        response = message_text(turn.message.content)
+        streamed = turn.streamed
+    except BudgetExceeded as exc:
+        if controller is not None:
+            controller.mark_exhausted(str(exc))
+        turn = None
+        response = ""
+        streamed = ""
     output_limit = False
     details = _orchestration_details(plan, results)
-    if response and _internal_action_transcript_leaked(response):
+    if response and turn is not None and _internal_action_transcript_leaked(response):
         retry_prompt = f"{_SYNTHESIZER_PROMPT}\n\n{_action_transcript_retry_message()}"
-        turn = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
+        turn = await _run_llm_tool_turn(
+            model,
+            retry_prompt,
+            messages,
+            [],
+            config,
+            None,
+            allow_reserve=True,
+            phase="synthesizer",
+            max_output_tokens=min(settings.CHAT_LLM_MAX_TOKENS, 2048),
+        )
         response = message_text(turn.message.content)
         streamed = turn.streamed
         details = [*details, *turn.details]
@@ -986,21 +1207,43 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
         # Mirror the single-agent path: auto-continue a synthesis truncated by the
         # output limit, then only surface the cut-off notice if it is still
         # truncated after the continuation budget.
-        response, appended, still_truncated, cont_details = await _auto_continue_answer(
-            model, messages, _SYNTHESIZER_PROMPT, response, turn.finish_reason, config, writer
-        )
+        try:
+            response, appended, still_truncated, cont_details = await _auto_continue_answer(
+                model,
+                messages,
+                _SYNTHESIZER_PROMPT,
+                response,
+                turn.finish_reason if turn is not None else None,
+                config,
+                writer,
+                allow_reserve=True,
+            )
+        except BudgetExceeded as exc:
+            if controller is not None:
+                controller.mark_exhausted(str(exc))
+            appended = ""
+            still_truncated = True
+            cont_details = ()
         streamed += appended
         details = [*details, *cont_details]
         response, output_limit = _append_output_limit_notice(response, "length" if still_truncated else None)
     else:
         response = _synthesis_fallback(plan, results)
 
+    run_status = _terminal_status(plan, results, controller)
+    budget_snapshot = controller.snapshot() if controller is not None else state.get("budget")
+    run_errors = _terminal_errors(plan, results, controller, list(state.get("run_errors") or []))
     ai_message = finalize_assistant_message(
         response=response,
         streamed=streamed,
         writer=writer,
         details=details,
         output_limit=output_limit,
+        extra_metadata={
+            "seizu_run_status": run_status,
+            **({"seizu_budget": budget_snapshot} if budget_snapshot else {}),
+            **({"seizu_run_errors": run_errors} if run_errors else {}),
+        },
     )
     # Clear transient orchestration state so completed runs don't bloat the
     # persisted thread/checkpoint.
@@ -1009,6 +1252,8 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
         "plan": [],
         "step_results": [],
         "iteration": 0,
+        "run_errors": [],
+        **_budget_state(config),
     }
 
 
@@ -1059,6 +1304,51 @@ def _synthesis_fallback(plan: list[dict[str, Any]], results: list[dict[str, Any]
         f"I ran a {len(plan)}-step plan ({passed} step(s) verified) but could not produce a"
         " final summary. Here is what each step found:\n\n" + _synthesis_context(plan, results)
     )
+
+
+def _terminal_status(
+    plan: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    controller: BudgetController | None,
+) -> str:
+    results_by_id = {result["step_id"]: result for result in results}
+    if (controller is not None and controller.finalizing) or any(result.get("budget_exhausted") for result in results):
+        return "budget_exhausted"
+    if any(result.get("blocked") for result in results):
+        return "blocked"
+    for step in plan:
+        if step.get("priority") == "optional":
+            continue
+        if step.get("status") != "passed":
+            return "partial"
+        result = results_by_id.get(step["id"], {})
+        if result.get("execution_error") or result.get("budget_skipped"):
+            return "partial"
+    return "completed"
+
+
+def _terminal_errors(
+    plan: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    controller: BudgetController | None,
+    existing: list[str],
+) -> list[str]:
+    errors = list(existing)
+    if controller is not None and controller.finalizing:
+        reason = controller.snapshot().get("exhaustion_reason")
+        if isinstance(reason, str) and reason:
+            errors.append(reason)
+    results_by_id = {result["step_id"]: result for result in results}
+    for step in plan:
+        result = results_by_id.get(step["id"], {})
+        if step.get("status") == "passed":
+            continue
+        reason = result.get("execution_error") or result.get("verify_reason")
+        if not reason and result.get("blocked"):
+            reason = f"Step was blocked: {result['blocked']}"
+        if isinstance(reason, str) and reason:
+            errors.append(f"{step['goal']}: {reason}")
+    return list(dict.fromkeys(errors))[:20]
 
 
 def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> list[dict[str, Any]]:

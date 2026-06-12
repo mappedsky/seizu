@@ -599,6 +599,16 @@ class ReportStore(ABC):
         """Update a session's updated_at. Returns None if the session is not found."""
 
     @abstractmethod
+    async def complete_chat_session_run(
+        self,
+        user_id: str,
+        thread_id: str,
+        status: str,
+        errors: list[str],
+    ) -> ChatSessionItem | None:
+        """Record terminal status and errors for a scheduled chat run session."""
+
+    @abstractmethod
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
         """Update a session's title and updated_at. Returns None if the session is not found."""
 

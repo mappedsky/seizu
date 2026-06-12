@@ -10,6 +10,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.routes import chat
 from reporting.schema.chat import ChatSessionItem
 from reporting.schema.report_config import User
+from reporting.services.chat_budget import BudgetController
 
 _FAKE_USER = User(
     user_id="test-user-id",
@@ -176,6 +177,9 @@ async def test_chat_stream_success(mocker):
     assert config["configurable"]["current_user"].user.user_id == "test-user-id"
     assert stream_mode == "custom"
     assert graph_input["messages"][0].content == "Hi"
+    controller = config["configurable"]["budget_controller"]
+    assert isinstance(controller, BudgetController)
+    assert graph_input["budget"] == controller.snapshot()
 
 
 async def test_chat_stream_surfaces_output_limit_finish_reason(mocker):
@@ -329,6 +333,47 @@ def test_history_message_metadata_no_false_positive_from_seizu_output_limit_abse
     message = type("Message", (), {"response_metadata": {}})()
     metadata = chat._history_message_metadata(message, "assistant", "Normal response.")
     assert metadata is None
+
+
+def test_history_message_metadata_includes_run_status_errors_and_budget():
+    message = type(
+        "Message",
+        (),
+        {
+            "response_metadata": {
+                "seizu_run_status": "partial",
+                "seizu_run_errors": ["Planner fallback"],
+                "seizu_budget": {
+                    "mode": "finalizing",
+                    "total_tokens": 12_345,
+                    "cost_usd": 0.12,
+                    "llm_calls": 9,
+                    "exhaustion_reason": "The run token budget is reserved for final synthesis.",
+                    "phases": {
+                        "planner": {"total_tokens": 1200, "llm_calls": 1, "internal": "not exposed"},
+                    },
+                    "internal": "not exposed",
+                },
+            }
+        },
+    )()
+
+    metadata = chat._history_message_metadata(message, "assistant", "Partial result.")
+
+    assert metadata == {
+        "run_status": "partial",
+        "run_errors": ["Planner fallback"],
+        "budget": {
+            "mode": "finalizing",
+            "total_tokens": 12_345,
+            "cost_usd": 0.12,
+            "llm_calls": 9,
+            "exhaustion_reason": "The run token budget is reserved for final synthesis.",
+            "phases": {
+                "planner": {"total_tokens": 1200, "llm_calls": 1},
+            },
+        },
+    }
 
 
 async def test_chat_stream_emits_detail_data_parts(mocker):
