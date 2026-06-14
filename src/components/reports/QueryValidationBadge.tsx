@@ -41,6 +41,7 @@ export default function QueryValidationBadge({
           size="small"
           color={hasErrors ? 'error' : 'warning'}
           onClick={() => setOpen(true)}
+          aria-label={hasErrors ? 'Query errors' : 'Query warnings'}
         >
           {hasErrors ? (
             <ErrorOutlineIcon fontSize="small" />
