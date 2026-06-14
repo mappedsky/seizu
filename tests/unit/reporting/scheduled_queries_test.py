@@ -365,7 +365,7 @@ def test_main_enabled(mocker):
 
 
 def test__bootstrap_registers_sigterm(mocker):
-    """_bootstrap registers a SIGTERM handler."""
-    signal_mock = mocker.patch("reporting.scheduled_queries.signal.signal")
+    """_bootstrap delegates worker signal registration."""
+    signal_mock = mocker.patch("reporting.scheduled_queries.install_shutdown_handlers")
     scheduled_queries._bootstrap()
     assert signal_mock.call_count == 1

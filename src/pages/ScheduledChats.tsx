@@ -33,7 +33,7 @@ import ScheduledChatDialog, {
 } from 'src/components/ScheduledChatDialog';
 import UserDisplay from 'src/components/UserDisplay';
 import { ScheduledChat, useChatSchedules } from 'src/hooks/useChatSchedules';
-import { usePermissions } from 'src/hooks/usePermissions';
+import { usePermissionState } from 'src/hooks/usePermissions';
 import { useFeature } from 'src/features.context';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
@@ -49,7 +49,7 @@ const updatedAtColumnSx = { ...listTableSecondaryCellSx, width: 180 };
 
 function ScheduledChats() {
   const navigate = useNavigate();
-  const hasPermission = usePermissions();
+  const { hasPermission, currentUser } = usePermissionState();
   const chatSchedulesEnabled = useFeature('chat_schedules');
   const canSchedule = chatSchedulesEnabled && hasPermission('chat:schedule');
   const canReadAll = hasPermission('chat:schedule:read_all');
@@ -108,43 +108,56 @@ function ScheduledChats() {
       state: { fromLabel: 'Scheduled Chats' } satisfies BackState,
     });
 
-  const rowActions = (schedule: ScheduledChat): RowMenuAction[] => [
-    {
-      key: 'view',
-      label: 'View',
-      icon: <VisibilityIcon fontSize="small" />,
-      onClick: () => openView(schedule),
-    },
-    {
-      key: 'edit',
-      label: 'Edit',
-      icon: <EditIcon fontSize="small" />,
-      onClick: () => {
-        setEditTarget(schedule);
-        setDialogOpen(true);
+  const rowActions = (schedule: ScheduledChat): RowMenuAction[] => {
+    const isOwner = currentUser?.user_id === schedule.created_by;
+    const ownerOnlyTooltip = isOwner
+      ? undefined
+      : 'Only the schedule owner can modify this scheduled chat.';
+    return [
+      {
+        key: 'view',
+        label: 'View',
+        icon: <VisibilityIcon fontSize="small" />,
+        onClick: () => openView(schedule),
       },
-    },
-    {
-      key: 'history',
-      label: 'View history',
-      icon: <HistoryIcon fontSize="small" />,
-      onClick: () =>
-        navigate(`/app/scheduled-chats/${schedule.scheduled_chat_id}/history`, {
-          state: { fromLabel: 'Scheduled Chats' } satisfies BackState,
-        }),
-    },
-    {
-      key: 'delete',
-      label: 'Delete',
-      icon: <DeleteIcon fontSize="small" />,
-      onClick: () => {
-        setDeleteError(null);
-        setDeleteTarget(schedule);
+      {
+        key: 'edit',
+        label: 'Edit',
+        icon: <EditIcon fontSize="small" />,
+        onClick: () => {
+          setEditTarget(schedule);
+          setDialogOpen(true);
+        },
+        disabled: !isOwner,
+        tooltip: ownerOnlyTooltip,
       },
-      destructive: true,
-      dividerBefore: true,
-    },
-  ];
+      {
+        key: 'history',
+        label: 'View history',
+        icon: <HistoryIcon fontSize="small" />,
+        onClick: () =>
+          navigate(
+            `/app/scheduled-chats/${schedule.scheduled_chat_id}/history`,
+            {
+              state: { fromLabel: 'Scheduled Chats' } satisfies BackState,
+            },
+          ),
+      },
+      {
+        key: 'delete',
+        label: 'Delete',
+        icon: <DeleteIcon fontSize="small" />,
+        onClick: () => {
+          setDeleteError(null);
+          setDeleteTarget(schedule);
+        },
+        disabled: !isOwner,
+        tooltip: ownerOnlyTooltip,
+        destructive: true,
+        dividerBefore: true,
+      },
+    ];
+  };
 
   const columns: ListTableColumn<ScheduledChat>[] = [
     {

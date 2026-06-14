@@ -159,7 +159,7 @@ def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
         title=item.get("title", ""),
         created_at=item["created_at"],
         updated_at=item["updated_at"],
-        origin=origin if origin in ("interactive", "scheduled") else "interactive",
+        origin=origin if origin in ("interactive", "scheduled", "workflow") else "interactive",
         scheduled_chat_id=item.get("scheduled_chat_id"),
         run_status=item.get("run_status"),
         run_errors=item.get("run_errors", []),
@@ -1580,11 +1580,18 @@ class DynamoDBReportStore(ReportStore):
     async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
         def _op() -> list[ScheduledChatItem]:
             table = _get_table()
-            resp = table.query(
-                KeyConditionExpression="PK = :pk",
-                ExpressionAttributeValues={":pk": _PK_SCHEDULED_CHAT_LIST},
-            )
-            items = [_scheduled_chat_from_item(item) for item in resp.get("Items", [])]
+            items: list[ScheduledChatItem] = []
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _PK_SCHEDULED_CHAT_LIST},
+            }
+            while True:
+                resp = table.query(**kwargs)
+                items.extend(_scheduled_chat_from_item(item) for item in resp.get("Items", []))
+                last_key = resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                kwargs["ExclusiveStartKey"] = last_key
             if user_id is not None:
                 items = [item for item in items if item.created_by == user_id]
             return items
@@ -1739,14 +1746,48 @@ class DynamoDBReportStore(ReportStore):
         def _op() -> bool:
             table = _get_table()
             resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
-            if not resp.get("Item"):
+            metadata = resp.get("Item")
+            if not metadata:
                 return False
-            items_resp = table.query(
-                KeyConditionExpression="PK = :pk",
-                ExpressionAttributeValues={":pk": _scheduled_chat_pk(sc_id)},
-                ProjectionExpression="PK, SK",
-            )
-            keys_to_delete = [{"PK": item["PK"], "SK": item["SK"]} for item in items_resp.get("Items", [])]
+            keys_to_delete: list[dict[str, str]] = []
+            schedule_kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _scheduled_chat_pk(sc_id)},
+                "ProjectionExpression": "PK, SK",
+            }
+            while True:
+                items_resp = table.query(**schedule_kwargs)
+                keys_to_delete.extend({"PK": item["PK"], "SK": item["SK"]} for item in items_resp.get("Items", []))
+                last_key = items_resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                schedule_kwargs["ExclusiveStartKey"] = last_key
+
+            owner_id = metadata["created_by"]
+            session_kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "FilterExpression": "scheduled_chat_id = :sc_id",
+                "ExpressionAttributeValues": {
+                    ":pk": _chat_session_list_pk(owner_id),
+                    ":sc_id": sc_id,
+                },
+                "ProjectionExpression": "PK, SK, thread_id",
+            }
+            while True:
+                sessions_resp = table.query(**session_kwargs)
+                for item in sessions_resp.get("Items", []):
+                    keys_to_delete.append({"PK": item["PK"], "SK": item["SK"]})
+                    keys_to_delete.append(
+                        {
+                            "PK": _chat_session_metadata_pk(owner_id),
+                            "SK": item["thread_id"],
+                        }
+                    )
+                last_key = sessions_resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                session_kwargs["ExclusiveStartKey"] = last_key
+
             keys_to_delete.append({"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)})
             with table.batch_writer() as batch:
                 for key in keys_to_delete:
@@ -1798,11 +1839,11 @@ class DynamoDBReportStore(ReportStore):
             if not item:
                 return
 
-            if status != "success" and error:
+            if status == "failure" and error:
                 errors = list(item.get("last_errors", []))
                 errors.insert(0, {"timestamp": now, "error": error})
                 errors = errors[:5]
-            elif status == "success":
+            elif status in {"success", "partial", "budget_exhausted"}:
                 errors = []
             else:
                 errors = list(item.get("last_errors", []))
@@ -3271,7 +3312,7 @@ class DynamoDBReportStore(ReportStore):
                 "updated_at": now,
                 "origin": origin,
                 "scheduled_chat_id": scheduled_chat_id,
-                "run_status": "running" if origin == "scheduled" else None,
+                "run_status": "running" if origin != "interactive" else None,
                 "run_errors": [],
             }
         )

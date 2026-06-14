@@ -5,6 +5,7 @@ from reporting import settings
 from reporting.scheduled_query_modules import temporal
 from reporting.schema.report_config import ScheduledQueryItem
 from reporting.schema.reporting_config import ScheduledQueryAction
+from reporting.temporal_workflows.shared import CveRepoReportInput
 
 _NOW = "2024-01-01T00:00:00+00:00"
 
@@ -70,6 +71,7 @@ async def test_handle_results_starts_workflow(mocker):
     args, kwargs = client.start_workflow.await_args
     assert args[0] == "cve_repo_report"
     workflow_input = args[1]
+    assert isinstance(workflow_input, CveRepoReportInput)
     assert workflow_input.creator_user_id == "user-1"
     assert workflow_input.rows == [{"repo": "org/app", "cve_id": "CVE-2026-0001"}]
     assert kwargs["id"] == f"seizu:cve_repo_report:sq-1:{_NOW}"

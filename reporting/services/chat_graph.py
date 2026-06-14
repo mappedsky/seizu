@@ -1738,32 +1738,30 @@ async def _run_tool_call(
             tools_required=outcome.tools_required,
         )
 
+    call_kwargs: dict[str, Any] = {
+        "gate_permission": Permission.CHAT_TOOLS_CALL,
+        "chat_safe_only": True,
+        "result_max_rows": settings.CHAT_TOOL_RESULT_MAX_ROWS,
+        "result_max_bytes": settings.CHAT_TOOL_RESULT_MAX_BYTES,
+    }
     if bypass_confirmations:
         # Bypass mode: no confirmation records are created; mcp_runtime
         # enforces chat:bypass_permissions and audit-logs each execution.
-        outcome = await mcp_runtime.call_tool_for_chat(
-            current_user,
-            request.name,
-            request.arguments,
-            gate_permission=Permission.CHAT_TOOLS_CALL,
-            chat_safe_only=True,
-            result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
-            result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
-            bypass_confirmations=True,
-        )
+        call_kwargs["bypass_confirmations"] = True
     else:
-        outcome = await mcp_runtime.call_tool_for_chat(
-            current_user,
-            request.name,
-            request.arguments,
-            gate_permission=Permission.CHAT_TOOLS_CALL,
-            chat_safe_only=True,
-            result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
-            result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
-            confirmation_source="chat",
-            confirmation_session_key=session_key,
-            confirmation_batch_id=batch_id,
+        call_kwargs.update(
+            {
+                "confirmation_source": "chat",
+                "confirmation_session_key": session_key,
+                "confirmation_batch_id": batch_id,
+            }
         )
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current_user,
+        request.name,
+        request.arguments,
+        **call_kwargs,
+    )
     return ToolCallResult(
         request=request,
         content=_idempotent_success_content(request, outcome.text),

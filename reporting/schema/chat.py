@@ -41,11 +41,9 @@ class ChatSessionItem(BaseModel):
     title: str
     created_at: str
     updated_at: str
-    # "interactive" sessions appear in the user's chat session list;
-    # "scheduled" sessions are created by scheduled chat runs, are hidden from
-    # that list, and are read-only in the web UI (viewable from the Scheduled
-    # Chats page).
-    origin: Literal["interactive", "scheduled"] = "interactive"
+    # "interactive" sessions appear in the user's chat session list. Headless
+    # "scheduled" and "workflow" sessions are hidden there and read-only.
+    origin: Literal["interactive", "scheduled", "workflow"] = "interactive"
     scheduled_chat_id: str | None = None
     run_status: str | None = None
     run_errors: list[str] = Field(default_factory=list)
@@ -157,8 +155,10 @@ class CreateScheduledChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_trigger(self) -> "CreateScheduledChatRequest":
-        if not self.schedule and not self.watch_scans:
-            raise ValueError("schedule or watch_scans is required")
+        has_schedule = self.schedule is not None
+        has_watch_scans = bool(self.watch_scans)
+        if has_schedule == has_watch_scans:
+            raise ValueError("exactly one of schedule or watch_scans is required")
         return self
 
 

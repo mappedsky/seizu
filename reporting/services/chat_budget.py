@@ -165,8 +165,8 @@ class BudgetController:
 
         max_calls = int(self._ledger.get("max_llm_calls") or 0)
         reserve_calls = 0 if reservation.allow_reserve else int(self._ledger.get("reserve_llm_calls") or 0)
-        reserved_calls = len(self._reservations)
-        if max_calls and int(self._ledger["llm_calls"]) + reserved_calls >= max_calls - reserve_calls:
+        projected_calls = int(self._ledger["llm_calls"]) + len(self._reservations) + 1
+        if max_calls and projected_calls > max_calls - reserve_calls:
             self.begin_finalization("The run reached its LLM-call safety limit.")
             raise BudgetExceeded(str(self._ledger["exhaustion_reason"]))
 

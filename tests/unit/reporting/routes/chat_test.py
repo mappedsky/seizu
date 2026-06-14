@@ -2,6 +2,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -804,19 +805,23 @@ async def test_update_chat_session_title_returns_404_when_not_found(mocker):
     assert response.status_code == 404
 
 
-async def test_chat_stream_rejects_scheduled_sessions(mocker):
+@pytest.mark.parametrize(
+    ("origin", "scheduled_chat_id"),
+    [("scheduled", "sc-1"), ("workflow", None)],
+)
+async def test_chat_stream_rejects_headless_sessions(mocker, origin, scheduled_chat_id):
     mocker.patch("reporting.routes.chat.get_chat_graph")
-    scheduled = ChatSessionItem(
+    headless = ChatSessionItem(
         thread_id="1001",
         title="Digest – 2026-06-11",
         created_at="2024-01-01T00:00:01+00:00",
         updated_at="2024-01-01T00:00:01+00:00",
-        origin="scheduled",
-        scheduled_chat_id="sc-1",
+        origin=origin,
+        scheduled_chat_id=scheduled_chat_id,
     )
     mocker.patch(
         "reporting.routes.chat.report_store.get_chat_session",
-        mocker.AsyncMock(return_value=scheduled),
+        mocker.AsyncMock(return_value=headless),
     )
     app = _make_app()
 

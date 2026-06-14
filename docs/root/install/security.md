@@ -64,6 +64,19 @@ Setting `RBAC_DEFAULT_ROLE=` denies access when the token does not contain an ex
 Use user-defined roles for narrower access. For example, separate report authors from users who can manage scheduled queries or toolsets.
 If a user truly needs ad-hoc Cypher, grant `query:execute` only to a tightly scoped role and keep that role out of general viewer assignments.
 
+### Headless role snapshots
+
+Scheduled chats and Temporal AI activities execute without a live bearer
+token. They resolve permissions from the role claim stored on the user's last
+authenticated Seizu request. Identity-provider role changes are therefore not
+background-synchronized, and the propagation lag is unbounded until that user
+authenticates again. A downgraded user may retain
+`chat:bypass_permissions` for headless runs during that interval.
+
+For immediate revocation, archive the Seizu user or disable their schedules
+and scheduled queries. Treat bypass audit logs as a detection control, not as
+revocation enforcement.
+
 ## Report Query Signing Secret
 
 `REPORT_QUERY_SIGNING_SECRET` signs the backend-issued capability tokens used by report panels.

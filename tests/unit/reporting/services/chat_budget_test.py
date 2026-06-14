@@ -82,6 +82,25 @@ async def test_parallel_reservations_cannot_oversubscribe_budget():
     assert sum(isinstance(result, BudgetExceeded) for result in results) == 1
 
 
+async def test_parallel_reserve_calls_cannot_exceed_hard_call_limit():
+    controller = BudgetController(_ledger(token_limit=0, reserve_tokens=0, max_llm_calls=2, reserve_llm_calls=0))
+
+    results = await asyncio.gather(
+        *[
+            controller.reserve(
+                estimated_input_tokens=0,
+                estimated_output_tokens=0,
+                allow_reserve=True,
+            )
+            for _ in range(3)
+        ],
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, Exception) for result in results) == 2
+    assert sum(isinstance(result, BudgetExceeded) for result in results) == 1
+
+
 async def test_llm_call_reserve_is_protected_for_finalization():
     controller = BudgetController(_ledger(token_limit=0, reserve_tokens=0, max_llm_calls=5, reserve_llm_calls=2))
     for _ in range(3):

@@ -11,9 +11,7 @@ updates.
 import asyncio
 import calendar
 import logging
-import signal
 from datetime import UTC, datetime, time, timedelta
-from typing import Any
 
 from reporting import (
     settings,
@@ -23,8 +21,8 @@ from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
 from reporting.schema.chat import ChatScheduleSpec, ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
 from reporting.services import headless_chat, report_store
-from reporting.services.chat_graph import close_chat_checkpoints, initialize_chat_checkpoints
 from reporting.services.reporting_neo4j import check_watch_scan_triggered
+from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +30,7 @@ _shutdown_event: asyncio.Event = asyncio.Event()
 
 
 def _bootstrap() -> None:
-    def finalizer(sig: int, frame: Any) -> None:
-        logger.info("SIGTERM caught, shutting down")
-        _shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, finalizer)
+    install_shutdown_handlers(_shutdown_event, logger)
 
 
 def _latest_daily_occurrence(spec: ChatScheduleSpec, now: datetime) -> datetime | None:
@@ -130,6 +124,7 @@ async def run_scheduled_chat(item: ScheduledChatItem) -> None:
             prompt=item.prompt,
             title=headless_chat.session_title(item.name),
             timeout_seconds=settings.CHAT_SCHEDULE_TIMEOUT_SECONDS,
+            origin="scheduled",
             scheduled_chat_id=sc_id,
         )
         logger.info(
@@ -143,15 +138,15 @@ async def run_scheduled_chat(item: ScheduledChatItem) -> None:
                 "budget": result.budget,
             },
         )
-        status = "success" if result.status == "completed" else result.status
-        if status == "success":
-            await report_store.record_scheduled_chat_result(sc_id, status)
-        else:
+        status = {"completed": "success", "failed": "failure"}.get(result.status, result.status)
+        if status == "failure":
             await report_store.record_scheduled_chat_result(
                 sc_id,
                 status,
                 error=f"Headless run ended with status: {result.status}",
             )
+        else:
+            await report_store.record_scheduled_chat_result(sc_id, status)
     except HeadlessIdentityError as exc:
         logger.error("Skipping scheduled chat: %s", exc, extra={"scheduled_chat_id": sc_id})
         await _record_failure(sc_id, str(exc))
@@ -169,11 +164,7 @@ async def _record_failure(sc_id: str, error: str) -> None:
 
 async def _run_worker() -> None:
     _bootstrap()
-    should_init = settings.DYNAMODB_CREATE_TABLE or (settings.REPORT_STORE_BACKEND == "sqlmodel")
-    if should_init:
-        await report_store.initialize()
-    await initialize_chat_checkpoints()
-    try:
+    async with chat_worker_resources():
         while not _shutdown_event.is_set():
             logger.debug("Checking scheduled chats...")
             items = await report_store.list_scheduled_chats()
@@ -181,8 +172,6 @@ async def _run_worker() -> None:
                 await run_scheduled_chat(item)
             if not _shutdown_event.is_set():
                 await asyncio.sleep(settings.CHAT_SCHEDULES_POLL_SECONDS)
-    finally:
-        await close_chat_checkpoints()
 
 
 def main() -> None:

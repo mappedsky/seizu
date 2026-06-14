@@ -1,7 +1,9 @@
+import pytest
+
 from reporting import scheduled_chats
 from reporting.authnz import CurrentUser
 from reporting.authnz.headless import HeadlessIdentityError
-from reporting.schema.chat import ScheduledChatItem
+from reporting.schema.chat import CreateScheduledChatRequest, ScheduledChatItem
 from reporting.schema.report_config import User
 from reporting.services.headless_chat import HeadlessChatResult
 
@@ -72,6 +74,7 @@ async def test_run_scheduled_chat_success(mocker):
     kwargs = run_chat.await_args.kwargs
     assert kwargs["prompt"] == "Summarize new findings"
     assert "Daily digest" in kwargs["title"]
+    assert kwargs["origin"] == "scheduled"
     record.assert_awaited_once_with("sc-1", "success")
 
 
@@ -86,10 +89,27 @@ async def test_run_scheduled_chat_records_partial_budgeted_result(mocker):
 
     await scheduled_chats.run_scheduled_chat(_item())
 
-    record.assert_awaited_once_with(
-        "sc-1",
-        "partial",
-        error="Headless run ended with status: partial",
+    record.assert_awaited_once_with("sc-1", "partial")
+
+
+def test_scheduled_chat_requires_exactly_one_trigger():
+    common = {"name": "Digest", "prompt": "Summarize"}
+
+    with pytest.raises(ValueError, match="exactly one"):
+        CreateScheduledChatRequest(**common)
+    with pytest.raises(ValueError, match="exactly one"):
+        CreateScheduledChatRequest(
+            **common,
+            schedule={"type": "hourly", "interval_hours": 1},
+            watch_scans=[{"grouptype": "GitHub"}],
+        )
+
+    assert (
+        CreateScheduledChatRequest(
+            **common,
+            schedule={"type": "hourly", "interval_hours": 1},
+        ).schedule
+        is not None
     )
 
 

@@ -25,7 +25,13 @@ A workflow runs **as the user who created the scheduled query**. The worker reso
 
 - Every tool call the AI session makes is checked against the creator's permissions, exactly as in interactive chat (including the `chat:tools:call` gate).
 - If the creator is archived, workflow sessions fail and stop.
-- A role change propagates to workflows on the creator's next authenticated request.
+- Role claims are snapshots updated only by an authenticated Seizu request.
+  A downgrade at the identity provider therefore does **not** immediately
+  revoke headless permissions: the lag is unbounded until the creator next
+  authenticates. During that interval a previously authorized
+  `chat:bypass_permissions` grant may still be used. Operators must archive
+  the Seizu user or disable their scheduled queries when immediate revocation
+  is required.
 
 ## Confirmation bypass model
 
@@ -42,10 +48,17 @@ The same permission gates the chat UI's optional "Bypass confirmations" mode and
 Input: the scheduled query's result rows, each carrying at least a `repo` key (repository fullname). Per repository, sequentially:
 
 1. Renders the `cve_response/cve_repo_assessment` skill with the repository name and its CVE rows.
-2. Creates a chat session owned by the creator (visible in their chat UI) and runs the full chat agent with the rendered skill as the first message. The agent verifies each CVE with the `cve_analysis`/`github_security` tools.
+2. Creates a workflow chat session owned by the creator and runs the full chat agent with the rendered skill as the first message. Workflow sessions are excluded from the interactive chat sidebar and cannot be continued through the chat API.
 3. The agent creates the report `CVE Findings – {repo}` if missing and appends a new version with a dated markdown findings summary. Reports are versioned; prior findings are preserved.
 
 A failing repository records an error in the workflow result without aborting the remaining repositories.
+
+The CVE rows originate in the graph and are an untrusted prompt input. Seizu
+JSON-encodes and HTML-escapes them inside an `<untrusted_cve_data>` block, then
+prepends an instruction that the block is evidence rather than executable
+instructions. Keep this boundary when adding fields or workflows. It reduces
+prompt-injection risk but does not make graph data trusted; retain normal RBAC,
+chat-safe tool filtering, result limits, and bypass audit logging.
 
 Temporal activities use the same `run_headless_chat()` entry point as scheduled
 chats. They therefore share token/cost accounting, role-specific model
@@ -80,4 +93,4 @@ The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`)
 - Temporal Web UI: `http://localhost:8233` — inspect workflow runs (`seizu:cve_repo_report:<scheduled_query_id>:<run marker>`), activity retries, and results.
 - The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.
 
-To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description) to `WORKFLOW_REGISTRY` — the spec's description is surfaced in the action form's workflow picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.
+To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description, input factory) to `WORKFLOW_REGISTRY`. The factory converts the common scheduled-query context into that workflow's typed input; the description is surfaced in the action form's workflow picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.

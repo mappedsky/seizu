@@ -40,6 +40,11 @@ Each run creates a chat session owned by the schedule's creator, but these sessi
 The `seizu-scheduled-chats` worker (`python -m reporting.scheduled_chats`) polls for due schedules and runs each as a headless agent session **owned by the schedule's creator**:
 
 - The creator's RBAC permissions apply to every tool call, resolved from the last role claim seen on one of their authenticated requests. Archived users' schedules stop running and record failures.
+- Stored role claims do not refresh in the background. An identity-provider
+  downgrade has an unbounded propagation delay until the creator next
+  authenticates, so a previously granted `chat:bypass_permissions` may remain
+  effective. Archive the Seizu user or disable their schedules when revocation
+  must be immediate.
 - Action confirmations are bypassed only while the creator holds `chat:bypass_permissions`; otherwise confirmation-gated tools fail closed for the run.
 - The headless system prompt tells the model nobody is present: it won't ask for confirmation and summarizes any blocked action instead of retrying.
 - A distributed lock guarantees one run per due window even with multiple workers.

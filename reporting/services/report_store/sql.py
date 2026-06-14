@@ -495,7 +495,7 @@ def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionIte
         title=record.title,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        origin=record.origin if record.origin in ("interactive", "scheduled") else "interactive",
+        origin=record.origin if record.origin in ("interactive", "scheduled", "workflow") else "interactive",
         scheduled_chat_id=record.scheduled_chat_id,
         run_status=record.run_status,
         run_errors=record.run_errors or [],
@@ -1364,6 +1364,7 @@ class SQLModelReportStore(ReportStore):
             record = await session.get(ScheduledChatRecord, sc_id)
             if not record:
                 return False
+            await session.execute(delete(ChatSessionRecord).where(col(ChatSessionRecord.scheduled_chat_id) == sc_id))
             stmt = select(ScheduledChatVersionRecord).where(ScheduledChatVersionRecord.scheduled_chat_id == sc_id)
             result = await session.execute(stmt)
             for ver in result.scalars().all():
@@ -1398,11 +1399,11 @@ class SQLModelReportStore(ReportStore):
                 return
             record.last_run_status = status
             record.last_run_at = now
-            if status != "success" and error:
+            if status == "failure" and error:
                 errors = list(record.last_errors or [])
                 errors.insert(0, {"timestamp": now, "error": error})
                 record.last_errors = errors[:5]
-            elif status == "success":
+            elif status in {"success", "partial", "budget_exhausted"}:
                 record.last_errors = []
             session.add(record)
             await session.commit()
@@ -2769,7 +2770,7 @@ class SQLModelReportStore(ReportStore):
                 updated_at=now,
                 origin=origin,
                 scheduled_chat_id=scheduled_chat_id,
-                run_status="running" if origin == "scheduled" else None,
+                run_status="running" if origin != "interactive" else None,
                 run_errors=[],
             )
             session.add(record)
@@ -2779,9 +2780,9 @@ class SQLModelReportStore(ReportStore):
                 title=title,
                 created_at=now,
                 updated_at=now,
-                origin=origin if origin in ("interactive", "scheduled") else "interactive",
+                origin=origin if origin in ("interactive", "scheduled", "workflow") else "interactive",
                 scheduled_chat_id=scheduled_chat_id,
-                run_status="running" if origin == "scheduled" else None,
+                run_status="running" if origin != "interactive" else None,
                 run_errors=[],
             )
 
@@ -2807,20 +2808,16 @@ class SQLModelReportStore(ReportStore):
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
-            stmt = (
-                update(ChatSessionRecord)
-                .where(
-                    col(ChatSessionRecord.user_id) == user_id,
-                    col(ChatSessionRecord.thread_id) == thread_id,
-                )
-                .values(updated_at=now)
-                .returning(ChatSessionRecord)
+            stmt = select(ChatSessionRecord).where(
+                col(ChatSessionRecord.user_id) == user_id,
+                col(ChatSessionRecord.thread_id) == thread_id,
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             if row is None:
-                await session.commit()
                 return None
+            row.updated_at = now
+            session.add(row)
             item = _chat_session_from_sql_record(row)
             await session.commit()
             return item
@@ -2834,38 +2831,36 @@ class SQLModelReportStore(ReportStore):
     ) -> ChatSessionItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
-            stmt = (
-                update(ChatSessionRecord)
-                .where(
-                    col(ChatSessionRecord.user_id) == user_id,
-                    col(ChatSessionRecord.thread_id) == thread_id,
-                )
-                .values(updated_at=now, run_status=status, run_errors=errors)
-                .returning(ChatSessionRecord)
+            stmt = select(ChatSessionRecord).where(
+                col(ChatSessionRecord.user_id) == user_id,
+                col(ChatSessionRecord.thread_id) == thread_id,
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
-            item = _chat_session_from_sql_record(row) if row is not None else None
+            if row is None:
+                return None
+            row.updated_at = now
+            row.run_status = status
+            row.run_errors = list(errors)
+            session.add(row)
+            item = _chat_session_from_sql_record(row)
             await session.commit()
             return item
 
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
-            stmt = (
-                update(ChatSessionRecord)
-                .where(
-                    col(ChatSessionRecord.user_id) == user_id,
-                    col(ChatSessionRecord.thread_id) == thread_id,
-                )
-                .values(title=title, updated_at=now)
-                .returning(ChatSessionRecord)
+            stmt = select(ChatSessionRecord).where(
+                col(ChatSessionRecord.user_id) == user_id,
+                col(ChatSessionRecord.thread_id) == thread_id,
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             if row is None:
-                await session.commit()
                 return None
+            row.title = title
+            row.updated_at = now
+            session.add(row)
             item = _chat_session_from_sql_record(row)
             await session.commit()
             return item

@@ -7,7 +7,7 @@ import * as schedulesModule from 'src/hooks/useChatSchedules';
 import * as permissionsModule from 'src/hooks/usePermissions';
 
 jest.mock('src/hooks/usePermissions', () => ({
-  usePermissions: jest.fn(),
+  usePermissionState: jest.fn(),
 }));
 
 jest.mock('src/components/UserDisplay', () => ({
@@ -21,9 +21,9 @@ jest.mock('src/hooks/useChatSchedules', () => ({
   useScheduledChatSessionHistory: jest.fn(),
 }));
 
-const mockUsePermissions =
-  permissionsModule.usePermissions as jest.MockedFunction<
-    typeof permissionsModule.usePermissions
+const mockUsePermissionState =
+  permissionsModule.usePermissionState as jest.MockedFunction<
+    typeof permissionsModule.usePermissionState
   >;
 const mockUseChatSchedules =
   schedulesModule.useChatSchedules as unknown as jest.Mock;
@@ -60,9 +60,14 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 describe('ScheduledChats', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockUsePermissions.mockReturnValue(
-      (permission: string) => permission === 'chat:schedule',
-    );
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) => permission === 'chat:schedule',
+      loading: false,
+      currentUser: {
+        user_id: 'user-1',
+        permissions: ['chat:schedule'],
+      } as never,
+    });
     mockUseChatSchedules.mockReturnValue({
       schedules: [SCHEDULE],
       loading: false,
@@ -107,7 +112,11 @@ describe('ScheduledChats', () => {
   });
 
   it('hides the page content without the permission', () => {
-    mockUsePermissions.mockReturnValue(() => false);
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: () => false,
+      loading: false,
+      currentUser: null,
+    });
     render(<ScheduledChats />, { wrapper: Wrapper });
 
     expect(
@@ -122,11 +131,16 @@ describe('ScheduledChats', () => {
   });
 
   it('shows all users with an owner column and filter for admins', async () => {
-    mockUsePermissions.mockReturnValue(
-      (permission: string) =>
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
         permission === 'chat:schedule' ||
         permission === 'chat:schedule:read_all',
-    );
+      loading: false,
+      currentUser: {
+        user_id: 'user-1',
+        permissions: ['chat:schedule', 'chat:schedule:read_all'],
+      } as never,
+    });
     mockUseChatSchedules.mockReturnValue({
       schedules: [
         SCHEDULE,
@@ -163,5 +177,40 @@ describe('ScheduledChats', () => {
 
     expect(screen.getByText('Weekly posture')).toBeInTheDocument();
     expect(screen.queryByText('Daily CVE digest')).not.toBeInTheDocument();
+  });
+
+  it('disables owner-only actions for another users schedule', () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
+        permission === 'chat:schedule' ||
+        permission === 'chat:schedule:read_all',
+      loading: false,
+      currentUser: {
+        user_id: 'user-1',
+        permissions: ['chat:schedule', 'chat:schedule:read_all'],
+      } as never,
+    });
+    mockUseChatSchedules.mockReturnValue({
+      schedules: [{ ...SCHEDULE, created_by: 'user-2' }],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+      createSchedule: jest.fn(),
+      updateSchedule: jest.fn(),
+      deleteSchedule: jest.fn(),
+    });
+
+    render(<ScheduledChats />, { wrapper: Wrapper });
+    fireEvent.click(screen.getByLabelText('Show all users'));
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+
+    expect(screen.getByText('Edit').closest('li')).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    expect(screen.getByText('Delete').closest('li')).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
   });
 });

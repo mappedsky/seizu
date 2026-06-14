@@ -1,7 +1,6 @@
 import asyncio
 import inspect
 import logging
-import signal
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,6 +18,7 @@ from reporting.schema.reporting_config import (
 )
 from reporting.services import report_store
 from reporting.services.reporting_neo4j import check_watch_scan_triggered, run_query_with_retry
+from reporting.worker_bootstrap import initialize_report_store, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +26,7 @@ _shutdown_event: asyncio.Event = asyncio.Event()
 
 
 def _bootstrap() -> None:
-    def finalizer(sig: int, frame: Any) -> None:
-        logger.info("SIGTERM caught, shutting down")
-        _shutdown_event.set()
-
-    signal.signal(signal.SIGTERM, finalizer)
+    install_shutdown_handlers(_shutdown_event, logger)
 
 
 def _item_to_scheduled_query(item: ScheduledQueryItem) -> ScheduledQuery:
@@ -145,9 +141,7 @@ async def _handle_results(
 
 async def _schedule_queries() -> None:
     _bootstrap()
-    should_init = settings.DYNAMODB_CREATE_TABLE or (settings.REPORT_STORE_BACKEND == "sqlmodel")
-    if should_init:
-        await report_store.initialize()
+    await initialize_report_store()
     await scheduled_query_modules.load_modules()
     while not _shutdown_event.is_set():
         logger.debug("Checking queries to schedule...")

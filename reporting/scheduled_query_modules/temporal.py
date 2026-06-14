@@ -14,7 +14,12 @@ from typing import Any
 from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
 from reporting.schema.reporting_config import ScheduledQueryAction
-from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowSpec, get_workflow_spec
+from reporting.temporal_workflows import (
+    WORKFLOW_REGISTRY,
+    WorkflowInputContext,
+    WorkflowSpec,
+    get_workflow_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +116,6 @@ async def _start_workflow(
     import temporalio.exceptions
 
     from reporting.services import report_store
-    from reporting.temporal_workflows.shared import CveRepoReportInput
 
     spec = _validated_spec(scheduled_query_id, action)
     if spec is None:
@@ -126,11 +130,13 @@ async def _start_workflow(
         return
 
     rows = _project_rows(scheduled_query_id, action, results)
-    workflow_input = CveRepoReportInput(
-        scheduled_query_id=scheduled_query_id,
-        creator_user_id=item.created_by,
-        rows=rows,
-        chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
+    workflow_input = spec.build_input(
+        WorkflowInputContext(
+            scheduled_query_id=scheduled_query_id,
+            creator_user_id=item.created_by,
+            rows=rows,
+            chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
+        )
     )
     # last_scheduled_at identifies this run (the lock sets it before the query
     # executes), making redelivery of the same run idempotent.

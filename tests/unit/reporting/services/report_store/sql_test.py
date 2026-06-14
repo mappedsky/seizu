@@ -253,6 +253,69 @@ async def test_chat_session_delete_missing_returns_false(store):
     assert await store.delete_chat_session("user-1", "no-such") is False
 
 
+async def test_workflow_chat_session_is_hidden_and_starts_running(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="workflow-1",
+    )
+
+    created = await store.create_chat_session(
+        "user-1",
+        title="Workflow",
+        origin="workflow",
+    )
+
+    assert created.origin == "workflow"
+    assert created.run_status == "running"
+    assert await store.list_chat_sessions("user-1", limit=10) == []
+
+
+async def test_delete_scheduled_chat_removes_associated_sessions(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        side_effect=["sc-1", "thread-1"],
+    )
+    await store.create_scheduled_chat(
+        name="Digest",
+        prompt="Summarize",
+        schedule={"type": "hourly", "interval_hours": 1},
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+    await store.create_chat_session(
+        "user-1",
+        title="Run",
+        origin="scheduled",
+        scheduled_chat_id="sc-1",
+    )
+
+    assert await store.delete_scheduled_chat("sc-1") is True
+    assert await store.get_chat_session("user-1", "thread-1") is None
+
+
+async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sc-1",
+    )
+    await store.create_scheduled_chat(
+        name="Digest",
+        prompt="Summarize",
+        schedule={"type": "hourly", "interval_hours": 1},
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+    await store.record_scheduled_chat_result("sc-1", "failure", error="boom")
+    await store.record_scheduled_chat_result("sc-1", "partial")
+
+    item = await store.get_scheduled_chat("sc-1")
+    assert item is not None
+    assert item.last_run_status == "partial"
+    assert item.last_errors == []
+
+
 # ---------------------------------------------------------------------------
 # Action confirmation — additional coverage
 # ---------------------------------------------------------------------------

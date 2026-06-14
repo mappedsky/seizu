@@ -828,21 +828,16 @@ async def _run_worker_step(
         batch = requested[:remaining]
         batch = _apply_planned_arguments(step, batch)
         action_count += len(batch)
+        batch_kwargs: dict[str, Any] = {}
         if chat_graph._bypass_confirmations_from_config(config):
-            batch_results = await _run_tool_call_batch(
-                batch,
-                current_user,
-                session_key=session_key,
-                batch_id=_confirmation_batch_id_for_requests(batch),
-                bypass_confirmations=True,
-            )
-        else:
-            batch_results = await _run_tool_call_batch(
-                batch,
-                current_user,
-                session_key=session_key,
-                batch_id=_confirmation_batch_id_for_requests(batch),
-            )
+            batch_kwargs["bypass_confirmations"] = True
+        batch_results = await _run_tool_call_batch(
+            batch,
+            current_user,
+            session_key=session_key,
+            batch_id=_confirmation_batch_id_for_requests(batch),
+            **batch_kwargs,
+        )
         # Surface each tool/skill call as a detail tagged with this step, so the UI
         # can nest the calls under the step that made them.
         for result in batch_results:

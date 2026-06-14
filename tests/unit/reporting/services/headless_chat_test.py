@@ -131,6 +131,7 @@ async def test_scheduled_run_creates_scheduled_origin_session(mocker):
         prompt="do the thing",
         title="Run",
         timeout_seconds=60,
+        origin="scheduled",
         scheduled_chat_id="sc-1",
     )
 

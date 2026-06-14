@@ -992,6 +992,115 @@ def _sq_version_dynamo_item(sq_id="sq1", version=1):
     }
 
 
+def _scheduled_chat_item(sc_id="sc1", created_by="user-1"):
+    return {
+        "PK": "SCHEDULED_CHAT_LIST",
+        "SK": f"SCHEDULED_CHAT#{sc_id}",
+        "scheduled_chat_id": sc_id,
+        "name": f"Chat {sc_id}",
+        "prompt": "Summarize",
+        "schedule": {"type": "hourly", "interval_hours": 1},
+        "watch_scans": [],
+        "enabled": True,
+        "current_version": 1,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "created_by": created_by,
+        "updated_by": created_by,
+        "last_errors": [],
+    }
+
+
+async def test_list_scheduled_chats_paginates(patch_table, store):
+    patch_table.query.side_effect = [
+        {
+            "Items": [_scheduled_chat_item("sc1")],
+            "LastEvaluatedKey": {"PK": "SCHEDULED_CHAT_LIST", "SK": "SCHEDULED_CHAT#sc1"},
+        },
+        {"Items": [_scheduled_chat_item("sc2")]},
+    ]
+
+    result = await store.list_scheduled_chats()
+
+    assert [item.scheduled_chat_id for item in result] == ["sc1", "sc2"]
+    assert patch_table.query.call_count == 2
+    assert patch_table.query.call_args_list[1].kwargs["ExclusiveStartKey"] == {
+        "PK": "SCHEDULED_CHAT_LIST",
+        "SK": "SCHEDULED_CHAT#sc1",
+    }
+
+
+async def test_delete_scheduled_chat_removes_paginated_sessions(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    def query_side_effect(**kwargs):
+        pk = kwargs["ExpressionAttributeValues"][":pk"]
+        start = kwargs.get("ExclusiveStartKey")
+        if pk == "SCHEDULED_CHAT#sc1":
+            if start:
+                return {"Items": [{"PK": pk, "SK": "VERSION#0000000001"}]}
+            return {
+                "Items": [{"PK": pk, "SK": "#METADATA"}],
+                "LastEvaluatedKey": {"PK": pk, "SK": "#METADATA"},
+            }
+        if pk == "CHAT_SESSION_LIST#user-1":
+            if start:
+                return {
+                    "Items": [
+                        {
+                            "PK": pk,
+                            "SK": "UPDATED#2#THREAD#t2",
+                            "thread_id": "t2",
+                        }
+                    ]
+                }
+            return {
+                "Items": [
+                    {
+                        "PK": pk,
+                        "SK": "UPDATED#1#THREAD#t1",
+                        "thread_id": "t1",
+                    }
+                ],
+                "LastEvaluatedKey": {"PK": pk, "SK": "UPDATED#1#THREAD#t1"},
+            }
+        raise AssertionError(f"Unexpected partition: {pk}")
+
+    patch_table.query.side_effect = query_side_effect
+    batch = MagicMock()
+    patch_table.batch_writer.return_value.__enter__ = MagicMock(return_value=batch)
+    patch_table.batch_writer.return_value.__exit__ = MagicMock(return_value=False)
+
+    assert await store.delete_scheduled_chat("sc1") is True
+
+    deleted = [call.kwargs["Key"] for call in batch.delete_item.call_args_list]
+    assert {"PK": "CHAT_SESSION#user-1", "SK": "t1"} in deleted
+    assert {"PK": "CHAT_SESSION#user-1", "SK": "t2"} in deleted
+    assert {"PK": "CHAT_SESSION_LIST#user-1", "SK": "UPDATED#1#THREAD#t1"} in deleted
+    assert {"PK": "CHAT_SESSION_LIST#user-1", "SK": "UPDATED#2#THREAD#t2"} in deleted
+
+
+async def test_partial_scheduled_chat_result_clears_stale_errors(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "last_errors": [{"timestamp": "old", "error": "boom"}],
+        }
+    }
+
+    await store.record_scheduled_chat_result("sc1", "partial")
+
+    assert patch_table.update_item.call_count == 2
+    for call in patch_table.update_item.call_args_list:
+        assert call.kwargs["ExpressionAttributeValues"][":errors"] == []
+
+
 _SQ_KWARGS = dict(
     name="My Query",
     cypher="MATCH (n) RETURN n",

@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -57,6 +58,7 @@ async def run_headless_chat(
     timeout_seconds: int,
     disclosed_tools: list[str] | None = None,
     on_chunk: Callable[[], None] | None = None,
+    origin: Literal["interactive", "scheduled", "workflow"] = "interactive",
     scheduled_chat_id: str | None = None,
 ) -> HeadlessChatResult:
     """Drive one full agent turn for ``current_user`` and return its summary.
@@ -64,15 +66,16 @@ async def run_headless_chat(
     ``on_chunk`` is invoked per streamed chunk (e.g. a Temporal activity
     heartbeat). ``disclosed_tools`` pre-unlocks tools under progressive
     disclosure when the prompt is a server-side rendered skill. When
-    ``scheduled_chat_id`` is set, the session is created with
-    ``origin="scheduled"``: hidden from the interactive session list and
-    read-only in the web UI.
+    ``origin`` explicitly identifies interactive, scheduled, and workflow
+    sessions. Headless origins are hidden from the interactive session list
+    and read-only in the web UI. ``scheduled_chat_id`` links scheduled runs to
+    their schedule.
     """
     bypass = Permission.CHAT_BYPASS_PERMISSIONS.value in current_user.permissions
     session = await report_store.create_chat_session(
         current_user.user.user_id,
         title,
-        origin="scheduled" if scheduled_chat_id else "interactive",
+        origin=origin,
         scheduled_chat_id=scheduled_chat_id,
     )
 

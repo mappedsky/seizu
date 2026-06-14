@@ -567,8 +567,8 @@ class ReportStore(ABC):
     async def list_chat_sessions(self, user_id: str, limit: int) -> list[ChatSessionItem]:
         """Return recent interactive chat sessions for a user, newest first.
 
-        Sessions created by scheduled chat runs (``origin="scheduled"``) are
-        excluded.
+        Headless sessions (``origin="scheduled"`` or ``origin="workflow"``)
+        are excluded.
         """
 
     @abstractmethod
@@ -585,9 +585,9 @@ class ReportStore(ABC):
     ) -> ChatSessionItem:
         """Create a new chat session with a store-generated ID.
 
-        ``origin="scheduled"`` sessions are hidden from ``list_chat_sessions``
-        and are read-only in the web UI; ``scheduled_chat_id`` links them to
-        the schedule that created them.
+        Headless sessions are hidden from ``list_chat_sessions`` and are
+        read-only in the web UI; ``scheduled_chat_id`` links scheduled
+        sessions to the schedule that created them.
         """
 
     @abstractmethod
