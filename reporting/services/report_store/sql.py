@@ -32,7 +32,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.services.report_store.base import ReportStore
+from reporting.services.report_store.base import ReportStore, initial_report_config
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
@@ -715,17 +715,18 @@ class SQLModelReportStore(ReportStore):
         created_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem:
-        """Create a new empty report (no initial version) and return the ReportListItem."""
+        """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
+        config = initial_report_config(name)
 
         async with AsyncSession(_get_engine()) as session:
             session.add(
                 ReportRecord(
                     report_id=report_id,
                     name=name,
-                    current_version=0,
+                    current_version=1,
                     created_at=now,
                     updated_at=now,
                     created_by=created_by,
@@ -733,12 +734,22 @@ class SQLModelReportStore(ReportStore):
                     access=report_access.model_dump(),
                 )
             )
+            session.add(
+                ReportVersionRecord(
+                    report_id=report_id,
+                    version=1,
+                    config=config,
+                    created_at=now,
+                    created_by=created_by,
+                    comment="Initial version",
+                )
+            )
             await session.commit()
 
         return ReportListItem(
             report_id=report_id,
             name=name,
-            current_version=0,
+            current_version=1,
             created_at=now,
             updated_at=now,
             created_by=created_by,

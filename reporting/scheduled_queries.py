@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import signal
 from datetime import datetime, timedelta
@@ -136,7 +137,10 @@ async def _handle_results(
         )
         return
     module = scheduled_query_modules.get_module(action_type)
-    await asyncio.to_thread(module.handle_results, scheduled_query_id, action, results)
+    if inspect.iscoroutinefunction(module.handle_results):
+        await module.handle_results(scheduled_query_id, action, results)
+    else:
+        await asyncio.to_thread(module.handle_results, scheduled_query_id, action, results)
 
 
 async def _schedule_queries() -> None:

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
+import neo4j.exceptions
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -232,6 +233,58 @@ async def test_query_execution_failure(mocker):
         )
     assert ret.status_code == 500
     assert "Query execution failed" in ret.json()["error"]
+
+
+async def test_query_client_execution_error_returns_query_errors(mocker):
+    _mock_validate(mocker, warnings=["Planner warning"])
+    client_error = neo4j.exceptions.Neo4jError._hydrate_neo4j(
+        code="Neo.ClientError.Statement.SyntaxError",
+        message="Invalid call signature for datetime()",
+    )
+    mocker.patch(
+        "reporting.routes.query.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=client_error),
+    )
+    save_history = mocker.patch(
+        "reporting.routes.query.report_store.save_query_history",
+        new=AsyncMock(),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(
+            "/api/v1/query/adhoc",
+            json={"query": "RETURN datetime(1781321046)"},
+        )
+
+    assert ret.status_code == 400
+    assert ret.json() == {
+        "errors": ["Invalid call signature for datetime()"],
+        "warnings": ["Planner warning"],
+    }
+    save_history.assert_not_awaited()
+
+
+async def test_query_neo4j_database_error_remains_server_error(mocker):
+    _mock_validate(mocker)
+    database_error = neo4j.exceptions.Neo4jError._hydrate_neo4j(
+        code="Neo.DatabaseError.General.UnknownError",
+        message="Database unavailable",
+    )
+    mocker.patch(
+        "reporting.routes.query.reporting_neo4j.run_query",
+        new=AsyncMock(side_effect=database_error),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(
+            "/api/v1/query/adhoc",
+            json={"query": "MATCH (n) RETURN n"},
+        )
+
+    assert ret.status_code == 500
+    assert ret.json()["error"] == "Query execution failed"
 
 
 async def test_query_serialize_node(mocker):

@@ -8,7 +8,6 @@ confirmations are bypassed only when the creator holds
 import this module for its action schema without pulling in the SDK.
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -61,12 +60,14 @@ async def setup() -> None:
     return
 
 
-def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, results: list[dict[str, Any]]) -> None:
+async def handle_results(
+    scheduled_query_id: str,
+    action: ScheduledQueryAction,
+    results: list[dict[str, Any]],
+) -> None:
     if not results:
         return
-    # handle_results runs via asyncio.to_thread (no loop in this thread), so a
-    # private event loop per dispatch is safe; the Temporal client binds to it.
-    asyncio.run(_start_workflow(scheduled_query_id, action, results))
+    await _start_workflow(scheduled_query_id, action, results)
 
 
 def _project_rows(

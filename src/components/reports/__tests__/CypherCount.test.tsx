@@ -188,6 +188,6 @@ describe('CypherCount', () => {
         <CypherCount cypher="CREATE (n) RETURN n" caption="Test Count" />
       </Wrapper>,
     );
-    expect(screen.getByText('Query validation failed')).toBeInTheDocument();
+    expect(screen.getByText('Query failed')).toBeInTheDocument();
   });
 });

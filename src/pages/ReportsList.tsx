@@ -29,7 +29,6 @@ import HistoryIcon from '@mui/icons-material/History';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
 import LockIcon from '@mui/icons-material/Lock';
-import PinIcon from '@mui/icons-material/PushPin';
 import PushPinIcon from '@mui/icons-material/PushPin';
 import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import PublicIcon from '@mui/icons-material/Public';
@@ -68,7 +67,6 @@ function ReportsList() {
   const {
     createReport,
     cloneReport,
-    saveReportVersion,
     setDashboardReport,
     pinReport,
     updateReportVisibility,
@@ -114,11 +112,6 @@ function ReportsList() {
     setCreateError(null);
     try {
       const item = await createReport(newName.trim());
-      await saveReportVersion(
-        item.report_id,
-        { name: newName.trim(), rows: [], schema_version: 1 },
-        'Initial version',
-      );
       setCreateOpen(false);
       setNewName('');
       navigate(`/app/reports/${item.report_id}?edit=true`);
@@ -458,7 +451,7 @@ function ReportsList() {
           {
             key: 'pinned',
             label: 'Pinned',
-            icon: <PinIcon fontSize="small" />,
+            icon: <PushPinIcon fontSize="small" />,
             matches: (report) => report.pinned,
           },
           {

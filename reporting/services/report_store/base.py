@@ -30,6 +30,11 @@ from reporting.schema.report_config import (
 )
 
 
+def initial_report_config(name: str) -> dict[str, Any]:
+    """Return the minimal valid config stored with a newly created report."""
+    return {"name": name, "rows": [], "schema_version": 1}
+
+
 class ReportStore(ABC):
     """Abstract base class for report configuration storage backends."""
 
@@ -85,7 +90,7 @@ class ReportStore(ABC):
         created_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem:
-        """Create a new empty report (no initial version) and return the ReportListItem."""
+        """Create a report with an initial version and return its metadata."""
 
     @abstractmethod
     async def save_report_version(

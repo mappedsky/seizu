@@ -159,7 +159,7 @@ describe('CypherTable', () => {
         <CypherTable cypher="CREATE (n) RETURN n" caption="My Table" />
       </Wrapper>,
     );
-    expect(screen.getByText('Query validation failed.')).toBeInTheDocument();
+    expect(screen.getByText('Query failed.')).toBeInTheDocument();
   });
 
   // preloadedRecords — used by CypherGraph to share already-fetched data across tab switches.

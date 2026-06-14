@@ -307,6 +307,30 @@ describe('useLazyCypherQuery', () => {
     await waitFor(() => expect(result.current[1].loading).toBe(false));
     expect(result.current[1].historyId).toBeNull();
   });
+
+  it('exposes Neo4j execution errors as queryErrors', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () =>
+        Promise.resolve({
+          errors: ['Invalid call signature for datetime()'],
+          warnings: ['Planner warning'],
+        }),
+    });
+    const { result } = renderHook(() => useLazyCypherQuery(CYPHER), {
+      wrapper: makeWrapper(false, null),
+    });
+    act(() => {
+      result.current[0]();
+    });
+    await waitFor(() => expect(result.current[1].loading).toBe(false));
+    expect(result.current[1].queryErrors).toEqual([
+      'Invalid call signature for datetime()',
+    ]);
+    expect(result.current[1].warnings).toEqual(['Planner warning']);
+    expect(result.current[1].error).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

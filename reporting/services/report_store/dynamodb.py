@@ -36,7 +36,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.services.report_store.base import ReportStore
+from reporting.services.report_store.base import ReportStore, initial_report_config
 
 logger = logging.getLogger(__name__)
 
@@ -1022,17 +1022,18 @@ class DynamoDBReportStore(ReportStore):
         created_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem:
-        """Create a new empty report (no initial version) and return the ReportListItem."""
+        """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
+        config = initial_report_config(name)
 
         metadata_item = {
             "PK": _report_pk(report_id),
             "SK": _SK_METADATA,
             "report_id": report_id,
             "name": name,
-            "current_version": 0,
+            "current_version": 1,
             "created_at": now,
             "updated_at": now,
             "created_by": created_by,
@@ -1045,7 +1046,7 @@ class DynamoDBReportStore(ReportStore):
             "SK": f"REPORT#{report_id}",
             "report_id": report_id,
             "name": name,
-            "current_version": 0,
+            "current_version": 1,
             "created_at": now,
             "updated_at": now,
             "created_by": created_by,
@@ -1053,16 +1054,28 @@ class DynamoDBReportStore(ReportStore):
             "access": report_access.model_dump(),
             "pinned": False,
         }
+        version_item: dict[str, Any] = {
+            "PK": _report_pk(report_id),
+            "SK": _version_sk(1),
+            "report_id": report_id,
+            "name": name,
+            "version": 1,
+            "config": config,
+            "created_at": now,
+            "created_by": created_by,
+            "comment": "Initial version",
+        }
+        latest_item: dict[str, Any] = {**version_item, "SK": _SK_LATEST}
 
         def _op() -> None:
             table = _get_table()
-            _transact_put_sync(table, metadata_item, list_item)
+            _transact_put_sync(table, metadata_item, list_item, version_item, latest_item)
 
         await asyncio.to_thread(_op)
         return ReportListItem(
             report_id=report_id,
             name=name,
-            current_version=0,
+            current_version=1,
             created_at=now,
             updated_at=now,
             created_by=created_by,

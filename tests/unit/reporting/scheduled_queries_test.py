@@ -166,9 +166,30 @@ async def test___handle_results_known_action(mocker):
     assert mod_mock.call_count == 1
 
 
+async def test___handle_results_known_async_action(mocker):
+    """Async action handlers run on the scheduled-query worker event loop."""
+    module = mocker.MagicMock()
+    module.handle_results = AsyncMock()
+    mocker.patch("reporting.scheduled_query_modules.get_module", return_value=module)
+    mocker.patch("reporting.scheduled_query_modules.get_module_names", return_value=["temporal"])
+    action = ScheduledQueryAction(
+        action_type="temporal",
+        action_config={"workflow": "cve_repo_report"},
+    )
+    results = [{"details": {"repo": "org/app"}}]
+
+    await scheduled_queries._handle_results("sq-1", action, results)
+
+    module.handle_results.assert_awaited_once_with("sq-1", action, results)
+
+
 async def test__schedule_queries(mocker):
     item1 = _make_sq_item("sq1", "test name")
     item2 = _make_sq_item("sq2", "test name 2")
+    mocker.patch(
+        "reporting.scheduled_queries.report_store.initialize",
+        new=AsyncMock(),
+    )
     mocker.patch(
         "reporting.scheduled_queries.report_store.list_scheduled_queries",
         new=AsyncMock(return_value=[item1, item2]),
@@ -203,6 +224,10 @@ async def test__schedule_queries(mocker):
 async def test__schedule_queries_calls_with_item(mocker):
     """_schedule_queries passes the full ScheduledQueryItem to schedule_query."""
     item = _make_sq_item("sq1", "test name")
+    mocker.patch(
+        "reporting.scheduled_queries.report_store.initialize",
+        new=AsyncMock(),
+    )
     mocker.patch(
         "reporting.scheduled_queries.report_store.list_scheduled_queries",
         new=AsyncMock(return_value=[item]),

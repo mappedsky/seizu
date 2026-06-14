@@ -341,6 +341,8 @@ function ReportView({
 }: ReportViewProps) {
   const displayTitle = title ?? report.name;
   const reportQueries = useMemo(() => report.queries ?? {}, [report]);
+  const reportRows = Array.isArray(report.rows) ? report.rows : [];
+  const hasInvalidRows = !Array.isArray(report.rows);
   const capabilities = queryCapabilities ?? EMPTY_QUERY_CAPABILITIES;
   const resolveQuery = useCallback(
     (cypher: string | undefined): string | undefined => {
@@ -598,7 +600,7 @@ function ReportView({
     setCollapsedRows((prev) => ({ ...prev, [rowIndex]: !prev[rowIndex] }));
   }, []);
 
-  const rows = report.rows.map((row, rowIndex) => {
+  const rows = reportRows.map((row, rowIndex) => {
     // collapsible defaults to true; only disabled when explicitly set false
     const effectiveCollapsible = row.collapsible !== false;
     const isCollapsed =
@@ -727,6 +729,27 @@ function ReportView({
               </Typography>
             </Container>
           </Box>
+        )}
+        {hasInvalidRows && (
+          <Container maxWidth={false} sx={{ ...contentContainerSx, pb: 1.5 }}>
+            <Paper
+              role="alert"
+              elevation={1}
+              sx={{
+                p: 2,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                color: 'error.main',
+              }}
+            >
+              <Error />
+              <Typography>
+                This report has an invalid configuration: rows must be an array,
+                with panels nested under each row.
+              </Typography>
+            </Paper>
+          </Container>
         )}
         <Box>{rows}</Box>
       </Box>

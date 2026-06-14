@@ -430,7 +430,7 @@ async def test_list_reports_returns_created_reports(store, mocker):
     assert isinstance(result[0], ReportListItem)
     assert result[0].report_id == "rid1"
     assert result[0].name == "My Report"
-    assert result[0].current_version == 0
+    assert result[0].current_version == 1
 
 
 # ---------------------------------------------------------------------------
@@ -442,13 +442,17 @@ async def test_get_report_latest_not_found(store):
     assert await store.get_report_latest("missing") is None
 
 
-async def test_get_report_latest_not_found_for_empty_report(store, mocker):
+async def test_get_report_latest_returns_initial_version(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",
         return_value="rid1",
     )
     await store.create_report(name="r1", created_by="user@example.com")
-    assert await store.get_report_latest("rid1") is None
+    result = await store.get_report_latest("rid1")
+    assert result is not None
+    assert result.version == 1
+    assert result.config == {"name": "r1", "rows": [], "schema_version": 1}
+    assert result.comment == "Initial version"
 
 
 async def test_get_report_latest_returns_version(store, mocker):
@@ -467,7 +471,7 @@ async def test_get_report_latest_returns_version(store, mocker):
     assert isinstance(result, ReportVersion)
     assert result.report_id == "rid1"
     assert result.name == "r1"
-    assert result.version == 1
+    assert result.version == 2
     assert result.config == {"name": "r1", "rows": [{"name": "r1"}]}
     assert result.created_by == "user@example.com"
     assert result.comment == "v1"
@@ -482,7 +486,7 @@ async def test_get_report_latest_returns_newest_after_update(store, mocker):
     await store.save_report_version(report_id="rid1", config={"v": 1}, created_by="u@x.com")
     await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
     result = await store.get_report_latest("rid1")
-    assert result.version == 2
+    assert result.version == 3
     assert result.config == {"name": "r", "v": 2}
 
 
@@ -506,11 +510,14 @@ async def test_get_report_version_found(store, mocker):
 
     v1 = await store.get_report_version("rid1", 1)
     v2 = await store.get_report_version("rid1", 2)
+    v3 = await store.get_report_version("rid1", 3)
     assert v1.version == 1
     assert v1.name == "r"
-    assert v1.config == {"name": "r", "v": 1}
+    assert v1.config == {"name": "r", "rows": [], "schema_version": 1}
     assert v2.version == 2
-    assert v2.config == {"name": "r", "v": 2}
+    assert v2.config == {"name": "r", "v": 1}
+    assert v3.version == 3
+    assert v3.config == {"name": "r", "v": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -522,13 +529,16 @@ async def test_list_report_versions_empty(store):
     assert await store.list_report_versions("missing") == []
 
 
-async def test_list_report_versions_empty_for_report_with_no_versions(store, mocker):
+async def test_list_report_versions_contains_initial_version(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",
         return_value="rid1",
     )
     await store.create_report(name="r", created_by="u@x.com")
-    assert await store.list_report_versions("rid1") == []
+    versions = await store.list_report_versions("rid1")
+    assert len(versions) == 1
+    assert versions[0].version == 1
+    assert versions[0].config == {"name": "r", "rows": [], "schema_version": 1}
 
 
 async def test_list_report_versions_newest_first(store, mocker):
@@ -542,10 +552,11 @@ async def test_list_report_versions_newest_first(store, mocker):
     await store.save_report_version(report_id="rid1", config={"v": 3}, created_by="u@x.com")
 
     versions = await store.list_report_versions("rid1")
-    assert len(versions) == 3
-    assert versions[0].version == 3
-    assert versions[1].version == 2
-    assert versions[2].version == 1
+    assert len(versions) == 4
+    assert versions[0].version == 4
+    assert versions[1].version == 3
+    assert versions[2].version == 2
+    assert versions[3].version == 1
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +576,7 @@ async def test_create_report_returns_list_item(store, mocker):
     assert isinstance(result, ReportListItem)
     assert result.report_id == "snowflake42"
     assert result.name == "My Report"
-    assert result.current_version == 0
+    assert result.current_version == 1
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +601,7 @@ async def test_save_report_version_increments_version(store, mocker):
         created_by="editor@example.com",
         comment="update",
     )
-    assert result.version == 1
+    assert result.version == 2
     assert result.name == "r"
     assert result.config == {"name": "r", "v": 2}
     assert result.comment == "update"
@@ -609,7 +620,7 @@ async def test_save_report_version_does_not_change_name_without_config_name(stor
     )
     result = await store.list_reports()
     assert result[0].name == "Original Name"
-    assert result[0].current_version == 1
+    assert result[0].current_version == 2
 
 
 async def test_save_report_version_updates_name_from_config(store, mocker):
@@ -661,7 +672,7 @@ async def test_save_report_version_latest_reflects_new_version(store, mocker):
     await store.save_report_version(report_id="rid1", config={"v": 2}, created_by="u@x.com")
 
     latest = await store.get_report_latest("rid1")
-    assert latest.version == 2
+    assert latest.version == 3
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +717,7 @@ async def test_set_and_get_dashboard_report(store, mocker):
     report = await store.get_dashboard_report()
     assert isinstance(report, ReportVersion)
     assert report.report_id == "rid1"
-    assert report.version == 1
+    assert report.version == 2
 
 
 async def test_set_dashboard_report_can_be_changed(store, mocker):

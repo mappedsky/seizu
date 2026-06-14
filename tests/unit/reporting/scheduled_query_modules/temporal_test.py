@@ -50,13 +50,13 @@ async def test_setup():
     assert await temporal.setup() is None
 
 
-def test_handle_results_no_results(mocker):
+async def test_handle_results_no_results(mocker):
     connect = mocker.patch.object(temporalio.client.Client, "connect")
-    temporal.handle_results("sq-1", _action(), [])
+    await temporal.handle_results("sq-1", _action(), [])
     connect.assert_not_called()
 
 
-def test_handle_results_starts_workflow(mocker):
+async def test_handle_results_starts_workflow(mocker):
     client = _patch_client(mocker)
     mocker.patch(
         "reporting.services.report_store.get_scheduled_query",
@@ -64,7 +64,7 @@ def test_handle_results_starts_workflow(mocker):
     )
     results = [{"details": {"repo": "org/app", "cve_id": "CVE-2026-0001"}}]
 
-    temporal.handle_results("sq-1", _action(), results)
+    await temporal.handle_results("sq-1", _action(), results)
 
     client.start_workflow.assert_awaited_once()
     args, kwargs = client.start_workflow.await_args
@@ -76,17 +76,17 @@ def test_handle_results_starts_workflow(mocker):
     assert kwargs["task_queue"] == settings.TEMPORAL_TASK_QUEUE
 
 
-def test_handle_results_refuses_unknown_workflow(mocker):
+async def test_handle_results_refuses_unknown_workflow(mocker):
     client = _patch_client(mocker)
     mocker.patch("reporting.services.report_store.get_scheduled_query")
     results = [{"details": {"repo": "org/app"}}]
 
-    temporal.handle_results("sq-1", _action(workflow="does_not_exist"), results)
+    await temporal.handle_results("sq-1", _action(workflow="does_not_exist"), results)
 
     client.start_workflow.assert_not_called()
 
 
-def test_handle_results_swallows_already_started(mocker):
+async def test_handle_results_swallows_already_started(mocker):
     client = _patch_client(mocker)
     client.start_workflow.side_effect = temporalio.exceptions.WorkflowAlreadyStartedError("wf-1", "cve_repo_report")
     mocker.patch(
@@ -95,10 +95,10 @@ def test_handle_results_swallows_already_started(mocker):
     )
     results = [{"details": {"repo": "org/app"}}]
 
-    temporal.handle_results("sq-1", _action(), results)
+    await temporal.handle_results("sq-1", _action(), results)
 
 
-def test_handle_results_truncates_rows(mocker):
+async def test_handle_results_truncates_rows(mocker):
     client = _patch_client(mocker)
     mocker.patch(
         "reporting.services.report_store.get_scheduled_query",
@@ -106,7 +106,7 @@ def test_handle_results_truncates_rows(mocker):
     )
     results = [{"details": {"repo": f"org/app-{i}"}} for i in range(5)]
 
-    temporal.handle_results("sq-1", _action(max_rows=2), results)
+    await temporal.handle_results("sq-1", _action(max_rows=2), results)
 
     args, _kwargs = client.start_workflow.await_args
     assert len(args[1].rows) == 2

@@ -1856,7 +1856,7 @@ skillsets:
 
           Inputs:
           - repo: `{% $repo %}`
-          - cves (JSON array of {repo, cve_id, severity, score, description, package, patched_version, url}): `{% $cves %}`
+          - cves (JSON array of {repo, cve_id, severity, score, description, package, patched_version, url, created_at}): `{% $cves %}`
 
           Workflow:
           1. For each distinct `cve_id` in `cves`, call `cve_analysis__get_cve` to confirm severity, score, and description. If a CVE is not found, keep the provided data and note the gap.
@@ -1948,13 +1948,16 @@ scheduled_queries:
   - name: New CVEs affecting repositories
     cypher: |-
       MATCH (sm:SyncMetadata)
-      WHERE sm.grouptype = "CVEMetadata" AND sm.syncedtype = "CVEMetadata" AND toString(sm.groupid) = "CVE_METADATA"
+      WHERE sm.grouptype = "GitHubOrganization"
+        AND sm.syncedtype = "GitHubOrganization"
+        AND toString(sm.groupid) = "https://github.com/mappedsky"
       WITH datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
-      MATCH (c:CVEMetadata)
-      WHERE datetime(c.published_date) > window_start
       MATCH (r:GitHubRepository)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
-      WHERE s.cve_id = c.id
-        AND coalesce(r.archived, false) = false AND coalesce(r.disabled, false) = false
+      WHERE s.created_at IS NOT NULL
+        AND datetime(s.created_at) > window_start
+        AND coalesce(r.archived, false) = false
+        AND coalesce(r.disabled, false) = false
+      MATCH (c:CVEMetadata {id: s.cve_id})
       RETURN DISTINCT {
         repo: r.fullname,
         cve_id: c.id,
@@ -1963,12 +1966,13 @@ scheduled_queries:
         description: c.description,
         package: s.dependency_package_name,
         patched_version: s.first_patched_version,
-        url: s.html_url
+        url: s.html_url,
+        created_at: s.created_at
       } AS details
     watch_scans:
-      - grouptype: CVEMetadata
-        syncedtype: CVEMetadata
-        groupid: CVE_METADATA
+      - grouptype: GitHubOrganization
+        syncedtype: GitHubOrganization
+        groupid: https://github.com/mappedsky
     enabled: true
     actions:
       - action_type: temporal

@@ -22,6 +22,13 @@ interface DashboardCacheEntry {
 const reportCapabilitiesCache = new Map<string, ReportCacheEntry>();
 let dashboardCacheEntry: DashboardCacheEntry | null = null;
 
+function hasValidReportRows(report: Report): boolean {
+  return (
+    Array.isArray(report.rows) &&
+    report.rows.every((row) => Array.isArray(row.panels))
+  );
+}
+
 export function updateCachedReportCapabilities(
   reportId: string,
   entry: ReportCacheEntry,
@@ -619,7 +626,13 @@ export function useReport(reportId: string | undefined): {
   const { accessToken } = useContext(AuthContext);
   const { auth_required } = useContext(AuthConfigContext);
   // Initialize from cache immediately to skip the loading flash on repeat visits
-  const cached = reportId ? reportCapabilitiesCache.get(reportId) : undefined;
+  const cachedCandidate = reportId
+    ? reportCapabilitiesCache.get(reportId)
+    : undefined;
+  const cached =
+    cachedCandidate && hasValidReportRows(cachedCandidate.report)
+      ? cachedCandidate
+      : undefined;
   const [report, setReport] = useState<Report | undefined>(cached?.report);
   const [name, setName] = useState<string | undefined>(cached?.name);
   const [reportVersion, setReportVersion] = useState<ReportVersion | undefined>(
@@ -643,7 +656,7 @@ export function useReport(reportId: string | undefined): {
 
     // Serve from cache if populated (navigating back to a previously-loaded report)
     const hit = reportCapabilitiesCache.get(reportId);
-    if (hit) {
+    if (hit && hasValidReportRows(hit.report)) {
       setReport(hit.report);
       setName(hit.name);
       setReportVersion(hit.reportVersion);
@@ -651,6 +664,7 @@ export function useReport(reportId: string | undefined): {
       setLoading(false);
       return;
     }
+    if (hit) reportCapabilitiesCache.delete(reportId);
 
     let cancelled = false;
 

@@ -53,7 +53,12 @@ selection, degradation behavior, terminal statuses, and the final budget
 ledger. Temporal remains optional: scheduled chats and interactive chat do not
 require a Temporal server.
 
-The seeded scheduled query **New CVEs affecting repositories** watches CVE metadata syncs (`watch_scans` on `SyncMetadata` with `grouptype: CVEMetadata`, `syncedtype: CVEMetadata`, `groupid: CVE_METADATA`) and joins recently published `CVEMetadata` against open `SecurityIssue` nodes to produce the per-repository rows.
+The seeded scheduled query **New CVEs affecting repositories** watches the
+mappedsky GitHub organization sync and selects open `SecurityIssue` nodes whose
+ISO-8601 `created_at` value falls within the scan window. It then joins
+their existing `CVEMetadata` records to produce per-repository rows. This
+detects a newly observed repository exposure even when the CVE itself was
+published earlier.
 
 ## Configuration
 

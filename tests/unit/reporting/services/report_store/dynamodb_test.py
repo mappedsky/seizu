@@ -355,10 +355,10 @@ async def test_create_report_returns_list_item(patch_table, store, mocker):
     assert isinstance(result, ReportListItem)
     assert result.report_id == "snowflake123"
     assert result.name == "My Report"
-    assert result.current_version == 0
+    assert result.current_version == 1
 
 
-async def test_create_report_writes_two_items_transactionally(patch_table, store, mocker):
+async def test_create_report_writes_initial_version_transactionally(patch_table, store, mocker):
     mocker.patch(
         "reporting.services.report_store.dynamodb.generate_report_id",
         return_value="rid",
@@ -367,7 +367,7 @@ async def test_create_report_writes_two_items_transactionally(patch_table, store
 
     patch_table.meta.client.transact_write_items.assert_called_once()
     items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
-    assert len(items) == 2
+    assert len(items) == 4
 
 
 async def test_create_report_correct_sks(patch_table, store, mocker):
@@ -380,6 +380,8 @@ async def test_create_report_correct_sks(patch_table, store, mocker):
     items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
     sks = [i["Put"]["Item"]["SK"] for i in items]
     assert "#METADATA" in sks
+    assert "#LATEST" in sks
+    assert "VERSION#0000000001" in sks
     # list item SK is the report_id prefixed with REPORT#
     pks = [i["Put"]["Item"]["PK"] for i in items]
     assert "REPORT_LIST" in pks

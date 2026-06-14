@@ -450,6 +450,13 @@ class Row(BaseModel):
 
 
 class Report(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def reject_top_level_panels(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "panels" in data:
+            raise ValueError("Report field 'panels' is invalid; panels must be nested under 'rows[].panels'.")
+        return data
+
     schema_version: int = Field(
         default=1,
         description=(

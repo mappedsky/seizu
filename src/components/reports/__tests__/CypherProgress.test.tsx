@@ -181,6 +181,6 @@ describe('CypherProgress', () => {
         <CypherProgress cypher="CREATE (n) RETURN n" caption="Test Progress" />
       </Wrapper>,
     );
-    expect(screen.getByText('Query validation failed')).toBeInTheDocument();
+    expect(screen.getByText('Query failed')).toBeInTheDocument();
   });
 });

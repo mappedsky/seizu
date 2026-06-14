@@ -517,7 +517,7 @@ export default function CypherTable({
           {caption}
           <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         </Typography>
-        <Typography variant="body2">Query validation failed.</Typography>
+        <Typography variant="body2">Query failed.</Typography>
       </Box>
     );
   }

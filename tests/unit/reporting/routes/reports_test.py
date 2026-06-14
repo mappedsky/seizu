@@ -644,6 +644,28 @@ async def test_create_version_missing_config_field(mocker):
     assert ret.status_code == 422
 
 
+async def test_create_version_rejects_top_level_panels(mocker):
+    mock_save = mocker.patch(
+        "reporting.routes.reports.report_store.save_report_version",
+        new=AsyncMock(),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(
+            "/api/v1/reports/rid1/versions",
+            json={
+                "config": {
+                    "name": "Invalid Report",
+                    "panels": [{"type": "markdown", "content": "Not nested under a row"}],
+                }
+            },
+        )
+
+    assert ret.status_code == 422
+    assert "panels must be nested under 'rows[].panels'" in str(ret.json())
+    mock_save.assert_not_awaited()
+
+
 async def test_create_version_non_json_body(mocker):
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
