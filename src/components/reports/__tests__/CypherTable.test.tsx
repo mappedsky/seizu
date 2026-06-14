@@ -13,13 +13,6 @@ jest.mock('src/components/reports/CypherDetails', () => ({
   },
 }));
 
-jest.mock('src/components/reports/QueryValidationBadge', () => ({
-  __esModule: true,
-  default: function MockQueryValidationBadge() {
-    return null;
-  },
-}));
-
 const { useLazyCypherQuery } = require('src/hooks/useCypherQuery');
 
 const theme = createTheme();
