@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import pytest
 
 from reporting import scheduled_chats
@@ -272,3 +274,98 @@ def test_schedule_spec_validation():
     with pytest.raises(ValueError):
         ChatScheduleSpec(type="monthly", days_of_month=[0])
     assert ChatScheduleSpec(type="monthly", days_of_month=[29, 31]).days_of_month == [29, 31]
+
+
+# ---------------------------------------------------------------------------
+# _bootstrap / _run_worker / main
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_installs_shutdown_handlers(mocker):
+    installed = mocker.patch("reporting.scheduled_chats.install_shutdown_handlers")
+    from reporting.scheduled_chats import _bootstrap
+
+    _bootstrap()
+
+    installed.assert_called_once()
+
+
+def test_monthly_year_rollback():
+    # January: day 31 hasn't happened yet → look back to Dec 31 of previous year.
+    spec = ChatScheduleSpec(type="monthly", days_of_month=[31])
+    # last run was Dec 31 — the Dec occurrence is already claimed, so not due.
+    assert schedule_due(spec, "2025-12-31T00:00:10+00:00", _CREATED, now=_now("2026-01-15T00:00:00+00:00")) is False
+    # no prior run (None) → floor=created_at which is before Dec 31 → due.
+    assert schedule_due(spec, None, "2025-12-01T00:00:00+00:00", now=_now("2026-01-15T00:00:00+00:00")) is True
+
+
+async def test_run_scheduled_chat_records_failure_status(mocker):
+    run_chat, _lock, record = _patch_run(mocker)
+    run_chat.return_value = HeadlessChatResult(thread_id="t1", summary="err", status="failed")
+
+    await scheduled_chats.run_scheduled_chat(_item())
+
+    record.assert_awaited_once_with("sc-1", "failure", error="Headless run ended with status: failed")
+
+
+async def test_record_failure_handles_store_exception(mocker):
+    mocker.patch(
+        "reporting.scheduled_chats.report_store.record_scheduled_chat_result",
+        mocker.AsyncMock(side_effect=RuntimeError("store down")),
+    )
+    # Should not raise — exception is caught and logged.
+    await scheduled_chats._record_failure("sc-1", "something went wrong")
+
+
+async def test_run_worker_polls_and_exits_on_shutdown(mocker):
+    @asynccontextmanager
+    async def _noop():
+        yield
+
+    import reporting.scheduled_chats as sc
+
+    mocker.patch("reporting.scheduled_chats._bootstrap")
+    mocker.patch("reporting.scheduled_chats.chat_worker_resources", _noop)
+    run_chat = mocker.patch("reporting.scheduled_chats.run_scheduled_chat", mocker.AsyncMock())
+    mocker.patch(
+        "reporting.scheduled_chats.report_store.list_scheduled_chats",
+        mocker.AsyncMock(return_value=[_item()]),
+    )
+
+    async def _sleep_and_set(*args, **kwargs):
+        sc._shutdown_event.set()
+
+    mocker.patch("reporting.scheduled_chats.asyncio.sleep", _sleep_and_set)
+
+    sc._shutdown_event.clear()
+    try:
+        from reporting.scheduled_chats import _run_worker
+
+        await _run_worker()
+    finally:
+        sc._shutdown_event.clear()
+
+    run_chat.assert_awaited_once()
+
+
+def test_main_runs_when_enabled(mocker):
+    mocker.patch("reporting.scheduled_chats.settings.CHAT_ENABLED", True)
+    mocker.patch("reporting.scheduled_chats.settings.CHAT_SCHEDULES_ENABLED", True)
+    mock_run = mocker.patch("reporting.scheduled_chats.asyncio.run")
+
+    from reporting.scheduled_chats import main
+
+    main()
+
+    assert mock_run.called
+
+
+def test_main_exits_when_disabled(mocker):
+    mocker.patch("reporting.scheduled_chats.settings.CHAT_ENABLED", False)
+    mock_run = mocker.patch("reporting.scheduled_chats.asyncio.run")
+
+    from reporting.scheduled_chats import main
+
+    main()
+
+    mock_run.assert_not_called()

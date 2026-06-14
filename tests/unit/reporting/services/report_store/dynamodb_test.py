@@ -1101,6 +1101,91 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(patch_table, st
         assert call.kwargs["ExpressionAttributeValues"][":errors"] == []
 
 
+async def test_get_scheduled_chat_returns_item(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    item = await store.get_scheduled_chat("sc1")
+
+    assert item is not None
+    assert item.scheduled_chat_id == "sc1"
+    assert item.name == "Chat sc1"
+
+
+async def test_get_scheduled_chat_returns_none_when_missing(patch_table, store):
+    patch_table.get_item.return_value = {}
+
+    item = await store.get_scheduled_chat("sc1")
+
+    assert item is None
+
+
+async def test_create_scheduled_chat_writes_three_items(patch_table, store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.dynamodb.generate_report_id",
+        return_value="sc-new",
+    )
+
+    item = await store.create_scheduled_chat(
+        name="My Chat",
+        prompt="Summarize",
+        schedule={"type": "hourly", "interval_hours": 2},
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+
+    assert item.scheduled_chat_id == "sc-new"
+    assert item.name == "My Chat"
+    assert patch_table.put_item.call_count == 3
+
+
+async def test_update_scheduled_chat_bumps_version(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    item = await store.update_scheduled_chat(
+        "sc1",
+        name="Updated",
+        prompt="New prompt",
+        schedule=None,
+        watch_scans=[],
+        enabled=False,
+        updated_by="user-1",
+    )
+
+    assert item is not None
+    assert item.name == "Updated"
+    assert item.current_version == 2
+    assert patch_table.put_item.call_count == 3
+
+
+async def test_update_scheduled_chat_returns_none_when_missing(patch_table, store):
+    patch_table.get_item.return_value = {}
+
+    item = await store.update_scheduled_chat(
+        "sc1",
+        name="Updated",
+        prompt="New prompt",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        updated_by="user-1",
+    )
+
+    assert item is None
+
+
 _SQ_KWARGS = dict(
     name="My Query",
     cypher="MATCH (n) RETURN n",

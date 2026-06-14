@@ -317,6 +317,111 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
 
 
 # ---------------------------------------------------------------------------
+# Scheduled chat CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_get_scheduled_chat_returns_none_for_unknown(store):
+    result = await store.get_scheduled_chat("does-not-exist")
+    assert result is None
+
+
+async def test_update_scheduled_chat_bumps_version(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sc-u",
+    )
+    await store.create_scheduled_chat(
+        name="Original",
+        prompt="Prompt",
+        schedule={"type": "hourly", "interval_hours": 1},
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+
+    updated = await store.update_scheduled_chat(
+        "sc-u",
+        name="Renamed",
+        prompt="New prompt",
+        schedule=None,
+        watch_scans=[],
+        enabled=False,
+        updated_by="user-2",
+        comment="v2",
+    )
+
+    assert updated is not None
+    assert updated.name == "Renamed"
+    assert updated.current_version == 2
+    assert updated.enabled is False
+
+
+async def test_update_nonexistent_scheduled_chat_returns_none(store):
+    result = await store.update_scheduled_chat(
+        "no-such-id",
+        name="X",
+        prompt="Y",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        updated_by="user-1",
+    )
+    assert result is None
+
+
+async def test_list_scheduled_chat_versions_returns_in_desc_order(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sc-v",
+    )
+    await store.create_scheduled_chat(
+        name="V",
+        prompt="P",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+    await store.update_scheduled_chat(
+        "sc-v",
+        name="V2",
+        prompt="P2",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        updated_by="user-1",
+    )
+
+    versions = await store.list_scheduled_chat_versions("sc-v")
+
+    assert [v.version for v in versions] == [2, 1]
+
+
+async def test_get_scheduled_chat_version_returns_correct_version(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sc-gv",
+    )
+    await store.create_scheduled_chat(
+        name="GV",
+        prompt="P",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+
+    v = await store.get_scheduled_chat_version("sc-gv", 1)
+    assert v is not None
+    assert v.version == 1
+    assert v.name == "GV"
+
+    missing = await store.get_scheduled_chat_version("sc-gv", 99)
+    assert missing is None
+
+
+# ---------------------------------------------------------------------------
 # Action confirmation — additional coverage
 # ---------------------------------------------------------------------------
 
