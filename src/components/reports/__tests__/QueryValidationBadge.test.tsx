@@ -14,7 +14,7 @@ test('shows a query execution error returned by the server', () => {
     </ThemeProvider>,
   );
 
-  fireEvent.click(screen.getByRole('button'));
+  fireEvent.click(screen.getByRole('button', { name: /query errors/i }));
 
   expect(screen.getByText('Query Issues')).toBeInTheDocument();
   expect(
