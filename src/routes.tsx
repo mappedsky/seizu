@@ -13,6 +13,7 @@ import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
 import ConfirmationPage from 'src/pages/ConfirmationPage';
 import ScheduledQueries from 'src/pages/ScheduledQueries';
 import ScheduledQueryHistory from 'src/pages/ScheduledQueryHistory';
+import ScheduledQueryView from 'src/pages/ScheduledQueryView';
 import ScheduledChats from 'src/pages/ScheduledChats';
 import ScheduledChatView from 'src/pages/ScheduledChatView';
 import ScheduledChatHistory from 'src/pages/ScheduledChatHistory';
@@ -47,6 +48,7 @@ const routes = [
       },
       { path: 'confirmations/:confirmationId', element: <ConfirmationPage /> },
       { path: 'scheduled-queries', element: <ScheduledQueries /> },
+      { path: 'scheduled-queries/:id', element: <ScheduledQueryView /> },
       {
         path: 'scheduled-queries/:id/history',
         element: <ScheduledQueryHistory />,

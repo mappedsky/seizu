@@ -158,7 +158,7 @@ function ScheduledQueryHistory() {
       actions: version.actions,
       comment: `Restored from version ${version.version}`,
     });
-    navigate(`/app/scheduled-queries`);
+    navigate(`/app/scheduled-queries/${id}`);
   }
 
   return (
