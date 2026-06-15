@@ -66,6 +66,15 @@ function Wrapper({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Flat wrapper (no inner Routes) for navigation tests that pass <Routes> as children.
+function NavWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <MemoryRouter initialEntries={['/app/scheduled-queries']}>
+      <ThemeProvider theme={theme}>{children}</ThemeProvider>
+    </MemoryRouter>
+  );
+}
+
 describe('ScheduledQueries', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -112,6 +121,41 @@ describe('ScheduledQueries', () => {
     await waitFor(() =>
       expect(global.fetch).toHaveBeenCalledWith('/api/v1/config'),
     );
+  });
+
+  it('navigates to the detail page when a query name is clicked', () => {
+    render(
+      <Routes>
+        <Route path="/app/scheduled-queries" element={<ScheduledQueries />} />
+        <Route
+          path="/app/scheduled-queries/:id"
+          element={<div>detail probe</div>}
+        />
+      </Routes>,
+      { wrapper: NavWrapper },
+    );
+
+    fireEvent.click(screen.getByText('Recent CVEs'));
+
+    expect(screen.getByText('detail probe')).toBeInTheDocument();
+  });
+
+  it('navigates to the detail page from the row menu View action', () => {
+    render(
+      <Routes>
+        <Route path="/app/scheduled-queries" element={<ScheduledQueries />} />
+        <Route
+          path="/app/scheduled-queries/:id"
+          element={<div>detail probe</div>}
+        />
+      </Routes>,
+      { wrapper: NavWrapper },
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View' }));
+
+    expect(screen.getByText('detail probe')).toBeInTheDocument();
   });
 
   it('renders the action config field warning in the edit dialog', async () => {

@@ -116,6 +116,47 @@ export function useScheduledQueriesList(): {
   return { scheduledQueries, loading, error, refresh };
 }
 
+export function useScheduledQuery(id: string | null): {
+  query: ScheduledQueryItem | null;
+  loading: boolean;
+  error: Error | null;
+  refresh: () => void;
+} {
+  const { accessToken } = useContext(AuthContext);
+  const { auth_required } = useContext(AuthConfigContext);
+  const [query, setQuery] = useState<ScheduledQueryItem | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [tick, setTick] = useState(0);
+
+  const refresh = useCallback(() => setTick((t) => t + 1), []);
+
+  useEffect(() => {
+    if (!id) return;
+    if (auth_required && !accessToken) return;
+
+    setLoading(true);
+    fetch(`/api/v1/scheduled-queries/${id}`, {
+      headers: getApiHeaders(accessToken),
+    })
+      .then((res) => {
+        if (!res.ok)
+          throw new Error(`Failed to load scheduled query: ${res.status}`);
+        return res.json();
+      })
+      .then((data: ScheduledQueryItem) => {
+        setQuery(data);
+        setLoading(false);
+      })
+      .catch((err: Error) => {
+        setError(err);
+        setLoading(false);
+      });
+  }, [id, accessToken, auth_required, tick]);
+
+  return { query, loading, error, refresh };
+}
+
 export function useScheduledQueryVersionsList(sqId: string | null): {
   versions: ScheduledQueryVersion[];
   loading: boolean;

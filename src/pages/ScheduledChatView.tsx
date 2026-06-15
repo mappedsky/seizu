@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Helmet } from 'react-helmet';
 import {
   Accordion,
@@ -14,6 +14,7 @@ import {
   Grid,
   Typography,
 } from '@mui/material';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -434,7 +435,9 @@ function SchedulePanels({ schedule }: { schedule: ScheduledChat }) {
 function ScheduledChatView() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const hasPermission = usePermissions();
+  const { fromLabel } = (location.state ?? {}) as BackState;
   const { currentUser } = useCurrentUserState();
   const { schedule, loading, error, refresh } = useChatSchedule(id ?? null);
   const { updateSchedule, deleteSchedule } = useChatSchedules(false);
@@ -517,6 +520,17 @@ function ScheduledChatView() {
         </title>
       </Helmet>
       <Box sx={pageContentSx}>
+        {fromLabel && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+            <Button
+              size="small"
+              startIcon={<ArrowBackIcon />}
+              onClick={() => navigate(-1)}
+            >
+              Back to {fromLabel}
+            </Button>
+          </Box>
+        )}
         <ListPageHeader
           title={schedule?.name ?? 'Scheduled Chat'}
           action={

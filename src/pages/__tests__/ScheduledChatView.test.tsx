@@ -66,17 +66,23 @@ const SCHEDULE: schedulesModule.ScheduledChat = {
   last_errors: [],
 };
 
-function Wrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <MemoryRouter initialEntries={['/app/scheduled-chats/sc1']}>
-      <ThemeProvider theme={theme}>
-        <Routes>
-          <Route path="/app/scheduled-chats/:id" element={<>{children}</>} />
-        </Routes>
-      </ThemeProvider>
-    </MemoryRouter>
-  );
+function makeWrapper(state: Record<string, unknown> = {}) {
+  return function Wrapper({ children }: { children: React.ReactNode }) {
+    return (
+      <MemoryRouter
+        initialEntries={[{ pathname: '/app/scheduled-chats/sc1', state }]}
+      >
+        <ThemeProvider theme={theme}>
+          <Routes>
+            <Route path="/app/scheduled-chats/:id" element={<>{children}</>} />
+          </Routes>
+        </ThemeProvider>
+      </MemoryRouter>
+    );
+  };
 }
+
+const Wrapper = makeWrapper();
 
 describe('ScheduledChatView', () => {
   beforeEach(() => {
@@ -197,5 +203,24 @@ describe('ScheduledChatView', () => {
     await act(async () => {});
 
     expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
+  });
+
+  it('shows a back button when fromLabel is in navigation state', async () => {
+    const WrapperWithState = makeWrapper({ fromLabel: 'Scheduled Chats' });
+    render(<ScheduledChatView />, { wrapper: WrapperWithState });
+    await act(async () => {});
+
+    expect(
+      screen.getByRole('button', { name: /back to scheduled chats/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('omits the back button without fromLabel in navigation state', async () => {
+    render(<ScheduledChatView />, { wrapper: Wrapper });
+    await act(async () => {});
+
+    expect(
+      screen.queryByRole('button', { name: /back to/i }),
+    ).not.toBeInTheDocument();
   });
 });
