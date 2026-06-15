@@ -265,6 +265,14 @@ class Panel(BaseModel):
         ],
     )
 
+    @model_validator(mode="after")
+    def require_markdown_content(self) -> "Panel":
+        # A markdown panel without its content field renders as an empty box;
+        # this is always a mistake (e.g. content placed under a different key).
+        if self.type == "markdown" and not self.markdown:
+            raise ValueError("Panel type 'markdown' requires the 'markdown' field to contain the panel content.")
+        return self
+
     w: int | None = Field(
         default=None,
         description="The width of the panel in grid columns (1-12). Used by react-grid-layout.",
@@ -442,6 +450,13 @@ class Row(BaseModel):
 
 
 class Report(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def reject_top_level_panels(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "panels" in data:
+            raise ValueError("Report field 'panels' is invalid; panels must be nested under 'rows[].panels'.")
+        return data
+
     schema_version: int = Field(
         default=1,
         description=(

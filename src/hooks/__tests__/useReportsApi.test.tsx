@@ -10,6 +10,7 @@ import {
   useReport,
   useDashboardReport,
   clearCapabilitiesCache,
+  updateCachedReportCapabilities,
 } from 'src/hooks/useReportsApi';
 
 const AUTH_CONFIG_NO_OIDC = {
@@ -749,6 +750,36 @@ describe('useReport', () => {
     });
     expect(second.current.loading).toBe(false);
     expect(second.current.report).toEqual(REPORT_CONFIG);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards a malformed cached report and fetches the latest version', async () => {
+    const malformedReport = {
+      name: 'Malformed Report',
+      panels: [{ type: 'markdown', content: 'Wrong level' }],
+    } as unknown as Report;
+    updateCachedReportCapabilities('r1', {
+      report: malformedReport,
+      name: 'Malformed Report',
+      reportVersion: {
+        ...REPORT_VERSION,
+        version: 1,
+        config: malformedReport,
+      },
+      queryCapabilities: {},
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(REPORT_VERSION),
+    });
+
+    const { result } = renderHook(() => useReport('r1'), {
+      wrapper: makeWrapper(false, null),
+    });
+
+    expect(result.current.loading).toBe(true);
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.report).toEqual(REPORT_CONFIG);
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 

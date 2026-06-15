@@ -13,7 +13,7 @@ import botocore.exceptions
 from snowflake import SnowflakeGenerator
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -36,7 +36,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.services.report_store.base import ReportStore
+from reporting.services.report_store.base import ReportStore, initial_report_config
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ _SK_DASHBOARD_POINTER = "#POINTER"
 _PK_USER_LOOKUP = "USER_LOOKUP"
 # Scheduled queries — list index PK for listing all scheduled queries.
 _PK_SCHEDULED_QUERY_LIST = "SCHEDULED_QUERY_LIST"
+_PK_SCHEDULED_CHAT_LIST = "SCHEDULED_CHAT_LIST"
 # Toolsets — list index PK for listing all toolsets.
 _PK_TOOLSET_LIST = "TOOLSET_LIST"
 # Skillsets — list index PK for listing all skillsets.
@@ -152,11 +153,16 @@ def _chat_session_list_sk(updated_at: str, thread_id: str) -> str:
 
 
 def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
+    origin = item.get("origin", "interactive")
     return ChatSessionItem(
         thread_id=item["thread_id"],
         title=item.get("title", ""),
         created_at=item["created_at"],
         updated_at=item["updated_at"],
+        origin=origin if origin in ("interactive", "scheduled", "workflow") else "interactive",
+        scheduled_chat_id=item.get("scheduled_chat_id"),
+        run_status=item.get("run_status"),
+        run_errors=item.get("run_errors", []),
     )
 
 
@@ -473,6 +479,45 @@ def _sq_pk(sq_id: str) -> str:
     return f"SQ#{sq_id}"
 
 
+def _scheduled_chat_pk(sc_id: str) -> str:
+    return f"SCHEDULED_CHAT#{sc_id}"
+
+
+def _scheduled_chat_from_item(item: dict) -> ScheduledChatItem:
+    return ScheduledChatItem(
+        scheduled_chat_id=item["scheduled_chat_id"],
+        name=item["name"],
+        prompt=item["prompt"],
+        schedule=item.get("schedule"),
+        watch_scans=item.get("watch_scans", []),
+        enabled=item.get("enabled", True),
+        current_version=item.get("current_version", 0),
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+        created_by=item["created_by"],
+        updated_by=item.get("updated_by"),
+        last_run_status=item.get("last_run_status"),
+        last_run_at=item.get("last_run_at"),
+        last_errors=item.get("last_errors", []),
+        last_scheduled_at=item.get("last_scheduled_at"),
+    )
+
+
+def _scheduled_chat_version_from_item(item: dict) -> ScheduledChatVersion:
+    return ScheduledChatVersion(
+        scheduled_chat_id=item["scheduled_chat_id"],
+        version=item["version"],
+        name=item["name"],
+        prompt=item["prompt"],
+        schedule=item.get("schedule"),
+        watch_scans=item.get("watch_scans", []),
+        enabled=item.get("enabled", True),
+        created_at=item["created_at"],
+        created_by=item["created_by"],
+        comment=item.get("comment"),
+    )
+
+
 def _toolset_pk(toolset_id: str) -> str:
     return f"TOOLSET#{toolset_id}"
 
@@ -700,7 +745,29 @@ def _user_from_item(item: dict) -> User:
         created_at=item["created_at"],
         last_login=item.get("last_login", item.get("last_seen_at", "")),
         archived_at=item.get("archived_at"),
+        role=item.get("role"),
     )
+
+
+def _sync_user_role(table: Any, user_id: str, role: str | None) -> User:
+    """Write the observed role claim to the user profile and return the user.
+
+    ``role`` is reserved in DynamoDB expressions, hence the alias.
+    """
+    if role is None:
+        update = "REMOVE #role"
+        kwargs: dict[str, Any] = {}
+    else:
+        update = "SET #role = :r"
+        kwargs = {"ExpressionAttributeValues": {":r": role}}
+    resp = table.update_item(
+        Key={"PK": _user_pk(user_id), "SK": _SK_METADATA},
+        UpdateExpression=update,
+        ExpressionAttributeNames={"#role": "role"},
+        ReturnValues="ALL_NEW",
+        **kwargs,
+    )
+    return _user_from_item(resp["Attributes"])
 
 
 def _strip_none(value: Any) -> Any:
@@ -955,17 +1022,18 @@ class DynamoDBReportStore(ReportStore):
         created_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem:
-        """Create a new empty report (no initial version) and return the ReportListItem."""
+        """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
+        config = initial_report_config(name)
 
         metadata_item = {
             "PK": _report_pk(report_id),
             "SK": _SK_METADATA,
             "report_id": report_id,
             "name": name,
-            "current_version": 0,
+            "current_version": 1,
             "created_at": now,
             "updated_at": now,
             "created_by": created_by,
@@ -978,7 +1046,7 @@ class DynamoDBReportStore(ReportStore):
             "SK": f"REPORT#{report_id}",
             "report_id": report_id,
             "name": name,
-            "current_version": 0,
+            "current_version": 1,
             "created_at": now,
             "updated_at": now,
             "created_by": created_by,
@@ -986,16 +1054,28 @@ class DynamoDBReportStore(ReportStore):
             "access": report_access.model_dump(),
             "pinned": False,
         }
+        version_item: dict[str, Any] = {
+            "PK": _report_pk(report_id),
+            "SK": _version_sk(1),
+            "report_id": report_id,
+            "name": name,
+            "version": 1,
+            "config": config,
+            "created_at": now,
+            "created_by": created_by,
+            "comment": "Initial version",
+        }
+        latest_item: dict[str, Any] = {**version_item, "SK": _SK_LATEST}
 
         def _op() -> None:
             table = _get_table()
-            _transact_put_sync(table, metadata_item, list_item)
+            _transact_put_sync(table, metadata_item, list_item, version_item, latest_item)
 
         await asyncio.to_thread(_op)
         return ReportListItem(
             report_id=report_id,
             name=name,
-            current_version=0,
+            current_version=1,
             created_at=now,
             updated_at=now,
             created_by=created_by,
@@ -1497,6 +1577,293 @@ class DynamoDBReportStore(ReportStore):
 
         await asyncio.to_thread(_op)
 
+    async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
+        def _op() -> list[ScheduledChatItem]:
+            table = _get_table()
+            items: list[ScheduledChatItem] = []
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _PK_SCHEDULED_CHAT_LIST},
+            }
+            while True:
+                resp = table.query(**kwargs)
+                items.extend(_scheduled_chat_from_item(item) for item in resp.get("Items", []))
+                last_key = resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                kwargs["ExclusiveStartKey"] = last_key
+            if user_id is not None:
+                items = [item for item in items if item.created_by == user_id]
+            return items
+
+        return await asyncio.to_thread(_op)
+
+    async def get_scheduled_chat(self, sc_id: str) -> ScheduledChatItem | None:
+        def _op() -> ScheduledChatItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            if not item:
+                return None
+            return _scheduled_chat_from_item(item)
+
+        return await asyncio.to_thread(_op)
+
+    async def create_scheduled_chat(
+        self,
+        name: str,
+        prompt: str,
+        schedule: dict[str, Any] | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        created_by: str,
+    ) -> ScheduledChatItem:
+        sc_id = generate_report_id()
+        now = datetime.now(tz=UTC).isoformat()
+        version = 1
+        base = _strip_none(
+            {
+                "scheduled_chat_id": sc_id,
+                "name": name,
+                "prompt": prompt,
+                "schedule": _floats_to_decimal(schedule) if schedule else None,
+                "watch_scans": _floats_to_decimal(watch_scans),
+                "enabled": enabled,
+                "current_version": version,
+                "created_at": now,
+                "updated_at": now,
+                "created_by": created_by,
+                "updated_by": created_by,
+            }
+        )
+        version_item = _strip_none(
+            {
+                "PK": _scheduled_chat_pk(sc_id),
+                "SK": _sq_version_sk(version),
+                "scheduled_chat_id": sc_id,
+                "version": version,
+                "name": name,
+                "prompt": prompt,
+                "schedule": _floats_to_decimal(schedule) if schedule else None,
+                "watch_scans": _floats_to_decimal(watch_scans),
+                "enabled": enabled,
+                "created_at": now,
+                "created_by": created_by,
+            }
+        )
+
+        def _op() -> ScheduledChatItem:
+            table = _get_table()
+            table.put_item(Item={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA, **base})
+            table.put_item(Item={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id), **base})
+            table.put_item(Item=version_item)
+            return _scheduled_chat_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def update_scheduled_chat(
+        self,
+        sc_id: str,
+        name: str,
+        prompt: str,
+        schedule: dict[str, Any] | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        updated_by: str,
+        comment: str | None = None,
+    ) -> ScheduledChatItem | None:
+        now = datetime.now(tz=UTC).isoformat()
+
+        def _op() -> ScheduledChatItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return None
+            version = int(existing.get("current_version", 0)) + 1
+            base = _strip_none(
+                {
+                    **{k: v for k, v in existing.items() if k not in ("PK", "SK")},
+                    "name": name,
+                    "prompt": prompt,
+                    "schedule": _floats_to_decimal(schedule) if schedule else None,
+                    "watch_scans": _floats_to_decimal(watch_scans),
+                    "enabled": enabled,
+                    "current_version": version,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+            )
+            if schedule is None:
+                base.pop("schedule", None)
+            version_item = _strip_none(
+                {
+                    "PK": _scheduled_chat_pk(sc_id),
+                    "SK": _sq_version_sk(version),
+                    "scheduled_chat_id": sc_id,
+                    "version": version,
+                    "name": name,
+                    "prompt": prompt,
+                    "schedule": _floats_to_decimal(schedule) if schedule else None,
+                    "watch_scans": _floats_to_decimal(watch_scans),
+                    "enabled": enabled,
+                    "created_at": now,
+                    "created_by": updated_by,
+                    "comment": comment,
+                }
+            )
+            table.put_item(Item={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA, **base})
+            table.put_item(Item={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id), **base})
+            table.put_item(Item=version_item)
+            return _scheduled_chat_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def list_scheduled_chat_versions(self, sc_id: str) -> list[ScheduledChatVersion]:
+        def _op() -> list[ScheduledChatVersion]:
+            table = _get_table()
+            resp = table.query(
+                KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+                ExpressionAttributeValues={":pk": _scheduled_chat_pk(sc_id), ":prefix": _SK_VERSION_PREFIX},
+                ScanIndexForward=False,
+            )
+            return [_scheduled_chat_version_from_item(item) for item in resp.get("Items", [])]
+
+        return await asyncio.to_thread(_op)
+
+    async def get_scheduled_chat_version(self, sc_id: str, version: int) -> ScheduledChatVersion | None:
+        def _op() -> ScheduledChatVersion | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _sq_version_sk(version)})
+            item = resp.get("Item")
+            if not item:
+                return None
+            return _scheduled_chat_version_from_item(item)
+
+        return await asyncio.to_thread(_op)
+
+    async def delete_scheduled_chat(self, sc_id: str) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            metadata = resp.get("Item")
+            if not metadata:
+                return False
+            keys_to_delete: list[dict[str, str]] = []
+            schedule_kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _scheduled_chat_pk(sc_id)},
+                "ProjectionExpression": "PK, SK",
+            }
+            while True:
+                items_resp = table.query(**schedule_kwargs)
+                keys_to_delete.extend({"PK": item["PK"], "SK": item["SK"]} for item in items_resp.get("Items", []))
+                last_key = items_resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                schedule_kwargs["ExclusiveStartKey"] = last_key
+
+            owner_id = metadata["created_by"]
+            session_kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "FilterExpression": "scheduled_chat_id = :sc_id",
+                "ExpressionAttributeValues": {
+                    ":pk": _chat_session_list_pk(owner_id),
+                    ":sc_id": sc_id,
+                },
+                "ProjectionExpression": "PK, SK, thread_id",
+            }
+            while True:
+                sessions_resp = table.query(**session_kwargs)
+                for item in sessions_resp.get("Items", []):
+                    keys_to_delete.append({"PK": item["PK"], "SK": item["SK"]})
+                    keys_to_delete.append(
+                        {
+                            "PK": _chat_session_metadata_pk(owner_id),
+                            "SK": item["thread_id"],
+                        }
+                    )
+                last_key = sessions_resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                session_kwargs["ExclusiveStartKey"] = last_key
+
+            keys_to_delete.append({"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)})
+            with table.batch_writer() as batch:
+                for key in keys_to_delete:
+                    batch.delete_item(Key=key)
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+            update_expr = "SET last_scheduled_at = :new_val"
+            expr_values: dict[str, Any] = {":new_val": now}
+
+            if expected_last_scheduled_at is None:
+                condition = "attribute_not_exists(last_scheduled_at)"
+            else:
+                condition = "last_scheduled_at = :expected"
+                expr_values[":expected"] = expected_last_scheduled_at
+
+            try:
+                table.update_item(
+                    Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                    UpdateExpression=update_expr,
+                    ExpressionAttributeValues=expr_values,
+                    ConditionExpression=condition,
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return False
+                raise
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues={":new_val": now},
+            )
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
+        def _op() -> None:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+
+            resp = table.get_item(Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            if not item:
+                return
+
+            if status == "failure" and error:
+                errors = list(item.get("last_errors", []))
+                errors.insert(0, {"timestamp": now, "error": error})
+                errors = errors[:5]
+            elif status in {"success", "partial", "budget_exhausted"}:
+                errors = []
+            else:
+                errors = list(item.get("last_errors", []))
+
+            update_expr = "SET last_run_status = :status, last_run_at = :now, last_errors = :errors"
+            expr_values = {":status": status, ":now": now, ":errors": errors}
+
+            table.update_item(
+                Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+            )
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+            )
+
+        await asyncio.to_thread(_op)
+
     async def get_or_create_user(
         self,
         sub: str,
@@ -1504,6 +1871,7 @@ class DynamoDBReportStore(ReportStore):
         email: str | None = None,
         display_name: str | None = None,
         preferred_username: str | None = None,
+        role: str | None = None,
     ) -> User:
         """Get an existing user by (iss, sub), or create one on first login."""
 
@@ -1522,7 +1890,10 @@ class DynamoDBReportStore(ReportStore):
                 profile_resp = table.get_item(
                     Key={"PK": _user_pk(user_id), "SK": _SK_METADATA},
                 )
-                return _user_from_item(profile_resp["Item"])
+                user = _user_from_item(profile_resp["Item"])
+                if user.role != role:
+                    user = _sync_user_role(table, user_id, role)
+                return user
 
             user_id = generate_report_id()
             profile_item = _strip_none(
@@ -1538,6 +1909,7 @@ class DynamoDBReportStore(ReportStore):
                     "created_at": now,
                     "last_login": now,
                     "archived_at": None,
+                    "role": role,
                 }
             )
             new_lookup_item = {
@@ -1572,6 +1944,7 @@ class DynamoDBReportStore(ReportStore):
                 created_at=now,
                 last_login=now,
                 archived_at=None,
+                role=role,
             )
 
         return await asyncio.to_thread(_op)
@@ -2864,13 +3237,47 @@ class DynamoDBReportStore(ReportStore):
 
         def _op() -> list[ChatSessionItem]:
             table = _get_table()
+            # Scheduled-run sessions are hidden from the interactive session
+            # list. The filter runs after Limit evaluates items, so a page mixed
+            # with scheduled sessions can return fewer than `limit` rows; that
+            # under-fill is acceptable for the sidebar list.
             resp = table.query(
                 KeyConditionExpression="PK = :pk",
-                ExpressionAttributeValues={":pk": pk},
+                FilterExpression="attribute_not_exists(origin) OR origin = :interactive",
+                ExpressionAttributeValues={":pk": pk, ":interactive": "interactive"},
                 Limit=bounded_limit,
                 ScanIndexForward=False,
             )
             return [_chat_session_from_item(item) for item in resp.get("Items", [])]
+
+        return await asyncio.to_thread(_op)
+
+    async def list_scheduled_chat_sessions(
+        self,
+        user_id: str,
+        scheduled_chat_id: str,
+        limit: int,
+    ) -> list[ChatSessionItem]:
+        pk = _chat_session_list_pk(user_id)
+        bounded_limit = max(1, min(limit, _CHAT_SESSION_LIST_MAX))
+
+        def _op() -> list[ChatSessionItem]:
+            table = _get_table()
+            sessions: list[ChatSessionItem] = []
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "FilterExpression": "scheduled_chat_id = :sc_id",
+                "ExpressionAttributeValues": {":pk": pk, ":sc_id": scheduled_chat_id},
+                "ScanIndexForward": False,
+            }
+            while len(sessions) < bounded_limit:
+                resp = table.query(**kwargs)
+                sessions.extend(_chat_session_from_item(item) for item in resp.get("Items", []))
+                last_key = resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                kwargs["ExclusiveStartKey"] = last_key
+            return sessions[:bounded_limit]
 
         return await asyncio.to_thread(_op)
 
@@ -2883,20 +3290,32 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def create_chat_session(self, user_id: str, title: str) -> ChatSessionItem:
+    async def create_chat_session(
+        self,
+        user_id: str,
+        title: str,
+        origin: str = "interactive",
+        scheduled_chat_id: str | None = None,
+    ) -> ChatSessionItem:
         thread_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         metadata_pk = _chat_session_metadata_pk(user_id)
         list_pk = _chat_session_list_pk(user_id)
-        metadata_item = {
-            "PK": metadata_pk,
-            "SK": thread_id,
-            "thread_id": thread_id,
-            "user_id": user_id,
-            "title": title,
-            "created_at": now,
-            "updated_at": now,
-        }
+        metadata_item = _strip_none(
+            {
+                "PK": metadata_pk,
+                "SK": thread_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "title": title,
+                "created_at": now,
+                "updated_at": now,
+                "origin": origin,
+                "scheduled_chat_id": scheduled_chat_id,
+                "run_status": "running" if origin != "interactive" else None,
+                "run_errors": [],
+            }
+        )
         list_item = {**metadata_item, "PK": list_pk, "SK": _chat_session_list_sk(now, thread_id)}
 
         def _op() -> ChatSessionItem:
@@ -2918,7 +3337,7 @@ class DynamoDBReportStore(ReportStore):
                     },
                 ]
             )
-            return ChatSessionItem(thread_id=thread_id, title=title, created_at=now, updated_at=now)
+            return _chat_session_from_item(metadata_item)
 
         return await asyncio.to_thread(_op)
 
@@ -2937,6 +3356,41 @@ class DynamoDBReportStore(ReportStore):
                     item={**existing, "updated_at": now},
                     expression="SET updated_at = :updated_at",
                     values={":updated_at": now},
+                ),
+            )
+
+        return await asyncio.to_thread(_op)
+
+    async def complete_chat_session_run(
+        self,
+        user_id: str,
+        thread_id: str,
+        status: str,
+        errors: list[str],
+    ) -> ChatSessionItem | None:
+        metadata_pk = _chat_session_metadata_pk(user_id)
+        list_pk = _chat_session_list_pk(user_id)
+
+        def _op() -> ChatSessionItem | None:
+            table = _get_table()
+            return _retry_chat_session_update(
+                table,
+                metadata_pk,
+                list_pk,
+                thread_id,
+                lambda existing, now: ChatSessionUpdate(
+                    item={
+                        **existing,
+                        "updated_at": now,
+                        "run_status": status,
+                        "run_errors": list(errors),
+                    },
+                    expression=("SET updated_at = :updated_at, run_status = :run_status, run_errors = :run_errors"),
+                    values={
+                        ":updated_at": now,
+                        ":run_status": status,
+                        ":run_errors": list(errors),
+                    },
                 ),
             )
 

@@ -129,6 +129,8 @@ Use `watch_scans` to trigger a query when Cartography SyncMetadata nodes are upd
 
 `watch_scans` works by tracking when the query last ran and comparing that time to the SyncMetadata node timestamps. A newly created query will run immediately, then only again after a matching sync is detected.
 
+In the UI, the `grouptype`, `syncedtype`, and `groupid` fields autocomplete from the distinct values present on `SyncMetadata` nodes in the graph (`GET /api/v1/sync-metadata/values`); free-form input (e.g. `.*` regexes) is still accepted.
+
 `frequency` and `watch_scans` are mutually exclusive.
 
 ## Built-in Actions
@@ -197,6 +199,24 @@ Requires the following environment variables (see [StatsD configuration](backend
           tag_fields:
             - severity
 ```
+
+### temporal
+
+The `temporal` action starts a named [Temporal](https://temporal.io/) workflow with the query results. See [Temporal workflows](temporal-workflows.html) for the full architecture, including the AI-session workflow that evaluates CVEs per repository and how confirmations are handled for headless runs.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| workflow | Yes | The registered workflow to start (e.g. `cve_repo_report`). |
+| max\_rows | No | Result rows beyond this limit are dropped before starting the workflow. Default: `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`. |
+| query\_return\_attribute | No | The attribute in each result row to forward. Default: `details` |
+
+Requires the following environment variables:
+
+- `TEMPORAL_ADDRESS`: host:port of the Temporal frontend (gRPC).
+- `TEMPORAL_NAMESPACE`: Temporal namespace (default `default`).
+- `TEMPORAL_TASK_QUEUE`: task queue shared with the Seizu temporal worker (default `seizu-workflows`).
+
+> Looking for recurring AI agent runs? Those are **scheduled chats**, managed from the chat sidebar rather than as a scheduled query action — the agent uses its own tools to query the graph, so no Cypher is needed. See [Scheduled chats](chat-schedules.html).
 
 ### log
 

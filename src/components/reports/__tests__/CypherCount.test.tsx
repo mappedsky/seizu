@@ -13,13 +13,6 @@ jest.mock('src/components/reports/CypherDetails', () => ({
   },
 }));
 
-jest.mock('src/components/reports/QueryValidationBadge', () => ({
-  __esModule: true,
-  default: function MockQueryValidationBadge() {
-    return null;
-  },
-}));
-
 const { useLazyCypherQuery } = require('src/hooks/useCypherQuery');
 
 const theme = createTheme();
@@ -188,6 +181,6 @@ describe('CypherCount', () => {
         <CypherCount cypher="CREATE (n) RETURN n" caption="Test Count" />
       </Wrapper>,
     );
-    expect(screen.getByText('Query validation failed')).toBeInTheDocument();
+    expect(screen.getByText('Query failed')).toBeInTheDocument();
   });
 });

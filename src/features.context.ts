@@ -5,16 +5,19 @@ import { createContext, useContext } from 'react';
 // useFeature(); the backend source of truth is reporting/settings.py.
 export interface Features {
   chat: boolean;
+  chat_schedules: boolean;
 }
 
 // Disabled defaults prevent feature UI from flashing before GET /api/v1/config
 // resolves. App.tsx applies BACKEND_DEFAULT_FEATURES after the config response.
 export const DEFAULT_FEATURES: Features = {
   chat: false,
+  chat_schedules: false,
 };
 
 export const BACKEND_DEFAULT_FEATURES: Features = {
   chat: true,
+  chat_schedules: true,
 };
 
 export const FeaturesContext = createContext<Features>(DEFAULT_FEATURES);

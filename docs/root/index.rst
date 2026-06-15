@@ -29,6 +29,8 @@ Documentation
 * `Security guidance <https://mappedsky.github.io/seizu/install/security.html>`_
 * `Query Console <https://mappedsky.github.io/seizu/install/query-console.html>`_
 * `Scheduled query documentation <https://mappedsky.github.io/seizu/install/scheduled-queries.html>`_
+* `Scheduled chat documentation <https://mappedsky.github.io/seizu/install/chat-schedules.html>`_
+* `Temporal workflow documentation <https://mappedsky.github.io/seizu/install/temporal-workflows.html>`_
 * `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
 * `MCP Skillsets documentation <https://mappedsky.github.io/seizu/install/mcp-skillsets.html>`_
 * `Basic development documentation <https://mappedsky.github.io/seizu/dev/dependencies.html>`_
@@ -44,6 +46,8 @@ Documentation
     install/security
     install/query-console
     install/scheduled-queries
+    install/chat-schedules
+    install/temporal-workflows
     install/mcp-toolsets
     install/mcp-skillsets
 

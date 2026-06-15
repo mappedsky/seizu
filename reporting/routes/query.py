@@ -8,13 +8,26 @@ from neo4j.graph import Node, Path, Relationship
 
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
-from reporting.schema.query import HistoryQueryRequest, QueryRequest, QueryResponse, ReportQueryRequest
+from reporting.schema.query import (
+    HistoryQueryRequest,
+    QueryRequest,
+    QueryResponse,
+    ReportQueryRequest,
+    ValidationResponse,
+)
 from reporting.services import report_store, reporting_neo4j
 from reporting.services.query_validator import validate_query
 from reporting.services.report_query_tokens import QueryTokenExpiredError, resolve_report_query_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+_QUERY_ERROR_RESPONSES = {
+    400: {
+        "model": ValidationResponse,
+        "description": "Query validation or execution error",
+    }
+}
 
 
 def _serialize_neo4j_value(value: Any) -> Any:
@@ -84,6 +97,18 @@ async def _execute_query(
             "errors": [],
             "history_id": history_id,
         }
+    except neo4j.exceptions.ClientError as exc:
+        logger.warning(
+            "Query execution rejected by Neo4j",
+            extra={"neo4j_code": exc.code},
+        )
+        return JSONResponse(
+            content={
+                "errors": [exc.message],
+                "warnings": [str(warning) for warning in validation.warnings],
+            },
+            status_code=400,
+        )
     except neo4j.exceptions.Neo4jError as e:
         logger.exception("Query execution failed")
         return JSONResponse(
@@ -102,7 +127,11 @@ async def _execute_query(
         )
 
 
-@router.post("/api/v1/query/adhoc", response_model=QueryResponse)
+@router.post(
+    "/api/v1/query/adhoc",
+    response_model=QueryResponse,
+    responses=_QUERY_ERROR_RESPONSES,
+)
 async def query_adhoc(
     body: QueryRequest,
     current: CurrentUser = Depends(require_permission(Permission.QUERY_EXECUTE)),
@@ -115,7 +144,11 @@ async def query_adhoc(
     )
 
 
-@router.post("/api/v1/query/report", response_model=QueryResponse)
+@router.post(
+    "/api/v1/query/report",
+    response_model=QueryResponse,
+    responses=_QUERY_ERROR_RESPONSES,
+)
 async def query_report(
     body: ReportQueryRequest,
     current: CurrentUser = Depends(require_permission(Permission.REPORTS_READ)),
@@ -143,7 +176,11 @@ async def query_report(
     return await _execute_query(query=query, params=params, current=current, save_history=False)
 
 
-@router.post("/api/v1/query/history", response_model=QueryResponse)
+@router.post(
+    "/api/v1/query/history",
+    response_model=QueryResponse,
+    responses=_QUERY_ERROR_RESPONSES,
+)
 async def query_by_history_id(
     body: HistoryQueryRequest,
     current: CurrentUser = Depends(require_permission(Permission.QUERY_EXECUTE)),

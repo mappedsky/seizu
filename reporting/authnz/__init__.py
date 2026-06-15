@@ -182,12 +182,14 @@ async def get_current_user(
         "token_exp": token_exp,
     }
 
+    role_claim = payload.get(settings.RBAC_ROLE_CLAIM)
     user = await report_store.get_or_create_user(
         sub=sub,
         iss=iss,
         email=email,
         display_name=payload.get("name"),
         preferred_username=preferred_username,
+        role=role_claim if isinstance(role_claim, str) else None,
     )
 
     permissions = await resolve_permissions(payload)

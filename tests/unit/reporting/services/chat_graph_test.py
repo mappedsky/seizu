@@ -252,17 +252,43 @@ async def test_invoke_structured_output_retries_when_first_response_lacks_json()
     class _Model:
         def __init__(self) -> None:
             self.calls = 0
+            self.kwargs: list[dict[str, Any]] = []
 
         # No with_structured_output -> straight to the JSON-prompt fallback.
         async def astream(self, _input, config=None, **kwargs):
             self.calls += 1
+            self.kwargs.append(kwargs)
             content = "Here is my analysis, but no JSON yet." if self.calls == 1 else '{"ok": true}'
             yield AIMessageChunk(content=content)
 
     model = _Model()
-    result = await chat_graph._invoke_structured_output(model, _Decision, [HumanMessage(content="x")], {})
+    result = await chat_graph._invoke_structured_output(
+        model,
+        _Decision,
+        [HumanMessage(content="x")],
+        {},
+        max_output_tokens=4096,
+    )
     assert result.ok is True
     assert model.calls == 2
+    assert [kwargs["max_tokens"] for kwargs in model.kwargs] == [4096, 4096]
+
+
+async def test_invoke_structured_output_failure_reports_safe_attempt_diagnostics():
+    class _Decision(BaseModel):
+        ok: bool
+
+    class _Model:
+        async def astream(self, _input, config=None, **kwargs):
+            yield AIMessageChunk(content="not json", response_metadata={"finish_reason": "length"})
+
+    with pytest.raises(ValueError, match=r"2 attempts \(chars=8, finish_reason=length; chars=8"):
+        await chat_graph._invoke_structured_output(
+            _Model(),
+            _Decision,
+            [HumanMessage(content="sensitive request")],
+            {},
+        )
 
 
 async def test_invoke_structured_output_stops_retrying_native_after_unsupported_error():
@@ -3071,3 +3097,67 @@ async def test_empty_synthesis_response_marked_broken(mocker):
     # Broken synthesis should not emit finish_reason:length (no spurious Continue button).
     finish_reason_events = [c for c in chunks if c.get("kind") == "finish_reason"]
     assert not finish_reason_events
+
+
+def test_bypass_confirmations_from_config():
+    helper = chat_graph._bypass_confirmations_from_config
+    assert helper({}) is False
+    assert helper({"configurable": {}}) is False
+    assert helper({"configurable": {"bypass_confirmations": True}}) is True
+    assert helper({"configurable": {"bypass_confirmations": False}}) is False
+    assert helper({"configurable": {"bypass_confirmations": "yes"}}) is False
+
+
+def test_headless_from_config():
+    helper = chat_graph._headless_from_config
+    assert helper({}) is False
+    assert helper({"configurable": {"headless": True}}) is True
+    assert helper({"configurable": {"headless": False}}) is False
+
+
+async def test_run_tool_call_bypass_uses_bypass_instead_of_confirmation(mocker):
+    call_tool = mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        mocker.AsyncMock(return_value=ChatActionOutcome(text="{}", blocked=None)),
+    )
+    spec = chat_graph.ChatToolSpec(
+        name="reports__create_version",
+        kind="tool",
+        description="",
+        input_schema={"type": "object", "properties": {}},
+    )
+    request = chat_graph.ToolCallRequest(id="call-1", name="reports__create_version", arguments={}, spec=spec)
+
+    await chat_graph._run_tool_call(
+        request,
+        None,
+        session_key="thread-1",
+        batch_id=None,
+        bypass_confirmations=True,
+    )
+
+    kwargs = call_tool.await_args.kwargs
+    assert kwargs["bypass_confirmations"] is True
+    assert "confirmation_source" not in kwargs
+    assert "confirmation_session_key" not in kwargs
+
+
+async def test_run_tool_call_interactive_keeps_confirmation_flow(mocker):
+    call_tool = mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        mocker.AsyncMock(return_value=ChatActionOutcome(text="{}", blocked=None)),
+    )
+    spec = chat_graph.ChatToolSpec(
+        name="reports__create_version",
+        kind="tool",
+        description="",
+        input_schema={"type": "object", "properties": {}},
+    )
+    request = chat_graph.ToolCallRequest(id="call-1", name="reports__create_version", arguments={}, spec=spec)
+
+    await chat_graph._run_tool_call(request, None, session_key="thread-1", batch_id=None)
+
+    kwargs = call_tool.await_args.kwargs
+    assert kwargs["confirmation_source"] == "chat"
+    assert kwargs["confirmation_session_key"] == "thread-1"
+    assert "bypass_confirmations" not in kwargs

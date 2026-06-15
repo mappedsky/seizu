@@ -152,12 +152,14 @@ async def _build_current_user_from_jwt(payload: dict[str, Any]) -> CurrentUser:
         "token_iat": token_iat,
         "token_exp": token_exp,
     }
+    role_claim = payload.get(settings.RBAC_ROLE_CLAIM)
     user = await report_store.get_or_create_user(
         sub=sub,
         iss=iss,
         email=email,
         display_name=payload.get("name"),
         preferred_username=preferred_username,
+        role=role_claim if isinstance(role_claim, str) else None,
     )
     permissions = await resolve_permissions(payload)
     return CurrentUser(user=user, jwt_claims=jwt_claims, permissions=permissions)

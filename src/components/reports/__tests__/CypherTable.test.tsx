@@ -13,13 +13,6 @@ jest.mock('src/components/reports/CypherDetails', () => ({
   },
 }));
 
-jest.mock('src/components/reports/QueryValidationBadge', () => ({
-  __esModule: true,
-  default: function MockQueryValidationBadge() {
-    return null;
-  },
-}));
-
 const { useLazyCypherQuery } = require('src/hooks/useCypherQuery');
 
 const theme = createTheme();
@@ -159,7 +152,7 @@ describe('CypherTable', () => {
         <CypherTable cypher="CREATE (n) RETURN n" caption="My Table" />
       </Wrapper>,
     );
-    expect(screen.getByText('Query validation failed.')).toBeInTheDocument();
+    expect(screen.getByText('Query failed.')).toBeInTheDocument();
   });
 
   // preloadedRecords — used by CypherGraph to share already-fetched data across tab switches.

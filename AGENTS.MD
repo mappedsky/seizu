@@ -4,9 +4,11 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What is Seizu?
 
-Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Two runtimes:
+Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Four runtimes:
 - **FastAPI web app** (`reporting/`) — serves the React frontend and REST API (ASGI, Gunicorn + UvicornWorker).
-- **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log); reads from the database, not the YAML config.
+- **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log, statsd, temporal); reads from the database, not the YAML config.
+- **Scheduled chats worker** (`reporting/scheduled_chats.py`) — runs recurring headless agent sessions managed from the Scheduled Chats page (see Scheduled Chats).
+- **Temporal worker** (`reporting/temporal_worker.py`) — hosts Temporal workflows/activities started by the `temporal` scheduled query action (see the Temporal Workflows section).
 
 ## Running Commands with Docker
 
@@ -82,7 +84,7 @@ FastAPI, Python 3.12, Gunicorn + UvicornWorker (ASGI). All I/O is async (neo4j a
 - `reporting/asgi.py` — `application = create_app()`.
 - `reporting/app.py` — `create_app()`; `openapi_url="/api/openapi.json"`, `docs_url="/api/docs"`; registers `secure` headers, routers, static, SPA fallback via `lifespan`; hosts the MCP/auth/CSRF ASGI middlewares.
 - `reporting/settings.py` — all config via env (Pydantic).
-- `reporting/routes/` — `config.py`, `me.py`, `query.py`, `reports.py`, `users.py`, `validate.py`, `scheduled_queries.py`, `roles.py`, `static.py` (healthcheck only).
+- `reporting/routes/` — `config.py`, `me.py`, `query.py`, `reports.py`, `users.py`, `validate.py`, `scheduled_queries.py`, `roles.py`, `sync_metadata.py` (distinct SyncMetadata values for watch-scan autocompletes), `static.py` (healthcheck only).
 - `reporting/authnz/__init__.py` — `HTTPBearer` + `Depends(get_current_user)`; `CurrentUser` dataclass (`user`, `jwt_claims`, `permissions`); `sync_user_profile` chains on it; tests override `app.dependency_overrides[get_current_user]`.
 - `reporting/services/` — async: `reporting_neo4j.py` (async driver + distributed locking), `report_store/`, `query_validator.py`.
 - `reporting/schema/reporting_config.py` — Pydantic models for the YAML config; `report_config.py` — store items + API schemas.
@@ -141,7 +143,7 @@ A LangGraph-backed chat assistant at `POST /api/v1/chat/stream` (frontend `src/p
 
 - **Streaming:** the route consumes `graph.astream(..., stream_mode="custom")` and re-emits tokens as a Vercel AI SDK UI Message Stream (SSE: `start`/`text-*`/`finish`, `data: [DONE]`). The node pushes chunks via `get_stream_writer()` as `{"kind": "token", "content": ...}`. The frontend uses `@ai-sdk/react` `useChat`.
 - **Message tags (`reporting/services/chat_messages.py`):** `MessageTag` is the reusable mechanism for excluding selected messages from history/LLM context. Tags live in `additional_kwargs["seizu_tags"]` (round-trips through the checkpoint serializer), and `load_thread_messages` calls `drop_tagged(..., EPHEMERAL)` at the read boundary. Broken assistant outputs are tagged `BROKEN` and filtered from future model context so failed turns do not poison retries.
-- **Permissions:** `chat:use` (Viewer+) gates the endpoint; `chat:tools:call` and `chat:skills:call` (Admin only) gate tool/skill use. Tool/skill calls also require the *underlying* MCP permission (e.g. `tools:call`, `skills:render`). For chat, `mcp_runtime` is called with `chat_safe_only=True`, which exposes only built-ins whose `required_permissions` are all in `_CHAT_SAFE_PERMISSIONS` (read/inspection only), plus mutating built-ins with an action-confirmation resolver. **Fail-closed:** a new write/delete tool is hidden from chat by default. The only intentional no-confirmation mutating exceptions are `reports__create` and `reports__clone`, because they create new private reports and do not modify existing resources; document any future exception at the tool registration.
+- **Permissions:** `chat:use` (Viewer+) gates the endpoint; `chat:tools:call` and `chat:skills:call` (Editor+) gate tool/skill use; `chat:bypass_permissions` (Editor+) gates the confirmation-bypass mode (UI toggle, headless runs — see Headless Agent Runs). Tool/skill calls also require the *underlying* MCP permission (e.g. `tools:call`, `skills:render`). For chat, `mcp_runtime` is called with `chat_safe_only=True`, which exposes only built-ins whose `required_permissions` are all in `_CHAT_SAFE_PERMISSIONS` (read/inspection only), plus mutating built-ins with an action-confirmation resolver. **Fail-closed:** a new write/delete tool is hidden from chat by default. Report configs are validated against the `Report` schema at save time (`CreateVersionRequest.validate_report_config`; markdown panels must carry content in `markdown`) so agents get an actionable error instead of storing a config that renders empty. The only intentional no-confirmation mutating exceptions are `reports__create` and `reports__clone`, because they create new private reports and do not modify existing resources; document any future exception at the tool registration.
 - **State and limits:** thread id is namespaced server-side as `user:{user_id}:thread:{client_thread_id}` (via `chat_graph.namespaced_thread_id`) so clients can't reach another user's thread. History persists through the backend selected by `CHAT_CHECKPOINT_BACKEND`: DynamoDB (`langgraph-checkpoint-aws`, with optional MinIO/S3 offload for >350KB payloads) or PostgreSQL (`langgraph-checkpoint-postgres`, async pool owned by the app lifespan). `make sqlmodel_enable/disable` switches the report store and chat checkpointer together. The frontend persists the thread id in `localStorage` and rehydrates the conversation on mount via `GET /api/v1/chat/history?thread_id=` (`chat_graph.load_thread_messages` → `graph.aget_state`), so a reload resumes the same conversation. Persisted messages are trimmed by `CHAT_MAX_PERSISTED_MESSAGES`; history responses are bounded by `CHAT_HISTORY_LIMIT`; chat MCP tool output is bounded by `CHAT_TOOL_RESULT_MAX_ROWS` and `CHAT_TOOL_RESULT_MAX_BYTES`. `DynamoDBSaver` is sync boto3 but its async methods offload to a threadpool (`run_in_executor`), so it doesn't block the event loop.
 
 ### Configuration System
@@ -164,7 +166,25 @@ DynamoDB key design: per report `#METADATA`/`#LATEST`/`VERSION#<n>`; per schedul
 
 ### Scheduled Query Action Plugins
 
-In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`). Schemas served via `GET /api/v1/config` as `scheduled_query_action_schemas`.
+In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`; optional `warning` renders an alert above the field, and a **required boolean must be `True`** to validate — used for explicit acknowledgements). Optional `required_permission()` gates who may *configure* the action (enforced in `validate_action_configs`, hidden in the UI; served as `scheduled_query_action_permissions`). Schemas served via `GET /api/v1/config` as `scheduled_query_action_schemas`.
+
+### Headless Agent Runs & Confirmation Bypass
+
+`reporting/services/headless_chat.py:run_headless_chat()` drives a full chat-agent turn for a stored user (session persists as their `ChatSessionItem`, visible in their chat UI). Used by scheduled chats and Temporal activities. Security model (don't weaken without explicit sign-off):
+- **Identity:** headless runs execute as the schedule/scheduled-query *creator*. `reporting/authnz/headless.py:resolve_stored_user()` rebuilds their permissions from the last role claim seen on an authenticated request (`User.role`, synced by `get_or_create_user`); archived users hard-stop.
+- **Confirmation bypass is permission-based:** `chat:bypass_permissions` (Editor+). `mcp_runtime.call_tool_for_chat(bypass_confirmations=True)` re-checks the permission and AUDIT-logs every bypassed execution; without the permission the call is blocked. Headless runs without bypass keep the normal confirmation flow (mutating tools fail closed for the run). Creator RBAC and `chat_safe_only` always apply.
+- The same permission gates the chat UI "Bypass confirmations" toggle (`ChatStreamRequest.bypass_confirmations`, 403 without it; default off).
+- Headless turns get a system-prompt addendum (`_HEADLESS_PROMPT_ADDENDUM` in chat_graph) telling the model nobody can answer: don't ask for confirmation, follow the skills, summarize blocks instead of retrying.
+
+### Scheduled Chats
+
+Recurring headless agent runs (prompt + trigger, no Cypher) managed from the top-level Scheduled Chats page (`/app/scheduled-chats`, with `/:id/history` for versions); `chat:schedule` (Editor+) gates the CRUD routes (`/api/v1/chat/schedules` + `/versions` + `/sessions`, registered when `CHAT_ENABLED` + `CHAT_SCHEDULES_ENABLED`) and the UI (`features.chat_schedules` → `useFeature('chat_schedules')`). Schedules are per-user (`created_by` owner; list/get/update/delete are owner-scoped, 404 otherwise) with full version history (`ScheduledChatItem`/`ScheduledChatVersion` in `reporting/schema/chat.py`; both store backends + lock/record methods mirror scheduled queries). Run sessions are created with `ChatSessionItem.origin="scheduled"` + `scheduled_chat_id`: excluded from `list_chat_sessions`, listed via `list_scheduled_chat_sessions`, viewable read-only from the page's runs dialog (transcripts via `GET .../sessions/{thread_id}/history`, resolved under the owner's namespace), and `POST /api/v1/chat/stream` rejects them (403). `chat:schedule:read_all` (Admin) unlocks viewing every user's schedules (`?all=true` / `?user_id=` on the list, plus read access to get/versions/sessions/history); mutations stay owner-only. The worker (`reporting/scheduled_chats.py`, compose `seizu-scheduled-chats`) polls every `CHAT_SCHEDULES_POLL_SECONDS`, supports `ChatScheduleSpec` triggers (hourly interval / daily days-of-week+hour / monthly days-of-month, all UTC; monthly days a month lacks clamp to its last day — due-logic in `schedule_due`) and `watch_scans` (reuses `check_watch_scan_triggered`), claims runs via `acquire_scheduled_chat_lock`, and runs `headless_chat.run_headless_chat` as the owner. Settings: `CHAT_SCHEDULES_ENABLED`, `CHAT_SCHEDULES_POLL_SECONDS`, `CHAT_SCHEDULE_TIMEOUT_SECONDS`. Docs: `docs/root/install/chat-schedules.md`.
+
+### Temporal Workflows
+
+The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a named workflow (from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py`) with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above).
+
+Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMPORAL_WORKER_ENABLED`, `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`, `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS`; `AGENT_CHAT_MAX_RESULT_ROWS`, `AGENT_CHAT_TIMEOUT_SECONDS`. Docs: `docs/root/install/temporal-workflows.md`.
 
 ### Docker Services
 
@@ -173,6 +193,9 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 | `seizu` | FastAPI backend + static frontend |
 | `seizu-node` | Bun dev server |
 | `seizu-scheduled-queries` | Scheduled query worker |
+| `seizu-scheduled-chats` | Scheduled chats worker (headless agent runs) |
+| `seizu-temporal-worker` | Temporal workflow worker |
+| `temporal` | Temporal dev server (`server start-dev`, in-memory; UI `:8233`) |
 | `neo4j` | Graph database |
 | `dynamodb` | DynamoDB Local (default backend) |
 | `minio` (+ `minio-create-bucket`) | S3-compatible store for chat checkpoint offload |
@@ -181,7 +204,7 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 | `authentik-*` | OIDC provider (`auth` profile) |
 | `cartography` | Graph data sync (`nostart` profile) |
 
-Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`.
+Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`, Temporal UI `:8233`.
 
 **Dockerfile stages:** `base` (Python + uv + `pyproject.toml`/`uv.lock`, no deps) → `dev` (`uv sync --frozen --all-groups --all-packages --no-install-workspace`; used by compose `target: dev`) ; `nodebuilder` (`oven/bun`, builds frontend) ; `production` (`uv sync --frozen --no-dev --package seizu --no-install-workspace` + built frontend; `publish.yml` builds this, so pytest/pre-commit never ship).
 

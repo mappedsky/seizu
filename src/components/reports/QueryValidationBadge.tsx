@@ -41,6 +41,7 @@ export default function QueryValidationBadge({
           size="small"
           color={hasErrors ? 'error' : 'warning'}
           onClick={() => setOpen(true)}
+          aria-label={hasErrors ? 'Query errors' : 'Query warnings'}
         >
           {hasErrors ? (
             <ErrorOutlineIcon fontSize="small" />
@@ -55,7 +56,7 @@ export default function QueryValidationBadge({
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>Query Validation Issues</DialogTitle>
+        <DialogTitle>Query Issues</DialogTitle>
         <DialogContent>
           {errors.length > 0 && (
             <>

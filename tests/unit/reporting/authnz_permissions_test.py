@@ -53,6 +53,11 @@ def test_editor_can_write_reports():
     assert Permission.QUERY_HISTORY_READ in EDITOR_PERMISSIONS
 
 
+def test_editor_can_use_chat_tools_and_skills():
+    assert Permission.CHAT_TOOLS_CALL in EDITOR_PERMISSIONS
+    assert Permission.CHAT_SKILLS_CALL in EDITOR_PERMISSIONS
+
+
 def test_editor_cannot_manage_toolsets_or_scheduled_queries():
     assert Permission.TOOLSETS_WRITE not in EDITOR_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_WRITE not in EDITOR_PERMISSIONS
@@ -62,8 +67,6 @@ def test_editor_cannot_manage_toolsets_or_scheduled_queries():
 def test_admin_has_all_admin_permissions():
     assert Permission.TOOLSETS_WRITE in ADMIN_PERMISSIONS
     assert Permission.TOOLSETS_DELETE in ADMIN_PERMISSIONS
-    assert Permission.CHAT_TOOLS_CALL in ADMIN_PERMISSIONS
-    assert Permission.CHAT_SKILLS_CALL in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_WRITE in ADMIN_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_DELETE in ADMIN_PERMISSIONS
     assert Permission.ROLES_WRITE in ADMIN_PERMISSIONS
@@ -250,3 +253,21 @@ async def test_sync_user_profile_calls_update_and_returns_updated_current_user(m
     )
     assert result.user.email == "new@example.com"
     assert result.permissions == VIEWER_PERMISSIONS
+
+
+def test_chat_bypass_permissions_role_membership():
+    assert Permission.CHAT_BYPASS_PERMISSIONS in EDITOR_PERMISSIONS
+    assert Permission.CHAT_BYPASS_PERMISSIONS in ADMIN_PERMISSIONS
+    assert Permission.CHAT_BYPASS_PERMISSIONS not in VIEWER_PERMISSIONS
+
+
+def test_chat_schedule_role_membership():
+    assert Permission.CHAT_SCHEDULE in EDITOR_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE not in VIEWER_PERMISSIONS
+
+
+def test_chat_schedule_read_all_is_admin_only():
+    assert Permission.CHAT_SCHEDULE_READ_ALL in ADMIN_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE_READ_ALL not in EDITOR_PERMISSIONS
+    assert Permission.CHAT_SCHEDULE_READ_ALL not in VIEWER_PERMISSIONS

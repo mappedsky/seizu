@@ -126,6 +126,19 @@ class CreateVersionRequest(BaseModel):
     config: dict[str, Any]
     comment: str | None = None
 
+    @field_validator("config")
+    @classmethod
+    def validate_report_config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # Validate against the Report schema so malformed configs (wrong field
+        # names, queries as a list, markdown panels without content) are
+        # rejected with an actionable error instead of stored and rendered
+        # empty. The original dict is stored, so unknown-but-ignored extras
+        # are preserved as before.
+        from reporting.schema.reporting_config import Report
+
+        Report.model_validate(value)
+        return value
+
 
 class CloneReportRequest(BaseModel):
     """Request body for POST /api/v1/reports/<id>/clone."""
@@ -145,6 +158,11 @@ class User(BaseModel):
     created_at: str
     last_login: str
     archived_at: str | None = None
+    # Last role claim observed on an authenticated request. Lets headless
+    # callers (Temporal workflows) resolve the user's permissions without a
+    # token; None means the user's tokens carry no role claim and headless
+    # resolution falls back to RBAC_DEFAULT_ROLE, same as the request path.
+    role: str | None = None
 
 
 class ScheduledQueryItem(BaseModel):
@@ -238,6 +256,10 @@ class ActionConfigFieldDef(BaseModel):
     description: str | None = None
     default: Any | None = None
     options: list[str] | None = None
+    # Rendered as a warning alert above the field; pair with a required
+    # boolean to force an explicit acknowledgement (a required boolean must be
+    # checked for the action config to validate).
+    warning: str | None = None
 
 
 class QueryHistoryItem(BaseModel):

@@ -355,10 +355,10 @@ async def test_create_report_returns_list_item(patch_table, store, mocker):
     assert isinstance(result, ReportListItem)
     assert result.report_id == "snowflake123"
     assert result.name == "My Report"
-    assert result.current_version == 0
+    assert result.current_version == 1
 
 
-async def test_create_report_writes_two_items_transactionally(patch_table, store, mocker):
+async def test_create_report_writes_initial_version_transactionally(patch_table, store, mocker):
     mocker.patch(
         "reporting.services.report_store.dynamodb.generate_report_id",
         return_value="rid",
@@ -367,7 +367,7 @@ async def test_create_report_writes_two_items_transactionally(patch_table, store
 
     patch_table.meta.client.transact_write_items.assert_called_once()
     items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
-    assert len(items) == 2
+    assert len(items) == 4
 
 
 async def test_create_report_correct_sks(patch_table, store, mocker):
@@ -380,6 +380,8 @@ async def test_create_report_correct_sks(patch_table, store, mocker):
     items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
     sks = [i["Put"]["Item"]["SK"] for i in items]
     assert "#METADATA" in sks
+    assert "#LATEST" in sks
+    assert "VERSION#0000000001" in sks
     # list item SK is the report_id prefixed with REPORT#
     pks = [i["Put"]["Item"]["PK"] for i in items]
     assert "REPORT_LIST" in pks
@@ -988,6 +990,200 @@ def _sq_version_dynamo_item(sq_id="sq1", version=1):
         "created_by": "user@example.com",
         "comment": None,
     }
+
+
+def _scheduled_chat_item(sc_id="sc1", created_by="user-1"):
+    return {
+        "PK": "SCHEDULED_CHAT_LIST",
+        "SK": f"SCHEDULED_CHAT#{sc_id}",
+        "scheduled_chat_id": sc_id,
+        "name": f"Chat {sc_id}",
+        "prompt": "Summarize",
+        "schedule": {"type": "hourly", "interval_hours": 1},
+        "watch_scans": [],
+        "enabled": True,
+        "current_version": 1,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "created_by": created_by,
+        "updated_by": created_by,
+        "last_errors": [],
+    }
+
+
+async def test_list_scheduled_chats_paginates(patch_table, store):
+    patch_table.query.side_effect = [
+        {
+            "Items": [_scheduled_chat_item("sc1")],
+            "LastEvaluatedKey": {"PK": "SCHEDULED_CHAT_LIST", "SK": "SCHEDULED_CHAT#sc1"},
+        },
+        {"Items": [_scheduled_chat_item("sc2")]},
+    ]
+
+    result = await store.list_scheduled_chats()
+
+    assert [item.scheduled_chat_id for item in result] == ["sc1", "sc2"]
+    assert patch_table.query.call_count == 2
+    assert patch_table.query.call_args_list[1].kwargs["ExclusiveStartKey"] == {
+        "PK": "SCHEDULED_CHAT_LIST",
+        "SK": "SCHEDULED_CHAT#sc1",
+    }
+
+
+async def test_delete_scheduled_chat_removes_paginated_sessions(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    def query_side_effect(**kwargs):
+        pk = kwargs["ExpressionAttributeValues"][":pk"]
+        start = kwargs.get("ExclusiveStartKey")
+        if pk == "SCHEDULED_CHAT#sc1":
+            if start:
+                return {"Items": [{"PK": pk, "SK": "VERSION#0000000001"}]}
+            return {
+                "Items": [{"PK": pk, "SK": "#METADATA"}],
+                "LastEvaluatedKey": {"PK": pk, "SK": "#METADATA"},
+            }
+        if pk == "CHAT_SESSION_LIST#user-1":
+            if start:
+                return {
+                    "Items": [
+                        {
+                            "PK": pk,
+                            "SK": "UPDATED#2#THREAD#t2",
+                            "thread_id": "t2",
+                        }
+                    ]
+                }
+            return {
+                "Items": [
+                    {
+                        "PK": pk,
+                        "SK": "UPDATED#1#THREAD#t1",
+                        "thread_id": "t1",
+                    }
+                ],
+                "LastEvaluatedKey": {"PK": pk, "SK": "UPDATED#1#THREAD#t1"},
+            }
+        raise AssertionError(f"Unexpected partition: {pk}")
+
+    patch_table.query.side_effect = query_side_effect
+    batch = MagicMock()
+    patch_table.batch_writer.return_value.__enter__ = MagicMock(return_value=batch)
+    patch_table.batch_writer.return_value.__exit__ = MagicMock(return_value=False)
+
+    assert await store.delete_scheduled_chat("sc1") is True
+
+    deleted = [call.kwargs["Key"] for call in batch.delete_item.call_args_list]
+    assert {"PK": "CHAT_SESSION#user-1", "SK": "t1"} in deleted
+    assert {"PK": "CHAT_SESSION#user-1", "SK": "t2"} in deleted
+    assert {"PK": "CHAT_SESSION_LIST#user-1", "SK": "UPDATED#1#THREAD#t1"} in deleted
+    assert {"PK": "CHAT_SESSION_LIST#user-1", "SK": "UPDATED#2#THREAD#t2"} in deleted
+
+
+async def test_partial_scheduled_chat_result_clears_stale_errors(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "last_errors": [{"timestamp": "old", "error": "boom"}],
+        }
+    }
+
+    await store.record_scheduled_chat_result("sc1", "partial")
+
+    assert patch_table.update_item.call_count == 2
+    for call in patch_table.update_item.call_args_list:
+        assert call.kwargs["ExpressionAttributeValues"][":errors"] == []
+
+
+async def test_get_scheduled_chat_returns_item(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    item = await store.get_scheduled_chat("sc1")
+
+    assert item is not None
+    assert item.scheduled_chat_id == "sc1"
+    assert item.name == "Chat sc1"
+
+
+async def test_get_scheduled_chat_returns_none_when_missing(patch_table, store):
+    patch_table.get_item.return_value = {}
+
+    item = await store.get_scheduled_chat("sc1")
+
+    assert item is None
+
+
+async def test_create_scheduled_chat_writes_three_items(patch_table, store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.dynamodb.generate_report_id",
+        return_value="sc-new",
+    )
+
+    item = await store.create_scheduled_chat(
+        name="My Chat",
+        prompt="Summarize",
+        schedule={"type": "hourly", "interval_hours": 2},
+        watch_scans=[],
+        enabled=True,
+        created_by="user-1",
+    )
+
+    assert item.scheduled_chat_id == "sc-new"
+    assert item.name == "My Chat"
+    assert patch_table.put_item.call_count == 3
+
+
+async def test_update_scheduled_chat_bumps_version(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            **_scheduled_chat_item(),
+            "PK": "SCHEDULED_CHAT#sc1",
+            "SK": "#METADATA",
+        }
+    }
+
+    item = await store.update_scheduled_chat(
+        "sc1",
+        name="Updated",
+        prompt="New prompt",
+        schedule=None,
+        watch_scans=[],
+        enabled=False,
+        updated_by="user-1",
+    )
+
+    assert item is not None
+    assert item.name == "Updated"
+    assert item.current_version == 2
+    assert patch_table.put_item.call_count == 3
+
+
+async def test_update_scheduled_chat_returns_none_when_missing(patch_table, store):
+    patch_table.get_item.return_value = {}
+
+    item = await store.update_scheduled_chat(
+        "sc1",
+        name="Updated",
+        prompt="New prompt",
+        schedule=None,
+        watch_scans=[],
+        enabled=True,
+        updated_by="user-1",
+    )
+
+    assert item is None
 
 
 _SQ_KWARGS = dict(

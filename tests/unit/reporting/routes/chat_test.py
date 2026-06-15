@@ -2,6 +2,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -10,6 +11,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.routes import chat
 from reporting.schema.chat import ChatSessionItem
 from reporting.schema.report_config import User
+from reporting.services.chat_budget import BudgetController
 
 _FAKE_USER = User(
     user_id="test-user-id",
@@ -176,6 +178,9 @@ async def test_chat_stream_success(mocker):
     assert config["configurable"]["current_user"].user.user_id == "test-user-id"
     assert stream_mode == "custom"
     assert graph_input["messages"][0].content == "Hi"
+    controller = config["configurable"]["budget_controller"]
+    assert isinstance(controller, BudgetController)
+    assert graph_input["budget"] == controller.snapshot()
 
 
 async def test_chat_stream_surfaces_output_limit_finish_reason(mocker):
@@ -331,6 +336,47 @@ def test_history_message_metadata_no_false_positive_from_seizu_output_limit_abse
     assert metadata is None
 
 
+def test_history_message_metadata_includes_run_status_errors_and_budget():
+    message = type(
+        "Message",
+        (),
+        {
+            "response_metadata": {
+                "seizu_run_status": "partial",
+                "seizu_run_errors": ["Planner fallback"],
+                "seizu_budget": {
+                    "mode": "finalizing",
+                    "total_tokens": 12_345,
+                    "cost_usd": 0.12,
+                    "llm_calls": 9,
+                    "exhaustion_reason": "The run token budget is reserved for final synthesis.",
+                    "phases": {
+                        "planner": {"total_tokens": 1200, "llm_calls": 1, "internal": "not exposed"},
+                    },
+                    "internal": "not exposed",
+                },
+            }
+        },
+    )()
+
+    metadata = chat._history_message_metadata(message, "assistant", "Partial result.")
+
+    assert metadata == {
+        "run_status": "partial",
+        "run_errors": ["Planner fallback"],
+        "budget": {
+            "mode": "finalizing",
+            "total_tokens": 12_345,
+            "cost_usd": 0.12,
+            "llm_calls": 9,
+            "exhaustion_reason": "The run token budget is reserved for final synthesis.",
+            "phases": {
+                "planner": {"total_tokens": 1200, "llm_calls": 1},
+            },
+        },
+    }
+
+
 async def test_chat_stream_emits_detail_data_parts(mocker):
     fake_graph = FakeDetailChatGraph()
     mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
@@ -394,6 +440,55 @@ async def test_chat_stream_requires_chat_permission(mocker):
         )
 
     assert response.status_code == 403
+
+
+async def test_chat_stream_bypass_requires_permission(mocker):
+    mocker.patch("reporting.routes.chat.get_chat_graph")
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app(_current_user(frozenset({"chat:use"})))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
+        )
+
+    assert response.status_code == 403
+    assert "chat:bypass_permissions" in response.text
+
+
+async def test_chat_stream_bypass_flag_reaches_graph_config(mocker):
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app(_current_user(frozenset({"chat:use", "chat:bypass_permissions"})))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
+        )
+
+    assert response.status_code == 200
+    _input, config, _mode = fake_graph.calls[0]
+    assert config["configurable"]["bypass_confirmations"] is True
+
+
+async def test_chat_stream_bypass_defaults_off(mocker):
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 200
+    _input, config, _mode = fake_graph.calls[0]
+    assert config["configurable"]["bypass_confirmations"] is False
 
 
 async def test_chat_stream_validates_body(mocker):
@@ -708,3 +803,33 @@ async def test_update_chat_session_title_returns_404_when_not_found(mocker):
         )
 
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("origin", "scheduled_chat_id"),
+    [("scheduled", "sc-1"), ("workflow", None)],
+)
+async def test_chat_stream_rejects_headless_sessions(mocker, origin, scheduled_chat_id):
+    mocker.patch("reporting.routes.chat.get_chat_graph")
+    headless = ChatSessionItem(
+        thread_id="1001",
+        title="Digest – 2026-06-11",
+        created_at="2024-01-01T00:00:01+00:00",
+        updated_at="2024-01-01T00:00:01+00:00",
+        origin=origin,
+        scheduled_chat_id=scheduled_chat_id,
+    )
+    mocker.patch(
+        "reporting.routes.chat.report_store.get_chat_session",
+        mocker.AsyncMock(return_value=headless),
+    )
+    app = _make_app()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 403
+    assert "read-only" in response.text

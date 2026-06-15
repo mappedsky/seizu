@@ -150,7 +150,7 @@ export default function CypherVerticalTable({
         <Typography gutterBottom variant="h4" component="div">
           <QueryValidationBadge errors={queryErrors} warnings={warnings} />
         </Typography>
-        <Typography variant="body2">Query validation failed.</Typography>
+        <Typography variant="body2">Query failed.</Typography>
       </Box>
     );
   }

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -28,6 +28,11 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
+
+
+def initial_report_config(name: str) -> dict[str, Any]:
+    """Return the minimal valid config stored with a newly created report."""
+    return {"name": name, "rows": [], "schema_version": 1}
 
 
 class ReportStore(ABC):
@@ -85,7 +90,7 @@ class ReportStore(ABC):
         created_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem:
-        """Create a new empty report (no initial version) and return the ReportListItem."""
+        """Create a report with an initial version and return its metadata."""
 
     @abstractmethod
     async def save_report_version(
@@ -154,12 +159,17 @@ class ReportStore(ABC):
         email: str | None = None,
         display_name: str | None = None,
         preferred_username: str | None = None,
+        role: str | None = None,
     ) -> User:
         """Get an existing user by (iss, sub), or create one on first login.
 
-        Existing users are returned as-is; no fields are updated.
-        Profile updates (email drift, last_login) are done separately via
-        ``update_user_profile``, called only from the ``/api/v1/me`` route.
+        Existing users are returned as-is, with one security-relevant
+        exception: ``role`` is the role claim observed on this request and is
+        synced (written only on drift, including clearing to None when the
+        claim is absent) so headless callers can later resolve the user's
+        permissions without a token. Other profile updates (email drift,
+        last_login) are done separately via ``update_user_profile``, called
+        only from the ``/api/v1/me`` route.
         Returns the User model.
         """
 
@@ -555,19 +565,53 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def list_chat_sessions(self, user_id: str, limit: int) -> list[ChatSessionItem]:
-        """Return recent chat sessions for a user, sorted by updated_at descending."""
+        """Return recent interactive chat sessions for a user, newest first.
+
+        Headless sessions (``origin="scheduled"`` or ``origin="workflow"``)
+        are excluded.
+        """
 
     @abstractmethod
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         """Return a chat session for a user, or None if it does not exist."""
 
     @abstractmethod
-    async def create_chat_session(self, user_id: str, title: str) -> ChatSessionItem:
-        """Create a new chat session with a store-generated ID."""
+    async def create_chat_session(
+        self,
+        user_id: str,
+        title: str,
+        origin: str = "interactive",
+        scheduled_chat_id: str | None = None,
+    ) -> ChatSessionItem:
+        """Create a new chat session with a store-generated ID.
+
+        Headless sessions are hidden from ``list_chat_sessions`` and are
+        read-only in the web UI; ``scheduled_chat_id`` links scheduled
+        sessions to the schedule that created them.
+        """
+
+    @abstractmethod
+    async def list_scheduled_chat_sessions(
+        self,
+        user_id: str,
+        scheduled_chat_id: str,
+        limit: int,
+    ) -> list[ChatSessionItem]:
+        """Return a schedule's run sessions, newest first."""
 
     @abstractmethod
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         """Update a session's updated_at. Returns None if the session is not found."""
+
+    @abstractmethod
+    async def complete_chat_session_run(
+        self,
+        user_id: str,
+        thread_id: str,
+        status: str,
+        errors: list[str],
+    ) -> ChatSessionItem | None:
+        """Record terminal status and errors for a scheduled chat run session."""
 
     @abstractmethod
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
@@ -576,6 +620,74 @@ class ReportStore(ABC):
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
         """Delete a session. Returns False if not found."""
+
+    # ------------------------------------------------------------------
+    # Scheduled chats
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
+        """Return scheduled chats, optionally filtered to one owner.
+
+        The worker lists all schedules (user_id=None); the API lists only the
+        requesting user's own schedules.
+        """
+
+    @abstractmethod
+    async def get_scheduled_chat(self, sc_id: str) -> ScheduledChatItem | None:
+        """Return a scheduled chat, or None if it does not exist."""
+
+    @abstractmethod
+    async def create_scheduled_chat(
+        self,
+        name: str,
+        prompt: str,
+        schedule: dict[str, Any] | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        created_by: str,
+    ) -> ScheduledChatItem:
+        """Create a scheduled chat owned by created_by."""
+
+    @abstractmethod
+    async def update_scheduled_chat(
+        self,
+        sc_id: str,
+        name: str,
+        prompt: str,
+        schedule: dict[str, Any] | None,
+        watch_scans: list[dict[str, Any]],
+        enabled: bool,
+        updated_by: str,
+        comment: str | None = None,
+    ) -> ScheduledChatItem | None:
+        """Replace a scheduled chat's configuration, appending a new version.
+
+        Returns None if not found.
+        """
+
+    @abstractmethod
+    async def list_scheduled_chat_versions(self, sc_id: str) -> list[ScheduledChatVersion]:
+        """Return all stored versions for a scheduled chat, newest first."""
+
+    @abstractmethod
+    async def get_scheduled_chat_version(self, sc_id: str, version: int) -> ScheduledChatVersion | None:
+        """Return a specific version of a scheduled chat, or None if not found."""
+
+    @abstractmethod
+    async def delete_scheduled_chat(self, sc_id: str) -> bool:
+        """Delete a scheduled chat and all its versions. Returns False if not found."""
+
+    @abstractmethod
+    async def acquire_scheduled_chat_lock(self, sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+        """Atomically claim a run by compare-and-setting last_scheduled_at.
+
+        Returns False when another worker already claimed this run.
+        """
+
+    @abstractmethod
+    async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
+        """Record a run outcome (last_run_status/last_run_at/last_errors)."""
 
     # ------------------------------------------------------------------
     # Action confirmations

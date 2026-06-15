@@ -27,6 +27,7 @@ async def get_config() -> dict:
         # Feature flags consumed by the frontend to show/hide whole features.
         "features": {
             "chat": settings.CHAT_ENABLED,
+            "chat_schedules": settings.CHAT_ENABLED and settings.CHAT_SCHEDULES_ENABLED,
         },
         "config": {},
     }

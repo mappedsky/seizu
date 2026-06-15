@@ -199,7 +199,7 @@ export default function CypherPie({
               N/A
             </Typography>
             <Typography variant="body2" align="center">
-              Query validation failed
+              Query failed
             </Typography>
           </CardContent>
         </Grid>

@@ -270,6 +270,22 @@ services:
         condition: service_healthy
     networks:
       auth:
+  temporal:
+    # Temporal CLI image running the lightweight dev server (in-memory SQLite):
+    # gRPC frontend on :7233, Web UI on :8233.
+    image: temporalio/temporal:latest
+    command: server start-dev --ip 0.0.0.0
+    ports:
+      - 7233:7233
+      - 8233:8233
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      database:
   seizu-scheduled-queries:
     image: ghcr.io/mappedsky/seizu
     restart: on-failure
@@ -279,11 +295,11 @@ services:
         condition: service_healthy
       dynamodb:
         condition: service_healthy
-      postgres:
+      temporal:
         condition: service_healthy
         required: false
-      postgres-create-chat-checkpoint-db:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
         required: false
     environment:
       - NEO4J_URI=bolt://neo4j:7687
@@ -292,10 +308,11 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - "SQS_CREATE_SCHEDULED_QUERY_QUEUES=true"
       - SQS_URL=http://sqs:9324
-      - SCHEDULED_QUERY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd
+      - SCHEDULED_QUERY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd,reporting.scheduled_query_modules.temporal
       - SLACK_OAUTH_BOT_TOKEN
       - STATSD_HOST=telegraf
       - STATSD_CONSTANT_TAGS
+      - TEMPORAL_ADDRESS=temporal:7233
       - REPORT_STORE_BACKEND
       - DYNAMODB_TABLE_NAME=seizu-reports
       - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
@@ -309,6 +326,193 @@ services:
       - .:/home/seizu/seizu
     networks:
       stats:
+      database:
+  seizu-scheduled-chats:
+    image: ghcr.io/mappedsky/seizu
+    restart: on-failure
+    user: seizu
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      dynamodb:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+        required: false
+      postgres-create-chat-checkpoint-db:
+        condition: service_completed_successfully
+        required: false
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - CHAT_SCHEDULES_ENABLED
+      - CHAT_SCHEDULES_POLL_SECONDS
+      - CHAT_SCHEDULE_TIMEOUT_SECONDS
+      # Scheduled chats enforce the owner's stored role unless dev mode is on;
+      # keep this aligned with the seizu service.
+      - DEVELOPMENT_ONLY_REQUIRE_AUTH
+      - REPORT_STORE_BACKEND
+      - AWS_ACCESS_KEY_ID=fake
+      - AWS_SECRET_ACCESS_KEY=fake
+      - AWS_DEFAULT_REGION=us-east-1
+      - DYNAMODB_TABLE_NAME=seizu-reports
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
+      - DYNAMODB_REGION=us-east-1
+      - DYNAMODB_CREATE_TABLE=true
+      - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
+      - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
+      - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
+      # Chat LLM + checkpointer — this worker drives headless chat sessions,
+      # so it needs the same chat configuration as the seizu service.
+      - CHAT_ENABLED
+      - CHAT_LLM_PROVIDER
+      - CHAT_LLM_MODEL
+      - CHAT_LLM_API_KEY
+      - CHAT_LLM_BASE_URL
+      - CHAT_LLM_TEMPERATURE
+      - CHAT_LLM_MAX_TOKENS
+      - CHAT_LLM_TIMEOUT_SECONDS
+      - CHAT_LLM_MAX_RETRIES
+      - CHAT_LLM_CONTEXT_MAX_MESSAGES
+      - CHAT_LLM_CONTEXT_MAX_CHARS
+      - CHAT_LLM_SYSTEM_PROMPT
+      - CHAT_LLM_PROGRESSIVE_DISCLOSURE
+      - CHAT_LLM_MAX_AUTO_ACTIONS
+      - CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
+      - CHAT_ORCHESTRATOR_ENABLED
+      - CHAT_ORCHESTRATOR_MAX_STEPS
+      - CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS
+      - CHAT_ORCHESTRATOR_MAX_ITERATIONS
+      - CHAT_ORCHESTRATOR_MAX_PARALLEL
+      - CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
+      - CHAT_RUN_TOKEN_BUDGET
+      - CHAT_RUN_COST_BUDGET_USD
+      - CHAT_RUN_RESERVE_PERCENT
+      - CHAT_RUN_SOFT_LIMIT_PERCENT
+      - CHAT_RUN_MAX_LLM_CALLS
+      - CHAT_LLM_PLANNER_MODEL
+      - CHAT_LLM_WORKER_MODEL
+      - CHAT_LLM_VERIFIER_MODEL
+      - CHAT_LLM_SYNTHESIZER_MODEL
+      - CHAT_LLM_ECONOMY_MODEL
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - GEMINI_API_KEY
+      - GOOGLE_API_KEY
+      - DEEPSEEK_API_KEY
+      - CHAT_CHECKPOINT_BACKEND
+      - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_PASSWORD=${CHAT_CHECKPOINT_DATABASE_PASSWORD:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+      - CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
+      - CHAT_CHECKPOINT_TABLE_NAME=seizu-chat-checkpoints
+      - CHAT_CHECKPOINT_CREATE_TABLE=true
+      - CHAT_CHECKPOINT_TTL_SECONDS=2592000
+      - CHAT_CHECKPOINT_ENABLE_COMPRESSION=true
+      - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
+      - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
+      - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+    command: python -m reporting.scheduled_chats
+    volumes:
+      - .:/home/seizu/seizu
+    networks:
+      database:
+  seizu-temporal-worker:
+    image: ghcr.io/mappedsky/seizu
+    restart: on-failure
+    user: seizu
+    depends_on:
+      temporal:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      dynamodb:
+        condition: service_healthy
+      minio-create-bucket:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+        required: false
+      postgres-create-chat-checkpoint-db:
+        condition: service_completed_successfully
+        required: false
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE
+      - TEMPORAL_TASK_QUEUE
+      - TEMPORAL_WORKER_ENABLED
+      - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      # Workflow chat sessions enforce the creator's stored role unless dev
+      # mode is on; keep this aligned with the seizu service.
+      - DEVELOPMENT_ONLY_REQUIRE_AUTH
+      - REPORT_STORE_BACKEND
+      - AWS_ACCESS_KEY_ID=fake
+      - AWS_SECRET_ACCESS_KEY=fake
+      - AWS_DEFAULT_REGION=us-east-1
+      - DYNAMODB_TABLE_NAME=seizu-reports
+      - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
+      - DYNAMODB_REGION=us-east-1
+      - DYNAMODB_CREATE_TABLE=true
+      - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
+      - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
+      - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
+      # Chat LLM + checkpointer — the worker drives headless chat sessions, so
+      # it needs the same chat configuration as the seizu service.
+      - CHAT_LLM_PROVIDER
+      - CHAT_LLM_MODEL
+      - CHAT_LLM_API_KEY
+      - CHAT_LLM_BASE_URL
+      - CHAT_LLM_TEMPERATURE
+      - CHAT_LLM_MAX_TOKENS
+      - CHAT_LLM_TIMEOUT_SECONDS
+      - CHAT_LLM_MAX_RETRIES
+      - CHAT_LLM_CONTEXT_MAX_MESSAGES
+      - CHAT_LLM_CONTEXT_MAX_CHARS
+      - CHAT_LLM_SYSTEM_PROMPT
+      - CHAT_LLM_PROGRESSIVE_DISCLOSURE
+      - CHAT_LLM_MAX_AUTO_ACTIONS
+      - CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
+      - CHAT_ORCHESTRATOR_ENABLED
+      - CHAT_ORCHESTRATOR_MAX_STEPS
+      - CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS
+      - CHAT_ORCHESTRATOR_MAX_ITERATIONS
+      - CHAT_ORCHESTRATOR_MAX_PARALLEL
+      - CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
+      - CHAT_RUN_TOKEN_BUDGET
+      - CHAT_RUN_COST_BUDGET_USD
+      - CHAT_RUN_RESERVE_PERCENT
+      - CHAT_RUN_SOFT_LIMIT_PERCENT
+      - CHAT_RUN_MAX_LLM_CALLS
+      - CHAT_LLM_PLANNER_MODEL
+      - CHAT_LLM_WORKER_MODEL
+      - CHAT_LLM_VERIFIER_MODEL
+      - CHAT_LLM_SYNTHESIZER_MODEL
+      - CHAT_LLM_ECONOMY_MODEL
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+      - GEMINI_API_KEY
+      - GOOGLE_API_KEY
+      - DEEPSEEK_API_KEY
+      - CHAT_CHECKPOINT_BACKEND
+      - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
+      - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_PASSWORD=${CHAT_CHECKPOINT_DATABASE_PASSWORD:-seizu}
+      - CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE
+      - CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE
+      - CHAT_CHECKPOINT_TABLE_NAME=seizu-chat-checkpoints
+      - CHAT_CHECKPOINT_CREATE_TABLE=true
+      - CHAT_CHECKPOINT_TTL_SECONDS=2592000
+      - CHAT_CHECKPOINT_ENABLE_COMPRESSION=true
+      - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
+      - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
+      - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+    command: python -m reporting.temporal_worker
+    volumes:
+      - .:/home/seizu/seizu
+    networks:
       database:
   seizu:
     image: ghcr.io/mappedsky/seizu
@@ -387,9 +591,20 @@ services:
       - CHAT_LLM_MAX_PARALLEL_TOOL_CALLS
       - CHAT_ORCHESTRATOR_ENABLED
       - CHAT_ORCHESTRATOR_MAX_STEPS
+      - CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS
       - CHAT_ORCHESTRATOR_MAX_ITERATIONS
       - CHAT_ORCHESTRATOR_MAX_PARALLEL
       - CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
+      - CHAT_RUN_TOKEN_BUDGET
+      - CHAT_RUN_COST_BUDGET_USD
+      - CHAT_RUN_RESERVE_PERCENT
+      - CHAT_RUN_SOFT_LIMIT_PERCENT
+      - CHAT_RUN_MAX_LLM_CALLS
+      - CHAT_LLM_PLANNER_MODEL
+      - CHAT_LLM_WORKER_MODEL
+      - CHAT_LLM_VERIFIER_MODEL
+      - CHAT_LLM_SYNTHESIZER_MODEL
+      - CHAT_LLM_ECONOMY_MODEL
       - OPENAI_API_KEY
       - ANTHROPIC_API_KEY
       - GEMINI_API_KEY

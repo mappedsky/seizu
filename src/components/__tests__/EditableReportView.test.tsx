@@ -85,6 +85,31 @@ describe('EditableReportView', () => {
     expect(screen.getByLabelText('Row name')).toHaveValue('Overview');
   });
 
+  it('shows an error instead of crashing for malformed rows', () => {
+    const onCancel = jest.fn();
+    const malformedReport = {
+      name: 'Malformed Report',
+      panels: [{ type: 'markdown', content: 'Wrong level' }],
+    } as unknown as Report;
+
+    render(
+      <Wrapper>
+        <EditableReportView
+          report={malformedReport}
+          reportId="r1"
+          onSave={jest.fn()}
+          onCancel={onCancel}
+        />
+      </Wrapper>,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'rows must be an array, with panels nested under each row',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Exit editor' }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it('saves the edited report name and comment', async () => {
     const onSave = jest.fn().mockResolvedValue(undefined);
     render(

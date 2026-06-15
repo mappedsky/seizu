@@ -282,6 +282,7 @@ async def test_get_current_user_extracts_sub_and_iss(mocker):
         email="alice@example.com",
         display_name="Alice",
         preferred_username="alice",
+        role=None,
     )
     assert result.user.user_id == "uid1"
 
@@ -332,6 +333,7 @@ async def test_get_current_user_allows_missing_email(mocker):
         email=None,
         display_name=None,
         preferred_username="alice",
+        role=None,
     )
     assert result.user.email is None
 
@@ -414,7 +416,7 @@ async def test_get_current_user_resolves_permissions_from_role_claim(mocker):
         created_at="2024-01-01T00:00:00+00:00",
         last_login="2024-01-01T00:00:00+00:00",
     )
-    mocker.patch(
+    mock_get_or_create = mocker.patch(
         "reporting.services.report_store.get_or_create_user",
         new=AsyncMock(return_value=fake_user),
     )
@@ -434,6 +436,9 @@ async def test_get_current_user_resolves_permissions_from_role_claim(mocker):
     result = await get_current_user(credentials=credentials)
     assert "toolsets:write" in result.permissions
     assert "reports:read" in result.permissions
+    # The observed role claim is synced to the user profile so headless
+    # callers (Temporal workflows) can resolve permissions later.
+    assert mock_get_or_create.call_args.kwargs["role"] == "seizu-admin"
 
 
 async def test_get_current_user_dev_mode_has_all_permissions(mocker):

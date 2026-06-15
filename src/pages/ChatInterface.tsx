@@ -23,7 +23,9 @@ import {
   Button,
   Card,
   Chip,
+  FormControlLabel,
   IconButton,
+  Switch,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -573,6 +575,7 @@ export default function ChatInterface() {
   const fetchHistory = useChatHistory();
 
   const canUseChat = hasPermission('chat:use');
+  const canBypassConfirmations = hasPermission('chat:bypass_permissions');
   const waitingForToken = auth_required && !accessToken;
   const sessionsFeedEnabled =
     chatEnabled && !permissionsLoading && !waitingForToken && canUseChat;
@@ -601,6 +604,10 @@ export default function ChatInterface() {
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
+  // Off by default every visit; bypassing confirmations is an explicit,
+  // per-session opt-in for users holding chat:bypass_permissions.
+  const [bypassConfirmations, setBypassConfirmations] = useState(false);
+  const bypassConfirmationsRef = useRef(false);
   const [decidingConfirmationId, setDecidingConfirmationId] = useState<
     string | null
   >(null);
@@ -788,6 +795,8 @@ export default function ChatInterface() {
   const chatId = activeThreadId ?? '__pending__';
   accessTokenRef.current = accessToken;
   chatIdRef.current = chatId;
+  bypassConfirmationsRef.current =
+    bypassConfirmations && canBypassConfirmations;
 
   const transport = useMemo(
     () =>
@@ -825,6 +834,9 @@ export default function ChatInterface() {
               ...(continueResponse ? { continue_response: true } : {}),
               ...(continueMessageId
                 ? { continue_message_id: continueMessageId }
+                : {}),
+              ...(bypassConfirmationsRef.current
+                ? { bypass_confirmations: true }
                 : {}),
             },
           };
@@ -1538,6 +1550,28 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
+        {canBypassConfirmations ? (
+          <Box
+            sx={{ display: 'flex', flexShrink: 0, justifyContent: 'flex-end' }}
+          >
+            <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={bypassConfirmations}
+                    onChange={(e) => setBypassConfirmations(e.target.checked)}
+                    size="small"
+                  />
+                }
+                label={
+                  <Typography variant="caption" color="text.secondary">
+                    Bypass confirmations
+                  </Typography>
+                }
+              />
+            </Tooltip>
+          </Box>
+        ) : null}
         <ChatInput
           busy={busy}
           disabled={disabled}

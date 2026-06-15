@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem
+from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -161,6 +161,7 @@ async def get_or_create_user(
     email: str | None = None,
     display_name: str | None = None,
     preferred_username: str | None = None,
+    role: str | None = None,
 ) -> User:
     return await get_store().get_or_create_user(
         sub=sub,
@@ -168,6 +169,7 @@ async def get_or_create_user(
         email=email,
         display_name=display_name,
         preferred_username=preferred_username,
+        role=role,
     )
 
 
@@ -639,12 +641,35 @@ async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | No
     return await get_store().get_chat_session(user_id, thread_id)
 
 
-async def create_chat_session(user_id: str, title: str) -> ChatSessionItem:
-    return await get_store().create_chat_session(user_id, title)
+async def create_chat_session(
+    user_id: str,
+    title: str,
+    origin: str = "interactive",
+    scheduled_chat_id: str | None = None,
+) -> ChatSessionItem:
+    return await get_store().create_chat_session(
+        user_id,
+        title,
+        origin=origin,
+        scheduled_chat_id=scheduled_chat_id,
+    )
+
+
+async def list_scheduled_chat_sessions(user_id: str, scheduled_chat_id: str, limit: int) -> list[ChatSessionItem]:
+    return await get_store().list_scheduled_chat_sessions(user_id, scheduled_chat_id, limit)
 
 
 async def touch_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
     return await get_store().touch_chat_session(user_id, thread_id)
+
+
+async def complete_chat_session_run(
+    user_id: str,
+    thread_id: str,
+    status: str,
+    errors: list[str],
+) -> ChatSessionItem | None:
+    return await get_store().complete_chat_session_run(user_id, thread_id, status, errors)
 
 
 async def update_chat_session_title(user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
@@ -653,6 +678,79 @@ async def update_chat_session_title(user_id: str, thread_id: str, title: str) ->
 
 async def delete_chat_session(user_id: str, thread_id: str) -> bool:
     return await get_store().delete_chat_session(user_id, thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled chat convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def list_scheduled_chats(user_id: str | None = None) -> list[ScheduledChatItem]:
+    return await get_store().list_scheduled_chats(user_id=user_id)
+
+
+async def get_scheduled_chat(sc_id: str) -> ScheduledChatItem | None:
+    return await get_store().get_scheduled_chat(sc_id)
+
+
+async def create_scheduled_chat(
+    name: str,
+    prompt: str,
+    schedule: dict[str, Any] | None,
+    watch_scans: list[dict[str, Any]],
+    enabled: bool,
+    created_by: str,
+) -> ScheduledChatItem:
+    return await get_store().create_scheduled_chat(
+        name=name,
+        prompt=prompt,
+        schedule=schedule,
+        watch_scans=watch_scans,
+        enabled=enabled,
+        created_by=created_by,
+    )
+
+
+async def update_scheduled_chat(
+    sc_id: str,
+    name: str,
+    prompt: str,
+    schedule: dict[str, Any] | None,
+    watch_scans: list[dict[str, Any]],
+    enabled: bool,
+    updated_by: str,
+    comment: str | None = None,
+) -> ScheduledChatItem | None:
+    return await get_store().update_scheduled_chat(
+        sc_id=sc_id,
+        name=name,
+        prompt=prompt,
+        schedule=schedule,
+        watch_scans=watch_scans,
+        enabled=enabled,
+        updated_by=updated_by,
+        comment=comment,
+    )
+
+
+async def list_scheduled_chat_versions(sc_id: str) -> list[ScheduledChatVersion]:
+    return await get_store().list_scheduled_chat_versions(sc_id)
+
+
+async def get_scheduled_chat_version(sc_id: str, version: int) -> ScheduledChatVersion | None:
+    return await get_store().get_scheduled_chat_version(sc_id, version)
+
+
+async def delete_scheduled_chat(sc_id: str) -> bool:
+    return await get_store().delete_scheduled_chat(sc_id)
+
+
+async def acquire_scheduled_chat_lock(sc_id: str, expected_last_scheduled_at: str | None) -> bool:
+    return await get_store().acquire_scheduled_chat_lock(sc_id, expected_last_scheduled_at)
+
+
+async def record_scheduled_chat_result(sc_id: str, status: str, error: str | None = None) -> None:
+    await get_store().record_scheduled_chat_result(sc_id, status, error=error)
 
 
 # ---------------------------------------------------------------------------

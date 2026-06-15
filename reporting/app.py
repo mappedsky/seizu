@@ -31,6 +31,7 @@ from reporting.routes import roles as roles_routes
 from reporting.routes import scheduled_queries as sq_routes
 from reporting.routes import skillsets as skillsets_routes
 from reporting.routes import static as static_routes
+from reporting.routes import sync_metadata as sync_metadata_routes
 from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
@@ -327,6 +328,7 @@ def create_app() -> FastAPI:
         roles_routes,
         sq_routes,
         skillsets_routes,
+        sync_metadata_routes,
         toolsets_routes,
         users_routes,
         validate_routes,
@@ -336,6 +338,10 @@ def create_app() -> FastAPI:
 
     if settings.CHAT_ENABLED:
         app.include_router(chat_routes.router)
+        if settings.CHAT_SCHEDULES_ENABLED:
+            from reporting.routes import chat_schedules as chat_schedules_routes
+
+            app.include_router(chat_schedules_routes.router)
 
     # MCP server — wired in as a pure ASGI middleware so it intercepts
     # /api/v1/mcp* before FastAPI's router.  This avoids a Starlette 1.0.0

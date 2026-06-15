@@ -23,6 +23,7 @@ from reporting.schema.chat import (
     UpdateChatSessionRequest,
 )
 from reporting.services import report_store
+from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import (
     ChatState,
     delete_thread_messages,
@@ -65,6 +66,16 @@ async def stream_chat(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> StreamingResponse:
     """Stream a chat response as an AI SDK UI Message Stream."""
+    if body.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in current.permissions:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing permissions: {Permission.CHAT_BYPASS_PERMISSIONS.value}",
+        )
+    session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
+    if session is not None and session.origin != "interactive":
+        # Headless-run transcripts are read-only: history stays viewable, but
+        # the conversation cannot be continued from the web UI.
+        raise HTTPException(status_code=403, detail="Headless chat sessions are read-only")
     return StreamingResponse(
         _stream_chat_response(body, current),
         media_type="text/event-stream",
@@ -134,6 +145,7 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
 
 async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[dict[str, Any]]:
     graph = get_chat_graph()
+    budget_controller = BudgetController(initial_budget_ledger())
     if body.resume_confirmation_id:
         resume_message = HumanMessage(
             content=f"Resume approved confirmation {body.resume_confirmation_id}",
@@ -141,7 +153,7 @@ async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncI
             additional_kwargs={"resume_confirmation_id": body.resume_confirmation_id},
         )
         tag_message(resume_message, MessageTag.EPHEMERAL)
-        graph_input: ChatState = {"messages": [resume_message]}
+        graph_input: ChatState = {"messages": [resume_message], "budget": budget_controller.snapshot()}
     elif body.continue_response:
         continue_message = HumanMessage(
             content=_CONTINUE_RESPONSE_PROMPT,
@@ -149,14 +161,21 @@ async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncI
             additional_kwargs={"continue_response": True},
         )
         tag_message(continue_message, MessageTag.EPHEMERAL)
-        graph_input = {"messages": [continue_message]}
+        graph_input = {"messages": [continue_message], "budget": budget_controller.snapshot()}
     else:
-        graph_input = {"messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")]}
+        graph_input = {
+            "messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")],
+            "budget": budget_controller.snapshot(),
+        }
     config = {
         "configurable": {
             "current_user": current,
             "thread_id": namespaced_thread_id(current, body.thread_id),
             "client_thread_id": body.thread_id,
+            # Permission re-checked in stream_chat (403) and on every bypassed
+            # call inside mcp_runtime.
+            "bypass_confirmations": body.bypass_confirmations,
+            "budget_controller": budget_controller,
         }
     }
     async for chunk in graph.astream(graph_input, config, stream_mode="custom"):
@@ -223,6 +242,46 @@ def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, o
         # Prefer the authoritative persisted signal set at write time.
         if response_metadata.get("seizu_output_limit"):
             metadata.update({"finish_reason": "length", "response_cut_off": True})
+        run_status = response_metadata.get("seizu_run_status")
+        if isinstance(run_status, str):
+            metadata["run_status"] = run_status
+        run_errors = response_metadata.get("seizu_run_errors")
+        if isinstance(run_errors, list):
+            metadata["run_errors"] = [error for error in run_errors if isinstance(error, str) and error.strip()][:20]
+        budget = response_metadata.get("seizu_budget")
+        if isinstance(budget, dict):
+            safe_budget: dict[str, object] = {
+                key: value
+                for key, value in budget.items()
+                if key
+                in {
+                    "token_limit",
+                    "cost_limit_usd",
+                    "input_tokens",
+                    "output_tokens",
+                    "total_tokens",
+                    "cost_usd",
+                    "llm_calls",
+                    "usage_estimated",
+                    "mode",
+                    "exhaustion_reason",
+                }
+                and isinstance(value, (str, int, float, bool, type(None)))
+            }
+            phases = budget.get("phases")
+            if isinstance(phases, dict):
+                safe_phases: dict[str, dict[str, int | float]] = {}
+                for phase, usage in list(phases.items())[:32]:
+                    if not isinstance(phase, str) or not isinstance(usage, dict):
+                        continue
+                    safe_phases[phase] = {
+                        key: value
+                        for key, value in usage.items()
+                        if key in {"input_tokens", "output_tokens", "total_tokens", "cost_usd", "llm_calls"}
+                        and isinstance(value, (int, float))
+                    }
+                safe_budget["phases"] = safe_phases
+            metadata["budget"] = safe_budget
         details = response_metadata.get("seizu_details")
         if isinstance(details, list):
             safe_details: list[dict[str, object]] = []

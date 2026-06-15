@@ -10,6 +10,7 @@ import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
+  Alert,
   Box,
   Button,
   Checkbox,
@@ -99,11 +100,14 @@ function uid() {
   return `id-${Date.now()}-${_counter}`;
 }
 
-function toEditableRows(rows: Row[]): EditableRow[] {
+function toEditableRows(rows: Row[] | undefined): EditableRow[] {
+  if (!Array.isArray(rows)) return [];
   return rows.map((row) => ({
     _id: uid(),
     ...row,
-    panels: row.panels.map((p) => ({ ...p, _id: uid() })),
+    panels: Array.isArray(row.panels)
+      ? row.panels.map((p) => ({ ...p, _id: uid() }))
+      : [],
   }));
 }
 
@@ -1003,6 +1007,9 @@ function EditableReportView({
   onSave,
   onCancel,
 }: EditableReportViewProps) {
+  const hasInvalidRows =
+    !Array.isArray(report.rows) ||
+    report.rows.some((row) => !Array.isArray(row.panels));
   const [namedQueries, setNamedQueries] = useState<Record<string, string>>(
     report.queries ?? {},
   );
@@ -1301,6 +1308,25 @@ function EditableReportView({
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
+
+  if (hasInvalidRows) {
+    return (
+      <Container maxWidth={false} sx={{ ...contentContainerSx, py: 3 }}>
+        <Alert
+          severity="error"
+          action={
+            <Button color="inherit" size="small" onClick={onCancel}>
+              Exit editor
+            </Button>
+          }
+        >
+          This report cannot be edited because its configuration is invalid:
+          rows must be an array, with panels nested under each row. Refresh the
+          page to load the latest version.
+        </Alert>
+      </Container>
+    );
+  }
 
   return (
     <>

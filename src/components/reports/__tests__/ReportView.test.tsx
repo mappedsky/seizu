@@ -364,6 +364,23 @@ describe('ReportView param building', () => {
     expect(screen.getByText('Markdown Row')).toBeInTheDocument();
   });
 
+  it('renders an actionable error when rows are missing at runtime', () => {
+    const malformedReport = {
+      name: 'Malformed Report',
+      panels: [{ type: 'markdown', content: 'Wrong level' }],
+    } as unknown as Report;
+
+    render(
+      <Wrapper>
+        <ReportView report={malformedReport} title="Malformed Report" />
+      </Wrapper>,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'rows must be an array, with panels nested under each row',
+    );
+  });
+
   it('falls back to literal string when panel.cypher is not in report.queries', () => {
     const directCypher = 'MATCH (n) RETURN count(n) AS total';
     const report = makeReport([

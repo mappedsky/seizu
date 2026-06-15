@@ -1,3 +1,4 @@
+from collections.abc import Awaitable
 from typing import Any, cast
 
 from reporting import settings
@@ -48,7 +49,7 @@ class ModuleInterface:
         can be used for any setup that your module may need to do, like creating
         databases or queues in development, etc.
         """
-        return
+        return None
 
     @staticmethod
     def action_config_schema() -> list[ActionConfigFieldDef]:
@@ -64,11 +65,15 @@ class ModuleInterface:
         scheduled_query_id: str,
         action: ScheduledQueryAction,
         results: list[dict[str, Any]],
-    ) -> None:
+    ) -> None | Awaitable[None]:
         """
-        Called when a schedule query configured to use this module has results.
+        Called when a scheduled query configured to use this module has results.
+
+        Synchronous handlers are executed in a worker thread. Async handlers
+        run on the scheduled-query worker's event loop, which is required for
+        services that share loop-bound async clients or database pools.
         """
-        return
+        return None
 
 
 async def load_modules() -> None:

@@ -254,6 +254,7 @@ async def call_tool_for_chat(
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
+    bypass_confirmations: bool = False,
 ) -> ChatActionOutcome:
     """Chat-oriented tool call returning the body together with a block reason.
 
@@ -261,6 +262,12 @@ async def call_tool_for_chat(
     needs to distinguish authorization failures from a tool's natural output
     so it can stop the turn instead of letting the model retry. The block
     reason is the structured replacement for matching error strings.
+
+    ``bypass_confirmations`` skips the action-confirmation gate entirely. It
+    is only honored for callers holding the ``chat:bypass_permissions``
+    permission (anyone else is blocked); every bypassed execution is
+    audit-logged. Used by the chat UI's bypass mode and by headless agent
+    runs (scheduled queries, Temporal workflows).
     """
     content, blocked = await _call_tool_core(
         current_user,
@@ -274,6 +281,7 @@ async def call_tool_for_chat(
         confirmation_source=confirmation_source,
         confirmation_session_key=confirmation_session_key,
         confirmation_batch_id=confirmation_batch_id,
+        bypass_confirmations=bypass_confirmations,
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
 
@@ -291,6 +299,7 @@ async def _call_tool_core(
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
+    bypass_confirmations: bool = False,
 ) -> tuple[list[TextContent], ChatBlockReason | None]:
     args = arguments or {}
     perms = _permissions(current_user, permissions)
@@ -316,7 +325,28 @@ async def _call_tool_core(
         missing_args = _missing_required_arguments(builtin.input_schema, args)
         if missing_args:
             return text_response({"error": f"Missing required argument(s): {', '.join(missing_args)}"}), None
-        if builtin.confirmation is not None and confirmation_source is not None:
+        if builtin.confirmation is not None and bypass_confirmations:
+            # Bypass mode (chat UI bypass toggle or a headless agent run):
+            # honored only for callers holding chat:bypass_permissions, and
+            # every bypassed execution is audit-logged.
+            if current_user is None:
+                return text_response(
+                    {"error": "Confirmation bypass requires an authenticated user"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            if Permission.CHAT_BYPASS_PERMISSIONS.value not in perms:
+                return text_response(
+                    {"error": f"Permission denied: {Permission.CHAT_BYPASS_PERMISSIONS.value}"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            logger.info(
+                "Action confirmation bypassed",
+                extra={
+                    "type": "AUDIT",
+                    "tool": name,
+                    "user": current_user.user.user_id,
+                    "source": "bypass",
+                },
+            )
+        elif builtin.confirmation is not None and confirmation_source is not None:
             # Fail-closed: a mutating tool was reached via a source that requires
             # confirmation but no session key is available to scope the record.
             if confirmation_session_key is None:
