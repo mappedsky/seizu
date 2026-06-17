@@ -106,11 +106,11 @@ function PanelGridRow({
     });
   }, []);
 
-  // Apply measured heights to the layout for ``auto_height`` panels in view
-  // mode. In edit mode the user controls height via drag handles, so we leave
-  // the configured ``h`` alone.
+  // Grow the grid cell to fit measured content for ``auto_height`` panels in
+  // both view and edit modes — otherwise a content-sized panel is clipped to
+  // its (smaller) configured ``h``. Fixed-height panels keep their configured
+  // ``h`` and remain user-resizable in edit mode.
   const layouts = useMemo(() => {
-    if (isEditing) return baseLayouts;
     const result = {} as Record<ResponsiveBreakpoint, LayoutCoords[]>;
     const breakpoints: ResponsiveBreakpoint[] = ['lg', 'md', 'sm', 'xs'];
     for (const bp of breakpoints) {
@@ -124,10 +124,10 @@ function PanelGridRow({
       });
     }
     return result;
-  }, [baseLayouts, panels, autoHeightsPx, isEditing]);
+  }, [baseLayouts, panels, autoHeightsPx]);
 
   const items = panels.map((panel, idx) => {
-    const useAutoHeight = !isEditing && panel.auto_height === true;
+    const useAutoHeight = panel.auto_height === true;
     return (
       <div
         key={panelKey(panel, idx)}

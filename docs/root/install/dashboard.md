@@ -110,6 +110,7 @@ Click **Edit report** (top-right when viewing a report) or choose **Edit** from 
 - **Rows** — add, rename, and delete rows. Rows hold panels in a horizontal grid.
 - **Panels** — within each row, drag a panel by its body to reposition it, or grab the bottom-right resize handle to change both width and height. The pencil and trash icons open the panel editor or remove the panel. When a report has multiple rows, the move icon opens a row picker for moving a panel to another row.
 - **Add panel** — opens the panel editor where you select the panel type and fill in the relevant fields. The form adapts to show only the fields applicable to the chosen type, and exposes Width and Height sliders plus the Cypher / settings specific to that type.
+- **Live previews** — panels render with live data reflecting your unsaved edits, so editing a panel's Cypher or settings updates its preview in place. Previews run the panel's resolved query through the read-only ad-hoc query path and so require the `query:execute` permission (held by `seizu-editor` and `seizu-admin`); editors without it see lightweight placeholders instead. ``auto_height`` panels grow to fit their content in edit mode just as they do when viewing.
 
 Drag and resize changes are saved with the next report version.
 

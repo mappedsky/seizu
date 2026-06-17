@@ -132,6 +132,47 @@ export function deriveRowLayout(
   return result;
 }
 
+/** A react-grid-layout position/size for a single panel. */
+export interface PanelLayoutPosition {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Merge a new grid position/size into a panel for persistence after a drag or
+ * resize. Returns the updated panel, or ``null`` when nothing meaningful
+ * changed (so callers can skip a state update).
+ *
+ * ``auto_height`` panels derive their height from their content — the grid cell
+ * is grown to fit by measurement, not by a stored ``h`` — so their ``h`` is
+ * preserved and ignored when detecting changes. This keeps content-driven
+ * auto-growth from churning state or writing a derived height into the config.
+ */
+export function mergePanelLayout<T extends Panel>(
+  panel: T,
+  pos: PanelLayoutPosition,
+): T | null {
+  const isAuto = panel.auto_height === true;
+  const heightUnchanged = isAuto || panel.h === pos.h;
+  if (
+    panel.x === pos.x &&
+    panel.y === pos.y &&
+    panel.w === pos.w &&
+    heightUnchanged
+  ) {
+    return null;
+  }
+  return {
+    ...panel,
+    x: pos.x,
+    y: pos.y,
+    w: pos.w,
+    h: isAuto ? panel.h : pos.h,
+  };
+}
+
 /**
  * Build a layout map for every responsive breakpoint. At ``xs`` (mobile),
  * panel widths are doubled (capped to the column count) and panels stack
