@@ -2,6 +2,7 @@ import {
   useState,
   useRef,
   useEffect,
+  useMemo,
   memo,
   useCallback,
   type Ref,
@@ -74,8 +75,13 @@ import {
 } from 'src/config.context';
 import PanelEditor, { EditablePanel } from 'src/components/reports/PanelEditor';
 import { EditPanelSkeleton } from 'src/components/reports/PanelLoadingSkeletons';
+import PanelItem from 'src/components/reports/PanelItem';
 import PanelGridRow from 'src/components/reports/PanelGridRow';
-import type { ResponsiveBreakpoint } from 'src/components/reports/panelLayout';
+import { usePermissionState } from 'src/hooks/usePermissions';
+import {
+  mergePanelLayout,
+  type ResponsiveBreakpoint,
+} from 'src/components/reports/panelLayout';
 import {
   DASHBOARD_NAVBAR_HEIGHT,
   DASHBOARD_SIDEBAR_WIDTH_VAR,
@@ -99,6 +105,14 @@ function uid() {
   _counter += 1;
   return `id-${Date.now()}-${_counter}`;
 }
+
+// Stable references for the live edit-mode panel preview. Edit mode has no
+// filled input bar (empty varData) and never uses signed capability tokens —
+// panels execute via the token-less ad-hoc path, so these can be module-level
+// singletons to keep PanelItem's memoization stable across re-renders.
+const EMPTY_VAR_DATA: Record<string, { label?: string; value?: string }> = {};
+const NO_CAPABILITY = (): undefined => undefined;
+const NOOP = (): void => {};
 
 function toEditableRows(rows: Row[] | undefined): EditableRow[] {
   if (!Array.isArray(rows)) return [];
@@ -180,6 +194,8 @@ interface EditablePanelCardProps {
   onDelete: () => void;
   moveTargetRows: ReadonlyArray<{ id: string; name: string }>;
   onMoveToRow: (targetRowId: string) => void;
+  resolveQuery: (cypher: string | undefined) => string | undefined;
+  allInputs: ReportInput[];
 }
 
 function EditablePanelCard({
@@ -188,11 +204,33 @@ function EditablePanelCard({
   onDelete,
   moveTargetRows,
   onMoveToRow,
+  resolveQuery,
+  allInputs,
 }: EditablePanelCardProps) {
   const [moveMenuAnchor, setMoveMenuAnchor] = useState<HTMLElement | null>(
     null,
   );
   const moveMenuOpen = Boolean(moveMenuAnchor);
+  const { hasPermission } = usePermissionState();
+  const canPreview = hasPermission('query:execute');
+  // Auto-height panels are content-sized: the card grows to its content and the
+  // grid cell grows to match (PanelGridRow measures it). Clamping/clipping these
+  // to the configured cell height (as fixed-height panels do) cuts them off.
+  const autoHeight = panel.auto_height === true;
+
+  // Strip layout-only fields (x/y/w/h) so dragging or resizing a panel does not
+  // change the identity of the object handed to PanelItem — only content edits
+  // (cypher, params, type, settings) should re-run the live preview query.
+  // ad-hoc query results are not cached, so a refire on every drag tick would
+  // spam the backend.
+  const { x: _x, y: _y, w: _w, h: _h, ...contentFields } = panel;
+  const contentSignature = JSON.stringify(contentFields);
+  // Re-derived only when the content signature changes (not on layout-only
+  // re-renders), keeping the object handed to PanelItem referentially stable.
+  const previewPanel = useMemo<EditablePanel>(
+    () => contentFields,
+    [contentSignature],
+  );
 
   return (
     <Paper
@@ -200,7 +238,7 @@ function EditablePanelCard({
       sx={{
         position: 'relative',
         p: 1,
-        height: '100%',
+        height: autoHeight ? 'auto' : '100%',
         minHeight: 0,
         display: 'flex',
         flexDirection: 'column',
@@ -221,8 +259,28 @@ function EditablePanelCard({
           </Typography>
         )}
       </Stack>
-      <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        <EditPanelSkeleton type={panel.type} />
+      <Box
+        sx={
+          autoHeight
+            ? { overflow: 'visible' }
+            : { flex: 1, minHeight: 0, overflow: 'hidden' }
+        }
+      >
+        {canPreview ? (
+          <PanelItem
+            item={previewPanel}
+            rowIndex={0}
+            index={0}
+            varData={EMPTY_VAR_DATA}
+            allInputs={allInputs}
+            resolveQuery={resolveQuery}
+            resolveCapability={NO_CAPABILITY}
+            refreshKey={0}
+            onTokenExpired={NOOP}
+          />
+        ) : (
+          <EditPanelSkeleton type={panel.type} />
+        )}
       </Box>
 
       {/* Edit/delete controls. Drag and resize are handled by react-grid-layout. */}
@@ -764,6 +822,8 @@ interface EditableRowCardProps {
   dragHandleProps: DragHandleProps;
   moveTargetRows: ReadonlyArray<{ id: string; name: string }>;
   onMovePanel: (panelId: string, targetRowId: string) => void;
+  resolveQuery: (cypher: string | undefined) => string | undefined;
+  allInputs: ReportInput[];
 }
 
 const EditableRowCard = memo(function EditableRowCard({
@@ -779,6 +839,8 @@ const EditableRowCard = memo(function EditableRowCard({
   dragHandleProps,
   moveTargetRows,
   onMovePanel,
+  resolveQuery,
+  allInputs,
 }: EditableRowCardProps) {
   const [rowName, setRowName] = useState(row.name);
 
@@ -903,6 +965,8 @@ const EditableRowCard = memo(function EditableRowCard({
                   onMoveToRow={(targetRowId) =>
                     onMovePanel(panel._id, targetRowId)
                   }
+                  resolveQuery={resolveQuery}
+                  allInputs={allInputs}
                 />
               );
             }}
@@ -1014,6 +1078,15 @@ function EditableReportView({
     report.queries ?? {},
   );
   const namedQueriesRef = useRef<Record<string, string>>(report.queries ?? {});
+  // Resolve a panel's cypher against the live (unsaved) named-queries map,
+  // mirroring ReportView's resolution so edit-mode previews match view mode.
+  const resolveQuery = useCallback(
+    (cypher: string | undefined): string | undefined => {
+      if (cypher === undefined) return undefined;
+      return namedQueries[cypher] ?? cypher;
+    },
+    [namedQueries],
+  );
   const [editableRows, setEditableRows] = useState<EditableRow[]>(
     toEditableRows(report.rows),
   );
@@ -1259,22 +1332,11 @@ function EditableReportView({
           const nextPanels = r.panels.map((panel, idx) => {
             const item = layout.find((l) => l.i === String(idx));
             if (!item) return panel;
-            if (
-              panel.x === item.x &&
-              panel.y === item.y &&
-              panel.w === item.w &&
-              panel.h === item.h
-            ) {
-              return panel;
-            }
-            dirty = true;
-            return {
-              ...panel,
-              x: item.x,
-              y: item.y,
-              w: item.w,
-              h: item.h,
-            };
+            // mergePanelLayout returns null when nothing meaningful changed and
+            // preserves the derived height for auto-height panels (see its doc).
+            const merged = mergePanelLayout(panel, item);
+            if (merged) dirty = true;
+            return merged ?? panel;
           });
           return dirty ? { ...r, panels: nextPanels } : r;
         }),
@@ -1450,6 +1512,8 @@ function EditableReportView({
                       onMovePanel={(panelId, targetRowId) =>
                         movePanel(panelId, row._id, targetRowId)
                       }
+                      resolveQuery={resolveQuery}
+                      allInputs={editableInputs}
                     />
                   )}
                 </SortableRowWrapper>

@@ -6,8 +6,14 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
+import { AuthContext } from 'src/auth.context';
+import { AuthConfigContext } from 'src/authConfig.context';
 import EditableReportView from 'src/components/EditableReportView';
 import { Report } from 'src/config.context';
+import {
+  CurrentUserStateProvider,
+  type CurrentUser,
+} from 'src/hooks/useCurrentUser';
 
 jest.mock('src/components/reports/PanelEditor', () => ({
   __esModule: true,
@@ -63,8 +69,52 @@ const REPORT: Report = {
   ],
 };
 
+function userWith(permissions: string[]): CurrentUser {
+  return {
+    user_id: 'u1',
+    sub: 'sub-1',
+    iss: 'https://idp.example',
+    email: null,
+    display_name: 'Editor',
+    created_at: '2024-01-01T00:00:00Z',
+    last_login: '2024-01-01T00:00:00Z',
+    archived_at: null,
+    permissions,
+  };
+}
+
+function renderAsUser(report: Report, permissions: string[]) {
+  return render(
+    <Wrapper>
+      <AuthConfigContext.Provider
+        value={{ auth_required: false, oidc: null, loaded: true }}
+      >
+        <AuthContext.Provider value={{ accessToken: null, isLoading: false }}>
+          <CurrentUserStateProvider
+            value={{ currentUser: userWith(permissions), loading: false }}
+          >
+            <EditableReportView
+              report={report}
+              reportId="r1"
+              onSave={jest.fn()}
+              onCancel={jest.fn()}
+            />
+          </CurrentUserStateProvider>
+        </AuthContext.Provider>
+      </AuthConfigContext.Provider>
+    </Wrapper>,
+  );
+}
+
 describe('EditableReportView', () => {
-  afterEach(cleanup);
+  let originalFetch: typeof global.fetch;
+  beforeEach(() => {
+    originalFetch = global.fetch;
+  });
+  afterEach(() => {
+    cleanup();
+    global.fetch = originalFetch;
+  });
 
   it('renders the edit toolbar and editable rows', () => {
     render(
@@ -195,5 +245,40 @@ describe('EditableReportView', () => {
         '',
       ),
     );
+  });
+
+  it('renders a live panel preview via the token-less ad-hoc path when the user can execute queries', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ results: [{ total: 5 }] }),
+    }) as unknown as typeof global.fetch;
+
+    renderAsUser(REPORT, ['reports:write', 'query:execute']);
+
+    // The panel's named cypher resolves against the unsaved queries map and is
+    // executed via the ad-hoc endpoint (no signed capability token).
+    await waitFor(() =>
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/v1/query/adhoc',
+        expect.anything(),
+      ),
+    );
+    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+    expect(body.query).toBe('MATCH (n) RETURN count(n) AS total');
+  });
+
+  it('falls back to a skeleton (no query) when the user lacks query:execute', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ results: [] }),
+    }) as unknown as typeof global.fetch;
+
+    renderAsUser(REPORT, ['reports:write']);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Row name')).toBeInTheDocument(),
+    );
+    const hitAdhoc = (global.fetch as jest.Mock).mock.calls.some(
+      (call) => call[0] === '/api/v1/query/adhoc',
+    );
+    expect(hitAdhoc).toBe(false);
   });
 });
