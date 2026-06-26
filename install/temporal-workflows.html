@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Temporal Workflows - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="MCP Toolsets" href="mcp-toolsets.html" /><link rel="prev" title="Scheduled Chats" href="chat-schedules.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Temporal Workflows"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#purpose">Purpose</a></li>
+<li><a class="reference internal" href="#architecture">Architecture</a></li>
+<li><a class="reference internal" href="#identity-and-permissions">Identity and permissions</a></li>
+<li><a class="reference internal" href="#confirmation-bypass-model">Confirmation bypass model</a></li>
+<li><a class="reference internal" href="#the-cve-repo-report-workflow">The cve_repo_report workflow</a></li>
+<li><a class="reference internal" href="#configuration">Configuration</a></li>
+<li><a class="reference internal" href="#local-development">Local development</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Temporal Workflows</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="temporal-workflows">
+<h1>Temporal Workflows<a class="headerlink" href="#temporal-workflows" title="Link to this heading">¶</a></h1>
+<section id="purpose">
+<h2>Purpose<a class="headerlink" href="#purpose" title="Link to this heading">¶</a></h2>
+<p>Scheduled query actions like <code class="docutils literal notranslate"><span class="pre">slack</span></code> or <code class="docutils literal notranslate"><span class="pre">sqs</span></code> are fire-and-forget. The <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action instead hands the query results to a durable, multi-step <a class="reference external" href="https://temporal.io/">Temporal</a> workflow executed by a dedicated Seizu worker. The first built-in workflow, <code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code>, runs an AI chat session per affected repository that evaluates newly discovered CVEs and creates or updates a versioned findings report.</p>
+</section>
+<section id="architecture">
+<h2>Architecture<a class="headerlink" href="#architecture" title="Link to this heading">¶</a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu-scheduled-queries ── temporal action ──&gt; Temporal server (task queue: seizu-workflows)
+</span><span data-line="2">                                                        │
+</span><span data-line="3">                                                        ▼
+</span><span data-line="4">                                              seizu-temporal-worker
+</span><span data-line="5">                                     (workflows + activities: headless AI chat
+</span><span data-line="6">                                      sessions, skill rendering, report tools)
+</span></pre></div>
+</div>
+<ul class="simple">
+<li><p>The <strong>scheduled query worker</strong> dispatches matching query results to the <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action, which starts a workflow run. The workflow ID embeds the scheduled query ID and run marker, so redelivery of the same run is idempotent.</p></li>
+<li><p>The <strong>Temporal server</strong> in local development is the lightweight CLI dev server (<code class="docutils literal notranslate"><span class="pre">temporal</span> <span class="pre">server</span> <span class="pre">start-dev</span></code>, in-memory). The Web UI is at <code class="docutils literal notranslate"><span class="pre">http://localhost:8233</span></code>.</p></li>
+<li><p>The <strong>Seizu temporal worker</strong> (<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">reporting.temporal_worker</span></code>) hosts the workflow and activity code. Activities own all I/O: resolving the creator’s identity, rendering skills, driving the chat agent, and storing results.</p></li>
+</ul>
+</section>
+<section id="identity-and-permissions">
+<h2>Identity and permissions<a class="headerlink" href="#identity-and-permissions" title="Link to this heading">¶</a></h2>
+<p>A workflow runs <strong>as the user who created the scheduled query</strong>. The worker resolves that user’s permissions from the last role claim observed on one of their authenticated requests (stored on the user profile), through the same RBAC resolution the request path uses. Consequences:</p>
+<ul class="simple">
+<li><p>Every tool call the AI session makes is checked against the creator’s permissions, exactly as in interactive chat (including the <code class="docutils literal notranslate"><span class="pre">chat:tools:call</span></code> gate).</p></li>
+<li><p>If the creator is archived, workflow sessions fail and stop.</p></li>
+<li><p>Role claims are snapshots updated only by an authenticated Seizu request.
+A downgrade at the identity provider therefore does <strong>not</strong> immediately
+revoke headless permissions: the lag is unbounded until the creator next
+authenticates. During that interval a previously authorized
+<code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code> grant may still be used. Operators must archive
+the Seizu user or disable their scheduled queries when immediate revocation
+is required.</p></li>
+</ul>
+</section>
+<section id="confirmation-bypass-model">
+<h2>Confirmation bypass model<a class="headerlink" href="#confirmation-bypass-model" title="Link to this heading">¶</a></h2>
+<p>Interactive chat requires per-action confirmation before mutating tools run. A headless workflow has no approver, so confirmations are governed by the <strong><code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code></strong> permission (granted to <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> and <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code> by default):</p>
+<ul class="simple">
+<li><p>When the scheduled query’s creator holds the permission, the workflow’s AI sessions run with confirmations bypassed; every bypassed tool execution is audit-logged by <code class="docutils literal notranslate"><span class="pre">mcp_runtime</span></code>.</p></li>
+<li><p>When the creator does not hold it, confirmation-gated tools fail closed for the run; the headless system-prompt addendum tells the model to note the block in its summary and move on.</p></li>
+<li><p>Chat-safe gating (<code class="docutils literal notranslate"><span class="pre">chat_safe_only</span></code>) and the creator’s RBAC permissions are enforced on top, unchanged.</p></li>
+</ul>
+<p>The same permission gates the chat UI’s optional “Bypass confirmations” mode and the <code class="docutils literal notranslate"><span class="pre">agent_chat</span></code> scheduled query action (see the <a class="reference internal" href="#scheduled-queries.html"><span class="xref myst">scheduled queries documentation</span></a>).</p>
+</section>
+<section id="the-cve-repo-report-workflow">
+<h2>The cve_repo_report workflow<a class="headerlink" href="#the-cve-repo-report-workflow" title="Link to this heading">¶</a></h2>
+<p>Input: the scheduled query’s result rows, each carrying at least a <code class="docutils literal notranslate"><span class="pre">repo</span></code> key (repository fullname). Per repository, sequentially:</p>
+<ol class="arabic simple">
+<li><p>Renders the <code class="docutils literal notranslate"><span class="pre">cve_response/cve_repo_assessment</span></code> skill with the repository name and its CVE rows.</p></li>
+<li><p>Creates a workflow chat session owned by the creator and runs the full chat agent with the rendered skill as the first message. Workflow sessions are excluded from the interactive chat sidebar and cannot be continued through the chat API.</p></li>
+<li><p>The agent creates the report <code class="docutils literal notranslate"><span class="pre">CVE</span> <span class="pre">Findings</span> <span class="pre">–</span> <span class="pre">{repo}</span></code> if missing and appends a new version with a dated markdown findings summary. Reports are versioned; prior findings are preserved.</p></li>
+</ol>
+<p>A failing repository records an error in the workflow result without aborting the remaining repositories.</p>
+<p>The CVE rows originate in the graph and are an untrusted prompt input. Seizu
+JSON-encodes and HTML-escapes them inside an <code class="docutils literal notranslate"><span class="pre">&lt;untrusted_cve_data&gt;</span></code> block, then
+prepends an instruction that the block is evidence rather than executable
+instructions. Keep this boundary when adding fields or workflows. It reduces
+prompt-injection risk but does not make graph data trusted; retain normal RBAC,
+chat-safe tool filtering, result limits, and bypass audit logging.</p>
+<p>Temporal activities use the same <code class="docutils literal notranslate"><span class="pre">run_headless_chat()</span></code> entry point as scheduled
+chats. They therefore share token/cost accounting, role-specific model
+selection, degradation behavior, terminal statuses, and the final budget
+ledger. Temporal remains optional: scheduled chats and interactive chat do not
+require a Temporal server.</p>
+<p>The seeded scheduled query <strong>New CVEs affecting repositories</strong> watches the
+mappedsky GitHub organization sync and selects open <code class="docutils literal notranslate"><span class="pre">SecurityIssue</span></code> nodes whose
+ISO-8601 <code class="docutils literal notranslate"><span class="pre">created_at</span></code> value falls within the scan window. It then joins
+their existing <code class="docutils literal notranslate"><span class="pre">CVEMetadata</span></code> records to produce per-repository rows. This
+detects a newly observed repository exposure even when the CVE itself was
+published earlier.</p>
+</section>
+<section id="configuration">
+<h2>Configuration<a class="headerlink" href="#configuration" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_ADDRESS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">localhost:7233</span></code></p></td>
+<td><p>Temporal frontend (gRPC) address. <code class="docutils literal notranslate"><span class="pre">temporal:7233</span></code> in docker compose.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_NAMESPACE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">default</span></code></p></td>
+<td><p>Namespace workflows run in.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_TASK_QUEUE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">seizu-workflows</span></code></p></td>
+<td><p>Task queue shared by the action module and the worker.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_WORKER_ENABLED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to disable the worker process.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_WORKFLOW_MAX_RESULT_ROWS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">200</span></code></p></td>
+<td><p>Cap on result rows forwarded into a workflow.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">600</span></code></p></td>
+<td><p>Per-repository AI chat activity timeout.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The worker also needs the chat configuration (<code class="docutils literal notranslate"><span class="pre">CHAT_LLM_*</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_*</span></code>) because it drives headless chat sessions. Note that <code class="docutils literal notranslate"><span class="pre">CHAT_LLM_PROVIDER=mock</span></code> echoes input and cannot call tools — exercising the CVE workflow end-to-end requires a real LLM provider.</p>
+</section>
+<section id="local-development">
+<h2>Local development<a class="headerlink" href="#local-development" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">up</span></code> starts the <code class="docutils literal notranslate"><span class="pre">temporal</span></code> dev server and the <code class="docutils literal notranslate"><span class="pre">seizu-temporal-worker</span></code> service alongside the rest of the stack:</p>
+<ul class="simple">
+<li><p>Temporal Web UI: <code class="docutils literal notranslate"><span class="pre">http://localhost:8233</span></code> — inspect workflow runs (<code class="docutils literal notranslate"><span class="pre">seizu:cve_repo_report:&lt;scheduled_query_id&gt;:&lt;run</span> <span class="pre">marker&gt;</span></code>), activity retries, and results.</p></li>
+<li><p>The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.</p></li>
+</ul>
+<p>To add a workflow: define the workflow + activities under <code class="docutils literal notranslate"><span class="pre">reporting/temporal_workflows/</span></code>, register them in <code class="docutils literal notranslate"><span class="pre">reporting/temporal_worker.py</span></code>, and add a <code class="docutils literal notranslate"><span class="pre">WorkflowSpec</span></code> (name, description, input factory) to <code class="docutils literal notranslate"><span class="pre">WORKFLOW_REGISTRY</span></code>. The factory converts the common scheduled-query context into that workflow’s typed input; the description is surfaced in the action form’s workflow picker. Use <code class="docutils literal notranslate"><span class="pre">reporting.services.headless_chat.run_headless_chat</span></code> for AI sessions so identity, confirmation, and audit handling stay consistent.</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="chat-schedules.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Scheduled Chats</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="mcp-toolsets.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">MCP Toolsets</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Security Guidance - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Query Console" href="query-console.html" /><link rel="prev" title="CLI" href="cli.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Security Guidance"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#production-checklist">Production checklist</a></li>
+<li><a class="reference internal" href="#seizu-authentication">Seizu authentication</a></li>
+<li><a class="reference internal" href="#rbac">RBAC</a><ul>
+<li><a class="reference internal" href="#headless-role-snapshots">Headless role snapshots</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#report-query-signing-secret">Report Query Signing Secret</a></li>
+<li><a class="reference internal" href="#query-execution">Query Execution</a></li>
+<li><a class="reference internal" href="#mcp">MCP</a></li>
+<li><a class="reference internal" href="#scheduled-queries">Scheduled Queries</a></li>
+<li><a class="reference internal" href="#report-store-and-secrets">Report Store And Secrets</a></li>
+<li><a class="reference internal" href="#neo4j-network-exposure">Neo4j Network Exposure</a></li>
+<li><a class="reference internal" href="#neo4j-authentication">Neo4j Authentication</a></li>
+<li><a class="reference internal" href="#neo4j-load-csv-and-ssrf-hardening">Neo4j LOAD CSV And SSRF Hardening</a></li>
+<li><a class="reference internal" href="#neo4j-apoc-and-extension-hardening">Neo4j APOC And Extension Hardening</a></li>
+<li><a class="reference internal" href="#neo4j-http-browser-and-cors">Neo4j HTTP, Browser, And CORS</a></li>
+<li><a class="reference internal" href="#tls">TLS</a></li>
+<li><a class="reference internal" href="#logging-and-audit">Logging And Audit</a></li>
+<li><a class="reference internal" href="#production-references">Production References</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Security Guidance</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="security-guidance">
+<h1>Security Guidance<a class="headerlink" href="#security-guidance" title="Link to this heading">¶</a></h1>
+<p>Seizu exposes operational views over a Neo4j security graph. Treat access to Seizu as access to the graph data itself, and treat access to the Query Console, MCP <code class="docutils literal notranslate"><span class="pre">graph__query</span></code>, and Cypher-backed toolsets as high-trust capabilities.</p>
+<p>This page covers the recommended production posture for Seizu and the Neo4j hardening settings that should sit underneath it.</p>
+<section id="production-checklist">
+<h2>Production checklist<a class="headerlink" href="#production-checklist" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p>Require authentication for every Seizu request.</p></li>
+<li><p>Validate JWT issuer and audience, and use a strong signing algorithm allowlist.</p></li>
+<li><p>Assign the least-privileged Seizu role that supports each user’s workflow.</p></li>
+<li><p>Keep ad-hoc Cypher execution limited to trusted roles that explicitly need <code class="docutils literal notranslate"><span class="pre">query:execute</span></code>.</p></li>
+<li><p>Prefer report views for read-only consumers; report queries are signed by the backend and are the safer default for shared dashboards.</p></li>
+<li><p>Limit MCP built-ins to the groups users actually need.</p></li>
+<li><p>Keep Neo4j reachable only from Seizu, workers, and trusted sync jobs.</p></li>
+<li><p>Disable Neo4j network and local-file import paths unless you explicitly need them.</p></li>
+<li><p>Restrict Neo4j extension loading and APOC access to a minimal allowlist.</p></li>
+<li><p>Run Seizu and Neo4j behind TLS at the network edge.</p></li>
+<li><p>Keep Seizu, Neo4j, APOC, and base container images patched.</p></li>
+<li><p>Protect graph data, report-store data, logs, backups, and config files with the same care as production credentials.</p></li>
+</ul>
+</section>
+<section id="seizu-authentication">
+<h2>Seizu authentication<a class="headerlink" href="#seizu-authentication" title="Link to this heading">¶</a></h2>
+<p>Do not run production with authentication disabled.</p>
+<p>Set:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">DEVELOPMENT_ONLY_REQUIRE_AUTH</span><span class="o">=</span><span class="nb">true</span>
+</span><span data-line="2"><span class="nv">JWKS_URL</span><span class="o">=</span>https://idp.example.com/application/o/seizu/jwks/
+</span><span data-line="3"><span class="nv">JWT_ISSUER</span><span class="o">=</span>https://idp.example.com/application/o/seizu/
+</span><span data-line="4"><span class="nv">JWT_AUDIENCE</span><span class="o">=</span>seizu
+</span><span data-line="5"><span class="nv">ALLOWED_JWT_ALGORITHMS</span><span class="o">=</span>RS256,ES256,ES512
+</span><span data-line="6"><span class="nv">OIDC_AUTHORITY</span><span class="o">=</span>https://idp.example.com/application/o/seizu/
+</span><span data-line="7"><span class="nv">OIDC_CLIENT_ID</span><span class="o">=</span>seizu
+</span><span data-line="8"><span class="nv">OIDC_SCOPE</span><span class="o">=</span><span class="s2">&quot;openid email&quot;</span>
+</span></pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">JWT_ISSUER</span></code> and <code class="docutils literal notranslate"><span class="pre">JWT_AUDIENCE</span></code> whenever your identity provider can issue stable values. Leaving them empty makes token validation less specific than it should be in production.</p>
+<p>If Seizu is exposed through HTTPS directly, keep <code class="docutils literal notranslate"><span class="pre">TALISMAN_FORCE_HTTPS=true</span></code>. If TLS terminates at a load balancer or ingress, enforce HTTPS and HSTS there and set Seizu’s proxy headers correctly for your deployment.</p>
+</section>
+<section id="rbac">
+<h2>RBAC<a class="headerlink" href="#rbac" title="Link to this heading">¶</a></h2>
+<p>Seizu resolves a role from the configured JWT claim and maps it to permissions.</p>
+<p>Use built-in roles conservatively:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Role</p></th>
+<th class="head"><p>Use</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code></p></td>
+<td><p>Read reports and dashboard. No ad-hoc query console or query history access.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code></p></td>
+<td><p>Viewer plus report authoring, chat tool/skill use (<code class="docutils literal notranslate"><span class="pre">chat:tools:call</span></code>, <code class="docutils literal notranslate"><span class="pre">chat:skills:call</span></code>), chat confirmation bypass (<code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code>), and scheduled chats (<code class="docutils literal notranslate"><span class="pre">chat:schedule</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code></p></td>
+<td><p>Editor plus toolsets, tools, skillsets, skills, scheduled queries, roles, and administrative objects.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Recommended settings:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">RBAC_ROLE_CLAIM</span><span class="o">=</span>seizu_role
+</span><span data-line="2"><span class="nv">RBAC_DEFAULT_ROLE</span><span class="o">=</span>
+</span></pre></div>
+</div>
+<p>Setting <code class="docutils literal notranslate"><span class="pre">RBAC_DEFAULT_ROLE=</span></code> denies access when the token does not contain an explicit Seizu role. This is safer than silently assigning a default role to every authenticated user.</p>
+<p>Use user-defined roles for narrower access. For example, separate report authors from users who can manage scheduled queries or toolsets.
+If a user truly needs ad-hoc Cypher, grant <code class="docutils literal notranslate"><span class="pre">query:execute</span></code> only to a tightly scoped role and keep that role out of general viewer assignments.</p>
+<section id="headless-role-snapshots">
+<h3>Headless role snapshots<a class="headerlink" href="#headless-role-snapshots" title="Link to this heading">¶</a></h3>
+<p>Scheduled chats and Temporal AI activities execute without a live bearer
+token. They resolve permissions from the role claim stored on the user’s last
+authenticated Seizu request. Identity-provider role changes are therefore not
+background-synchronized, and the propagation lag is unbounded until that user
+authenticates again. A downgraded user may retain
+<code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code> for headless runs during that interval.</p>
+<p>For immediate revocation, archive the Seizu user or disable their schedules
+and scheduled queries. Treat bypass audit logs as a detection control, not as
+revocation enforcement.</p>
+</section>
+</section>
+<section id="report-query-signing-secret">
+<h2>Report Query Signing Secret<a class="headerlink" href="#report-query-signing-secret" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">REPORT_QUERY_SIGNING_SECRET</span></code> signs the backend-issued capability tokens used by report panels.
+Treat it like any other application signing key:</p>
+<ul class="simple">
+<li><p>Use a cryptographically random secret.</p></li>
+<li><p>Use at least 32 bytes of entropy; 64 bytes is a better default.</p></li>
+<li><p>Encode it as hex or base64, then store the encoded string in your secret manager or deployment env vars.</p></li>
+<li><p>If you use hex, 32 bytes becomes 64 characters and 64 bytes becomes 128 characters.</p></li>
+<li><p>If you use base64, 32 bytes is typically 44 characters with padding; longer secrets will be proportionally longer.</p></li>
+<li><p>Generate a fresh value per deployment environment. Do not reuse the same secret across dev, staging, and production unless you have a deliberate reason to do so.</p></li>
+<li><p>Keep it stable across restarts so existing report tokens remain valid until they expire.</p></li>
+<li><p>Rotate it if the secret is exposed; rotation invalidates outstanding report tokens immediately.</p></li>
+</ul>
+<p>Example generation commands:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span>
+</span><span data-line="2">openssl<span class="w"> </span>rand<span class="w"> </span>-base64<span class="w"> </span><span class="m">48</span>
+</span><span data-line="3">python<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;&#39;PY&#39;</span>
+</span><span data-line="4"><span class="s">import secrets</span>
+</span><span data-line="5"><span class="s">print(secrets.token_hex(32))</span>
+</span><span data-line="6"><span class="s">PY</span>
+</span></pre></div>
+</div>
+<p>Prefer a longer secret if your secret storage format allows it. The exact encoding does not matter as long as the full random value is preserved without truncation or normalization.</p>
+</section>
+<section id="query-execution">
+<h2>Query Execution<a class="headerlink" href="#query-execution" title="Link to this heading">¶</a></h2>
+<p>Seizu validates Cypher before execution:</p>
+<ul class="simple">
+<li><p>Neo4j <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span></code> must classify the query as read-only.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">LOAD</span> <span class="pre">CSV</span></code>, APOC network procedures, APOC dynamic Cypher execution helpers, and selected Neo4j administration commands are blocked.</p></li>
+<li><p>The validator scans original, comment-stripped, and Cypher Unicode-decoded forms to catch common obfuscation.</p></li>
+</ul>
+<p>This validation is a guardrail, not the only control. Query-capable users can still read data they are allowed to query. Do not give Query Console or MCP graph-query permissions to users who should not have broad graph read access.
+With the current split between execution paths:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">POST</span> <span class="pre">/api/v1/query/adhoc</span></code> is for trusted ad-hoc exploration and always records query history.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">POST</span> <span class="pre">/api/v1/query/report</span></code> is for report panels and only accepts backend-signed tokens bound to the current user and report version.</p></li>
+<li><p>Report tokens are short-lived capabilities. Treat them as authorization artifacts, not as values to expose or store outside the request flow.</p></li>
+<li><p>Report API responses do not include <code class="docutils literal notranslate"><span class="pre">query_capabilities</span></code> unless the caller explicitly opts in with <code class="docutils literal notranslate"><span class="pre">include_query_capabilities=true</span></code>.</p></li>
+</ul>
+<p>When writing reports, scheduled queries, and tools:</p>
+<ul class="simple">
+<li><p>Prefer parameters for user-controlled values.</p></li>
+<li><p>Do not concatenate untrusted values into Cypher.</p></li>
+<li><p>Avoid dynamic labels, relationship types, and property names unless the value comes from a strict allowlist.</p></li>
+<li><p>Add explicit <code class="docutils literal notranslate"><span class="pre">LIMIT</span></code> values to exploratory queries.</p></li>
+<li><p>Keep returned columns narrow; avoid returning entire nodes if a few fields are enough.</p></li>
+<li><p>Treat error messages, query history, and signed report-query tokens as sensitive.</p></li>
+<li><p>Keep report panels on signed report execution; do not route them through the ad-hoc console path.</p></li>
+</ul>
+</section>
+<section id="mcp">
+<h2>MCP<a class="headerlink" href="#mcp" title="Link to this heading">¶</a></h2>
+<p>The MCP endpoint can expose Seizu management tools and user-defined Cypher-backed tools to LLM clients.</p>
+<p>Recommended settings:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">MCP_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+</span><span data-line="2"><span class="nv">MCP_ENABLED_BUILTINS</span><span class="o">=</span>graph,reports
+</span></pre></div>
+</div>
+<p>Only enable the built-in groups that users actually need. Use <code class="docutils literal notranslate"><span class="pre">MCP_ENABLED_BUILTINS=none</span></code> if you only want user-defined toolsets exposed.</p>
+<p>For MCP clients that support OAuth discovery, configure:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">MCP_OAUTH_AUTHORIZATION_ENDPOINT</span><span class="o">=</span>https://idp.example.com/application/o/seizu/authorize/
+</span><span data-line="2"><span class="nv">MCP_OAUTH_TOKEN_ENDPOINT</span><span class="o">=</span>https://idp.example.com/application/o/token/
+</span><span data-line="3"><span class="nv">MCP_OAUTH_ISSUER</span><span class="o">=</span>https://idp.example.com/application/o/seizu/
+</span><span data-line="4"><span class="nv">MCP_RESOURCE_URL</span><span class="o">=</span>https://seizu.example.com/api/v1/mcp
+</span></pre></div>
+</div>
+<p>Toolsets should be treated like code:</p>
+<ul class="simple">
+<li><p>Review Cypher before enabling a tool.</p></li>
+<li><p>Keep parameters typed and required where possible.</p></li>
+<li><p>Return the minimum useful data.</p></li>
+<li><p>Disable or delete tools that are no longer used.</p></li>
+<li><p>Use version history to audit changes.</p></li>
+</ul>
+</section>
+<section id="scheduled-queries">
+<h2>Scheduled Queries<a class="headerlink" href="#scheduled-queries" title="Link to this heading">¶</a></h2>
+<p>Scheduled queries run without an interactive user at execution time. Keep them narrowly scoped.</p>
+<p>Recommendations:</p>
+<ul class="simple">
+<li><p>Require <code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code> only for trusted administrators.</p></li>
+<li><p>Review destination action configs, especially Slack channels and SQS queue names.</p></li>
+<li><p>Avoid placing secrets in scheduled query config.</p></li>
+<li><p>Keep result sizes bounded.</p></li>
+<li><p>Disable scheduled queries that are no longer required.</p></li>
+<li><p>Run workers with only the cloud permissions they need for their configured actions.</p></li>
+</ul>
+</section>
+<section id="report-store-and-secrets">
+<h2>Report Store And Secrets<a class="headerlink" href="#report-store-and-secrets" title="Link to this heading">¶</a></h2>
+<p>Reports, scheduled queries, roles, toolsets, tools, skillsets, and skills are stored in the report store. Protect that store as configuration state, not as disposable cache.</p>
+<p>Recommendations:</p>
+<ul class="simple">
+<li><p>Use IAM roles or workload identity instead of static AWS keys when possible.</p></li>
+<li><p>Limit DynamoDB or SQL credentials to the minimum required tables/database.</p></li>
+<li><p>Encrypt storage volumes and managed database storage.</p></li>
+<li><p>Back up report-store data and test restore paths.</p></li>
+<li><p>Keep Slack tokens, OIDC client secrets, database passwords, and cloud credentials in a secret manager.</p></li>
+<li><p>Do not commit <code class="docutils literal notranslate"><span class="pre">.env</span></code>, credentials files, or generated local state.</p></li>
+</ul>
+</section>
+<section id="neo4j-network-exposure">
+<h2>Neo4j Network Exposure<a class="headerlink" href="#neo4j-network-exposure" title="Link to this heading">¶</a></h2>
+<p>Neo4j should not be directly reachable from end users.</p>
+<p>Recommended production topology:</p>
+<ul class="simple">
+<li><p>Browser/users -&gt; Seizu frontend/API only.</p></li>
+<li><p>Seizu API/workers -&gt; Neo4j Bolt.</p></li>
+<li><p>Cartography/sync jobs -&gt; Neo4j Bolt.</p></li>
+<li><p>No public listener for Neo4j HTTP, HTTPS, or Bolt.</p></li>
+</ul>
+<p>The default development compose stack does not publish Neo4j ports to the host. Keep that pattern in production unless you have a specific operational need.</p>
+<p>If direct Neo4j administration is required, use a private network, VPN, bastion host, or short-lived port forward.</p>
+</section>
+<section id="neo4j-authentication">
+<h2>Neo4j Authentication<a class="headerlink" href="#neo4j-authentication" title="Link to this heading">¶</a></h2>
+<p>The development compose stack uses <code class="docutils literal notranslate"><span class="pre">NEO4J_AUTH=none</span></code> for convenience. Do not use that in production.</p>
+<p>Production should enable Neo4j authentication and use a dedicated Seizu database user:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">NEO4J_AUTH</span><span class="o">=</span>neo4j/&lt;strong-password&gt;
+</span><span data-line="2"><span class="nv">NEO4J_USER</span><span class="o">=</span>seizu
+</span><span data-line="3"><span class="nv">NEO4J_PASSWORD</span><span class="o">=</span>&lt;strong-password&gt;
+</span></pre></div>
+</div>
+<p>With Neo4j Enterprise, use Neo4j RBAC to grant only the graph privileges Seizu needs. At minimum, separate operational administrator accounts from application accounts.</p>
+</section>
+<section id="neo4j-load-csv-and-ssrf-hardening">
+<h2>Neo4j LOAD CSV And SSRF Hardening<a class="headerlink" href="#neo4j-load-csv-and-ssrf-hardening" title="Link to this heading">¶</a></h2>
+<p>Seizu does not need arbitrary Cypher-originated HTTP, FTP, or local-file imports for normal operation. Harden Neo4j so a future validator bypass still cannot make outbound requests or read local files.</p>
+<p>Recommended Neo4j 5.x settings:</p>
+<div class="highlight-properties notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="na">dbms.security.allow_csv_import_from_file_urls</span><span class="o">=</span><span class="s">false</span>
+</span><span data-line="2"><span class="na">internal.dbms.cypher_ip_blocklist</span><span class="o">=</span><span class="s">0.0.0.0/0,::/0</span>
+</span></pre></div>
+</div>
+<p>In Docker environment-variable form:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">NEO4J_dbms_security_allow__csv__import__from__file__urls</span><span class="o">=</span><span class="nb">false</span>
+</span><span data-line="2"><span class="nv">NEO4J_internal_dbms_cypher__ip__blocklist</span><span class="o">=</span><span class="m">0</span>.0.0.0/0,::/0
+</span></pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">dbms.security.allow_csv_import_from_file_urls=false</span></code> disables <code class="docutils literal notranslate"><span class="pre">file:///</span></code> reads through <code class="docutils literal notranslate"><span class="pre">LOAD</span> <span class="pre">CSV</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">internal.dbms.cypher_ip_blocklist=0.0.0.0/0,::/0</span></code> blocks all IPv4 and IPv6 HTTP/FTP requests made by Cypher features such as <code class="docutils literal notranslate"><span class="pre">LOAD</span> <span class="pre">CSV</span></code>.</p>
+<p>If your Neo4j deployment has a legitimate import workflow, prefer offline <code class="docutils literal notranslate"><span class="pre">neo4j-admin</span> <span class="pre">database</span> <span class="pre">import</span></code> or a tightly controlled import directory. If you must allow network loading, block metadata and internal ranges at both Neo4j and network egress layers.</p>
+</section>
+<section id="neo4j-apoc-and-extension-hardening">
+<h2>Neo4j APOC And Extension Hardening<a class="headerlink" href="#neo4j-apoc-and-extension-hardening" title="Link to this heading">¶</a></h2>
+<p>APOC and other Neo4j extensions increase the callable surface from Cypher. Load only what you need.</p>
+<p>Seizu’s development compose stack uses a narrow APOC utility allowlist:</p>
+<div class="highlight-properties notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="na">dbms.security.procedures.allowlist</span><span class="o">=</span><span class="s">apoc.convert.*,apoc.text.*</span>
+</span><span data-line="2"><span class="na">dbms.security.procedures.unrestricted</span><span class="o">=</span><span class="s">apoc.convert.*,apoc.text.*</span>
+</span></pre></div>
+</div>
+<p>In Docker environment-variable form:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">NEO4J_dbms_security_procedures_allowlist</span><span class="o">=</span>apoc.convert.*,apoc.text.*
+</span><span data-line="2"><span class="nv">NEO4J_dbms_security_procedures_unrestricted</span><span class="o">=</span>apoc.convert.*,apoc.text.*
+</span></pre></div>
+</div>
+<p>Avoid broad settings such as:</p>
+<div class="highlight-properties notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="na">dbms.security.procedures.allowlist</span><span class="o">=</span><span class="s">*</span>
+</span><span data-line="2"><span class="na">dbms.security.procedures.unrestricted</span><span class="o">=</span><span class="s">apoc.*</span>
+</span></pre></div>
+</div>
+<p>Do not install APOC Extended, GDS, custom procedures, or other plugins unless a specific Seizu workflow requires them. If you add a plugin, review:</p>
+<ul class="simple">
+<li><p>Network-capable procedures.</p></li>
+<li><p>File import/export procedures.</p></li>
+<li><p>Procedures that execute dynamic Cypher.</p></li>
+<li><p>Procedures that run writes, background jobs, triggers, or schema operations.</p></li>
+</ul>
+<p>Then update the allowlist and Seizu query validator tests accordingly.</p>
+</section>
+<section id="neo4j-http-browser-and-cors">
+<h2>Neo4j HTTP, Browser, And CORS<a class="headerlink" href="#neo4j-http-browser-and-cors" title="Link to this heading">¶</a></h2>
+<p>If users do not need Neo4j Browser in production, disable Neo4j HTTP/HTTPS listeners or keep them on a private administrative network.</p>
+<p>Relevant settings include:</p>
+<div class="highlight-properties notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="na">server.http.enabled</span><span class="o">=</span><span class="s">false</span>
+</span><span data-line="2"><span class="na">server.https.enabled</span><span class="o">=</span><span class="s">false</span>
+</span><span data-line="3"><span class="na">dbms.security.http_access_control_allow_origin</span><span class="o">=</span><span class="s">https://seizu.example.com</span>
+</span></pre></div>
+</div>
+<p>Only keep HTTP enabled when you need health checks, Browser, or administrative access. If it is enabled, do not expose it publicly.</p>
+</section>
+<section id="tls">
+<h2>TLS<a class="headerlink" href="#tls" title="Link to this heading">¶</a></h2>
+<p>Use TLS at the public edge for Seizu. For production Neo4j, also consider TLS for Bolt traffic, especially when Seizu and Neo4j are not on the same trusted private network.</p>
+<p>Neo4j Bolt TLS is controlled by:</p>
+<div class="highlight-properties notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="na">server.bolt.tls_level</span><span class="o">=</span><span class="s">REQUIRED</span>
+</span></pre></div>
+</div>
+<p>This requires certificate configuration and corresponding Seizu driver URI/settings. Do not enable it without testing the Seizu backend, workers, CLI, and sync jobs against the TLS-enabled endpoint.</p>
+</section>
+<section id="logging-and-audit">
+<h2>Logging And Audit<a class="headerlink" href="#logging-and-audit" title="Link to this heading">¶</a></h2>
+<p>Recommendations:</p>
+<ul class="simple">
+<li><p>Keep Seizu API logs and Neo4j logs available for investigation.</p></li>
+<li><p>Avoid DEBUG logging in production unless actively investigating an issue.</p></li>
+<li><p>Treat query text as sensitive because it can include labels, properties, internal identifiers, and user-entered values.</p></li>
+<li><p>Review query history retention expectations with your users.</p></li>
+<li><p>Monitor for blocked validation attempts, repeated query errors, and unusually large result sets.</p></li>
+</ul>
+</section>
+<section id="production-references">
+<h2>Production References<a class="headerlink" href="#production-references" title="Link to this heading">¶</a></h2>
+<p>These upstream Neo4j pages are useful when hardening an environment:</p>
+<ul class="simple">
+<li><p><a class="reference external" href="https://neo4j.com/docs/operations-manual/current/security/checklist/">Neo4j security checklist</a></p></li>
+<li><p><a class="reference external" href="https://neo4j.com/docs/operations-manual/current/security/securing-extensions/">Securing Neo4j extensions</a></p></li>
+<li><p><a class="reference external" href="https://neo4j.com/docs/apoc/current/security-guidelines/">APOC security guidelines</a></p></li>
+<li><p><a class="reference external" href="https://neo4j.com/developer/kb/protecting-against-ssrf/">Protecting Neo4j against SSRF</a></p></li>
+<li><p><a class="reference external" href="https://neo4j.com/developer/kb/protecting-against-cypher-injection/">Protecting against Cypher injection</a></p></li>
+</ul>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="cli.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">CLI</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="query-console.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Query Console</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

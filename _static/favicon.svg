@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140" role="img" aria-label="Seizu">
+  <title>Seizu</title>
+  <rect width="140" height="140" rx="22" fill="#0a0f22"/>
+  <circle cx="70" cy="70" r="50" fill="none" stroke="#8fb4ff" stroke-width="10"/>
+  <circle cx="70" cy="70" r="18" fill="#f5c16c"/>
+</svg>

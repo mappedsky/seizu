@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>CLI - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Security Guidance" href="security.html" /><link rel="prev" title="Dashboard Configuration" href="dashboard.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="CLI"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#installation">Installation</a></li>
+<li><a class="reference internal" href="#connecting-to-a-seizu-api">Connecting to a Seizu API</a></li>
+<li><a class="reference internal" href="#authentication">Authentication</a></li>
+<li><a class="reference internal" href="#common-commands">Common Commands</a></li>
+<li><a class="reference internal" href="#seed-and-export">Seed and Export</a></li>
+<li><a class="reference internal" href="#permissions">Permissions</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">CLI</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="cli">
+<h1>CLI<a class="headerlink" href="#cli" title="Link to this heading">¶</a></h1>
+<p>Seizu includes a <code class="docutils literal notranslate"><span class="pre">seizu</span></code> command-line client for managing reports, scheduled queries, MCP toolsets, MCP skillsets, and seed/export workflows through the REST API.</p>
+<section id="installation">
+<h2>Installation<a class="headerlink" href="#installation" title="Link to this heading">¶</a></h2>
+<p>For a packaged installation, install the CLI-only package:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>seizu-cli
+</span></pre></div>
+</div>
+<p>The full <code class="docutils literal notranslate"><span class="pre">seizu</span></code> server package also installs the same <code class="docutils literal notranslate"><span class="pre">seizu</span></code> command.</p>
+<p>When working from the source checkout with the Docker quickstart, run the CLI inside the backend container:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>seizu<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>--frozen<span class="w"> </span>--no-sync<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>seizu_cli<span class="w"> </span>--help
+</span></pre></div>
+</div>
+<p>For repeated local use, the examples below show the installed <code class="docutils literal notranslate"><span class="pre">seizu</span></code> command. In the Docker quickstart, replace <code class="docutils literal notranslate"><span class="pre">seizu</span></code> with:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>seizu<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>--frozen<span class="w"> </span>--no-sync<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>seizu_cli
+</span></pre></div>
+</div>
+</section>
+<section id="connecting-to-a-seizu-api">
+<h2>Connecting to a Seizu API<a class="headerlink" href="#connecting-to-a-seizu-api" title="Link to this heading">¶</a></h2>
+<p>The CLI talks to the Seizu API. If no API URL is provided, it uses <code class="docutils literal notranslate"><span class="pre">http://localhost:8080</span></code>.</p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">--api-url</span></code> for one command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>--api-url<span class="w"> </span>https://seizu.example.com<span class="w"> </span>reports<span class="w"> </span>list
+</span></pre></div>
+</div>
+<p>Or set <code class="docutils literal notranslate"><span class="pre">SEIZU_API_URL</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nb">export</span><span class="w"> </span><span class="nv">SEIZU_API_URL</span><span class="o">=</span>https://seizu.example.com
+</span><span data-line="2">seizu<span class="w"> </span>reports<span class="w"> </span>list
+</span></pre></div>
+</div>
+<p>You can also create <code class="docutils literal notranslate"><span class="pre">~/.config/seizu/seizu.conf</span></code>:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">api_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://seizu.example.com</span>
+</span><span data-line="2"><span class="nt">seed_file</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">~/dashboards/reporting-dashboard.yaml</span>
+</span></pre></div>
+</div>
+<p>Configuration resolution is:</p>
+<ol class="arabic simple">
+<li><p>CLI flags</p></li>
+<li><p>Environment variables</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">~/.config/seizu/seizu.conf</span></code></p></li>
+<li><p>Built-in defaults</p></li>
+</ol>
+</section>
+<section id="authentication">
+<h2>Authentication<a class="headerlink" href="#authentication" title="Link to this heading">¶</a></h2>
+<p>Unauthenticated development stacks do not require a login. For authenticated deployments, run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>login
+</span></pre></div>
+</div>
+<p>The CLI uses the OAuth Device Authorization Grant. It prints a browser URL and a short code; approve the login in the browser, then the CLI stores the token in the OS keyring. Use <code class="docutils literal notranslate"><span class="pre">--credentials-file</span></code> when a keyring is unavailable:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>--credentials-file<span class="w"> </span>~/.config/seizu/credentials.json<span class="w"> </span>login
+</span></pre></div>
+</div>
+<p>Check or clear the current login:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>whoami
+</span><span data-line="2">seizu<span class="w"> </span><span class="nb">logout</span>
+</span></pre></div>
+</div>
+<p>For automation, pass a bearer token directly:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">SEIZU_TOKEN</span><span class="o">=</span>&lt;access_token&gt;<span class="w"> </span>seizu<span class="w"> </span>reports<span class="w"> </span>list
+</span></pre></div>
+</div>
+</section>
+<section id="common-commands">
+<h2>Common Commands<a class="headerlink" href="#common-commands" title="Link to this heading">¶</a></h2>
+<p>List and inspect reports:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>reports<span class="w"> </span>list
+</span><span data-line="2">seizu<span class="w"> </span>reports<span class="w"> </span>get<span class="w"> </span>&lt;report_id&gt;
+</span><span data-line="3">seizu<span class="w"> </span>reports<span class="w"> </span>versions<span class="w"> </span>&lt;report_id&gt;
+</span><span data-line="4">seizu<span class="w"> </span>reports<span class="w"> </span>version-get<span class="w"> </span>&lt;report_id&gt;<span class="w"> </span>&lt;version&gt;
+</span></pre></div>
+</div>
+<p>Create, clone, publish, and manage dashboard reports:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>reports<span class="w"> </span>create<span class="w"> </span><span class="s2">&quot;Investigation Dashboard&quot;</span>
+</span><span data-line="2">seizu<span class="w"> </span>reports<span class="w"> </span>clone<span class="w"> </span>&lt;report_id&gt;<span class="w"> </span><span class="s2">&quot;Copy of Investigation Dashboard&quot;</span>
+</span><span data-line="3">seizu<span class="w"> </span>reports<span class="w"> </span>publish<span class="w"> </span>&lt;report_id&gt;
+</span><span data-line="4">seizu<span class="w"> </span>reports<span class="w"> </span>unpublish<span class="w"> </span>&lt;report_id&gt;
+</span><span data-line="5">seizu<span class="w"> </span>reports<span class="w"> </span>set-dashboard<span class="w"> </span>&lt;report_id&gt;
+</span><span data-line="6">seizu<span class="w"> </span>reports<span class="w"> </span>delete<span class="w"> </span>&lt;report_id&gt;
+</span></pre></div>
+</div>
+<p>Scheduled queries can be listed, inspected, deleted, and reviewed by version:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>scheduled-queries<span class="w"> </span>list
+</span><span data-line="2">seizu<span class="w"> </span>scheduled-queries<span class="w"> </span>get<span class="w"> </span>&lt;scheduled_query_id&gt;
+</span><span data-line="3">seizu<span class="w"> </span>scheduled-queries<span class="w"> </span>versions<span class="w"> </span>&lt;scheduled_query_id&gt;
+</span><span data-line="4">seizu<span class="w"> </span>scheduled-queries<span class="w"> </span>version-get<span class="w"> </span>&lt;scheduled_query_id&gt;<span class="w"> </span>&lt;version&gt;
+</span><span data-line="5">seizu<span class="w"> </span>scheduled-queries<span class="w"> </span>delete<span class="w"> </span>&lt;scheduled_query_id&gt;
+</span></pre></div>
+</div>
+<p>For MCP toolsets and skillsets:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>toolsets<span class="w"> </span>list
+</span><span data-line="2">seizu<span class="w"> </span>toolsets<span class="w"> </span>tools<span class="w"> </span>list<span class="w"> </span>&lt;toolset_id&gt;
+</span><span data-line="3">seizu<span class="w"> </span>toolsets<span class="w"> </span>tools<span class="w"> </span>call<span class="w"> </span>&lt;toolset_id&gt;<span class="w"> </span>&lt;tool_id&gt;<span class="w"> </span>--arg<span class="w"> </span><span class="nv">limit</span><span class="o">=</span><span class="m">10</span>
+</span><span data-line="4">
+</span><span data-line="5">seizu<span class="w"> </span>skillsets<span class="w"> </span>list
+</span><span data-line="6">seizu<span class="w"> </span>skillsets<span class="w"> </span>skills<span class="w"> </span>render<span class="w"> </span>&lt;skillset_id&gt;<span class="w"> </span>&lt;skill_id&gt;<span class="w"> </span>--args-json<span class="w"> </span><span class="s1">&#39;{&quot;node_id&quot;:&quot;abc&quot;}&#39;</span>
+</span></pre></div>
+</div>
+<p>Most list and get commands support JSON output:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>reports<span class="w"> </span>list<span class="w"> </span>--output<span class="w"> </span>json
+</span><span data-line="2">seizu<span class="w"> </span>toolsets<span class="w"> </span>tools<span class="w"> </span>call<span class="w"> </span>&lt;toolset_id&gt;<span class="w"> </span>&lt;tool_id&gt;<span class="w"> </span>--output<span class="w"> </span>json
+</span></pre></div>
+</div>
+<p>Run <code class="docutils literal notranslate"><span class="pre">seizu</span> <span class="pre">--help</span></code> or <code class="docutils literal notranslate"><span class="pre">seizu</span> <span class="pre">&lt;group&gt;</span> <span class="pre">--help</span></code> for the full command list.</p>
+</section>
+<section id="seed-and-export">
+<h2>Seed and Export<a class="headerlink" href="#seed-and-export" title="Link to this heading">¶</a></h2>
+<p>The CLI can seed reports, scheduled queries, toolsets, and skillsets from the same YAML configuration format used by the quickstart:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>seed<span class="w"> </span>--config<span class="w"> </span>path/to/reporting-dashboard.yaml
+</span><span data-line="2">seizu<span class="w"> </span>seed<span class="w"> </span>--dry-run
+</span><span data-line="3">seizu<span class="w"> </span>seed<span class="w"> </span>--force
+</span></pre></div>
+</div>
+<p>Export writes the latest API state back into the YAML file:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--config<span class="w"> </span>path/to/reporting-dashboard.yaml
+</span><span data-line="2">seizu<span class="w"> </span><span class="nb">export</span><span class="w"> </span>--dry-run
+</span></pre></div>
+</div>
+<p>When <code class="docutils literal notranslate"><span class="pre">--config</span></code> is omitted, the CLI uses <code class="docutils literal notranslate"><span class="pre">seed_file</span></code> from <code class="docutils literal notranslate"><span class="pre">~/.config/seizu/seizu.conf</span></code>, then falls back to <code class="docutils literal notranslate"><span class="pre">~/.config/seizu/reporting-dashboard.yaml</span></code>.</p>
+</section>
+<section id="permissions">
+<h2>Permissions<a class="headerlink" href="#permissions" title="Link to this heading">¶</a></h2>
+<p>CLI commands use the same RBAC permissions as the web UI and REST API. For example, <code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code> can list and read public objects, <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> can author reports, and <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code> can manage toolsets, tools, skillsets, skills, scheduled queries, roles, and administrative objects.</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="dashboard.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Dashboard Configuration</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="security.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Security Guidance</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

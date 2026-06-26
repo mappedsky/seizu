@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 120" role="img" aria-label="Seizu">
+  <title>Seizu</title>
+  <g transform="translate(10, 10)">
+    <circle cx="50" cy="50" r="42" fill="none" stroke="#8fb4ff" stroke-width="1.8" opacity="0.4"/>
+    <circle cx="50" cy="50" r="42" fill="none" stroke="#8fb4ff" stroke-width="1.8" stroke-dasharray="2.5 7" opacity="0.9"/>
+    <g stroke="#8fb4ff" stroke-width="1.6" opacity="0.9" stroke-linecap="round">
+      <line x1="50" y1="2" x2="50" y2="9"/>
+      <line x1="50" y1="91" x2="50" y2="98"/>
+      <line x1="2" y1="50" x2="9" y2="50"/>
+      <line x1="91" y1="50" x2="98" y2="50"/>
+    </g>
+    <g stroke="#8fb4ff" stroke-width="1.1" stroke-linecap="round">
+      <line x1="28" y1="40" x2="44" y2="30"/>
+      <line x1="44" y1="30" x2="62" y2="38"/>
+      <line x1="62" y1="38" x2="72" y2="56"/>
+      <line x1="44" y1="30" x2="48" y2="56"/>
+      <line x1="48" y1="56" x2="72" y2="56"/>
+      <line x1="48" y1="56" x2="36" y2="70"/>
+    </g>
+    <g>
+      <circle cx="28" cy="40" r="2.4" fill="#8fb4ff"/>
+      <circle cx="44" cy="30" r="3.2" fill="#f5c16c"/>
+      <circle cx="62" cy="38" r="2.4" fill="#ffffff"/>
+      <circle cx="72" cy="56" r="2.6" fill="#8fb4ff"/>
+      <circle cx="48" cy="56" r="2.8" fill="#ffffff"/>
+      <circle cx="36" cy="70" r="2.1" fill="#8fb4ff"/>
+    </g>
+  </g>
+  <text x="130" y="78" font-family="Manrope, 'Inter', system-ui, sans-serif" font-weight="800" font-size="64" letter-spacing="-3.2" fill="#f4f7ff">Seizu</text>
+</svg>

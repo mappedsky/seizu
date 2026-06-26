@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scheduled Queries - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Scheduled Chats" href="chat-schedules.html" /><link rel="prev" title="Query Console" href="query-console.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Scheduled Queries"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#purpose">Purpose</a></li>
+<li><a class="reference internal" href="#managing-scheduled-queries">Managing Scheduled Queries</a><ul>
+<li><a class="reference internal" href="#scheduled-queries-list">Scheduled Queries list</a></li>
+<li><a class="reference internal" href="#creating-a-scheduled-query">Creating a scheduled query</a></li>
+<li><a class="reference internal" href="#editing-a-scheduled-query">Editing a scheduled query</a></li>
+<li><a class="reference internal" href="#version-history">Version history</a></li>
+<li><a class="reference internal" href="#deleting-a-scheduled-query">Deleting a scheduled query</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#yaml-configuration-for-seeding">YAML Configuration (for seeding)</a></li>
+<li><a class="reference internal" href="#scheduling">Scheduling</a><ul>
+<li><a class="reference internal" href="#fixed-frequency">Fixed frequency</a></li>
+<li><a class="reference internal" href="#watch-scans">Watch scans</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#built-in-actions">Built-in Actions</a><ul>
+<li><a class="reference internal" href="#slack">slack</a></li>
+<li><a class="reference internal" href="#sqs">sqs</a></li>
+<li><a class="reference internal" href="#statsd">statsd</a><ul>
+<li><a class="reference internal" href="#example">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#temporal">temporal</a></li>
+<li><a class="reference internal" href="#log">log</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#custom-actions">Custom Actions</a></li>
+<li><a class="reference internal" href="#run-the-scheduled-queries-worker">Run the Scheduled Queries Worker</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Scheduled Queries</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="scheduled-queries">
+<h1>Scheduled Queries<a class="headerlink" href="#scheduled-queries" title="Link to this heading">¶</a></h1>
+<section id="purpose">
+<h2>Purpose<a class="headerlink" href="#purpose" title="Link to this heading">¶</a></h2>
+<p>Dashboards are a good visual representation of a system, for when you want to actively check something, but sometimes you want to be passively notified about changes in the graph data.</p>
+<p>Seizu can run queries on a set schedule, or when the SyncMetadata graph data changes.
+It can take the query results and pass them into a list of configurable actions.</p>
+</section>
+<section id="managing-scheduled-queries">
+<h2>Managing Scheduled Queries<a class="headerlink" href="#managing-scheduled-queries" title="Link to this heading">¶</a></h2>
+<p>Scheduled queries are stored in the database and managed through the Seizu UI or API. They are not read directly from the YAML configuration file at runtime.</p>
+<blockquote>
+<div><p><strong>Permissions:</strong> Creating and editing scheduled queries requires the <code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code> permission (<code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code>). Deleting requires <code class="docutils literal notranslate"><span class="pre">scheduled_queries:delete</span></code>. Restoring a historical version also requires <code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code>. Users with <code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code> or <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> roles can view scheduled queries and history but will not see the <strong>New scheduled query</strong> button, and write/delete/restore actions in the <strong>⋮</strong> menu will be disabled.</p>
+</div></blockquote>
+<section id="scheduled-queries-list">
+<h3>Scheduled Queries list<a class="headerlink" href="#scheduled-queries-list" title="Link to this heading">¶</a></h3>
+<p>Navigate to <strong>Scheduled Queries</strong> in the sidebar to view all scheduled queries. From the list you can:</p>
+<ul class="simple">
+<li><p>Click a query name to view its current configuration in a read-only detail dialog.</p></li>
+<li><p>Open the <strong>⋮</strong> menu on any row to <strong>Edit</strong>, <strong>View history</strong>, or <strong>Delete</strong> a query.</p></li>
+<li><p>The table shows the trigger type, configured actions, enabled status, current version, latest update timestamp, and who last updated each query.</p></li>
+</ul>
+</section>
+<section id="creating-a-scheduled-query">
+<h3>Creating a scheduled query<a class="headerlink" href="#creating-a-scheduled-query" title="Link to this heading">¶</a></h3>
+<p>Click <strong>New scheduled query</strong> on the Scheduled Queries page. The form includes:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>name</p></td>
+<td><p>A user-friendly name for the scheduled query.</p></td>
+</tr>
+<tr class="row-odd"><td><p>cypher</p></td>
+<td><p>A Cypher query to run. The query must return the data as <code class="docutils literal notranslate"><span class="pre">details</span></code> (or as configured via <code class="docutils literal notranslate"><span class="pre">query_return_attribute</span></code> in the action config).</p></td>
+</tr>
+<tr class="row-even"><td><p>enabled</p></td>
+<td><p>Whether the query will be run by the worker.</p></td>
+</tr>
+<tr class="row-odd"><td><p>trigger</p></td>
+<td><p>Choose <strong>Fixed frequency</strong> (run every N minutes) or <strong>Watch scans</strong> (run when matching SyncMetadata nodes are updated).</p></td>
+</tr>
+<tr class="row-even"><td><p>frequency</p></td>
+<td><p>Minutes between runs. Used when trigger is <strong>Fixed frequency</strong>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>watch scans</p></td>
+<td><p>List of SyncMetadata filters. Each entry takes <code class="docutils literal notranslate"><span class="pre">grouptype</span></code>, <code class="docutils literal notranslate"><span class="pre">syncedtype</span></code>, and <code class="docutils literal notranslate"><span class="pre">groupid</span></code> (all support <code class="docutils literal notranslate"><span class="pre">.*</span></code> as a wildcard). Used when trigger is <strong>Watch scans</strong>.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>Query parameters. Each param has a name and a value. Toggle the <strong>list</strong> button to switch between a single value and a comma-separated list of values.</p></td>
+</tr>
+<tr class="row-odd"><td><p>actions</p></td>
+<td><p>One or more actions to run with the query results. See the Built-in Actions section below.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="editing-a-scheduled-query">
+<h3>Editing a scheduled query<a class="headerlink" href="#editing-a-scheduled-query" title="Link to this heading">¶</a></h3>
+<p>Choose <strong>Edit</strong> from the <strong>⋮</strong> menu. The form is the same as creation. An optional <strong>Comment</strong> field is shown when editing, allowing you to describe what changed.</p>
+<p>Every save creates a new numbered version; existing versions are never overwritten.</p>
+</section>
+<section id="version-history">
+<h3>Version history<a class="headerlink" href="#version-history" title="Link to this heading">¶</a></h3>
+<p>Every save creates a new numbered version. To view the history:</p>
+<ul class="simple">
+<li><p>Choose <strong>View history</strong> from the <strong>⋮</strong> menu in the Scheduled Queries list.</p></li>
+</ul>
+<p>The history page lists all versions newest-first, showing the version number, save date, who created that version, and the save comment. The current (latest) version is labeled <strong>current</strong>.</p>
+<p>Click a version number to view the full configuration at that point in time. From the overflow menu on any version row you can <strong>Restore</strong> to save that historical configuration as a new latest version. The Restore action is disabled if you do not have the <code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code> permission.</p>
+<p>Restoring a version never deletes history — it creates a new version whose config matches the restored one, with a comment of <code class="docutils literal notranslate"><span class="pre">Restored</span> <span class="pre">from</span> <span class="pre">version</span> <span class="pre">N</span></code>.</p>
+</section>
+<section id="deleting-a-scheduled-query">
+<h3>Deleting a scheduled query<a class="headerlink" href="#deleting-a-scheduled-query" title="Link to this heading">¶</a></h3>
+<p>Choose <strong>Delete</strong> from the <strong>⋮</strong> menu and confirm. This permanently removes the query and all its versions.</p>
+</section>
+</section>
+<section id="yaml-configuration-for-seeding">
+<h2>YAML Configuration (for seeding)<a class="headerlink" href="#yaml-configuration-for-seeding" title="Link to this heading">¶</a></h2>
+<p>The YAML configuration file is used only as a seed source — it is not read at runtime by the scheduled query worker.
+Scheduled queries can be seeded from the YAML file using:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>seed_dashboard
+</span></pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">scheduled_queries</span></code> section in the YAML uses a <strong>list</strong> format:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">scheduled_queries</span><span class="p">:</span>
+</span><span data-line="2"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Recently published HIGH/CRITICAL CVEs</span>
+</span><span data-line="3"><span class="w">    </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">recent-cves</span><span class="w">          </span><span class="c1"># reference to a key in the top-level queries dict</span>
+</span><span data-line="4"><span class="w">    </span><span class="nt">params</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">base_severity</span>
+</span><span data-line="6"><span class="w">        </span><span class="nt">value</span><span class="p">:</span>
+</span><span data-line="7"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HIGH</span>
+</span><span data-line="8"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CRITICAL</span>
+</span><span data-line="9"><span class="w">    </span><span class="nt">frequency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1440</span><span class="w">              </span><span class="c1"># every 24 hours</span>
+</span><span data-line="10"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span data-line="11"><span class="w">    </span><span class="nt">actions</span><span class="p">:</span>
+</span><span data-line="12"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">action_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">slack</span>
+</span><span data-line="13"><span class="w">        </span><span class="nt">action_config</span><span class="p">:</span>
+</span><span data-line="14"><span class="w">          </span><span class="nt">title</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Recently published HIGH/CRITICAL CVEs</span>
+</span><span data-line="15"><span class="w">          </span><span class="nt">initial_comment</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+</span><span data-line="16"><span class="w">            </span><span class="no">The following HIGH/CRITICAL CVEs have been published in the last 2 hours.</span>
+</span><span data-line="17"><span class="w">          </span><span class="nt">channels</span><span class="p">:</span>
+</span><span data-line="18"><span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">C00000000</span>
+</span><span data-line="19">
+</span><span data-line="20"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">K8s container images with no vulnerability scans</span>
+</span><span data-line="21"><span class="w">    </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s-images-without-scans</span>
+</span><span data-line="22"><span class="w">    </span><span class="nt">watch_scans</span><span class="p">:</span>
+</span><span data-line="23"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">grouptype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">KubernetesCluster</span>
+</span><span data-line="24"><span class="w">        </span><span class="nt">syncedtype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">KubernetesCluster</span>
+</span><span data-line="25"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span data-line="26"><span class="w">    </span><span class="nt">actions</span><span class="p">:</span>
+</span><span data-line="27"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">action_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sqs</span>
+</span><span data-line="28"><span class="w">        </span><span class="nt">action_config</span><span class="p">:</span>
+</span><span data-line="29"><span class="w">          </span><span class="nt">sqs_queue</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">k8s-image-scanner</span>
+</span></pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">cypher</span></code> field is resolved against the top-level <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict; if no matching key is found, the value is used as a literal Cypher string.</p>
+<p>Seeding is idempotent by name: existing queries are skipped unless their content has changed or <code class="docutils literal notranslate"><span class="pre">--force</span></code> is passed.</p>
+</section>
+<section id="scheduling">
+<h2>Scheduling<a class="headerlink" href="#scheduling" title="Link to this heading">¶</a></h2>
+<section id="fixed-frequency">
+<h3>Fixed frequency<a class="headerlink" href="#fixed-frequency" title="Link to this heading">¶</a></h3>
+<p>Use the <code class="docutils literal notranslate"><span class="pre">frequency</span></code> field (minutes) to run a query on a regular schedule:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Recently published HIGH/CRITICAL CVEs</span>
+</span><span data-line="2"><span class="w">    </span><span class="nt">frequency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1440</span><span class="w">   </span><span class="c1"># every 24 hours</span>
+</span></pre></div>
+</div>
+</section>
+<section id="watch-scans">
+<h3>Watch scans<a class="headerlink" href="#watch-scans" title="Link to this heading">¶</a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">watch_scans</span></code> to trigger a query when Cartography SyncMetadata nodes are updated:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">K8s container images with no vulnerability scans</span>
+</span><span data-line="2"><span class="w">    </span><span class="nt">watch_scans</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">grouptype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">KubernetesCluster</span>
+</span><span data-line="4"><span class="w">        </span><span class="nt">syncedtype</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">KubernetesCluster</span>
+</span></pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">watch_scans</span></code> works by tracking when the query last ran and comparing that time to the SyncMetadata node timestamps. A newly created query will run immediately, then only again after a matching sync is detected.</p>
+<p>In the UI, the <code class="docutils literal notranslate"><span class="pre">grouptype</span></code>, <code class="docutils literal notranslate"><span class="pre">syncedtype</span></code>, and <code class="docutils literal notranslate"><span class="pre">groupid</span></code> fields autocomplete from the distinct values present on <code class="docutils literal notranslate"><span class="pre">SyncMetadata</span></code> nodes in the graph (<code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/api/v1/sync-metadata/values</span></code>); free-form input (e.g. <code class="docutils literal notranslate"><span class="pre">.*</span></code> regexes) is still accepted.</p>
+<p><code class="docutils literal notranslate"><span class="pre">frequency</span></code> and <code class="docutils literal notranslate"><span class="pre">watch_scans</span></code> are mutually exclusive.</p>
+</section>
+</section>
+<section id="built-in-actions">
+<h2>Built-in Actions<a class="headerlink" href="#built-in-actions" title="Link to this heading">¶</a></h2>
+<p>Action configuration forms in the UI are generated dynamically from the schema declared by each module. Required fields are marked with <code class="docutils literal notranslate"><span class="pre">*</span></code>.</p>
+<section id="slack">
+<h3>slack<a class="headerlink" href="#slack" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">slack</span></code> action takes query results and attaches them as a CSV to a Slack message.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>title</p></td>
+<td><p>Yes</p></td>
+<td><p>The title of the Slack message.</p></td>
+</tr>
+<tr class="row-odd"><td><p>initial_comment</p></td>
+<td><p>Yes</p></td>
+<td><p>The message body. The CSV is attached to this message.</p></td>
+</tr>
+<tr class="row-even"><td><p>channels</p></td>
+<td><p>Yes</p></td>
+<td><p>A list of channel IDs (not names) to send the message to.</p></td>
+</tr>
+<tr class="row-odd"><td><p>query_return_attribute</p></td>
+<td><p>No</p></td>
+<td><p>The attribute in each result row to include. Default: <code class="docutils literal notranslate"><span class="pre">details</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Requires the following environment variable:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">SLACK_OAUTH_BOT_TOKEN</span></code>: Slack OAuth bot token for authentication.</p></li>
+</ul>
+</section>
+<section id="sqs">
+<h3>sqs<a class="headerlink" href="#sqs" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">sqs</span></code> action enqueues each query result row into an SQS queue.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>sqs_queue</p></td>
+<td><p>Yes</p></td>
+<td><p>The SQS queue name to enqueue results into.</p></td>
+</tr>
+<tr class="row-odd"><td><p>query_return_attribute</p></td>
+<td><p>No</p></td>
+<td><p>The attribute in each result row to enqueue. Default: <code class="docutils literal notranslate"><span class="pre">details</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Local development options:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">SQS_CREATE_SCHEDULED_QUERY_QUEUES</span></code>: Automatically create the configured queues if they don’t exist.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SQS_URL</span></code>: URL for a local/fake SQS server.</p></li>
+</ul>
+</section>
+<section id="statsd">
+<h3>statsd<a class="headerlink" href="#statsd" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">statsd</span></code> action emits a numeric field from each query result row as a DogStatsD metric.
+Enabled by default; requires <code class="docutils literal notranslate"><span class="pre">STATSD_HOST</span></code> to be configured (the action logs a warning and skips emission when it is unset).</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>metric</p></td>
+<td><p>Yes</p></td>
+<td><p>StatsD metric name to emit (e.g. <code class="docutils literal notranslate"><span class="pre">cves.critical</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p>value_field</p></td>
+<td><p>Yes</p></td>
+<td><p>Field in each result row that holds the numeric value.</p></td>
+</tr>
+<tr class="row-even"><td><p>metric_type</p></td>
+<td><p>No</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gauge</span></code> (default), <code class="docutils literal notranslate"><span class="pre">increment</span></code>, or <code class="docutils literal notranslate"><span class="pre">decrement</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>tag_fields</p></td>
+<td><p>No</p></td>
+<td><p>List of fields whose values are attached as DogStatsD tags (<code class="docutils literal notranslate"><span class="pre">field:value</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p>query_return_attribute</p></td>
+<td><p>No</p></td>
+<td><p>Top-level attribute of each result row that contains the data. Default: <code class="docutils literal notranslate"><span class="pre">details</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Requires the following environment variables (see <a class="reference internal" href="#backend.html#statsd-configuration"><span class="xref myst">StatsD configuration</span></a>):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">STATSD_HOST</span></code>: hostname of a DogStatsD-compatible server (e.g. Telegraf).</p></li>
+</ul>
+<section id="example">
+<h4>Example<a class="headerlink" href="#example" title="Link to this heading">¶</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CVEs by severity</span>
+</span><span data-line="2"><span class="w">    </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|</span>
+</span><span data-line="3"><span class="w">      </span><span class="no">MATCH (c:CVE) RETURN c.base_severity AS severity, count(c) AS total</span>
+</span><span data-line="4"><span class="w">    </span><span class="nt">frequency</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span>
+</span><span data-line="5"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span data-line="6"><span class="w">    </span><span class="nt">actions</span><span class="p">:</span>
+</span><span data-line="7"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">action_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">statsd</span>
+</span><span data-line="8"><span class="w">        </span><span class="nt">action_config</span><span class="p">:</span>
+</span><span data-line="9"><span class="w">          </span><span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves.count</span>
+</span><span data-line="10"><span class="w">          </span><span class="nt">value_field</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">total</span>
+</span><span data-line="11"><span class="w">          </span><span class="nt">tag_fields</span><span class="p">:</span>
+</span><span data-line="12"><span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">severity</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="temporal">
+<h3>temporal<a class="headerlink" href="#temporal" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action starts a named <a class="reference external" href="https://temporal.io/">Temporal</a> workflow with the query results. See <a class="reference internal" href="#temporal-workflows.html"><span class="xref myst">Temporal workflows</span></a> for the full architecture, including the AI-session workflow that evaluates CVEs per repository and how confirmations are handled for headless runs.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>workflow</p></td>
+<td><p>Yes</p></td>
+<td><p>The registered workflow to start (e.g. <code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code>).</p></td>
+</tr>
+<tr class="row-odd"><td><p>max_rows</p></td>
+<td><p>No</p></td>
+<td><p>Result rows beyond this limit are dropped before starting the workflow. Default: <code class="docutils literal notranslate"><span class="pre">TEMPORAL_WORKFLOW_MAX_RESULT_ROWS</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>query_return_attribute</p></td>
+<td><p>No</p></td>
+<td><p>The attribute in each result row to forward. Default: <code class="docutils literal notranslate"><span class="pre">details</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Requires the following environment variables:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_ADDRESS</span></code>: host:port of the Temporal frontend (gRPC).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_NAMESPACE</span></code>: Temporal namespace (default <code class="docutils literal notranslate"><span class="pre">default</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_TASK_QUEUE</span></code>: task queue shared with the Seizu temporal worker (default <code class="docutils literal notranslate"><span class="pre">seizu-workflows</span></code>).</p></li>
+</ul>
+<blockquote>
+<div><p>Looking for recurring AI agent runs? Those are <strong>scheduled chats</strong>, managed from the chat sidebar rather than as a scheduled query action — the agent uses its own tools to query the graph, so no Cypher is needed. See <a class="reference internal" href="#chat-schedules.html"><span class="xref myst">Scheduled chats</span></a>.</p>
+</div></blockquote>
+</section>
+<section id="log">
+<h3>log<a class="headerlink" href="#log" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">log</span></code> action logs query results using Python’s standard logger. Intended for development and testing; not enabled by default.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Required</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>log_attrs</p></td>
+<td><p>Yes</p></td>
+<td><p>A list of attributes from each result row to include in the log message.</p></td>
+</tr>
+<tr class="row-odd"><td><p>query_return_attribute</p></td>
+<td><p>No</p></td>
+<td><p>The attribute in each result row to read. Default: <code class="docutils literal notranslate"><span class="pre">details</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>message</p></td>
+<td><p>No</p></td>
+<td><p>The log message prefix. Default: <code class="docutils literal notranslate"><span class="pre">Result</span> <span class="pre">for</span> <span class="pre">&lt;scheduled_query_id&gt;</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>level</p></td>
+<td><p>No</p></td>
+<td><p>Log level: <code class="docutils literal notranslate"><span class="pre">debug</span></code>, <code class="docutils literal notranslate"><span class="pre">info</span></code>, <code class="docutils literal notranslate"><span class="pre">warning</span></code>, <code class="docutils literal notranslate"><span class="pre">error</span></code>. Default: <code class="docutils literal notranslate"><span class="pre">info</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>To enable the <code class="docutils literal notranslate"><span class="pre">log</span></code> module, add it to <code class="docutils literal notranslate"><span class="pre">SCHEDULED_QUERY_MODULES</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">SCHEDULED_QUERY_MODULES</span><span class="o">=</span><span class="n">reporting</span><span class="o">.</span><span class="n">scheduled_query_modules</span><span class="o">.</span><span class="n">sqs</span><span class="p">,</span><span class="n">reporting</span><span class="o">.</span><span class="n">scheduled_query_modules</span><span class="o">.</span><span class="n">slack</span><span class="p">,</span><span class="n">reporting</span><span class="o">.</span><span class="n">scheduled_query_modules</span><span class="o">.</span><span class="n">statsd</span><span class="p">,</span><span class="n">reporting</span><span class="o">.</span><span class="n">scheduled_query_modules</span><span class="o">.</span><span class="n">log</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="custom-actions">
+<h2>Custom Actions<a class="headerlink" href="#custom-actions" title="Link to this heading">¶</a></h2>
+<p>Custom actions can be included through Python modules, configured via the <code class="docutils literal notranslate"><span class="pre">SCHEDULED_QUERY_MODULES</span></code> setting (comma-separated module paths; default includes <code class="docutils literal notranslate"><span class="pre">sqs</span></code> and <code class="docutils literal notranslate"><span class="pre">slack</span></code>).</p>
+<p>The module must implement the <code class="docutils literal notranslate"><span class="pre">ModuleInterface</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="kn">from</span><span class="w"> </span><span class="nn">reporting.schema.report_config</span><span class="w"> </span><span class="kn">import</span> <span class="n">ActionConfigFieldDef</span>
+</span><span data-line="4"><span class="kn">from</span><span class="w"> </span><span class="nn">reporting.schema.reporting_config</span><span class="w"> </span><span class="kn">import</span> <span class="n">ScheduledQueryAction</span>
+</span><span data-line="5">
+</span><span data-line="6">
+</span><span data-line="7"><span class="k">class</span><span class="w"> </span><span class="nc">ModuleInterface</span><span class="p">:</span>
+</span><span data-line="8">    <span class="nd">@staticmethod</span>
+</span><span data-line="9">    <span class="k">def</span><span class="w"> </span><span class="nf">action_name</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span data-line="10">        <span class="k">return</span> <span class="s2">&quot;&quot;</span>
+</span><span data-line="11">
+</span><span data-line="12">    <span class="nd">@staticmethod</span>
+</span><span data-line="13">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="14">        <span class="k">return</span>
+</span><span data-line="15">
+</span><span data-line="16">    <span class="nd">@staticmethod</span>
+</span><span data-line="17">    <span class="k">def</span><span class="w"> </span><span class="nf">action_config_schema</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">ActionConfigFieldDef</span><span class="p">]:</span>
+</span><span data-line="18">        <span class="k">return</span> <span class="p">[]</span>
+</span><span data-line="19">
+</span><span data-line="20">    <span class="nd">@staticmethod</span>
+</span><span data-line="21">    <span class="k">def</span><span class="w"> </span><span class="nf">handle_results</span><span class="p">(</span>
+</span><span data-line="22">        <span class="n">scheduled_query_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span data-line="23">        <span class="n">action</span><span class="p">:</span> <span class="n">ScheduledQueryAction</span><span class="p">,</span>
+</span><span data-line="24">        <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]],</span>
+</span><span data-line="25">    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="26">        <span class="k">return</span>
+</span></pre></div>
+</div>
+<p>Key methods:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">action_name()</span></code> — returns the string identifier used in <code class="docutils literal notranslate"><span class="pre">action_type</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">setup()</span></code> — called once at worker startup for initialisation (e.g. creating SQS queues)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">handle_results()</span></code> — called with each set of query results</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">action_config_schema()</span></code> — <strong>optional but recommended</strong>; returns a list of <code class="docutils literal notranslate"><span class="pre">ActionConfigFieldDef</span></code> objects describing the action’s config fields. The UI uses this to generate typed input forms instead of a raw JSON textarea. Required and optional fields, types (<code class="docutils literal notranslate"><span class="pre">string</span></code>, <code class="docutils literal notranslate"><span class="pre">text</span></code>, <code class="docutils literal notranslate"><span class="pre">number</span></code>, <code class="docutils literal notranslate"><span class="pre">boolean</span></code>, <code class="docutils literal notranslate"><span class="pre">string_list</span></code>, <code class="docutils literal notranslate"><span class="pre">select</span></code>), defaults, and help text are all declared here.</p></li>
+</ul>
+<p>Example minimal module:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="k">def</span><span class="w"> </span><span class="nf">action_name</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+</span><span data-line="2">    <span class="k">return</span> <span class="s2">&quot;print&quot;</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="k">def</span><span class="w"> </span><span class="nf">setup</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="5">    <span class="k">return</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="k">def</span><span class="w"> </span><span class="nf">handle_results</span><span class="p">(</span>
+</span><span data-line="8">    <span class="n">scheduled_query_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span data-line="9">    <span class="n">action</span><span class="p">:</span> <span class="n">ScheduledQueryAction</span><span class="p">,</span>
+</span><span data-line="10">    <span class="n">results</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]],</span>
+</span><span data-line="11"><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="12">    <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">results</span><span class="p">:</span>
+</span><span data-line="13">        <span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+</span><span data-line="14">
+</span><span data-line="15"><span class="k">def</span><span class="w"> </span><span class="nf">action_config_schema</span><span class="p">():</span>
+</span><span data-line="16">    <span class="k">return</span> <span class="p">[]</span>
+</span></pre></div>
+</div>
+<p>Settings for modules should be fetched within the module itself:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">reporting.utils.settings</span><span class="w"> </span><span class="kn">import</span> <span class="n">str_env</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">_SLACK_OAUTH_BOT_TOKEN</span> <span class="o">=</span> <span class="n">str_env</span><span class="p">(</span><span class="s2">&quot;SLACK_OAUTH_BOT_TOKEN&quot;</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="run-the-scheduled-queries-worker">
+<h2>Run the Scheduled Queries Worker<a class="headerlink" href="#run-the-scheduled-queries-worker" title="Link to this heading">¶</a></h2>
+<p>For packaged installs, run the worker with the installed console script:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu-scheduled-queries
+</span></pre></div>
+</div>
+<p>When working from a source checkout, the equivalent module command is:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>reporting.scheduled_queries
+</span></pre></div>
+</div>
+<p>In the Docker quickstart, Docker Compose runs the same worker as the <code class="docutils literal notranslate"><span class="pre">seizu-scheduled-queries</span></code> service.</p>
+<p>The worker runs continuously until terminated.</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="query-console.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Query Console</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="chat-schedules.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Scheduled Chats</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>
