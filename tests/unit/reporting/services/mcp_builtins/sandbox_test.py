@@ -329,6 +329,89 @@ async def test_handler_returns_error_on_timeout() -> None:
     assert "timed out" in result["error"]
 
 
+async def test_handler_persists_inner_tool_events_through_real_agent() -> None:
+    """End-to-end: an inner sandbox tool call runs through a *real*
+    ``create_react_agent`` and its completed event lands in the accumulator the
+    outer node captured, tagged with the outer tool call's id.
+
+    The other handler tests mock ``create_react_agent`` away, so this is the only
+    coverage of the actual path that persists inner-tool details (the path whose
+    breakage made sandbox sub-calls vanish on reload): the accumulator must be
+    captured at the handler boundary and threaded into the wrapped tools, not read
+    from a contextvar inside the inner graph's execution.
+    """
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from reporting.services.chat_graph import _child_detail_event_accumulator, _current_tool_detail_id
+
+    class _FakeToolCaller(BaseChatModel):
+        """Calls ``run_python`` once, then returns a final answer.
+
+        Stateless: it decides which turn it is by whether the message history
+        already contains a tool result, so it is safe to reuse across calls.
+        """
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-tool-caller"
+
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+            return self
+
+        def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+            if any(isinstance(m, ToolMessage) for m in messages):
+                msg = AIMessage(content="all done")
+            else:
+                msg = AIMessage(
+                    content="",
+                    tool_calls=[{"name": "run_python", "args": {"code": "print(1)"}, "id": "c1"}],
+                )
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+        async def _agenerate(
+            self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+        ) -> ChatResult:
+            return self._generate(messages, stop, run_manager, **kwargs)
+
+    fake_backend = _make_fake_backend()
+    accumulator: dict[str, list[dict[str, Any]]] = {}
+    _child_detail_event_accumulator.set(accumulator)
+    _current_tool_detail_id.set("outer-sandbox-1")
+    try:
+        with (
+            patch("reporting.settings.SANDBOX_ENABLED", True),
+            patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+            patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+            patch("reporting.settings.SANDBOX_DOMAIN", ""),
+            patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+            patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+            patch(
+                "reporting.services.mcp_builtins.sandbox._open_backend",
+                new=_open_backend_ctx(fake_backend),
+            ),
+            patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=_FakeToolCaller()),
+        ):
+            # current_user=None keeps the inner agent's toolset to just the sandbox
+            # execution tools, so the only tool call is run_python.
+            result = await _handle_delegate({"task": "run some code"}, None)
+    finally:
+        _child_detail_event_accumulator.set(None)
+        _current_tool_detail_id.set(None)
+
+    assert result.get("result") == "all done"
+    # The inner run_python call landed as a nested child under the outer tool
+    # call's detail id, so the outer node persists it inside the subagent entry
+    # and the frontend nests it after a reload.
+    children = accumulator.get("outer-sandbox-1")
+    assert children is not None
+    assert len(children) == 1
+    assert children[0]["title"] == "Sandbox: run_python"
+    assert children[0]["status"] == "completed"
+    fake_backend.run_python.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Seizu tool injection — sandbox inner agent gets all permitted tools
 # ---------------------------------------------------------------------------
@@ -433,74 +516,89 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_wrap_with_detail_events_emits_running_then_completed() -> None:
-    """Each wrapped tool call emits running→completed with a shared stable id."""
+async def test_wrap_with_detail_events_emits_subagent_section_per_call() -> None:
+    """Each inner call (re)emits the one subagent section under the outer detail
+    id, with the child row transitioning running -> completed."""
     events: list[Any] = []
+    children: list[dict[str, Any]] = []
 
     async def echo(message: str) -> str:
         return f"echoed: {message}"
 
     original = StructuredTool.from_function(coroutine=echo, name="echo", description="echo")
-    (wrapped,) = _wrap_with_detail_events([original], events.append)
+    (wrapped,) = _wrap_with_detail_events([original], events.append, parent_id="outer-1", children=children)
 
     result = await wrapped.coroutine(message="hi")  # type: ignore[misc]
     assert result == "echoed: hi"
 
+    # Two frames — one when the child starts, one when it completes — both
+    # addressing the single subagent section by the outer detail id.
     assert len(events) == 2
-    running, completed = events
-    assert running["data"]["status"] == "running"
-    assert running["data"]["title"] == "Sandbox: echo"
-    assert completed["data"]["status"] == "completed"
-    assert "hi" in completed["data"]["body"]
-    # Both events share the same SSE id so the frontend can upsert them.
-    assert running["id"] == completed["id"]
-    # detail_id in the data payload lets buildDetailTree deduplicate by id.
-    assert running["data"]["detail_id"] == running["id"]
-    assert completed["data"]["detail_id"] == completed["id"]
-    # No parent_id when none was provided
-    assert "parent_id" not in running["data"]
-    assert "parent_id" not in completed["data"]
+    for event in events:
+        assert event["id"] == "outer-1"
+        assert event["data"]["kind"] == "subagent"
+        assert event["data"]["detail_id"] == "outer-1"
+        assert len(event["data"]["children"]) == 1
+    assert events[0]["data"]["children"][0]["status"] == "running"
+    completed_child = events[1]["data"]["children"][0]
+    assert completed_child["status"] == "completed"
+    assert completed_child["title"] == "Sandbox: echo"
+    assert "hi" in completed_child["body"]
+    assert "message: hi" in completed_child["arguments"]
+
+    # The shared children list holds the final completed row for the outer node
+    # to persist into the subagent entry.
+    assert len(children) == 1
+    assert children[0]["status"] == "completed"
 
 
-async def test_wrap_with_detail_events_includes_parent_id() -> None:
-    """Events include parent_id when the outer tool call's detail ID is provided."""
+async def test_wrap_with_detail_events_snapshots_children_per_frame() -> None:
+    """Each emitted frame snapshots children, so the in-place completed mutation
+    cannot retroactively rewrite an already-emitted running frame."""
+    events: list[Any] = []
+    children: list[dict[str, Any]] = []
+
+    async def echo(x: str) -> str:
+        return x
+
+    original = StructuredTool.from_function(coroutine=echo, name="echo", description="echo")
+    (wrapped,) = _wrap_with_detail_events([original], events.append, parent_id="p", children=children)
+    await wrapped.coroutine(x="one")  # type: ignore[misc]
+
+    assert events[0]["data"]["children"][0]["status"] == "running"
+
+
+async def test_wrap_with_detail_events_emits_error_child() -> None:
+    """A raising tool marks its child row 'error', re-emits the section, re-raises."""
+    events: list[Any] = []
+    children: list[dict[str, Any]] = []
+
+    async def boom() -> str:
+        raise ValueError("exploded")
+
+    original = StructuredTool.from_function(coroutine=boom, name="boom", description="boom")
+    (wrapped,) = _wrap_with_detail_events([original], events.append, parent_id="p", children=children)
+
+    with pytest.raises(ValueError, match="exploded"):
+        await wrapped.coroutine()  # type: ignore[misc]
+
+    assert events[-1]["data"]["children"][0]["status"] == "error"
+    assert "exploded" in events[-1]["data"]["children"][0]["body"]
+    assert children[0]["status"] == "error"
+
+
+async def test_wrap_with_detail_events_no_parent_id_is_silent() -> None:
+    """Without a parent_id (e.g. outside a streaming context) nothing is emitted."""
     events: list[Any] = []
 
     async def noop() -> str:
         return "ok"
 
     original = StructuredTool.from_function(coroutine=noop, name="noop", description="noop")
-    (wrapped,) = _wrap_with_detail_events([original], events.append, parent_id="outer-detail-123")
-
-    await wrapped.coroutine()  # type: ignore[misc]
-
-    running, completed = events
-    assert running["data"]["parent_id"] == "outer-detail-123"
-    assert completed["data"]["parent_id"] == "outer-detail-123"
-    # detail_id must also be present so the frontend upsert logic can
-    # recognise running+completed as the same node.
-    assert running["data"]["detail_id"] == running["id"]
-    assert completed["data"]["detail_id"] == completed["id"]
-
-
-async def test_wrap_with_detail_events_emits_error_on_exception() -> None:
-    """A tool that raises emits an error event and re-raises the exception."""
-    events: list[Any] = []
-
-    async def boom() -> str:
-        raise ValueError("exploded")
-
-    original = StructuredTool.from_function(coroutine=boom, name="boom", description="boom")
     (wrapped,) = _wrap_with_detail_events([original], events.append)
-
-    with pytest.raises(ValueError, match="exploded"):
-        await wrapped.coroutine()  # type: ignore[misc]
-
-    assert len(events) == 2
-    running, error = events
-    assert running["data"]["status"] == "running"
-    assert error["data"]["status"] == "error"
-    assert "exploded" in error["data"]["body"]
+    result = await wrapped.coroutine()  # type: ignore[misc]
+    assert result == "ok"
+    assert events == []
 
 
 async def test_wrap_with_detail_events_preserves_tool_without_coroutine() -> None:

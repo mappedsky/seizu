@@ -368,24 +368,54 @@ def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
     return _ToolMessageNormalizingModel(get_chat_model(role="worker"))
 
 
+_SANDBOX_TITLE = "Tool: sandbox__delegate"
+_CHILD_BODY_MAX = 600
+_CHILD_ARGS_MAX = 600
+
+
 def _wrap_with_detail_events(
-    tools: list[StructuredTool], writer: Any, parent_id: str | None = None
+    tools: list[StructuredTool],
+    writer: Any,
+    parent_id: str | None = None,
+    children: list[dict[str, Any]] | None = None,
 ) -> list[StructuredTool]:
-    """Re-wrap each inner-agent tool so its calls appear in the outer chat detail stream.
+    """Re-wrap each inner-agent tool so its calls nest inside the outer subagent entry.
 
-    Each call emits a ``running`` event on entry and a ``completed`` (or ``error``)
-    event on exit, using a stable ``id`` so the UI reconciles them into a single
-    collapsible entry rather than two separate rows.
+    The outer chat loop pre-emits one detail entry for the ``sandbox__delegate``
+    call (id == ``parent_id``).  Each inner tool call appends a child detail dict
+    to the shared ``children`` list and re-emits that same outer entry — now as a
+    ``subagent`` kind carrying the growing ``children`` array — under the *same*
+    ``parent_id``.  Because every update reuses one detail id, the AI SDK reconciles
+    them into a single section that fills in live as the subagent works, instead of
+    a flurry of sibling rows that reorder and vanish.
 
-    ``writer`` must be captured from the outer LangGraph context *before* the inner
-    ``create_react_agent`` graph starts — LangGraph resets the ``get_stream_writer``
-    contextvar when it begins its own execution, so capturing it afterwards yields a
-    no-op writer that silently drops all events.
+    ``writer`` and ``children`` must both be captured from the outer LangGraph
+    context *before* the inner ``create_react_agent`` graph starts and passed in
+    here.  LangGraph resets the ``get_stream_writer`` contextvar when it begins its
+    own execution, so reading it from inside the wrapped tool would yield a no-op
+    writer that drops events; ``children`` is captured the same way so persistence
+    never depends on a contextvar surviving the inner graph's execution.  The outer
+    node reads the same ``children`` list back to attach it to the persisted entry,
+    so the whole run survives a page reload.
 
-    If ``parent_id`` is provided (the outer tool call's detail ID), each event
-    includes a ``parent_id`` field so the frontend can group these inner events
-    under the outer ``Tool: sandbox__delegate`` entry.
+    With no ``parent_id`` (e.g. outside a streaming context, in tests) the tools run
+    untouched apart from the bookkeeping, and nothing is emitted.
     """
+
+    def _emit_section(status: str) -> None:
+        if not parent_id:
+            return
+        data: dict[str, Any] = {
+            "kind": "subagent",
+            "title": _SANDBOX_TITLE,
+            "status": status,
+            "detail_id": parent_id,
+            # Snapshot the children so a later in-place mutation can't retroactively
+            # alter an already-emitted frame.
+            "children": [dict(child) for child in (children or [])],
+        }
+        writer({"kind": "detail", "id": parent_id, "data": data})
+
     result: list[StructuredTool] = []
     for tool in tools:
         original = tool.coroutine
@@ -397,30 +427,28 @@ def _wrap_with_detail_events(
         async def _wrapped(
             _orig: Any = original,
             _name: str = tool_name,
-            _parent_id: str | None = parent_id,
             **kwargs: Any,
         ) -> Any:
-            detail_id = f"sandbox_{uuid.uuid4().hex}"
-
-            def _event(status: str, body: str = "") -> dict[str, Any]:
-                data: dict[str, Any] = {
-                    "kind": "tool",
-                    "title": f"Sandbox: {_name}",
-                    "status": status,
-                    "detail_id": detail_id,
-                    "body": body,
-                }
-                if _parent_id:
-                    data["parent_id"] = _parent_id
-                return {"kind": "detail", "id": detail_id, "data": data}
-
-            writer(_event("running"))
+            child: dict[str, Any] = {
+                "kind": "tool",
+                "title": f"Sandbox: {_name}",
+                "status": "running",
+                "detail_id": f"sandbox_{uuid.uuid4().hex}",
+                "arguments": _truncate(_format_args(kwargs), _CHILD_ARGS_MAX),
+            }
+            if children is not None:
+                children.append(child)
+            _emit_section("running")
             try:
                 out = await _orig(**kwargs)
             except Exception as exc:
-                writer(_event("error", str(exc)[:300]))
+                child["status"] = "error"
+                child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
+                _emit_section("running")
                 raise
-            writer(_event("completed", str(out)[:300] if out is not None else ""))
+            child["status"] = "completed"
+            child["body"] = _truncate(str(out) if out is not None else "", _CHILD_BODY_MAX)
+            _emit_section("running")
             return out
 
         create_kwargs: dict[str, Any] = {
@@ -434,9 +462,22 @@ def _wrap_with_detail_events(
     return result
 
 
+def _format_args(kwargs: dict[str, Any]) -> str:
+    """Render inner-tool arguments compactly for a child detail entry."""
+    parts: list[str] = []
+    for key, value in kwargs.items():
+        text = value if isinstance(value, str) else repr(value)
+        parts.append(f"{key}: {text}")
+    return "\n".join(parts)
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
-    from reporting.services.chat_graph import _current_tool_detail_id
+    from reporting.services.chat_graph import _child_detail_event_accumulator, _current_tool_detail_id
 
     # Capture the outer chat graph's stream writer before starting the inner
     # create_react_agent, which resets the LangGraph contextvar.  Falls back to
@@ -446,10 +487,20 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     except RuntimeError:
         writer = lambda _: None  # noqa: E731
 
-    # The outer chat agent pre-emits a "running" detail for this tool call with
-    # this ID.  Stamping it as parent_id on inner events lets the frontend group
-    # them under the already-visible sandbox__delegate row.
+    # The outer chat loop pre-emits a "running" detail for this tool call with this
+    # ID; we reuse it as the subagent section's id so inner-tool details fill in
+    # under the already-visible sandbox__delegate row rather than as sibling rows.
     parent_id: str | None = _current_tool_detail_id.get()
+
+    # Grab (and own) the children list for this detail id from the outer node's
+    # accumulator here — alongside writer and parent_id — rather than from inside
+    # the wrapped tools; see _wrap_with_detail_events for why neither the writer nor
+    # this list may be read through a contextvar after the inner graph starts.  The
+    # outer node reads this same list back to persist the nested children.
+    accumulator = _child_detail_event_accumulator.get()
+    children: list[dict[str, Any]] | None = (
+        accumulator.setdefault(parent_id, []) if (accumulator is not None and parent_id) else None
+    )
 
     if settings.CHAT_LLM_PROVIDER == "mock":
         return {"error": "sandbox__delegate requires a real LLM provider (CHAT_LLM_PROVIDER=mock)"}
@@ -466,7 +517,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             tools = _build_sandbox_tools(backend)
             if current_user is not None:
                 tools = [*tools, *await _build_seizu_tools(current_user)]
-            tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id)
+            tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
             model = _get_sandbox_model()
             agent = create_react_agent(model=model, tools=tools)
             result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})

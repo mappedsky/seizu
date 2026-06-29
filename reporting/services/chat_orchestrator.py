@@ -54,6 +54,7 @@ from reporting.services.chat_graph import (
     _auto_continue_answer,
     _blocked_tool_call_response,
     _chat_provider,
+    _child_detail_event_accumulator,
     _client_thread_id_from_config,
     _collect_confirmations_to_run,
     _confirmation_batch_id_for_requests,
@@ -808,6 +809,10 @@ async def _run_worker_step(
     output_text = ""
     blocked: ChatBlockReason | None = None
     tools_used: list[str] = []
+    # Full per-call detail entries (with any subagent children), persisted on the
+    # step result so a reloaded orchestrator turn replays the same nested trace it
+    # showed live — not just tool names.
+    tool_details: list[dict[str, Any]] = []
     confirmation_blocked: list[ToolCallResult] = []
     required_action = str(step.get("required_action") or "")
     execution_error = ""
@@ -858,6 +863,11 @@ async def _run_worker_step(
         batch_kwargs: dict[str, Any] = {}
         if chat_graph._bypass_confirmations_from_config(config):
             batch_kwargs["bypass_confirmations"] = True
+        # A subagent handler (e.g. sandbox) records its inner-tool calls keyed by
+        # the outer tool call's detail id; collect them so we can fold them into a
+        # single nested ``subagent`` entry, just like the single-agent path.
+        child_details: dict[str, list[dict[str, Any]]] = {}
+        _child_detail_event_accumulator.set(child_details)
         batch_results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -865,10 +875,18 @@ async def _run_worker_step(
             batch_id=_confirmation_batch_id_for_requests(batch),
             **batch_kwargs,
         )
+        _child_detail_event_accumulator.set(None)
         # Surface each tool/skill call as a detail tagged with this step, so the UI
-        # can nest the calls under the step that made them.
+        # can nest the calls under the step that made them.  Emit under the tool
+        # call's own detail id so live subagent frames reconcile into one section.
         for result in batch_results:
-            _emit(writer, {**_tool_call_detail_data(result), "step_id": step_id})
+            detail_data: dict[str, Any] = {**_tool_call_detail_data(result), "step_id": step_id}
+            children = child_details.get(result.request.id)
+            if children:
+                detail_data["kind"] = "subagent"
+                detail_data["children"] = children
+            tool_details.append(detail_data)
+            _emit(writer, detail_data, detail_id=result.request.id)
         tool_ai_message = _ai_message_for_tool_results(ai_message, batch_results)
         messages = [
             *messages,
@@ -953,6 +971,10 @@ async def _run_worker_step(
         "cost_usd": step_cost_usd,
         "estimated_tokens": step_budget,
     }
+    if tool_details:
+        # Persisted so _orchestration_details can replay the full per-call trace
+        # (args/output and nested subagent children) on reload.
+        step_result["tool_details"] = tool_details
     if newly_disclosed_names:
         # Propagate to the dispatcher so dependent steps inherit the disclosure.
         step_result["disclosed_tools"] = sorted(newly_disclosed_names)
@@ -1403,10 +1425,17 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
                 "body": _truncate_text(str(result.get("execution_error") or result.get("output", "")), 6000),
             }
         )
-        # Per-tool entries are reconstructed name-only (the step result keeps tool
-        # names, not each call's args/output), enough to show what ran under the step.
-        for tool_name in result.get("tools_used", []) or []:
-            details.append({"kind": "tool", "title": f"Tool: {tool_name}", "status": "completed", "step_id": step_id})
+        # Prefer the full per-call trace (args/output and nested subagent children)
+        # so a reloaded turn matches what streamed live; the entries already carry
+        # step_id. Fall back to name-only for results persisted before tool_details.
+        tool_details = result.get("tool_details")
+        if isinstance(tool_details, list) and tool_details:
+            details.extend(tool_details)
+        else:
+            for tool_name in result.get("tools_used", []) or []:
+                details.append(
+                    {"kind": "tool", "title": f"Tool: {tool_name}", "status": "completed", "step_id": step_id}
+                )
         if "verified" in result:
             details.append(
                 {

@@ -692,6 +692,60 @@ def test_orchestration_details_carry_step_hierarchy():
     assert s1_verify["status"] == "completed"
 
 
+def test_orchestration_details_replay_tool_details_with_children():
+    """When a step persisted full tool_details (incl. subagent children), the
+    reconstructed trace replays them verbatim instead of name-only — so a reloaded
+    orchestrator turn shows the same nested subagent section it showed live."""
+    plan = [_step("s1", goal="gather")]
+    plan[0]["goal"] = "gather"
+    subagent_detail = {
+        "kind": "subagent",
+        "title": "Tool: sandbox__delegate",
+        "status": "completed",
+        "step_id": "s1",
+        "detail_id": "tc-1",
+        "arguments": "task: crunch numbers",
+        "body": "done",
+        "children": [
+            {
+                "kind": "tool",
+                "title": "Sandbox: run_python",
+                "status": "completed",
+                "detail_id": "sb-1",
+                "body": "42",
+            }
+        ],
+    }
+    results = [
+        {
+            "step_id": "s1",
+            "output": "done",
+            "tools_used": ["sandbox__delegate"],
+            "tool_details": [subagent_detail],
+            "verified": True,
+            "verify_reason": "ok",
+        }
+    ]
+    details = chat_orchestrator._orchestration_details(plan, results)
+
+    replayed = next(d for d in details if d.get("detail_id") == "tc-1")
+    assert replayed["kind"] == "subagent"
+    assert replayed["step_id"] == "s1"
+    assert [c["title"] for c in replayed["children"]] == ["Sandbox: run_python"]
+    # The name-only fallback entry must NOT also appear (no duplication).
+    assert not [d for d in details if d.get("title") == "Tool: sandbox__delegate" and "children" not in d]
+
+
+def test_orchestration_details_fall_back_to_names_without_tool_details():
+    """Results persisted before tool_details existed still reconstruct name-only."""
+    plan = [_step("s1", goal="gather")]
+    plan[0]["goal"] = "gather"
+    results = [{"step_id": "s1", "output": "done", "tools_used": ["graph__query"]}]
+    details = chat_orchestrator._orchestration_details(plan, results)
+    tool_entries = [d for d in details if d["kind"] == "tool" and d.get("step_id") == "s1"]
+    assert [d["title"] for d in tool_entries] == ["Tool: graph__query"]
+
+
 # --- Router short-circuits (no LLM call) --------------------------------------
 
 

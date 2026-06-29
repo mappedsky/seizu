@@ -722,7 +722,7 @@ describe('ChatInterface', () => {
     );
   }, 15_000);
 
-  it('collapses streaming details when the response completes', async () => {
+  it('keeps details expanded when the response completes, collapses on manual click', async () => {
     const messages = [
       {
         id: 'assistant-message',
@@ -768,20 +768,22 @@ describe('ChatInterface', () => {
       'true',
     );
 
+    // When streaming ends the panel must stay open so the user can read details
+    // without having to manually re-expand it.
     mockUseChat.mockReturnValue(chatResult('ready'));
     rerender(chatTree());
 
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
-        'aria-expanded',
-        'false',
-      ),
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    await act(async () => {});
     expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
       'aria-expanded',
       'true',
+    );
+
+    // The user can still collapse the panel manually.
+    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
     );
   });
 
@@ -854,6 +856,81 @@ describe('ChatInterface', () => {
         expect(screen.getByText('Plan')).toBeVisible();
         expect(screen.getByText('Step: gather data')).toBeVisible();
         expect(screen.getByText('Verify: gather data')).toBeVisible();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
+  it('nests a subagent (with its inner tools) under an orchestrator step', async () => {
+    // Orchestrator reload shape: a subagent tool detail carries step_id (nests it
+    // under the step) AND children (its inner tool calls). The tree must render two
+    // levels deep — step -> subagent -> inner tools — not flatten the inner rows.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-step',
+              data: {
+                kind: 'step',
+                title: 'Step: crunch data',
+                status: 'completed',
+                step_id: 's1',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'tc-sandbox-1',
+              data: {
+                kind: 'subagent',
+                title: 'Tool: sandbox__delegate',
+                status: 'completed',
+                step_id: 's1',
+                detail_id: 'tc-sandbox-1',
+                body: 'done',
+                children: [
+                  {
+                    kind: 'tool',
+                    title: 'Sandbox: run_python',
+                    status: 'completed',
+                    detail_id: 'sandbox-run-python',
+                    body: '42',
+                  },
+                ],
+              },
+            },
+            { type: 'text', text: 'Synthesized answer.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Details 2' }));
+    await waitFor(
+      () => {
+        expect(screen.getByText('Step: crunch data')).toBeVisible();
+        expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
+        // The inner tool (grandchild) is still rendered, not flattened away.
+        expect(screen.getByText('Sandbox: run_python')).toBeInTheDocument();
       },
       { timeout: 10_000 },
     );
@@ -1035,6 +1112,157 @@ describe('ChatInterface', () => {
         expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
         // The inner tool's running+completed collapse into one child entry.
         expect(screen.getAllByText('Sandbox: run_python')).toHaveLength(1);
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
+  it('renders a subagent detail with its inline children nested', async () => {
+    // The current (reload-safe) shape: one detail entry of kind "subagent" whose
+    // inner tool calls live in `children`. This is what a persisted sandbox turn
+    // looks like after a reload — a single part, no sibling rows to reorder/lose.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'tc-sandbox-1',
+              data: {
+                kind: 'subagent',
+                title: 'Tool: sandbox__delegate',
+                status: 'completed',
+                detail_id: 'tc-sandbox-1',
+                arguments: 'task: run some code',
+                body: 'all done',
+                children: [
+                  {
+                    kind: 'tool',
+                    title: 'Sandbox: run_python',
+                    status: 'completed',
+                    detail_id: 'sandbox-run-python',
+                    body: 'hello world',
+                  },
+                  {
+                    kind: 'tool',
+                    title: 'Sandbox: run_bash',
+                    status: 'completed',
+                    detail_id: 'sandbox-run-bash',
+                    body: 'exit 0',
+                  },
+                ],
+              },
+            },
+            { type: 'text', text: 'All done.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(screen.getByText('All done.')).toBeInTheDocument();
+    // One top-level detail (the subagent section); children are structural.
+    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    await waitFor(
+      () => {
+        expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
+        expect(screen.getByText('Sandbox: run_python')).toBeInTheDocument();
+        expect(screen.getByText('Sandbox: run_bash')).toBeInTheDocument();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
+  it('grows a subagent section in place as inner tool calls stream', async () => {
+    // While streaming, the section is re-emitted under one id with a growing
+    // children array. The latest frame wins (upsert by detail_id), so the section
+    // appears immediately and fills in — it never duplicates or drops children.
+    const sectionFrame = (children: unknown[]) => ({
+      type: 'data-seizu-detail' as const,
+      id: 'tc-sandbox-1',
+      data: {
+        kind: 'subagent',
+        title: 'Tool: sandbox__delegate',
+        status: 'running',
+        detail_id: 'tc-sandbox-1',
+        children,
+      },
+    });
+
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            // The AI SDK may append each re-emitted frame as a separate part; the
+            // newest frame (most children) must win after the upsert.
+            sectionFrame([
+              {
+                kind: 'tool',
+                title: 'Sandbox: run_python',
+                status: 'running',
+                detail_id: 'sandbox-run-python',
+              },
+            ]),
+            sectionFrame([
+              {
+                kind: 'tool',
+                title: 'Sandbox: run_python',
+                status: 'completed',
+                detail_id: 'sandbox-run-python',
+                body: 'hello world',
+              },
+              {
+                kind: 'tool',
+                title: 'Sandbox: run_bash',
+                status: 'running',
+                detail_id: 'sandbox-run-bash',
+              },
+            ]),
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    await waitFor(
+      () => {
+        // Section present immediately; both children from the latest frame show,
+        // and only once (no duplication from the earlier frame).
+        expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
+        expect(screen.getAllByText('Sandbox: run_python')).toHaveLength(1);
+        expect(screen.getByText('Sandbox: run_bash')).toBeInTheDocument();
       },
       { timeout: 10_000 },
     );

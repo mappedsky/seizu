@@ -58,11 +58,22 @@ from reporting.utils.sql import build_database_url
 logger = logging.getLogger(__name__)
 
 # Holds the outer detail event ID for the currently-executing tool call so that
-# tool handlers (e.g. sandbox__delegate) can stamp parent_id on their own
-# child events and have them grouped under the outer entry in the UI.
+# a subagent tool handler (e.g. sandbox__delegate) can address the same detail
+# entry the outer loop pre-emitted and grow its nested children list in place.
 # Set inside _run_tool_call_batch.run_one before calling the handler; each
 # asyncio.gather task gets its own context copy so parallel calls don't interfere.
 _current_tool_detail_id: ContextVar[str | None] = ContextVar("_current_tool_detail_id", default=None)
+
+# Collects the nested child details produced by a subagent tool handler, keyed by
+# the outer tool call's detail id.  A handler (e.g. sandbox) appends/updates its
+# inner-tool detail dicts in the list for its own detail id; the outer loop reads
+# them back to attach a ``children`` array to that tool's final/persisted detail,
+# so the whole subagent run is one entry that survives a page reload.  Set to a
+# fresh dict before each _run_tool_call_batch call; asyncio tasks inherit the same
+# dict reference, so parallel calls share it safely (each writes a distinct key).
+_child_detail_event_accumulator: ContextVar[dict[str, list[dict[str, Any]]] | None] = ContextVar(
+    "_child_detail_event_accumulator", default=None
+)
 
 # Carries the outer chat agent's currently-disclosed tool names into builtin
 
@@ -492,6 +503,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         for request in batch:
             running_data = _tool_call_running_detail_data(request)
             writer({"kind": "detail", "id": request.id, "data": running_data})
+        child_details: dict[str, list[dict[str, Any]]] = {}
+        _child_detail_event_accumulator.set(child_details)
         results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -499,8 +512,17 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             batch_id=batch_id,
             bypass_confirmations=_bypass_confirmations_from_config(config),
         )
+        _child_detail_event_accumulator.set(None)
         for result in results:
             detail_data = _tool_call_detail_data(result)
+            # A subagent handler (e.g. sandbox) records its inner-tool calls under
+            # this tool's detail id.  Fold them into a single ``subagent`` entry with
+            # a nested ``children`` array so the whole run is one collapsible section
+            # that persists as a unit and survives a page reload.
+            children = child_details.get(result.request.id)
+            if children:
+                detail_data["kind"] = "subagent"
+                detail_data["children"] = children
             detail_events.append(detail_data)
             writer({"kind": "detail", "id": result.request.id, "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
