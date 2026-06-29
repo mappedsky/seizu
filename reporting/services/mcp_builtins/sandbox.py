@@ -81,6 +81,12 @@ class _E2BSandboxBackend:
     async def run_python(self, code: str) -> str:
         execution = await self._sandbox.run_code(code)
         parts: list[str] = []
+        # logs.stdout captures print() output; execution.text is the return-value
+        # text of the last expression (display output, not stdout).  We need both.
+        if execution.logs.stdout:
+            parts.append("".join(execution.logs.stdout))
+        if execution.logs.stderr:
+            parts.append("stderr:\n" + "".join(execution.logs.stderr))
         if execution.text:
             parts.append(execution.text)
         if execution.error:

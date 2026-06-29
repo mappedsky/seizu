@@ -15,6 +15,7 @@ from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
     _build_seizu_tools,
+    _E2BSandboxBackend,
     _get_sandbox_model,
     _handle_delegate,
     _ToolMessageNormalizingModel,
@@ -76,6 +77,57 @@ def _open_backend_ctx(fake_backend: MagicMock) -> Any:
 def test_fake_backend_satisfies_protocol() -> None:
     """The mock backend should be recognised as a SandboxBackend at runtime."""
     assert isinstance(_make_fake_backend(), SandboxBackend)
+
+
+# ---------------------------------------------------------------------------
+# _E2BSandboxBackend.run_python — stdout/stderr capture
+# ---------------------------------------------------------------------------
+
+
+def _make_execution(*, stdout: list[str], stderr: list[str], text: str | None = None, error: Any = None) -> MagicMock:
+    logs = MagicMock()
+    logs.stdout = stdout
+    logs.stderr = stderr
+    execution = MagicMock()
+    execution.logs = logs
+    execution.text = text
+    execution.error = error
+    return execution
+
+
+async def test_run_python_captures_stdout() -> None:
+    """print() output (logs.stdout) must appear in the returned string."""
+    sdk = MagicMock()
+    sdk.run_code = AsyncMock(return_value=_make_execution(stdout=["hello\n", "world\n"], stderr=[]))
+    result = await _E2BSandboxBackend(sdk).run_python("print('hello\\nworld')")
+    assert "hello" in result
+    assert "world" in result
+
+
+async def test_run_python_captures_stderr() -> None:
+    """stderr output (logs.stderr) must appear in the returned string."""
+    sdk = MagicMock()
+    sdk.run_code = AsyncMock(return_value=_make_execution(stdout=[], stderr=["warning\n"]))
+    result = await _E2BSandboxBackend(sdk).run_python("import sys; print('warning', file=sys.stderr)")
+    assert "warning" in result
+    assert "stderr" in result
+
+
+async def test_run_python_captures_expression_result() -> None:
+    """execution.text (return-value display) is included alongside stdout."""
+    sdk = MagicMock()
+    sdk.run_code = AsyncMock(return_value=_make_execution(stdout=["line\n"], stderr=[], text="42"))
+    result = await _E2BSandboxBackend(sdk).run_python("print('line'); 6*7")
+    assert "line" in result
+    assert "42" in result
+
+
+async def test_run_python_no_output_fallback() -> None:
+    """Empty execution returns the sentinel string instead of an empty string."""
+    sdk = MagicMock()
+    sdk.run_code = AsyncMock(return_value=_make_execution(stdout=[], stderr=[]))
+    result = await _E2BSandboxBackend(sdk).run_python("x = 1")
+    assert result == "(no output)"
 
 
 # ---------------------------------------------------------------------------
