@@ -1796,6 +1796,9 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     user_context = f"\nCurrent Seizu user display name: {json.dumps(display_name)}." if display_name else ""
     provider_note = _provider_prompt_note(provider_name)
     answer_budget = _answer_budget()
+    _sandbox_available = settings.SANDBOX_ENABLED and (
+        current_user is None or Permission.SANDBOX_DELEGATE.value in current_user.permissions
+    )
     sandbox_note = (
         (
             "\n\nA sandbox code-execution environment is available via sandbox__delegate. "
@@ -1807,7 +1810,7 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
             "When you have tool results that need numeric or programmatic processing, delegate to the "
             "sandbox rather than reasoning through the calculation yourself."
         )
-        if settings.SANDBOX_ENABLED
+        if _sandbox_available
         else ""
     )
     return (

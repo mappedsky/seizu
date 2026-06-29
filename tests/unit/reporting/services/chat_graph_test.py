@@ -2332,13 +2332,25 @@ def test_build_system_prompt_is_seizu_specific(mocker):
 
 def test_build_system_prompt_includes_sandbox_note_when_enabled(mocker):
     mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
-    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    user = CurrentUser(
+        user=_user().user,
+        jwt_claims={},
+        permissions=frozenset({Permission.SANDBOX_DELEGATE.value}),
+    )
+    prompt = chat_graph.build_system_prompt("anthropic", user)
     assert "sandbox__delegate" in prompt
     assert "do not compute statistics" in prompt.lower() or "numbers computed by the model" in prompt
 
 
 def test_build_system_prompt_excludes_sandbox_note_when_disabled(mocker):
     mocker.patch("reporting.settings.SANDBOX_ENABLED", False)
+    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    assert "sandbox__delegate" not in prompt
+
+
+def test_build_system_prompt_excludes_sandbox_note_without_permission(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
+    # _user() does not hold sandbox:delegate — note must be suppressed even when the feature is on.
     prompt = chat_graph.build_system_prompt("anthropic", _user())
     assert "sandbox__delegate" not in prompt
 
