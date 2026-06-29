@@ -69,6 +69,9 @@ class Permission(StrEnum):
     ROLES_WRITE = "roles:write"
     ROLES_DELETE = "roles:delete"
 
+    # Sandbox delegation
+    SANDBOX_DELEGATE = "sandbox:delegate"
+
 
 # ---------------------------------------------------------------------------
 # Built-in role permission sets (hierarchical: Admin ⊇ Editor ⊇ Viewer)
@@ -103,6 +106,7 @@ EDITOR_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.CHAT_SKILLS_CALL,
         Permission.CHAT_BYPASS_PERMISSIONS,
         Permission.CHAT_SCHEDULE,
+        Permission.SANDBOX_DELEGATE,
     }
 )
 

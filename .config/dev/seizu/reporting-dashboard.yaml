@@ -1846,6 +1846,44 @@ skillsets:
       cve_repo_report workflow from the scheduled query temporal action.
     enabled: true
     skills:
+      fetch_new_cves:
+        name: Fetch New CVEs
+        description: >-
+          Returns CVEs published within the lookback window by querying the
+          graph (populated from the NVD sync), producing a deduplicated list
+          of CVE IDs sorted by publication date for downstream use by
+          cve_repo_assessment.
+        template: |-
+          Query the graph for CVEs published within the lookback window and return a clean list of CVE IDs ready for consumption by cve_repo_assessment.
+
+          Inputs:
+          - lookback_hours: {% $lookback_hours %} (default 24)
+
+          Workflow:
+          1. Call `cve_analysis__get_recent_cves` with `hours={% $lookback_hours %}` and `severity=""` (no filter) to retrieve all CVEs published within the window, ordered by published date descending.
+          2. Extract the `id` field from each result row.
+          3. Deduplicate the CVE IDs.
+
+          Output format:
+          - Return a JSON array of CVE ID strings, sorted by most recent published date first.
+            Example: ["CVE-2026-12345", "CVE-2026-12344", "CVE-2026-12343"]
+          - Include a brief summary: total CVEs found, lookback window used, and the newest and oldest publication dates in the set.
+          - If no CVEs are found, output an empty array and note that no CVEs were published in the graph within the window.
+        parameters:
+          - name: lookback_hours
+            type: integer
+            description: Number of hours to look back from now for newly published CVEs.
+            required: false
+            default: 24
+        triggers:
+          - fetch new CVEs
+          - get latest CVEs
+          - pull recent CVEs
+          - check for new CVEs
+          - CVE feed
+        tools_required:
+          - cve_analysis__get_recent_cves
+        enabled: true
       cve_repo_assessment:
         name: CVE Repository Assessment
         description: >-
@@ -1896,6 +1934,57 @@ skillsets:
           - reports__get
           - reports__create
           - reports__create_version
+        enabled: true
+      cve_severity_analysis:
+        name: CVE Severity Analysis
+        description: >-
+          Compute a CVSS score distribution and severity breakdown for CVEs
+          published in the graph over a configurable lookback window. Uses the
+          sandbox to run Python against graph data for percentile analysis and
+          score statistics.
+        template: |-
+          Compute a CVSS score distribution and severity breakdown for CVEs in the NVD-synced graph over the last {% $hours %} hours.
+
+          This analysis requires numeric computation that goes beyond what a graph query returns directly — use sandbox__delegate for the entire workflow. The sandbox agent has direct access to the cve_analysis tools (they are available in its tool list) and can call them to fetch data, then run Python for the statistics.
+
+          Inputs:
+          - hours: {% $hours %} (default 168)
+
+          Task to pass to sandbox__delegate:
+
+            You have access to graph tools including cve_analysis__get_recent_cves and cve_analysis__count_cves_by_severity. Use them to fetch data, then run Python to compute statistics.
+
+            1. Call cve_analysis__get_recent_cves with hours={% $hours %} and severity="" (empty string, no filter) to retrieve all CVEs published in the window. Each row returns: id, severity, base_score, epss_score, published.
+            2. Call cve_analysis__count_cves_by_severity (no parameters) for an all-time severity count for context.
+            3. Using Python, compute from the get_recent_cves results:
+               a. Count of CVEs in the window per severity tier (CRITICAL / HIGH / MEDIUM / LOW / NONE / unknown)
+               b. Percentage of each tier out of total window CVEs
+               c. Average base_score across all CVEs in the window that have a non-null score
+               d. Average base_score per severity tier (omit tiers with no scored CVEs)
+               e. CVSS score percentiles across all scored CVEs in the window: P25, P50, P75, P90, P95
+               f. Top 10 CVEs by base_score (id, severity, score, published date)
+            4. Return a markdown report structured as:
+               - ## CVE Risk Distribution — Last {% $hours %} Hours
+               - One-line summary: total CVEs in window, breakdown by severity, and all-time total from step 2
+               - **Severity Distribution** table: Severity | Count | % of Window | Avg Score
+               - **CVSS Percentiles** table: P25 | P50 | P75 | P90 | P95
+               - **Top 10 CVEs by Score** table: CVE ID | Severity | Base Score | Published
+
+          Present the markdown report from the sandbox agent directly as your response.
+        parameters:
+          - name: hours
+            type: integer
+            description: Lookback window in hours for recently published CVEs.
+            required: false
+            default: 168
+        triggers:
+          - cve severity analysis
+          - cvss distribution
+          - cve score breakdown
+          - vulnerability risk distribution
+          - cve statistics
+          - cvss percentiles
+        tools_required: []
         enabled: true
 
 scheduled_queries:

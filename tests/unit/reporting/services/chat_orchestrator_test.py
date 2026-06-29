@@ -378,7 +378,7 @@ async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
         ]
     )
 
-    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
         out = []
         for req in batch:
             if req.name == "github_security":
@@ -416,6 +416,90 @@ async def test_worker_step_can_call_tools_a_skill_discloses(mocker):
     assert result["output"] == "Found 2 critical CVEs: CVE-1, CVE-2."
     # The disclosure propagates so dependent steps inherit it.
     assert result["disclosed_tools"] == ["github_security__org_overview"]
+
+
+async def test_worker_step_always_disclosed_tools_available_after_skill_renders(mocker):
+    # Regression: always-disclosed tools (e.g. sandbox__delegate) must be in the
+    # model's tool list from the very first worker turn even when _step_tool_specs
+    # restricts active_specs to only the required skill spec.  Previously, a skill
+    # with tools_required=[] would render, and the follow-up sandbox__delegate call
+    # would fail because sandbox__delegate was absent from available.
+    skill = chat_graph.ChatToolSpec(
+        name="cve_response__cve_severity_analysis",
+        kind="skill",
+        description="CVE analysis",
+        input_schema={"type": "object"},
+    )
+    sandbox = chat_graph.ChatToolSpec(
+        name="sandbox__delegate",
+        kind="tool",
+        description="Delegate to sandbox",
+        input_schema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+    )
+    tool_specs = [skill, sandbox]
+    step = _step("s1", action_kind="skill", required_action="cve_response__cve_severity_analysis")
+
+    class _ScriptedToolModel:
+        def __init__(self, responses: list) -> None:
+            self.responses = responses
+            self.calls = 0
+
+        def bind_tools(self, _tools: Any) -> "_ScriptedToolModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            index = min(self.calls, len(self.responses) - 1)
+            self.calls += 1
+            yield self.responses[index]
+
+    from langchain_core.messages import AIMessage
+
+    model = _ScriptedToolModel(
+        [
+            # Turn 1: call the skill
+            AIMessage(content="", tool_calls=[{"name": "cve_response__cve_severity_analysis", "args": {}, "id": "c1"}]),
+            # Turn 2: skill rendered with tools_required=[]; model follows up with sandbox__delegate
+            AIMessage(
+                content="", tool_calls=[{"name": "sandbox__delegate", "args": {"task": "compute stats"}, "id": "c2"}]
+            ),
+            AIMessage(content="## CVE Risk Distribution\n..."),
+        ]
+    )
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        out = []
+        for req in batch:
+            if req.name == "cve_response__cve_severity_analysis":
+                # Skill renders with no tools_required
+                out.append(
+                    chat_graph.ToolCallResult(
+                        request=req, content="call sandbox__delegate with task=...", tools_required=()
+                    )
+                )
+            else:
+                out.append(chat_graph.ToolCallResult(request=req, content='{"result": "stats computed"}'))
+        return out
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+    mocker.patch(
+        "reporting.services.mcp_builtins.always_disclosed_tool_names", return_value=frozenset({"sandbox__delegate"})
+    )
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=model,
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=tool_specs,
+        writer=lambda event: None,
+    )
+
+    assert result.get("execution_error") in (None, "")
+    assert "sandbox__delegate" in result["tools_used"]
+    assert result["output"] == "## CVE Risk Distribution\n..."
 
 
 def test_match_action_spec_resolves_short_skill_id():
@@ -500,7 +584,7 @@ async def test_worker_step_synthesizes_when_action_budget_exhausted(mocker):
                 # The forced-synthesis turn (called with no tools).
                 yield AIMessage(content="Validated the queries but ran out of budget before applying updates.")
 
-    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
         return [chat_graph.ToolCallResult(request=req, content="{}") for req in batch]
 
     mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
@@ -546,7 +630,7 @@ async def test_budgeted_headless_worker_is_not_stopped_by_per_step_action_guard(
             else:
                 yield AIMessage(content="Plan step complete.")
 
-    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None):
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
         return [chat_graph.ToolCallResult(request=req, content="{}") for req in batch]
 
     mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)

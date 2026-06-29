@@ -999,7 +999,13 @@ async def test_chat_graph_streams_real_llm_with_seizu_prompt(mocker):
             )
         ],
     )
-    list_tools = mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user")
+    # Tools are fetched once even under progressive disclosure because
+    # always-disclosed tools (e.g. sandbox__delegate) must appear in the
+    # capability context and be immediately callable by the model.
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[],
+    )
     graph = chat_graph.build_chat_graph(MemorySaver())
 
     chunks = [
@@ -1017,7 +1023,6 @@ async def test_chat_graph_streams_real_llm_with_seizu_prompt(mocker):
     assert "not a generic chatbot" in fake_model.messages[0].content
     assert "progressive disclosure is enabled" in fake_model.messages[0].content
     assert "investigation__triage" in fake_model.messages[0].content
-    list_tools.assert_not_called()
     assert fake_model.messages[-1].content == "What should I check?"
 
 
@@ -2325,6 +2330,19 @@ def test_build_system_prompt_is_seizu_specific(mocker):
     assert "call the matching skill" in prompt
 
 
+def test_build_system_prompt_includes_sandbox_note_when_enabled(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
+    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    assert "sandbox__delegate" in prompt
+    assert "do not compute statistics" in prompt.lower() or "numbers computed by the model" in prompt
+
+
+def test_build_system_prompt_excludes_sandbox_note_when_disabled(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", False)
+    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    assert "sandbox__delegate" not in prompt
+
+
 def test_answer_budget_scales_with_configured_output_limit():
     assert chat_graph._answer_budget(1024) == chat_graph.AnswerBudget(
         min_words=150,
@@ -2528,6 +2546,55 @@ def test_build_capability_context_progressive_disclosure_lists_only_skills():
     assert "trigger phrases" in context
     assert "call that skill now" in context
     assert "Available tools:" not in context
+    assert "Always-available tools:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_includes_always_disclosed_tools():
+    skills = [
+        Prompt(
+            name="investigation__triage",
+            description="Triage a graph investigation",
+            arguments=[PromptArgument(name="asset", required=True)],
+        )
+    ]
+    always_disclosed = [
+        Tool(
+            name="sandbox__delegate",
+            description="Delegate a task to an isolated sandbox",
+            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+        )
+    ]
+
+    context = chat_graph.build_capability_context(skills, None, always_disclosed_tools=always_disclosed)
+
+    assert "progressive disclosure is enabled" in context
+    assert "Available skills:" in context
+    assert "investigation__triage" in context
+    assert "Always-available tools:" in context
+    assert "sandbox__delegate" in context
+    assert "Available tools:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_no_skills_only_always_disclosed():
+    always_disclosed = [
+        Tool(
+            name="sandbox__delegate",
+            description="Delegate a task to an isolated sandbox",
+            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+        )
+    ]
+
+    context = chat_graph.build_capability_context([], None, always_disclosed_tools=always_disclosed)
+
+    assert "progressive disclosure is enabled" in context
+    assert "Always-available tools:" in context
+    assert "sandbox__delegate" in context
+    assert "Available skills:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_empty_returns_empty():
+    context = chat_graph.build_capability_context([], None, always_disclosed_tools=[])
+    assert context == ""
 
 
 def test_build_capability_context_full_disclosure_lists_skills_and_tools():

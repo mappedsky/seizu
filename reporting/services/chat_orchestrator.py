@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_graph
+from reporting.services import chat_graph, mcp_builtins
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     ChatState,
@@ -377,11 +377,23 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     writer = get_stream_writer()
 
     skills = await _list_chat_prompts(current_user)
-    # Under progressive disclosure the planner sees skills only (tools are
-    # disclosed by rendered skills), so it plans skill-first instead of wiring up
-    # raw tool/graph queries it would not otherwise be allowed to call.
-    capability_tools = None if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE else await _list_chat_tools(current_user)
-    capability = build_capability_context(skills, capability_tools)
+    # Under progressive disclosure the planner sees skills and always-disclosed
+    # tools (tools the model can always reach without a skill unlock, e.g.
+    # sandbox__delegate) so it can plan their use from the start.
+    always_disclosed_tools_for_capability: list[chat_graph.Tool] = []
+    if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE:
+        capability_tools = None
+        _always_disclosed_names = mcp_builtins.always_disclosed_tool_names()
+        if _always_disclosed_names:
+            _all_tools = await _list_chat_tools(current_user)
+            always_disclosed_tools_for_capability = [t for t in _all_tools if t.name in _always_disclosed_names]
+    else:
+        capability_tools = await _list_chat_tools(current_user)
+    capability = build_capability_context(
+        skills,
+        capability_tools,
+        always_disclosed_tools=always_disclosed_tools_for_capability,
+    )
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
 
     run_errors: list[str] = []
@@ -726,10 +738,15 @@ async def _run_worker_step(
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
+    _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive else frozenset()
     available_pool = (
         tool_specs
         if not progressive
-        else [spec for spec in tool_specs if spec.kind == "skill" or spec.name in disclosed_names]
+        else [
+            spec
+            for spec in tool_specs
+            if spec.kind == "skill" or spec.name in disclosed_names or spec.name in _always_disclosed_names
+        ]
     )
     specs, contract_error = _step_tool_specs(available_pool, step)
     if contract_error:
@@ -759,6 +776,16 @@ async def _run_worker_step(
     # renders, the sub-tools stay invisible, and the step produces no findings.
     active_specs = list(specs)
     active_names = {spec.name for spec in active_specs}
+    # Always-disclosed tools (e.g. sandbox__delegate) must be present from the
+    # first turn of every worker step, even for single-action skill steps where
+    # _step_tool_specs only returns the required spec.  Without this, a skill
+    # that renders "call sandbox__delegate" would do so with sandbox__delegate
+    # absent from the model's tool list — the model produces text instead of a
+    # tool call and the step fails.
+    for spec in available_pool:
+        if spec.name in _always_disclosed_names and spec.name not in active_names:
+            active_specs.append(spec)
+            active_names.add(spec.name)
     newly_disclosed_names: set[str] = set()
     available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)

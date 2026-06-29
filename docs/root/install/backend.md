@@ -279,6 +279,17 @@ When ``MCP_OAUTH_AUTHORIZATION_ENDPOINT`` and ``MCP_OAUTH_TOKEN_ENDPOINT`` are s
 * ``MCP_OAUTH_TOKEN_ENDPOINT``: OIDC token endpoint URL; default: ``""`` (metadata endpoint disabled)
 * ``MCP_OAUTH_ISSUER``: Issuer value for the metadata document. Defaults to ``JWT_ISSUER`` if unset; default: ``""``
 
+### Sandbox delegation
+
+The sandbox delegation feature lets the chat agent run Python code, execute shell commands, and read/write files in an isolated ephemeral sandbox. See the [sandbox documentation](sandbox.html) for architecture details, provider options, and development setup.
+
+* ``SANDBOX_ENABLED``: Enable the ``sandbox__delegate`` chat tool; default: ``False``
+* ``SANDBOX_API_KEY``: API key for the sandbox provider. Required for E2B cloud; leave empty for self-hosted deployments that use internal auth; default: ``""``
+* ``SANDBOX_DOMAIN``: Sandbox service hostname. Empty → E2B cloud. Set to your cluster ingress hostname for self-hosted deployments (e.g. OpenKruise Agents); default: ``""``
+* ``SANDBOX_TIMEOUT_SECONDS``: Maximum wall-clock seconds for one sandbox task before it is aborted; default: ``120``
+* ``SANDBOX_MAX_OUTPUT_BYTES``: Maximum bytes in the result returned to the chat agent; larger output is truncated; default: ``50000``
+* ``SANDBOX_LLM_MODEL``: LiteLLM model ID for the inner sandbox subagent. Empty → inherits ``CHAT_LLM_MODEL``; default: ``""``
+
 ### Scheduled queries
 
 * ``ENABLE_SCHEDULED_QUERIES``: Whether or not scheduled queries should be enabled. Note that if the worker is not running, scheduled queries will not run, even if this is set to true; default: ``True``

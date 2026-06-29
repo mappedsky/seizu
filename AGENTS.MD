@@ -180,6 +180,24 @@ In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: 
 
 Recurring headless agent runs (prompt + trigger, no Cypher) managed from the top-level Scheduled Chats page (`/app/scheduled-chats`, with `/:id/history` for versions); `chat:schedule` (Editor+) gates the CRUD routes (`/api/v1/chat/schedules` + `/versions` + `/sessions`, registered when `CHAT_ENABLED` + `CHAT_SCHEDULES_ENABLED`) and the UI (`features.chat_schedules` → `useFeature('chat_schedules')`). Schedules are per-user (`created_by` owner; list/get/update/delete are owner-scoped, 404 otherwise) with full version history (`ScheduledChatItem`/`ScheduledChatVersion` in `reporting/schema/chat.py`; both store backends + lock/record methods mirror scheduled queries). Run sessions are created with `ChatSessionItem.origin="scheduled"` + `scheduled_chat_id`: excluded from `list_chat_sessions`, listed via `list_scheduled_chat_sessions`, viewable read-only from the page's runs dialog (transcripts via `GET .../sessions/{thread_id}/history`, resolved under the owner's namespace), and `POST /api/v1/chat/stream` rejects them (403). `chat:schedule:read_all` (Admin) unlocks viewing every user's schedules (`?all=true` / `?user_id=` on the list, plus read access to get/versions/sessions/history); mutations stay owner-only. The worker (`reporting/scheduled_chats.py`, compose `seizu-scheduled-chats`) polls every `CHAT_SCHEDULES_POLL_SECONDS`, supports `ChatScheduleSpec` triggers (hourly interval / daily days-of-week+hour / monthly days-of-month, all UTC; monthly days a month lacks clamp to its last day — due-logic in `schedule_due`) and `watch_scans` (reuses `check_watch_scan_triggered`), claims runs via `acquire_scheduled_chat_lock`, and runs `headless_chat.run_headless_chat` as the owner. Settings: `CHAT_SCHEDULES_ENABLED`, `CHAT_SCHEDULES_POLL_SECONDS`, `CHAT_SCHEDULE_TIMEOUT_SECONDS`. Docs: `docs/root/install/chat-schedules.md`.
 
+### Sandbox Delegation
+
+`reporting/services/mcp_builtins/sandbox.py` — a `chat_only=True` builtin that lets the chat agent delegate code execution and file operations to an isolated ephemeral sandbox.
+
+**`SandboxBackend` protocol** — the five-operation stable interface (`run_python`, `run_bash`, `read_file`, `write_file`, `list_files`) that every sandbox provider must implement. Fixed names/descriptions mean the inner agent behaves consistently across providers. Use `@runtime_checkable` — `isinstance(mock, SandboxBackend)` works in tests.
+
+**`_E2BSandboxBackend`** — the built-in implementation wrapping `e2b_code_interpreter.AsyncSandbox`. Contains all E2B-specific logic (response shape, bytes decoding, etc.). Nothing outside this class knows about E2B internals.
+
+**`_open_backend(*, api_key, domain)`** — async context manager; the single extension point for swapping providers. Opens an `_E2BSandboxBackend` today. To add a new backend: implement `SandboxBackend`, select it here (e.g. by a new `SANDBOX_BACKEND` setting), yield it. No other code changes.
+
+**`_build_sandbox_tools(backend)`** — wraps the five `SandboxBackend` methods as LangChain `StructuredTool`s for the `create_react_agent` inner subagent. Takes `SandboxBackend`, not `Any`.
+
+**Security model**: sandbox is ephemeral and network-isolated from Seizu's data stores and credentials. No confirmation gate (`chat_safe_without_confirmation=True`; same rationale as `reports__create`). `chat_only=True` keeps the tool off the MCP server endpoint.
+
+**Permission**: `sandbox:delegate` (Editor+). Enabled via `SANDBOX_ENABLED=true`. Settings: `SANDBOX_API_KEY`, `SANDBOX_DOMAIN`, `SANDBOX_TIMEOUT_SECONDS`, `SANDBOX_MAX_OUTPUT_BYTES`, `SANDBOX_LLM_MODEL`. Docs: `docs/root/install/sandbox.md`.
+
+**Testing**: patch `_open_backend` with an `_open_backend_ctx(fake_backend)` that yields a mock satisfying `SandboxBackend`. Tests are fully backend-agnostic — no E2B package needed.
+
 ### Temporal Workflows
 
 The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a named workflow (from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py`) with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above).

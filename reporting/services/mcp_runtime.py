@@ -176,13 +176,14 @@ async def list_tools_for_user(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
 ) -> list[Tool]:
     perms = _permissions(current_user, permissions)
     if gate_permission and gate_permission.value not in perms:
         return []
 
     tools: list[Tool] = []
-    for builtin in list_builtin_tools():
+    for builtin in list_builtin_tools(include_chat_only=include_chat_only):
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
             continue
         if missing_permissions(builtin.required_permissions, perms):
@@ -249,6 +250,7 @@ async def call_tool_for_chat(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
@@ -268,6 +270,9 @@ async def call_tool_for_chat(
     permission (anyone else is blocked); every bypassed execution is
     audit-logged. Used by the chat UI's bypass mode and by headless agent
     runs (scheduled queries, Temporal workflows).
+
+    ``include_chat_only`` exposes tools marked ``chat_only=True`` (e.g.
+    ``sandbox__delegate``) that are invisible on the MCP server endpoint.
     """
     content, blocked = await _call_tool_core(
         current_user,
@@ -276,6 +281,7 @@ async def call_tool_for_chat(
         gate_permission=gate_permission,
         permissions=permissions,
         chat_safe_only=chat_safe_only,
+        include_chat_only=include_chat_only,
         result_max_rows=result_max_rows,
         result_max_bytes=result_max_bytes,
         confirmation_source=confirmation_source,
@@ -294,6 +300,7 @@ async def _call_tool_core(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
@@ -309,7 +316,7 @@ async def _call_tool_core(
             ChatBlockReason.PERMISSION_DENIED,
         )
 
-    builtin = find_builtin(name)
+    builtin = find_builtin(name, include_chat_only=include_chat_only)
     if builtin is not None:
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
             return (

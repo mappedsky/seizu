@@ -42,6 +42,14 @@ class BuiltinTool:
     requires_user: bool = False
     confirmation: ConfirmationResolver | None = None
     chat_safe_without_confirmation: bool = False
+    # When True the tool is only callable from the chat agent, not via the MCP
+    # server endpoint.  External MCP clients never see it in tool listings.
+    chat_only: bool = False
+    # When True the tool is always included in the chat agent's callable set,
+    # even under progressive disclosure (where most tools are gated behind skill
+    # rendering).  Use this for general-purpose execution tools (e.g. sandbox
+    # delegation) that the model should be able to reach without a skill unlock.
+    always_disclosed: bool = False
 
 
 def model_input_schema(

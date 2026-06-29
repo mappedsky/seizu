@@ -636,6 +636,14 @@ services:
       # MCP_OAUTH_TOKEN_ENDPOINT=
       # MCP_OAUTH_ISSUER=
       - MCP_RESOURCE_URL=http://localhost:8080/api/v1/mcp
+      # Sandbox delegation — set SANDBOX_ENABLED=true + SANDBOX_API_KEY to enable
+      # the sandbox__delegate chat tool (E2B cloud or OpenKruise Agents).
+      - SANDBOX_ENABLED
+      - SANDBOX_API_KEY
+      - SANDBOX_DOMAIN
+      - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_LLM_MODEL
       # In dev the project is bind-mounted here; the production image copies
       # the frontend build to /build via the Dockerfile nodebuilder stage.
       - STATIC_FOLDER=/home/seizu/seizu/build

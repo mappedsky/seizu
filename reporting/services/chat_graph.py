@@ -35,7 +35,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
-from reporting.services import action_confirmations, mcp_runtime, report_store
+from reporting.services import action_confirmations, mcp_builtins, mcp_runtime, report_store
 from reporting.services.chat_budget import (
     BudgetExceeded,
     budget_controller_from_config,
@@ -55,6 +55,8 @@ from reporting.services.mcp_runtime import ChatBlockReason
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
+
+# Carries the outer chat agent's currently-disclosed tool names into builtin
 
 
 class ChatState(TypedDict):
@@ -325,18 +327,25 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     skills = await _list_chat_prompts(current_user)
     tools: list[Tool] = []
     progressive_disclosure = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
+    _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive_disclosure else frozenset()
     # Carry forward tools the conversation already unlocked in earlier turns so a
     # resumed/follow-up turn can call them directly (the in-turn disclosure set
     # is otherwise reset each turn — see ChatState.disclosed_tools).
     disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
     if not progressive_disclosure:
         tools = await _list_chat_tools(current_user)
-    elif disclosed_tool_names:
+    elif disclosed_tool_names or _always_disclosed_names:
         # Resolve the persisted names against the live store; names whose tool
-        # no longer exists simply drop out.
+        # no longer exists simply drop out.  Also fetch when always-disclosed
+        # tools exist so they can appear in the capability context.
         tools = await _list_chat_tools(current_user)
 
-    capability_context = build_capability_context(skills, tools if not progressive_disclosure else None)
+    always_disclosed_tools = [t for t in tools if t.name in _always_disclosed_names] if progressive_disclosure else []
+    capability_context = build_capability_context(
+        skills,
+        tools if not progressive_disclosure else None,
+        always_disclosed_tools=always_disclosed_tools,
+    )
     if capability_context:
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
 
@@ -345,7 +354,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     if not progressive_disclosure:
         tool_specs = _mcp_tool_specs(tools)
     else:
-        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
+        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
 
     action_count = 0
     action_summaries: list[str] = []
@@ -506,7 +515,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
+                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
@@ -891,6 +900,7 @@ async def _execute_confirmations(
             c.arguments,
             gate_permission=Permission.CHAT_TOOLS_CALL,
             chat_safe_only=True,
+            include_chat_only=True,
             result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
             result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
         )
@@ -1562,6 +1572,7 @@ async def _list_chat_tools(current_user: CurrentUser | None) -> list[Tool]:
         current_user,
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
+        include_chat_only=True,
     )
 
 
@@ -1741,6 +1752,7 @@ async def _run_tool_call(
     call_kwargs: dict[str, Any] = {
         "gate_permission": Permission.CHAT_TOOLS_CALL,
         "chat_safe_only": True,
+        "include_chat_only": True,
         "result_max_rows": settings.CHAT_TOOL_RESULT_MAX_ROWS,
         "result_max_bytes": settings.CHAT_TOOL_RESULT_MAX_BYTES,
     }
@@ -1784,6 +1796,20 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     user_context = f"\nCurrent Seizu user display name: {json.dumps(display_name)}." if display_name else ""
     provider_note = _provider_prompt_note(provider_name)
     answer_budget = _answer_budget()
+    sandbox_note = (
+        (
+            "\n\nA sandbox code-execution environment is available via sandbox__delegate. "
+            "Prefer it over in-response computation for: statistical analysis or aggregation over datasets "
+            "(averages, percentiles, distributions, rankings), data transformation or reformatting of "
+            "structured results, and any task that requires running code to produce a verified output. "
+            "Do not compute statistics, sort data, or transform structured payloads in your response "
+            "text — numbers computed by the model without running code are unreliable. "
+            "When you have tool results that need numeric or programmatic processing, delegate to the "
+            "sandbox rather than reasoning through the calculation yourself."
+        )
+        if settings.SANDBOX_ENABLED
+        else ""
+    )
     return (
         "You are Seizu's AI investigation assistant inside a security graph dashboard. "
         "Seizu is a configuration-driven reporting platform for Neo4j security graph data; "
@@ -1819,7 +1845,7 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "result. After you have run one or more skills or tools, finish the turn by calling the "
         f"`{_FINAL_ANSWER_TOOL}` tool with your complete final answer; do not deliver a post-action answer as plain "
         "text, and never describe tool work you have not performed."
-        f"{user_context}{provider_note}"
+        f"{sandbox_note}{user_context}{provider_note}"
     )
 
 
@@ -2409,33 +2435,46 @@ def _json_dump(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
 
 
-def build_capability_context(skills: list[Prompt], tools: list[Tool] | None) -> str:
+def build_capability_context(
+    skills: list[Prompt],
+    tools: list[Tool] | None,
+    always_disclosed_tools: list[Tool] | None = None,
+) -> str:
     """Build the capability section of the system prompt from already-listed data.
 
     The caller fetches the listings once per chat turn and threads them through
     here — keeps the hot path to a single store roundtrip per listing instead
     of re-listing once per consumer (capability context, skill specs, tool
     specs). Pass ``tools=None`` to render the progressive-disclosure variant
-    (skills only).
+    (skills + always-disclosed tools only).
     """
     if tools is None:
-        return _progressive_capability_context(skills)
+        return _progressive_capability_context(skills, always_disclosed_tools or [])
     return _full_capability_context(skills, tools)
 
 
-def _progressive_capability_context(skills: list[Prompt]) -> str:
-    if not skills:
+def _progressive_capability_context(
+    skills: list[Prompt],
+    always_disclosed_tools: list[Tool] | None = None,
+) -> str:
+    if not skills and not always_disclosed_tools:
         return ""
-    return (
+    header = (
         "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
         "tools. When the task needs a workflow, call the relevant skill tool with every required argument. Seizu will "
         "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
         "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
-        "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill or by prior "
-        "conversation context. Skill descriptions can include trigger phrases; if the current user request matches a "
-        "trigger phrase, call that skill now instead of describing how to trigger it.\n\n"
-        f"Available skills:\n{_format_skills(skills)}"
+        "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill, by prior "
+        "conversation context, or listed below as always available. Skill descriptions can include trigger phrases; "
+        "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
+        "trigger it."
     )
+    sections: list[str] = [header]
+    if skills:
+        sections.append(f"Available skills:\n{_format_skills(skills)}")
+    if always_disclosed_tools:
+        sections.append(f"Always-available tools:\n{_format_tools(always_disclosed_tools)}")
+    return "\n\n".join(sections)
 
 
 def _full_capability_context(skills: list[Prompt], tools: list[Tool]) -> str:

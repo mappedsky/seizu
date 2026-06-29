@@ -22,8 +22,19 @@ def test_all_group_names_includes_known_groups():
 
 def test_list_builtin_tools_empty_filter_returns_all():
     # Empty MCP_ENABLED_BUILTINS means all groups are enabled.
+    # chat_only tools are excluded by default (MCP server path), so groups
+    # whose tools are all chat_only won't appear in the group set.
     with patch("reporting.settings.MCP_ENABLED_BUILTINS", []):
         all_tools = list_builtin_tools()
+    assert "graph" in {t.group for t in all_tools}
+    assert "reports" in {t.group for t in all_tools}
+    # sandbox tools are chat_only — they must not appear in the MCP listing.
+    assert "sandbox" not in {t.group for t in all_tools}
+
+
+def test_list_builtin_tools_include_chat_only_returns_all_groups():
+    with patch("reporting.settings.MCP_ENABLED_BUILTINS", []):
+        all_tools = list_builtin_tools(include_chat_only=True)
     assert {t.group for t in all_tools} == set(all_group_names())
 
 
@@ -63,14 +74,14 @@ def test_find_builtin_unknown_name_returns_none():
 
 def test_every_builtin_has_required_permissions():
     # A tool without any permission requirement would bypass RBAC entirely —
-    # guard against accidentally adding one.
-    for tool in list_builtin_tools():
+    # guard against accidentally adding one.  Check all tools including chat_only.
+    for tool in list_builtin_tools(include_chat_only=True):
         assert tool.required_permissions, f"{tool.name} is missing required_permissions"
 
 
 @pytest.mark.parametrize(
     "tool",
-    list_builtin_tools(),
+    [t for t in list_builtin_tools(include_chat_only=True) if not t.chat_only],
     ids=lambda t: t.name,
 )
 async def test_each_builtin_enforces_its_required_permission(tool):
