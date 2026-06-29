@@ -129,11 +129,19 @@ def test_sandbox_delegate_is_always_disclosed() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_handler_returns_error_when_disabled() -> None:
+def test_sandbox_delegate_absent_when_disabled() -> None:
+    """sandbox__delegate must not appear in any listing when SANDBOX_ENABLED=false."""
     with patch("reporting.settings.SANDBOX_ENABLED", False):
-        result = await _handle_delegate({"task": "print hello"}, _current_user())
-    assert "error" in result
-    assert "SANDBOX_ENABLED" in result["error"]
+        all_tools = list_builtin_tools(include_chat_only=True)
+        assert not any(t.name == "sandbox__delegate" for t in all_tools)
+        assert find_builtin("sandbox__delegate", include_chat_only=True) is None
+
+
+def test_sandbox_delegate_present_when_enabled() -> None:
+    """sandbox__delegate appears in listings when SANDBOX_ENABLED=true."""
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tool = find_builtin("sandbox__delegate", include_chat_only=True)
+        assert tool is not None
 
 
 async def test_handler_returns_error_for_mock_provider() -> None:

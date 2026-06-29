@@ -346,9 +346,6 @@ def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
 
-    if not settings.SANDBOX_ENABLED:
-        return {"error": "Sandbox is not enabled (SANDBOX_ENABLED=false)"}
-
     if settings.CHAT_LLM_PROVIDER == "mock":
         return {"error": "sandbox__delegate requires a real LLM provider (CHAT_LLM_PROVIDER=mock)"}
 
@@ -390,6 +387,12 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     return {"result": output}
 
 
+def _sandbox_enabled() -> bool:
+    from reporting import settings
+
+    return settings.SANDBOX_ENABLED
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -409,6 +412,9 @@ GROUP_DEF = BuiltinGroup(
             input_schema=_INPUT_SCHEMA,
             required_permissions=[Permission.SANDBOX_DELEGATE.value],
             handler=_handle_delegate,
+            # enabled: omit the tool from all listings when SANDBOX_ENABLED=false
+            # so the model never sees it and call-time errors are never reached.
+            enabled=_sandbox_enabled,
             # chat_only: external MCP clients must not see this tool — the sandbox
             # is scoped to the chat session and isolated from Seizu's internals.
             chat_only=True,

@@ -25,6 +25,7 @@ from reporting.schema.confirmations import ActionConfirmationTarget
 
 BuiltinHandler = Callable[[dict[str, Any], CurrentUser | None], Awaitable[Any]]
 ConfirmationResolver = Callable[[dict[str, Any], CurrentUser | None], Awaitable[ActionConfirmationTarget | None]]
+EnabledCheck = Callable[[], bool] | None
 
 
 @dataclass
@@ -50,6 +51,12 @@ class BuiltinTool:
     # rendering).  Use this for general-purpose execution tools (e.g. sandbox
     # delegation) that the model should be able to reach without a skill unlock.
     always_disclosed: bool = False
+    # Optional callable evaluated at listing/lookup time.  When it returns
+    # False the tool is omitted from listings and find_builtin returns None —
+    # identical to the tool not existing.  Use this for feature-flag gates
+    # (e.g. ``lambda: settings.SANDBOX_ENABLED``) so disabled features never
+    # surface to the model and don't produce unnecessary call-time errors.
+    enabled: EnabledCheck = None
 
 
 def model_input_schema(

@@ -83,6 +83,8 @@ def list_builtin_tools(*, include_chat_only: bool = False) -> list[BuiltinTool]:
         for tool in group.tools:
             if tool.chat_only and not include_chat_only:
                 continue
+            if tool.enabled is not None and not tool.enabled():
+                continue
             tools.append(tool)
     return tools
 
@@ -118,6 +120,8 @@ def find_builtin(name: str, *, include_chat_only: bool = False) -> BuiltinTool |
     if allowed is not None and tool.group not in allowed:
         return None
     if tool.chat_only and not include_chat_only:
+        return None
+    if tool.enabled is not None and not tool.enabled():
         return None
     return tool
 
