@@ -122,8 +122,18 @@ async def _open_backend(*, api_key: str, domain: str) -> AsyncIterator[SandboxBa
     Tests patch this function to inject any :class:`SandboxBackend` without
     touching provider SDKs.  The ``e2b_code_interpreter`` import stays lazy so
     importing this module never fails when the package is absent.
+
+    Security defaults applied to every sandbox:
+    - ``allow_internet_access``: off by default (``SANDBOX_ALLOW_INTERNET``).
+      Enable only when the task explicitly requires outbound network access.
+    - ``network={"allow_public_traffic": False}``: any HTTP server the sandbox
+      exposes requires the auto-generated ``sandbox.traffic_access_token`` in
+      the ``e2b-traffic-access-token`` header.  Our SDK calls (run_code,
+      files.read/write, etc.) use a separate transport and are unaffected.
     """
     from e2b_code_interpreter import AsyncSandbox
+
+    from reporting import settings as _settings
 
     create_kwargs: dict[str, Any] = {}
     if api_key:
@@ -134,6 +144,10 @@ async def _open_backend(*, api_key: str, domain: str) -> AsyncIterator[SandboxBa
         # because non-E2B deployments issue tokens that don't match "e2b_*".
         create_kwargs["domain"] = domain
         create_kwargs["validate_api_key"] = False
+    # Security hardening — applied unconditionally so the defaults are safe
+    # regardless of how the sandbox was provisioned.
+    create_kwargs["allow_internet_access"] = _settings.SANDBOX_ALLOW_INTERNET
+    create_kwargs["network"] = {"allow_public_traffic": False}
     sandbox = await AsyncSandbox.create(**create_kwargs)
     async with sandbox:
         yield _E2BSandboxBackend(sandbox)

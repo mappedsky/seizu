@@ -518,6 +518,12 @@ SANDBOX_DOMAIN = str_env("SANDBOX_DOMAIN", "")
 # Leave empty for self-hosted deployments that use internal auth.
 SANDBOX_API_KEY = str_env("SANDBOX_API_KEY", "")
 
+# Allow sandboxes to make outbound internet connections.
+# Defaults to false: sandboxes are network-isolated from the public internet.
+# Set to true only when the task explicitly requires external network access
+# (e.g. fetching a URL, cloning a public repo).
+SANDBOX_ALLOW_INTERNET = bool_env("SANDBOX_ALLOW_INTERNET", False)
+
 # Hard timeout for a single sandbox__delegate invocation (seconds).
 SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 
