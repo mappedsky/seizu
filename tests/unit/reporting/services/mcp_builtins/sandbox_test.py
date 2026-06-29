@@ -453,6 +453,26 @@ async def test_wrap_with_detail_events_emits_running_then_completed() -> None:
     assert completed["data"]["status"] == "completed"
     assert "hi" in completed["data"]["body"]
     assert running["id"] == completed["id"]
+    # No parent_id when none was provided
+    assert "parent_id" not in running["data"]
+    assert "parent_id" not in completed["data"]
+
+
+async def test_wrap_with_detail_events_includes_parent_id() -> None:
+    """Events include parent_id when the outer tool call's detail ID is provided."""
+    events: list[Any] = []
+
+    async def noop() -> str:
+        return "ok"
+
+    original = StructuredTool.from_function(coroutine=noop, name="noop", description="noop")
+    (wrapped,) = _wrap_with_detail_events([original], events.append, parent_id="outer-detail-123")
+
+    await wrapped.coroutine()  # type: ignore[misc]
+
+    running, completed = events
+    assert running["data"]["parent_id"] == "outer-detail-123"
+    assert completed["data"]["parent_id"] == "outer-detail-123"
 
 
 async def test_wrap_with_detail_events_emits_error_on_exception() -> None:

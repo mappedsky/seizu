@@ -368,7 +368,9 @@ def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
     return _ToolMessageNormalizingModel(get_chat_model(role="worker"))
 
 
-def _wrap_with_detail_events(tools: list[StructuredTool], writer: Any) -> list[StructuredTool]:
+def _wrap_with_detail_events(
+    tools: list[StructuredTool], writer: Any, parent_id: str | None = None
+) -> list[StructuredTool]:
     """Re-wrap each inner-agent tool so its calls appear in the outer chat detail stream.
 
     Each call emits a ``running`` event on entry and a ``completed`` (or ``error``)
@@ -379,6 +381,10 @@ def _wrap_with_detail_events(tools: list[StructuredTool], writer: Any) -> list[S
     ``create_react_agent`` graph starts — LangGraph resets the ``get_stream_writer``
     contextvar when it begins its own execution, so capturing it afterwards yields a
     no-op writer that silently drops all events.
+
+    If ``parent_id`` is provided (the outer tool call's detail ID), each event
+    includes a ``parent_id`` field so the frontend can group these inner events
+    under the outer ``Tool: sandbox__delegate`` entry.
     """
     result: list[StructuredTool] = []
     for tool in tools:
@@ -388,48 +394,32 @@ def _wrap_with_detail_events(tools: list[StructuredTool], writer: Any) -> list[S
             continue
         tool_name = tool.name
 
-        async def _wrapped(_orig: Any = original, _name: str = tool_name, **kwargs: Any) -> Any:
+        async def _wrapped(
+            _orig: Any = original,
+            _name: str = tool_name,
+            _parent_id: str | None = parent_id,
+            **kwargs: Any,
+        ) -> Any:
             detail_id = f"sandbox_{uuid.uuid4().hex}"
-            writer(
-                {
-                    "kind": "detail",
-                    "id": detail_id,
-                    "data": {
-                        "kind": "tool",
-                        "title": f"Sandbox: {_name}",
-                        "status": "running",
-                        "body": "",
-                    },
+
+            def _event(status: str, body: str = "") -> dict[str, Any]:
+                data: dict[str, Any] = {
+                    "kind": "tool",
+                    "title": f"Sandbox: {_name}",
+                    "status": status,
+                    "body": body,
                 }
-            )
+                if _parent_id:
+                    data["parent_id"] = _parent_id
+                return {"kind": "detail", "id": detail_id, "data": data}
+
+            writer(_event("running"))
             try:
                 out = await _orig(**kwargs)
             except Exception as exc:
-                writer(
-                    {
-                        "kind": "detail",
-                        "id": detail_id,
-                        "data": {
-                            "kind": "tool",
-                            "title": f"Sandbox: {_name}",
-                            "status": "error",
-                            "body": str(exc)[:300],
-                        },
-                    }
-                )
+                writer(_event("error", str(exc)[:300]))
                 raise
-            writer(
-                {
-                    "kind": "detail",
-                    "id": detail_id,
-                    "data": {
-                        "kind": "tool",
-                        "title": f"Sandbox: {_name}",
-                        "status": "completed",
-                        "body": str(out)[:300] if out is not None else "",
-                    },
-                }
-            )
+            writer(_event("completed", str(out)[:300] if out is not None else ""))
             return out
 
         create_kwargs: dict[str, Any] = {
@@ -445,6 +435,7 @@ def _wrap_with_detail_events(tools: list[StructuredTool], writer: Any) -> list[S
 
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
+    from reporting.services.chat_graph import _current_tool_detail_id
 
     # Capture the outer chat graph's stream writer before starting the inner
     # create_react_agent, which resets the LangGraph contextvar.  Falls back to
@@ -453,6 +444,11 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         writer: Any = get_stream_writer()
     except RuntimeError:
         writer = lambda _: None  # noqa: E731
+
+    # The outer chat agent pre-emits a "running" detail for this tool call with
+    # this ID.  Stamping it as parent_id on inner events lets the frontend group
+    # them under the already-visible sandbox__delegate row.
+    parent_id: str | None = _current_tool_detail_id.get()
 
     if settings.CHAT_LLM_PROVIDER == "mock":
         return {"error": "sandbox__delegate requires a real LLM provider (CHAT_LLM_PROVIDER=mock)"}
@@ -469,7 +465,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             tools = _build_sandbox_tools(backend)
             if current_user is not None:
                 tools = [*tools, *await _build_seizu_tools(current_user)]
-            tools = _wrap_with_detail_events(tools, writer)
+            tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id)
             model = _get_sandbox_model()
             agent = create_react_agent(model=model, tools=tools)
             result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})

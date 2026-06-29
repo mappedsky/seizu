@@ -815,9 +815,15 @@ async def test_chat_graph_streams_tool_enabled_text_as_it_arrives(mocker):
     assert len(planning) == 1
     assert planning[0]["data"]["kind"] == "thinking"
     assert planning[0]["data"]["body"] == "Inspecting now"
-    assert len(tool_details) == 1
-    assert tool_details[0]["data"]["arguments"] == '{"org":"mappedsky"}'
-    assert tool_details[0]["data"]["body"] == '{"ok": true}'
+    # Two events per tool call: a pre-run "running" event and a post-run
+    # "completed" event.  Both share the same SSE id (request.id) so the AI
+    # SDK updates the message part in-place rather than creating a second row.
+    assert len(tool_details) == 2
+    running_detail, completed_detail = tool_details
+    assert running_detail["data"]["status"] == "running"
+    assert running_detail["id"] == completed_detail["id"]
+    assert completed_detail["data"]["arguments"] == '{"org":"mappedsky"}'
+    assert completed_detail["data"]["body"] == '{"ok": true}'
 
 
 async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge(mocker):

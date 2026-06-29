@@ -860,9 +860,10 @@ describe('ChatInterface', () => {
   }, 15_000);
 
   it('groups Sandbox: sub-events under their parent Tool: sandbox__delegate entry', async () => {
-    // Inner sandbox agent tool calls arrive in the stream BEFORE the outer
-    // "Tool: sandbox__delegate" detail (which is emitted after the batch returns).
-    // buildDetailTree must buffer them and nest them under the parent when it arrives.
+    // The outer chat agent pre-emits a "running" detail for sandbox__delegate
+    // (id="tc-sandbox-1") before the batch runs, then updates it to "completed"
+    // after.  Inner sandbox sub-events carry parent_id="tc-sandbox-1" so they
+    // are grouped under the outer entry.
     mockUseChat.mockReturnValue({
       id: 'chat-id',
       messages: [
@@ -870,6 +871,20 @@ describe('ChatInterface', () => {
           id: 'assistant-message',
           role: 'assistant',
           parts: [
+            // Outer tool running → completed (same SSE id, last value wins)
+            {
+              type: 'data-seizu-detail',
+              id: 'tc-sandbox-1',
+              data: {
+                kind: 'tool',
+                title: 'Tool: sandbox__delegate',
+                status: 'completed',
+                detail_id: 'tc-sandbox-1',
+                arguments: '{"task":"run some code"}',
+                body: 'done',
+              },
+            },
+            // Inner sandbox sub-events (arrive after the running event)
             {
               type: 'data-seizu-detail',
               id: 'sandbox-run-python',
@@ -877,6 +892,7 @@ describe('ChatInterface', () => {
                 kind: 'tool',
                 title: 'Sandbox: run_python',
                 status: 'completed',
+                parent_id: 'tc-sandbox-1',
                 body: 'hello world',
               },
             },
@@ -887,18 +903,8 @@ describe('ChatInterface', () => {
                 kind: 'tool',
                 title: 'Sandbox: run_bash',
                 status: 'completed',
+                parent_id: 'tc-sandbox-1',
                 body: 'exit 0',
-              },
-            },
-            {
-              type: 'data-seizu-detail',
-              id: 'outer-tool',
-              data: {
-                kind: 'tool',
-                title: 'Tool: sandbox__delegate',
-                status: 'completed',
-                arguments: '{"task":"run some code"}',
-                body: 'done',
               },
             },
             { type: 'text', text: 'All done.' },

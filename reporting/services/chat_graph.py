@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Annotated, Any, Literal, NotRequired, Protocol
@@ -55,6 +56,13 @@ from reporting.services.mcp_runtime import ChatBlockReason
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
+
+# Holds the outer detail event ID for the currently-executing tool call so that
+# tool handlers (e.g. sandbox__delegate) can stamp parent_id on their own
+# child events and have them grouped under the outer entry in the UI.
+# Set inside _run_tool_call_batch.run_one before calling the handler; each
+# asyncio.gather task gets its own context copy so parallel calls don't interfere.
+_current_tool_detail_id: ContextVar[str | None] = ContextVar("_current_tool_detail_id", default=None)
 
 # Carries the outer chat agent's currently-disclosed tool names into builtin
 
@@ -478,6 +486,12 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
         batch_id = _confirmation_batch_id_for_requests(batch)
+        # Emit "running" events before the batch so the UI shows each tool
+        # immediately.  The same request.id is the SSE event id for both the
+        # running and completed events; the AI SDK updates the part in-place.
+        for request in batch:
+            running_data = _tool_call_running_detail_data(request)
+            writer({"kind": "detail", "id": request.id, "data": running_data})
         results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -488,7 +502,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         for result in results:
             detail_data = _tool_call_detail_data(result)
             detail_events.append(detail_data)
-            writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
+            writer({"kind": "detail", "id": result.request.id, "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
         tool_ai_message = _ai_message_for_tool_results(ai_message, results)
@@ -1667,6 +1681,10 @@ async def _run_tool_call_batch(
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
 
     async def run_one(request: ToolCallRequest) -> ToolCallResult:
+        # Expose this tool call's detail ID to the handler so it can stamp
+        # parent_id on any child detail events.  Each asyncio.gather task gets
+        # its own context copy, so parallel calls don't clobber each other.
+        _current_tool_detail_id.set(request.id)
         if semaphore is None:
             return await _run_tool_call(
                 request,
@@ -1917,6 +1935,23 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
     )
 
 
+def _tool_call_running_detail_data(request: ToolCallRequest) -> dict[str, Any]:
+    """Minimal detail event emitted before a tool call runs.
+
+    The same ``request.id`` is used as the SSE event id so the AI SDK updates
+    this part in-place when the completed event arrives.  Including ``detail_id``
+    in the data lets the frontend match child events' ``parent_id`` to this entry
+    without needing access to the SSE-level event id.
+    """
+    action = "Skill" if request.spec.kind == "skill" else "Tool"
+    return {
+        "kind": request.spec.kind,
+        "title": f"{action}: {request.name}",
+        "status": "running",
+        "detail_id": request.id,
+    }
+
+
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
     # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
@@ -1931,6 +1966,7 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",
         "status": status,
+        "detail_id": result.request.id,
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
     }

@@ -78,6 +78,11 @@ type SeizuChatDetail = {
   arguments?: string;
   body?: string;
   step_id?: string;
+  // Stable ID emitted alongside the event data so child events can reference
+  // this entry as their parent without needing the SSE-level event id.
+  detail_id?: string;
+  // ID of the parent detail entry; the frontend groups this as a child of that entry.
+  parent_id?: string;
 };
 
 const KNOWN_DETAIL_KINDS = [
@@ -178,6 +183,14 @@ function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
         step_id:
           'step_id' in detail && typeof detail.step_id === 'string'
             ? detail.step_id
+            : undefined,
+        detail_id:
+          'detail_id' in detail && typeof detail.detail_id === 'string'
+            ? detail.detail_id
+            : undefined,
+        parent_id:
+          'parent_id' in detail && typeof detail.parent_id === 'string'
+            ? detail.parent_id
             : undefined,
       };
     })
@@ -287,78 +300,68 @@ function detailsEqual(
       detail.status === candidate.status &&
       detail.arguments === candidate.arguments &&
       detail.body === candidate.body &&
-      detail.step_id === candidate.step_id
+      detail.step_id === candidate.step_id &&
+      detail.detail_id === candidate.detail_id &&
+      detail.parent_id === candidate.parent_id
     );
   });
 }
 
 type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
 
-// Group the flat detail stream into a hierarchy.
+// Group the flat detail stream into a hierarchy.  Two mechanisms coexist:
 //
-// Two grouping mechanisms:
+// 1. parent_id grouping: a detail with parent_id is attached as a child of
+//    the detail whose detail_id matches.  The outer chat agent pre-emits a
+//    "running" event for each tool call (including sandbox__delegate) so the
+//    parent entry is always present in the list before its children arrive.
+//    Pass 1 builds a node map keyed by detail_id; pass 2 assigns children.
 //
-// 1. Step grouping (orchestrator): a `step` detail opens a group; tool/verify
-//    details tagged with its step_id nest under it.
-//
-// 2. Sandbox grouping: inner sandbox-agent tool calls have titles prefixed
-//    "Sandbox: " and arrive in the stream BEFORE their parent
-//    "Tool: sandbox__delegate" detail (because the inner events are emitted
-//    during handler execution while the outer event is emitted after the batch
-//    returns).  We accumulate them and attach them as children when the parent
-//    detail is encountered.  Each "Tool: sandbox__delegate" claim only the
-//    immediately preceding batch of "Sandbox: " items, so multiple sandbox
-//    calls in the same message each group with their own sub-events.
+// 2. step_id grouping (orchestrator): a `step` detail opens a group; tool/
+//    verify details tagged with its step_id nest under it.  Handled in pass 2.
 //
 // Ungrouped details (routing, plan, top-level thinking) stay at the root.
 function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
-  const nodes: DetailNode[] = [];
+  // Pass 1: build a node for every detail, index the ones with a detail_id.
+  const nodeMap = new Map<string, DetailNode>();
+  const allNodes: DetailNode[] = details.map((detail) => {
+    const node: DetailNode = { detail, children: [] };
+    if (detail.detail_id) nodeMap.set(detail.detail_id, node);
+    return node;
+  });
+
+  // Pass 2: assign each node to either a parent (by parent_id or step_id) or
+  // to the root list.
+  const roots: DetailNode[] = [];
   let currentStep: DetailNode | null = null;
-  // Buffer for "Sandbox: *" items waiting for their parent tool entry.
-  const pendingSandbox: SeizuChatDetail[] = [];
 
-  const flushSandbox = () => {
-    for (const child of pendingSandbox) {
-      nodes.push({ detail: child, children: [] });
+  for (const node of allNodes) {
+    const { detail } = node;
+
+    if (detail.parent_id) {
+      const parent = nodeMap.get(detail.parent_id);
+      if (parent) {
+        parent.children.push(detail);
+        continue;
+      }
+      // Parent not found (e.g. older message without detail_id) — fall through.
     }
-    pendingSandbox.length = 0;
-  };
 
-  for (const detail of details) {
     if (detail.kind === 'step') {
-      flushSandbox();
-      currentStep = { detail, children: [] };
-      nodes.push(currentStep);
+      currentStep = node;
+      roots.push(node);
     } else if (
       detail.step_id &&
       currentStep &&
       currentStep.detail.step_id === detail.step_id
     ) {
       currentStep.children.push(detail);
-    } else if (detail.title.startsWith('Sandbox: ')) {
-      // Hold — will be attached to the next "Tool: sandbox__delegate" node.
-      pendingSandbox.push(detail);
-    } else if (
-      detail.kind === 'tool' &&
-      detail.title === 'Tool: sandbox__delegate' &&
-      pendingSandbox.length > 0
-    ) {
-      // Claim the buffered sandbox sub-events as children of this tool call.
-      nodes.push({ detail, children: [...pendingSandbox] });
-      pendingSandbox.length = 0;
     } else {
-      // Any non-sandbox detail flushes orphaned sandbox items to root first.
-      flushSandbox();
-      nodes.push({ detail, children: [] });
+      roots.push(node);
     }
   }
 
-  // Orphaned sandbox items (e.g. during live streaming before the parent
-  // "Tool: sandbox__delegate" event has arrived) fall through to root so they
-  // remain visible rather than being silently hidden.
-  flushSandbox();
-
-  return nodes;
+  return roots;
 }
 
 // Status icons replace text labels: a checkmark/spinner/hourglass/error reads at
