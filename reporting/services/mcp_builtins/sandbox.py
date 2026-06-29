@@ -236,6 +236,8 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
     # Never pass sandbox__delegate to the inner agent (prevents recursive delegation).
     seizu_tools = [t for t in all_tools if t.name != "sandbox__delegate"]
 
+    _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
+
     result: list[Any] = []
     for tool in seizu_tools:
         schema: dict[str, Any] = tool.inputSchema or {}
@@ -244,10 +246,11 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
         fields: dict[str, Any] = {}
         for prop_name, prop_info in properties.items():
             desc = str(prop_info.get("description", ""))
+            py_type: type = _JSON_TYPE_TO_PY.get(prop_info.get("type", "string"), str)
             if prop_name in required:
-                fields[prop_name] = (str, Field(..., description=desc))
+                fields[prop_name] = (py_type, Field(..., description=desc))
             else:
-                fields[prop_name] = (str | None, Field(None, description=desc))
+                fields[prop_name] = (py_type | None, Field(None, description=desc))
         args_schema = create_model("_Input", **fields) if fields else None
 
         tool_name = tool.name

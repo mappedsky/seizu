@@ -296,6 +296,33 @@ async def test_build_seizu_tools_returns_all_permitted_tools() -> None:
     assert {t.name for t in tools} == {"graph__query", "reports__get"}
 
 
+async def test_build_seizu_tools_coerces_integer_params() -> None:
+    """Integer params from the MCP schema must be typed int so Pydantic coerces
+    the LLM's string output ("10") to int before the value reaches Neo4j."""
+    int_tool = Tool(
+        name="my_toolset__search",
+        description="Search",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "max rows"},
+                "query": {"type": "string", "description": "search text"},
+            },
+            "required": ["query"],
+        },
+    )
+    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[int_tool])):
+        tools = await _build_seizu_tools(_current_user())
+
+    assert len(tools) == 1
+    schema_cls = tools[0].args_schema
+    assert schema_cls is not None
+    # Pydantic should coerce the LLM's string "10" to int 10.
+    instance = schema_cls(query="test", limit="10")
+    assert instance.limit == 10
+    assert isinstance(instance.limit, int)
+
+
 async def test_build_seizu_tools_excludes_sandbox_delegate() -> None:
     # sandbox__delegate must never be passed to the inner agent (prevent recursion).
     all_tools = [
