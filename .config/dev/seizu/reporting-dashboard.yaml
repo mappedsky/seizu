@@ -1030,15 +1030,15 @@ toolsets:
           date descending.
         cypher: |-
           MATCH (c:CVEMetadata)
-          WHERE datetime(c.published_date) > datetime() - duration({hours: $hours})
-            AND ($severity = '' OR c.base_severity = $severity)
+          WHERE datetime(c.published_date) > datetime() - duration({hours: COALESCE($hours, 24)})
+            AND (coalesce($severity, '') = '' OR c.base_severity = $severity)
           RETURN c.id AS id,
                  c.base_severity AS base_severity,
                  c.base_score AS base_score,
                  c.description_en AS description,
                  c.published_date AS published_date
           ORDER BY c.published_date DESC
-          LIMIT $limit
+          LIMIT COALESCE($limit, 50)
         parameters:
           - name: hours
             type: integer
@@ -1085,12 +1085,13 @@ toolsets:
           source (SyncMetadata nodes). Useful for checking data freshness.
         cypher: |-
           MATCH (s:SyncMetadata)
+          WHERE s.lastupdated IS NOT NULL
           RETURN s.grouptype AS grouptype,
                  s.syncedtype AS syncedtype,
                  s.groupid AS groupid,
                  datetime({epochSeconds: s.lastupdated}) AS last_synced
           ORDER BY last_synced DESC
-          LIMIT $limit
+          LIMIT COALESCE($limit, 20)
         parameters:
           - name: limit
             type: integer
@@ -1164,8 +1165,8 @@ toolsets:
           WHERE ($include_archived OR (coalesce(r.archived, false) = false AND coalesce(r._ont_archived, false) = false AND coalesce(r.disabled, false) = false))
             AND ($exclude_forks = false OR coalesce(r.fork, false) = false)
           MATCH (r)-[:FOUND_IN]-(s:SecurityIssue)
-          WHERE ($state = '' OR s.state = $state)
-            AND ($severity = '' OR s.severity = $severity)
+          WHERE (coalesce($state, '') = '' OR s.state = $state)
+            AND (coalesce($severity, '') = '' OR s.severity = $severity)
           WITH DISTINCT r, s,
                CASE s.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END AS severity_rank
           RETURN r.fullname AS repo,
@@ -1184,7 +1185,7 @@ toolsets:
                  s.vulnerable_version_range AS vulnerable_range,
                  s.html_url AS url
           ORDER BY severity_rank DESC, coalesce(s.epss_percentage, 0) DESC, coalesce(s.cvss_v4_score, s.cvss_v3_score, 0) DESC
-          LIMIT $limit
+          LIMIT COALESCE($limit, 25)
         parameters:
           - name: org
             type: string
@@ -1439,17 +1440,18 @@ toolsets:
           coverage.
         cypher: |-
           MATCH (s:SyncMetadata)
-          WHERE coalesce(s.groupid, '') = 'https://github.com/' + $org
+          WHERE (coalesce(s.groupid, '') = 'https://github.com/' + $org
              OR coalesce(s.groupid, '') CONTAINS $org
              OR coalesce(s.grouptype, '') CONTAINS 'GitHub'
-             OR coalesce(s.syncedtype, '') CONTAINS 'GitHub'
+             OR coalesce(s.syncedtype, '') CONTAINS 'GitHub')
+            AND s.lastupdated IS NOT NULL
           RETURN s.grouptype AS grouptype,
                  s.syncedtype AS syncedtype,
                  s.groupid AS groupid,
                  datetime({epochSeconds: s.lastupdated}) AS last_synced,
                  s.lastupdated AS lastupdated_epoch
           ORDER BY s.lastupdated DESC
-          LIMIT $limit
+          LIMIT COALESCE($limit, 20)
         parameters:
           - name: org
             type: string
