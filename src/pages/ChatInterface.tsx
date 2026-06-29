@@ -294,14 +294,39 @@ function detailsEqual(
 
 type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
 
-// Group the flat detail stream into a step hierarchy: a `step` detail opens a
-// group, and the tool/verify details tagged with its step_id nest under it.
+// Group the flat detail stream into a hierarchy.
+//
+// Two grouping mechanisms:
+//
+// 1. Step grouping (orchestrator): a `step` detail opens a group; tool/verify
+//    details tagged with its step_id nest under it.
+//
+// 2. Sandbox grouping: inner sandbox-agent tool calls have titles prefixed
+//    "Sandbox: " and arrive in the stream BEFORE their parent
+//    "Tool: sandbox__delegate" detail (because the inner events are emitted
+//    during handler execution while the outer event is emitted after the batch
+//    returns).  We accumulate them and attach them as children when the parent
+//    detail is encountered.  Each "Tool: sandbox__delegate" claim only the
+//    immediately preceding batch of "Sandbox: " items, so multiple sandbox
+//    calls in the same message each group with their own sub-events.
+//
 // Ungrouped details (routing, plan, top-level thinking) stay at the root.
 function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
   const nodes: DetailNode[] = [];
   let currentStep: DetailNode | null = null;
+  // Buffer for "Sandbox: *" items waiting for their parent tool entry.
+  const pendingSandbox: SeizuChatDetail[] = [];
+
+  const flushSandbox = () => {
+    for (const child of pendingSandbox) {
+      nodes.push({ detail: child, children: [] });
+    }
+    pendingSandbox.length = 0;
+  };
+
   for (const detail of details) {
     if (detail.kind === 'step') {
+      flushSandbox();
       currentStep = { detail, children: [] };
       nodes.push(currentStep);
     } else if (
@@ -310,10 +335,29 @@ function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
       currentStep.detail.step_id === detail.step_id
     ) {
       currentStep.children.push(detail);
+    } else if (detail.title.startsWith('Sandbox: ')) {
+      // Hold — will be attached to the next "Tool: sandbox__delegate" node.
+      pendingSandbox.push(detail);
+    } else if (
+      detail.kind === 'tool' &&
+      detail.title === 'Tool: sandbox__delegate' &&
+      pendingSandbox.length > 0
+    ) {
+      // Claim the buffered sandbox sub-events as children of this tool call.
+      nodes.push({ detail, children: [...pendingSandbox] });
+      pendingSandbox.length = 0;
     } else {
+      // Any non-sandbox detail flushes orphaned sandbox items to root first.
+      flushSandbox();
       nodes.push({ detail, children: [] });
     }
   }
+
+  // Orphaned sandbox items (e.g. during live streaming before the parent
+  // "Tool: sandbox__delegate" event has arrived) fall through to root so they
+  // remain visible rather than being silently hidden.
+  flushSandbox();
+
   return nodes;
 }
 

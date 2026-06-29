@@ -859,6 +859,82 @@ describe('ChatInterface', () => {
     );
   }, 15_000);
 
+  it('groups Sandbox: sub-events under their parent Tool: sandbox__delegate entry', async () => {
+    // Inner sandbox agent tool calls arrive in the stream BEFORE the outer
+    // "Tool: sandbox__delegate" detail (which is emitted after the batch returns).
+    // buildDetailTree must buffer them and nest them under the parent when it arrives.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'sandbox-run-python',
+              data: {
+                kind: 'tool',
+                title: 'Sandbox: run_python',
+                status: 'completed',
+                body: 'hello world',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'sandbox-run-bash',
+              data: {
+                kind: 'tool',
+                title: 'Sandbox: run_bash',
+                status: 'completed',
+                body: 'exit 0',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'outer-tool',
+              data: {
+                kind: 'tool',
+                title: 'Tool: sandbox__delegate',
+                status: 'completed',
+                arguments: '{"task":"run some code"}',
+                body: 'done',
+              },
+            },
+            { type: 'text', text: 'All done.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // The chip shows the raw event count (3); grouping is structural, not counted.
+    expect(screen.getByText('All done.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Details 3' }));
+    await waitFor(
+      () => {
+        expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
+        // Sandbox sub-events are children of the outer row, not root nodes.
+        expect(screen.getByText('Sandbox: run_python')).toBeInTheDocument();
+        expect(screen.getByText('Sandbox: run_bash')).toBeInTheDocument();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
   it('formats settled blocks as Markdown and leaves the in-progress block plain', async () => {
     // A block followed by a blank line is settled and parsed once; the still-
     // growing final block stays plain text (raw markup) until it settles. This is
