@@ -407,6 +407,7 @@ def _wrap_with_detail_events(
                     "kind": "tool",
                     "title": f"Sandbox: {_name}",
                     "status": status,
+                    "detail_id": detail_id,
                     "body": body,
                 }
                 if _parent_id:

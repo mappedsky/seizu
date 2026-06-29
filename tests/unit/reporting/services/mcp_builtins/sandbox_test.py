@@ -452,7 +452,11 @@ async def test_wrap_with_detail_events_emits_running_then_completed() -> None:
     assert running["data"]["title"] == "Sandbox: echo"
     assert completed["data"]["status"] == "completed"
     assert "hi" in completed["data"]["body"]
+    # Both events share the same SSE id so the frontend can upsert them.
     assert running["id"] == completed["id"]
+    # detail_id in the data payload lets buildDetailTree deduplicate by id.
+    assert running["data"]["detail_id"] == running["id"]
+    assert completed["data"]["detail_id"] == completed["id"]
     # No parent_id when none was provided
     assert "parent_id" not in running["data"]
     assert "parent_id" not in completed["data"]
@@ -473,6 +477,10 @@ async def test_wrap_with_detail_events_includes_parent_id() -> None:
     running, completed = events
     assert running["data"]["parent_id"] == "outer-detail-123"
     assert completed["data"]["parent_id"] == "outer-detail-123"
+    # detail_id must also be present so the frontend upsert logic can
+    # recognise running+completed as the same node.
+    assert running["data"]["detail_id"] == running["id"]
+    assert completed["data"]["detail_id"] == completed["id"]
 
 
 async def test_wrap_with_detail_events_emits_error_on_exception() -> None:

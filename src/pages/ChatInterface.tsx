@@ -322,13 +322,24 @@ type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
 //
 // Ungrouped details (routing, plan, top-level thinking) stay at the root.
 function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
-  // Pass 1: build a node for every detail, index the ones with a detail_id.
+  // Pass 1: build a node for every detail.  Events with a detail_id are
+  // upserted: if an earlier event already created a node for that id, we
+  // update its detail in-place rather than creating a second node.  This
+  // handles the case where the AI SDK appends both the "running" and
+  // "completed" events as separate parts instead of updating the first one.
   const nodeMap = new Map<string, DetailNode>();
-  const allNodes: DetailNode[] = details.map((detail) => {
-    const node: DetailNode = { detail, children: [] };
-    if (detail.detail_id) nodeMap.set(detail.detail_id, node);
-    return node;
-  });
+  const allNodes: DetailNode[] = [];
+  for (const detail of details) {
+    if (detail.detail_id && nodeMap.has(detail.detail_id)) {
+      // Update the existing node in-place so its position in allNodes —
+      // and any children already assigned — are preserved.
+      nodeMap.get(detail.detail_id)!.detail = detail;
+    } else {
+      const node: DetailNode = { detail, children: [] };
+      allNodes.push(node);
+      if (detail.detail_id) nodeMap.set(detail.detail_id, node);
+    }
+  }
 
   // Pass 2: assign each node to either a parent (by parent_id or step_id) or
   // to the root list.

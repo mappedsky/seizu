@@ -892,6 +892,7 @@ describe('ChatInterface', () => {
                 kind: 'tool',
                 title: 'Sandbox: run_python',
                 status: 'completed',
+                detail_id: 'sandbox-run-python',
                 parent_id: 'tc-sandbox-1',
                 body: 'hello world',
               },
@@ -903,6 +904,7 @@ describe('ChatInterface', () => {
                 kind: 'tool',
                 title: 'Sandbox: run_bash',
                 status: 'completed',
+                detail_id: 'sandbox-run-bash',
                 parent_id: 'tc-sandbox-1',
                 body: 'exit 0',
               },
@@ -936,6 +938,103 @@ describe('ChatInterface', () => {
         // Sandbox sub-events are children of the outer row, not root nodes.
         expect(screen.getByText('Sandbox: run_python')).toBeInTheDocument();
         expect(screen.getByText('Sandbox: run_bash')).toBeInTheDocument();
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
+  it('deduplicates running+completed events with the same detail_id (upsert semantics)', async () => {
+    // The AI SDK appends both the "running" and "completed" events as separate
+    // parts when they share the same SSE id.  buildDetailTree must upsert-by-
+    // detail_id so the entry transitions in-place (running→completed) without
+    // creating a duplicate node or losing its children.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            // D1 running (pre-emitted before the batch)
+            {
+              type: 'data-seizu-detail',
+              id: 'tc-sandbox-1',
+              data: {
+                kind: 'tool',
+                title: 'Tool: sandbox__delegate',
+                status: 'running',
+                detail_id: 'tc-sandbox-1',
+              },
+            },
+            // Inner tool running then completed (both appended as separate parts)
+            {
+              type: 'data-seizu-detail',
+              id: 'sandbox-run-python',
+              data: {
+                kind: 'tool',
+                title: 'Sandbox: run_python',
+                status: 'running',
+                detail_id: 'sandbox-run-python',
+                parent_id: 'tc-sandbox-1',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'sandbox-run-python',
+              data: {
+                kind: 'tool',
+                title: 'Sandbox: run_python',
+                status: 'completed',
+                detail_id: 'sandbox-run-python',
+                parent_id: 'tc-sandbox-1',
+                body: 'hello world',
+              },
+            },
+            // D1 completed (appended, same detail_id as running)
+            {
+              type: 'data-seizu-detail',
+              id: 'tc-sandbox-1',
+              data: {
+                kind: 'tool',
+                title: 'Tool: sandbox__delegate',
+                status: 'completed',
+                detail_id: 'tc-sandbox-1',
+                arguments: '{"task":"run some code"}',
+                body: 'done',
+              },
+            },
+            { type: 'text', text: 'All done.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // 4 raw detail events; chip reflects the raw count.
+    expect(screen.getByText('All done.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
+    await waitFor(
+      () => {
+        // Upsert collapses running+completed for sandbox__delegate into one node.
+        const outerEntries = screen.getAllByText('Tool: sandbox__delegate');
+        expect(outerEntries).toHaveLength(1);
+        // The single entry should reflect the final "completed" state.
+        expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
+        // The inner tool's running+completed collapse into one child entry.
+        expect(screen.getAllByText('Sandbox: run_python')).toHaveLength(1);
       },
       { timeout: 10_000 },
     );
