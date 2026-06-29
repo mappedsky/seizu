@@ -143,7 +143,10 @@ def test_sandbox_delegate_absent_from_default_listing() -> None:
 
 def test_sandbox_delegate_present_with_include_chat_only() -> None:
     """Chat agent path: sandbox__delegate appears when include_chat_only=True."""
-    tools = list_builtin_tools(include_chat_only=True)
+    # The tool is gated by SANDBOX_ENABLED (default false), so pin it on to keep
+    # the registry assertions independent of the ambient environment.
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tools = list_builtin_tools(include_chat_only=True)
     assert any(t.name == "sandbox__delegate" for t in tools)
 
 
@@ -152,19 +155,22 @@ def test_find_builtin_excludes_sandbox_delegate_by_default() -> None:
 
 
 def test_find_builtin_includes_sandbox_delegate_with_flag() -> None:
-    tool = find_builtin("sandbox__delegate", include_chat_only=True)
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tool = find_builtin("sandbox__delegate", include_chat_only=True)
     assert tool is not None
     assert tool.group == "sandbox"
 
 
 def test_sandbox_delegate_has_required_permissions() -> None:
-    tool = find_builtin("sandbox__delegate", include_chat_only=True)
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tool = find_builtin("sandbox__delegate", include_chat_only=True)
     assert tool is not None
     assert Permission.SANDBOX_DELEGATE.value in tool.required_permissions
 
 
 def test_sandbox_delegate_is_chat_safe_without_confirmation() -> None:
-    tool = find_builtin("sandbox__delegate", include_chat_only=True)
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tool = find_builtin("sandbox__delegate", include_chat_only=True)
     assert tool is not None
     assert tool.chat_safe_without_confirmation is True
     assert tool.confirmation is None
@@ -173,10 +179,11 @@ def test_sandbox_delegate_is_chat_safe_without_confirmation() -> None:
 def test_sandbox_delegate_is_always_disclosed() -> None:
     from reporting.services.mcp_builtins import always_disclosed_tool_names
 
-    tool = find_builtin("sandbox__delegate", include_chat_only=True)
-    assert tool is not None
-    assert tool.always_disclosed is True
-    assert "sandbox__delegate" in always_disclosed_tool_names()
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
+        tool = find_builtin("sandbox__delegate", include_chat_only=True)
+        assert tool is not None
+        assert tool.always_disclosed is True
+        assert "sandbox__delegate" in always_disclosed_tool_names()
 
 
 # ---------------------------------------------------------------------------

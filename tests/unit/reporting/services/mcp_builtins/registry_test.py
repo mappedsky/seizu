@@ -33,7 +33,9 @@ def test_list_builtin_tools_empty_filter_returns_all():
 
 
 def test_list_builtin_tools_include_chat_only_returns_all_groups():
-    with patch("reporting.settings.MCP_ENABLED_BUILTINS", []):
+    # SANDBOX_ENABLED (default false) gates the sandbox group's only tool, so pin
+    # it on to assert every group is represented regardless of the environment.
+    with patch("reporting.settings.MCP_ENABLED_BUILTINS", []), patch("reporting.settings.SANDBOX_ENABLED", True):
         all_tools = list_builtin_tools(include_chat_only=True)
     assert {t.group for t in all_tools} == set(all_group_names())
 
