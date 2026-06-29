@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from langchain_core.tools import StructuredTool
 from mcp.types import Tool
 
 from reporting.authnz import CurrentUser
@@ -16,6 +18,7 @@ from reporting.services.mcp_builtins.sandbox import (
     _get_sandbox_model,
     _handle_delegate,
     _ToolMessageNormalizingModel,
+    _wrap_with_detail_events,
 )
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -344,6 +347,66 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     tool_names = {t.name for t in captured_tools}
     assert "run_python" in tool_names
     assert "graph__query" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# _wrap_with_detail_events — surfaces inner-agent tool calls in the detail stream
+# ---------------------------------------------------------------------------
+
+
+async def test_wrap_with_detail_events_emits_running_then_completed() -> None:
+    """Each wrapped tool call emits running→completed with a shared stable id."""
+    events: list[Any] = []
+
+    async def echo(message: str) -> str:
+        return f"echoed: {message}"
+
+    original = StructuredTool.from_function(coroutine=echo, name="echo", description="echo")
+    (wrapped,) = _wrap_with_detail_events([original], events.append)
+
+    result = await wrapped.coroutine(message="hi")  # type: ignore[misc]
+    assert result == "echoed: hi"
+
+    assert len(events) == 2
+    running, completed = events
+    assert running["data"]["status"] == "running"
+    assert running["data"]["title"] == "Sandbox: echo"
+    assert completed["data"]["status"] == "completed"
+    assert "hi" in completed["data"]["body"]
+    assert running["id"] == completed["id"]
+
+
+async def test_wrap_with_detail_events_emits_error_on_exception() -> None:
+    """A tool that raises emits an error event and re-raises the exception."""
+    events: list[Any] = []
+
+    async def boom() -> str:
+        raise ValueError("exploded")
+
+    original = StructuredTool.from_function(coroutine=boom, name="boom", description="boom")
+    (wrapped,) = _wrap_with_detail_events([original], events.append)
+
+    with pytest.raises(ValueError, match="exploded"):
+        await wrapped.coroutine()  # type: ignore[misc]
+
+    assert len(events) == 2
+    running, error = events
+    assert running["data"]["status"] == "running"
+    assert error["data"]["status"] == "error"
+    assert "exploded" in error["data"]["body"]
+
+
+async def test_wrap_with_detail_events_preserves_tool_without_coroutine() -> None:
+    """Tools with no coroutine (sync-only) are passed through unchanged."""
+    events: list[Any] = []
+
+    def sync_fn(x: int) -> int:
+        return x + 1
+
+    original = StructuredTool.from_function(func=sync_fn, name="sync", description="sync")
+    (passthrough,) = _wrap_with_detail_events([original], events.append)
+    assert passthrough is original
+    assert events == []
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 
 import asyncio
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, runtime_checkable
@@ -28,6 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import StructuredTool
+from langgraph.config import get_stream_writer
 from langgraph.prebuilt import create_react_agent
 
 from reporting.authnz import CurrentUser
@@ -357,8 +359,91 @@ def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
     return _ToolMessageNormalizingModel(get_chat_model(role="worker"))
 
 
+def _wrap_with_detail_events(tools: list[StructuredTool], writer: Any) -> list[StructuredTool]:
+    """Re-wrap each inner-agent tool so its calls appear in the outer chat detail stream.
+
+    Each call emits a ``running`` event on entry and a ``completed`` (or ``error``)
+    event on exit, using a stable ``id`` so the UI reconciles them into a single
+    collapsible entry rather than two separate rows.
+
+    ``writer`` must be captured from the outer LangGraph context *before* the inner
+    ``create_react_agent`` graph starts — LangGraph resets the ``get_stream_writer``
+    contextvar when it begins its own execution, so capturing it afterwards yields a
+    no-op writer that silently drops all events.
+    """
+    result: list[StructuredTool] = []
+    for tool in tools:
+        original = tool.coroutine
+        if original is None:
+            result.append(tool)
+            continue
+        tool_name = tool.name
+
+        async def _wrapped(_orig: Any = original, _name: str = tool_name, **kwargs: Any) -> Any:
+            detail_id = f"sandbox_{uuid.uuid4().hex}"
+            writer(
+                {
+                    "kind": "detail",
+                    "id": detail_id,
+                    "data": {
+                        "kind": "tool",
+                        "title": f"Sandbox: {_name}",
+                        "status": "running",
+                        "body": "",
+                    },
+                }
+            )
+            try:
+                out = await _orig(**kwargs)
+            except Exception as exc:
+                writer(
+                    {
+                        "kind": "detail",
+                        "id": detail_id,
+                        "data": {
+                            "kind": "tool",
+                            "title": f"Sandbox: {_name}",
+                            "status": "error",
+                            "body": str(exc)[:300],
+                        },
+                    }
+                )
+                raise
+            writer(
+                {
+                    "kind": "detail",
+                    "id": detail_id,
+                    "data": {
+                        "kind": "tool",
+                        "title": f"Sandbox: {_name}",
+                        "status": "completed",
+                        "body": str(out)[:300] if out is not None else "",
+                    },
+                }
+            )
+            return out
+
+        create_kwargs: dict[str, Any] = {
+            "coroutine": _wrapped,
+            "name": tool.name,
+            "description": tool.description or tool.name,
+        }
+        if tool.args_schema is not None:
+            create_kwargs["args_schema"] = tool.args_schema
+        result.append(StructuredTool.from_function(**create_kwargs))
+    return result
+
+
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
+
+    # Capture the outer chat graph's stream writer before starting the inner
+    # create_react_agent, which resets the LangGraph contextvar.  Falls back to
+    # a no-op outside a LangGraph streaming context (e.g. in tests).
+    try:
+        writer: Any = get_stream_writer()
+    except RuntimeError:
+        writer = lambda _: None  # noqa: E731
 
     if settings.CHAT_LLM_PROVIDER == "mock":
         return {"error": "sandbox__delegate requires a real LLM provider (CHAT_LLM_PROVIDER=mock)"}
@@ -375,6 +460,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             tools = _build_sandbox_tools(backend)
             if current_user is not None:
                 tools = [*tools, *await _build_seizu_tools(current_user)]
+            tools = _wrap_with_detail_events(tools, writer)
             model = _get_sandbox_model()
             agent = create_react_agent(model=model, tools=tools)
             result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
