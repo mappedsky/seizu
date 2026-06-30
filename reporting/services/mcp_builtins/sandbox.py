@@ -187,28 +187,35 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     """Build LangChain StructuredTools from a :class:`SandboxBackend`.
 
     The tool names and descriptions are fixed regardless of which backend is
-    active, so the inner agent's behaviour is consistent across providers.
+    active, so the inner agent's behaviour is consistent across providers.  Every
+    result is byte-capped (``SANDBOX_MAX_OUTPUT_BYTES``) before it reaches the
+    inner agent, so a single noisy command or large file read can't blow up its
+    context.
     """
+    from reporting import settings
+
+    def _cap(text: str) -> str:
+        return _truncate_bytes(text, settings.SANDBOX_MAX_OUTPUT_BYTES)
 
     async def run_python(code: str) -> str:
         """Run Python code in the sandbox and return stdout, stderr, and any text output."""
-        return await backend.run_python(code)
+        return _cap(await backend.run_python(code))
 
     async def run_bash(cmd: str) -> str:
         """Run a shell command in the sandbox and return stdout and stderr."""
-        return await backend.run_bash(cmd)
+        return _cap(await backend.run_bash(cmd))
 
     async def read_file(path: str) -> str:
         """Read the contents of a file in the sandbox filesystem."""
-        return await backend.read_file(path)
+        return _cap(await backend.read_file(path))
 
     async def write_file(path: str, content: str) -> str:
         """Write content to a file in the sandbox filesystem."""
-        return await backend.write_file(path, content)
+        return _cap(await backend.write_file(path, content))
 
     async def list_files(path: str = "/") -> str:
         """List files and directories at a path in the sandbox filesystem."""
-        return await backend.list_files(path)
+        return _cap(await backend.list_files(path))
 
     return [
         StructuredTool.from_function(coroutine=run_python, name="run_python", description=run_python.__doc__ or ""),
@@ -220,14 +227,20 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
 
 
 async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
-    """Build LangChain StructuredTools wrapping all chat-safe Seizu MCP tools
-    the current user has permission to call.
+    """Build LangChain StructuredTools wrapping the Seizu MCP tools the sandbox
+    inner agent may call.
 
-    The sandbox inner agent gets the full permitted tool set so it can fetch
-    data and run computations without relying on the outer model to relay
-    results through the ``context`` field.  Tool access is bounded by RBAC
-    (``chat_safe_only=True`` + ``CHAT_TOOLS_CALL`` permission), not by the
-    outer model's current progressive-disclosure state.
+    The inner agent gets read-only/inspection tools, the explicit no-confirmation
+    exceptions, and all user-defined toolset tools so it can fetch data and run
+    computations without relaying results through the ``context`` field.  Tool
+    access is bounded by RBAC (``chat_safe_only=True`` + ``CHAT_TOOLS_CALL``), not
+    by the outer model's progressive-disclosure state.
+
+    Confirmation-gated mutating tools are excluded (``exclude_confirmation_gated``):
+    the sandbox subagent runs to completion inside one outer tool call and cannot
+    drive the interactive, session-scoped confirmation round-trip, so gated
+    mutations stay with the outer chat agent where the user can approve them. The
+    runtime also fail-closes if such a tool were somehow reached here.
     """
     from pydantic import Field, create_model
 
@@ -238,6 +251,7 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
         include_chat_only=False,
+        exclude_confirmation_gated=True,
     )
     # Never pass sandbox__delegate to the inner agent (prevents recursive delegation).
     seizu_tools = [t for t in all_tools if t.name != "sandbox__delegate"]
@@ -475,6 +489,19 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _truncate_bytes(text: str, max_bytes: int) -> str:
+    """Cap text to ``max_bytes`` UTF-8 bytes with a ``[truncated]`` marker.
+
+    Applied to every inner tool result before it is fed back to the sandbox agent
+    (not just the final answer), so a large file read or noisy command can't blow
+    up the inner model's context, memory, latency, or provider spend.
+    """
+    encoded = text.encode()
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode(errors="replace") + "\n[truncated]"
+
+
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
     from reporting.services.chat_graph import _child_detail_event_accumulator, _current_tool_detail_id
@@ -536,12 +563,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         logger.exception("sandbox__delegate failed")
         return {"error": "Sandbox task failed — see server logs for details"}
 
-    max_bytes = settings.SANDBOX_MAX_OUTPUT_BYTES
-    encoded = output.encode()
-    if len(encoded) > max_bytes:
-        output = encoded[:max_bytes].decode(errors="replace") + "\n[truncated]"
-
-    return {"result": output}
+    return {"result": _truncate_bytes(output, settings.SANDBOX_MAX_OUTPUT_BYTES)}
 
 
 def _sandbox_enabled() -> bool:

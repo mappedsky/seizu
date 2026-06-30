@@ -102,6 +102,8 @@ def always_disclosed_tool_names() -> frozenset[str]:
         if allowed is not None and group.name not in allowed:
             continue
         for tool in group.tools:
+            if tool.enabled is not None and not tool.enabled():
+                continue
             if tool.always_disclosed:
                 names.add(tool.name)
     return frozenset(names)

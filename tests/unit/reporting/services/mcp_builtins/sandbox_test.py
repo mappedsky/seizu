@@ -14,6 +14,7 @@ from reporting.schema.report_config import User
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
+    _build_sandbox_tools,
     _build_seizu_tools,
     _E2BSandboxBackend,
     _get_sandbox_model,
@@ -183,6 +184,17 @@ def test_sandbox_delegate_is_always_disclosed() -> None:
         tool = find_builtin("sandbox__delegate", include_chat_only=True)
         assert tool is not None
         assert tool.always_disclosed is True
+        assert "sandbox__delegate" in always_disclosed_tool_names()
+
+
+def test_always_disclosed_respects_enabled() -> None:
+    """always_disclosed_tool_names() must honor each tool's enabled() gate, so a
+    disabled sandbox does not linger in the internal always-disclosed set."""
+    from reporting.services.mcp_builtins import always_disclosed_tool_names
+
+    with patch("reporting.settings.SANDBOX_ENABLED", False):
+        assert "sandbox__delegate" not in always_disclosed_tool_names()
+    with patch("reporting.settings.SANDBOX_ENABLED", True):
         assert "sandbox__delegate" in always_disclosed_tool_names()
 
 
@@ -480,6 +492,33 @@ async def test_build_seizu_tools_excludes_sandbox_delegate() -> None:
 
     assert len(tools) == 1
     assert tools[0].name == "graph__query"
+
+
+async def test_build_seizu_tools_requests_confirmation_gated_excluded() -> None:
+    """The inner agent must never be handed confirmation-gated mutating tools, so
+    the listing is requested with exclude_confirmation_gated=True."""
+    list_mock = AsyncMock(return_value=[])
+    with patch("reporting.services.mcp_runtime.list_tools_for_user", list_mock):
+        await _build_seizu_tools(_current_user())
+
+    assert list_mock.await_args is not None
+    assert list_mock.await_args.kwargs["exclude_confirmation_gated"] is True
+    assert list_mock.await_args.kwargs["chat_safe_only"] is True
+
+
+async def test_build_sandbox_tools_caps_result_bytes() -> None:
+    """Every inner tool result is byte-capped before reaching the inner agent, not
+    just the final answer — a large read can't blow up the inner model's context."""
+    backend = _make_fake_backend()
+    backend.run_python = AsyncMock(return_value="x" * 10_000)
+    # The cap is read at call time, so the patch must wrap the await, not just build.
+    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 100):
+        tools = _build_sandbox_tools(backend)
+        run_python = next(t for t in tools if t.name == "run_python")
+        out = await run_python.coroutine(code="print('x' * 10000)")  # type: ignore[misc]
+
+    assert len(out.encode()) <= 100 + len("\n[truncated]")
+    assert out.endswith("[truncated]")
 
 
 async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
