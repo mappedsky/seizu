@@ -176,14 +176,29 @@ async def list_tools_for_user(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
+    exclude_confirmation_gated: bool = False,
 ) -> list[Tool]:
+    """List the tools a user may call.
+
+    ``exclude_confirmation_gated`` drops only built-ins that carry a confirmation
+    resolver — i.e. mutating tools whose safety depends on a human approving them.
+    It is for autonomous callers that cannot drive the confirmation round-trip
+    (the sandbox subagent), so they get read-only built-ins, the explicit
+    no-confirmation exceptions, and all user-defined tools (which have no
+    confirmation gate today), but never a tool that would execute ungated. It is a
+    per-tool flag check, not a blanket category exclusion: if user-defined tools
+    ever gain a confirmation gate, they fall under the same filter automatically.
+    """
     perms = _permissions(current_user, permissions)
     if gate_permission and gate_permission.value not in perms:
         return []
 
     tools: list[Tool] = []
-    for builtin in list_builtin_tools():
+    for builtin in list_builtin_tools(include_chat_only=include_chat_only):
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
+            continue
+        if exclude_confirmation_gated and builtin.confirmation is not None:
             continue
         if missing_permissions(builtin.required_permissions, perms):
             continue
@@ -249,12 +264,14 @@ async def call_tool_for_chat(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
     bypass_confirmations: bool = False,
+    confirmation_pre_approved: bool = False,
 ) -> ChatActionOutcome:
     """Chat-oriented tool call returning the body together with a block reason.
 
@@ -268,6 +285,17 @@ async def call_tool_for_chat(
     permission (anyone else is blocked); every bypassed execution is
     audit-logged. Used by the chat UI's bypass mode and by headless agent
     runs (scheduled queries, Temporal workflows).
+
+    ``confirmation_pre_approved`` runs a confirmation-gated tool *without* the
+    gate because the caller has already verified the confirmation is approved
+    and atomically claimed it for execution. It is internal-only (the
+    post-approval executor in ``chat_graph._execute_confirmations``) and is not
+    permission-gated — the approval already happened through the normal flow.
+    Distinct from ``bypass_confirmations``, which skips the gate before any
+    approval and requires ``chat:bypass_permissions``.
+
+    ``include_chat_only`` exposes tools marked ``chat_only=True`` (e.g.
+    ``sandbox__delegate``) that are invisible on the MCP server endpoint.
     """
     content, blocked = await _call_tool_core(
         current_user,
@@ -276,11 +304,13 @@ async def call_tool_for_chat(
         gate_permission=gate_permission,
         permissions=permissions,
         chat_safe_only=chat_safe_only,
+        include_chat_only=include_chat_only,
         result_max_rows=result_max_rows,
         result_max_bytes=result_max_bytes,
         confirmation_source=confirmation_source,
         confirmation_session_key=confirmation_session_key,
         confirmation_batch_id=confirmation_batch_id,
+        confirmation_pre_approved=confirmation_pre_approved,
         bypass_confirmations=bypass_confirmations,
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
@@ -294,12 +324,14 @@ async def _call_tool_core(
     gate_permission: Permission | None = None,
     permissions: frozenset[str] | None = None,
     chat_safe_only: bool = False,
+    include_chat_only: bool = False,
     result_max_rows: int | None = None,
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
     confirmation_batch_id: str | None = None,
     bypass_confirmations: bool = False,
+    confirmation_pre_approved: bool = False,
 ) -> tuple[list[TextContent], ChatBlockReason | None]:
     args = arguments or {}
     perms = _permissions(current_user, permissions)
@@ -309,7 +341,7 @@ async def _call_tool_core(
             ChatBlockReason.PERMISSION_DENIED,
         )
 
-    builtin = find_builtin(name)
+    builtin = find_builtin(name, include_chat_only=include_chat_only)
     if builtin is not None:
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
             return (
@@ -346,6 +378,31 @@ async def _call_tool_core(
                     "source": "bypass",
                 },
             )
+        elif builtin.confirmation is not None and confirmation_pre_approved:
+            # Pre-approved execution: the caller (the post-approval executor in
+            # chat_graph) already verified the confirmation is approved and
+            # atomically claimed it, so the gate must NOT run again — re-running it
+            # here would create a fresh pending confirmation or, without a source,
+            # hit the fail-closed branch below. Fall through to the handler.
+            if current_user is None:
+                return text_response(
+                    {"error": "Confirmation execution requires an authenticated user"}
+                ), ChatBlockReason.PERMISSION_DENIED
+        elif builtin.confirmation is not None and confirmation_source is None:
+            # Fail-closed: a confirmation-gated mutating tool was reached without a
+            # confirmation source and without bypass. This means the caller did not
+            # plumb the confirmation context (e.g. an autonomous subagent), so there
+            # is no one to approve the action — refuse rather than execute it ungated.
+            # Both real entry points always pass a source (chat="chat", MCP="mcp"),
+            # so this only fires on an internal caller that forgot to, and is a
+            # defense-in-depth backstop behind tool-list filtering at the call site.
+            logger.warning(
+                "Refused confirmation-gated tool reached without a confirmation source",
+                extra={"type": "AUDIT", "tool": name},
+            )
+            return text_response(
+                {"error": f"Tool '{name}' requires action confirmation, which is unavailable in this context"}
+            ), ChatBlockReason.PERMISSION_DENIED
         elif builtin.confirmation is not None and confirmation_source is not None:
             # Fail-closed: a mutating tool was reached via a source that requires
             # confirmation but no session key is available to scope the record.

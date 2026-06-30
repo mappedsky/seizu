@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_graph
+from reporting.services import chat_graph, mcp_builtins
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     ChatState,
@@ -54,6 +54,7 @@ from reporting.services.chat_graph import (
     _auto_continue_answer,
     _blocked_tool_call_response,
     _chat_provider,
+    _child_detail_event_accumulator,
     _client_thread_id_from_config,
     _collect_confirmations_to_run,
     _confirmation_batch_id_for_requests,
@@ -377,11 +378,23 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     writer = get_stream_writer()
 
     skills = await _list_chat_prompts(current_user)
-    # Under progressive disclosure the planner sees skills only (tools are
-    # disclosed by rendered skills), so it plans skill-first instead of wiring up
-    # raw tool/graph queries it would not otherwise be allowed to call.
-    capability_tools = None if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE else await _list_chat_tools(current_user)
-    capability = build_capability_context(skills, capability_tools)
+    # Under progressive disclosure the planner sees skills and always-disclosed
+    # tools (tools the model can always reach without a skill unlock, e.g.
+    # sandbox__delegate) so it can plan their use from the start.
+    always_disclosed_tools_for_capability: list[chat_graph.Tool] = []
+    if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE:
+        capability_tools = None
+        _always_disclosed_names = mcp_builtins.always_disclosed_tool_names()
+        if _always_disclosed_names:
+            _all_tools = await _list_chat_tools(current_user)
+            always_disclosed_tools_for_capability = [t for t in _all_tools if t.name in _always_disclosed_names]
+    else:
+        capability_tools = await _list_chat_tools(current_user)
+    capability = build_capability_context(
+        skills,
+        capability_tools,
+        always_disclosed_tools=always_disclosed_tools_for_capability,
+    )
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
 
     run_errors: list[str] = []
@@ -726,10 +739,15 @@ async def _run_worker_step(
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
+    _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive else frozenset()
     available_pool = (
         tool_specs
         if not progressive
-        else [spec for spec in tool_specs if spec.kind == "skill" or spec.name in disclosed_names]
+        else [
+            spec
+            for spec in tool_specs
+            if spec.kind == "skill" or spec.name in disclosed_names or spec.name in _always_disclosed_names
+        ]
     )
     specs, contract_error = _step_tool_specs(available_pool, step)
     if contract_error:
@@ -759,6 +777,16 @@ async def _run_worker_step(
     # renders, the sub-tools stay invisible, and the step produces no findings.
     active_specs = list(specs)
     active_names = {spec.name for spec in active_specs}
+    # Always-disclosed tools (e.g. sandbox__delegate) must be present from the
+    # first turn of every worker step, even for single-action skill steps where
+    # _step_tool_specs only returns the required spec.  Without this, a skill
+    # that renders "call sandbox__delegate" would do so with sandbox__delegate
+    # absent from the model's tool list — the model produces text instead of a
+    # tool call and the step fails.
+    for spec in available_pool:
+        if spec.name in _always_disclosed_names and spec.name not in active_names:
+            active_specs.append(spec)
+            active_names.add(spec.name)
     newly_disclosed_names: set[str] = set()
     available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)
@@ -781,6 +809,10 @@ async def _run_worker_step(
     output_text = ""
     blocked: ChatBlockReason | None = None
     tools_used: list[str] = []
+    # Full per-call detail entries (with any subagent children), persisted on the
+    # step result so a reloaded orchestrator turn replays the same nested trace it
+    # showed live — not just tool names.
+    tool_details: list[dict[str, Any]] = []
     confirmation_blocked: list[ToolCallResult] = []
     required_action = str(step.get("required_action") or "")
     execution_error = ""
@@ -831,6 +863,11 @@ async def _run_worker_step(
         batch_kwargs: dict[str, Any] = {}
         if chat_graph._bypass_confirmations_from_config(config):
             batch_kwargs["bypass_confirmations"] = True
+        # A subagent handler (e.g. sandbox) records its inner-tool calls keyed by
+        # the outer tool call's detail id; collect them so we can fold them into a
+        # single nested ``subagent`` entry, just like the single-agent path.
+        child_details: dict[str, list[dict[str, Any]]] = {}
+        _child_detail_event_accumulator.set(child_details)
         batch_results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -838,10 +875,18 @@ async def _run_worker_step(
             batch_id=_confirmation_batch_id_for_requests(batch),
             **batch_kwargs,
         )
+        _child_detail_event_accumulator.set(None)
         # Surface each tool/skill call as a detail tagged with this step, so the UI
-        # can nest the calls under the step that made them.
+        # can nest the calls under the step that made them.  Emit under the tool
+        # call's own detail id so live subagent frames reconcile into one section.
         for result in batch_results:
-            _emit(writer, {**_tool_call_detail_data(result), "step_id": step_id})
+            detail_data: dict[str, Any] = {**_tool_call_detail_data(result), "step_id": step_id}
+            children = child_details.get(result.request.id)
+            if children:
+                detail_data["kind"] = "subagent"
+                detail_data["children"] = children
+            tool_details.append(detail_data)
+            _emit(writer, detail_data, detail_id=result.request.id)
         tool_ai_message = _ai_message_for_tool_results(ai_message, batch_results)
         messages = [
             *messages,
@@ -926,6 +971,10 @@ async def _run_worker_step(
         "cost_usd": step_cost_usd,
         "estimated_tokens": step_budget,
     }
+    if tool_details:
+        # Persisted so _orchestration_details can replay the full per-call trace
+        # (args/output and nested subagent children) on reload.
+        step_result["tool_details"] = tool_details
     if newly_disclosed_names:
         # Propagate to the dispatcher so dependent steps inherit the disclosure.
         step_result["disclosed_tools"] = sorted(newly_disclosed_names)
@@ -1376,10 +1425,17 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
                 "body": _truncate_text(str(result.get("execution_error") or result.get("output", "")), 6000),
             }
         )
-        # Per-tool entries are reconstructed name-only (the step result keeps tool
-        # names, not each call's args/output), enough to show what ran under the step.
-        for tool_name in result.get("tools_used", []) or []:
-            details.append({"kind": "tool", "title": f"Tool: {tool_name}", "status": "completed", "step_id": step_id})
+        # Prefer the full per-call trace (args/output and nested subagent children)
+        # so a reloaded turn matches what streamed live; the entries already carry
+        # step_id. Fall back to name-only for results persisted before tool_details.
+        tool_details = result.get("tool_details")
+        if isinstance(tool_details, list) and tool_details:
+            details.extend(tool_details)
+        else:
+            for tool_name in result.get("tools_used", []) or []:
+                details.append(
+                    {"kind": "tool", "title": f"Tool: {tool_name}", "status": "completed", "step_id": step_id}
+                )
         if "verified" in result:
             details.append(
                 {

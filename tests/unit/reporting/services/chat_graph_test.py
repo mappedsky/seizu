@@ -815,9 +815,15 @@ async def test_chat_graph_streams_tool_enabled_text_as_it_arrives(mocker):
     assert len(planning) == 1
     assert planning[0]["data"]["kind"] == "thinking"
     assert planning[0]["data"]["body"] == "Inspecting now"
-    assert len(tool_details) == 1
-    assert tool_details[0]["data"]["arguments"] == '{"org":"mappedsky"}'
-    assert tool_details[0]["data"]["body"] == '{"ok": true}'
+    # Two events per tool call: a pre-run "running" event and a post-run
+    # "completed" event.  Both share the same SSE id (request.id) so the AI
+    # SDK updates the message part in-place rather than creating a second row.
+    assert len(tool_details) == 2
+    running_detail, completed_detail = tool_details
+    assert running_detail["data"]["status"] == "running"
+    assert running_detail["id"] == completed_detail["id"]
+    assert completed_detail["data"]["arguments"] == '{"org":"mappedsky"}'
+    assert completed_detail["data"]["body"] == '{"ok": true}'
 
 
 async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge(mocker):
@@ -999,7 +1005,13 @@ async def test_chat_graph_streams_real_llm_with_seizu_prompt(mocker):
             )
         ],
     )
-    list_tools = mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user")
+    # Tools are fetched once even under progressive disclosure because
+    # always-disclosed tools (e.g. sandbox__delegate) must appear in the
+    # capability context and be immediately callable by the model.
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[],
+    )
     graph = chat_graph.build_chat_graph(MemorySaver())
 
     chunks = [
@@ -1017,7 +1029,6 @@ async def test_chat_graph_streams_real_llm_with_seizu_prompt(mocker):
     assert "not a generic chatbot" in fake_model.messages[0].content
     assert "progressive disclosure is enabled" in fake_model.messages[0].content
     assert "investigation__triage" in fake_model.messages[0].content
-    list_tools.assert_not_called()
     assert fake_model.messages[-1].content == "What should I check?"
 
 
@@ -1756,6 +1767,49 @@ async def test_resume_expired_approved_confirmation_does_not_execute(mocker):
     call_tool.assert_not_called()
 
 
+async def test_execute_confirmations_runs_approved_tool_through_real_runtime(mocker):
+    """Regression: an approved + claimed confirmation must actually execute. This
+    drives _execute_confirmations through the *real* mcp_runtime (call_tool_for_chat
+    is NOT mocked), so the fail-closed confirmation guard can't silently block it
+    again — the bug the earlier mocked tests missed."""
+    confirmation = ActionConfirmation.model_validate(
+        {
+            "confirmation_id": "confirm-run",
+            "user_id": "user-1",
+            "source": "chat",
+            "session_key": "hashed-session",
+            "tool_name": "reports__delete",
+            "action": "delete",
+            "resource_type": "report",
+            "resource_id": "report-1",
+            "arguments": {"report_id": "report-1"},
+            "arguments_hash": "hash",
+            "status": "approved",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:30:00+00:00",
+        }
+    )
+    # Claim succeeds (returns the approved confirmation), then the real runtime runs.
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.claim_action_confirmation_for_execution",
+        return_value=confirmation,
+    )
+    delete_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True
+    )
+    user = CurrentUser(
+        user=User(user_id="user-1", sub="sub", iss="iss", email="u@example.com", created_at=_NOW, last_login=_NOW),
+        jwt_claims={},
+        permissions=frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}),
+    )
+
+    outcomes, errors, _details = await chat_graph._execute_confirmations([confirmation], user)
+
+    assert errors == []
+    assert [name for name, _ in outcomes] == ["reports__delete"]
+    delete_report.assert_called_once()
+
+
 async def test_resume_confirmation_must_belong_to_active_chat_thread(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -2325,6 +2379,31 @@ def test_build_system_prompt_is_seizu_specific(mocker):
     assert "call the matching skill" in prompt
 
 
+def test_build_system_prompt_includes_sandbox_note_when_enabled(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
+    user = CurrentUser(
+        user=_user().user,
+        jwt_claims={},
+        permissions=frozenset({Permission.SANDBOX_DELEGATE.value}),
+    )
+    prompt = chat_graph.build_system_prompt("anthropic", user)
+    assert "sandbox__delegate" in prompt
+    assert "do not compute statistics" in prompt.lower() or "numbers computed by the model" in prompt
+
+
+def test_build_system_prompt_excludes_sandbox_note_when_disabled(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", False)
+    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    assert "sandbox__delegate" not in prompt
+
+
+def test_build_system_prompt_excludes_sandbox_note_without_permission(mocker):
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
+    # _user() does not hold sandbox:delegate — note must be suppressed even when the feature is on.
+    prompt = chat_graph.build_system_prompt("anthropic", _user())
+    assert "sandbox__delegate" not in prompt
+
+
 def test_answer_budget_scales_with_configured_output_limit():
     assert chat_graph._answer_budget(1024) == chat_graph.AnswerBudget(
         min_words=150,
@@ -2528,6 +2607,55 @@ def test_build_capability_context_progressive_disclosure_lists_only_skills():
     assert "trigger phrases" in context
     assert "call that skill now" in context
     assert "Available tools:" not in context
+    assert "Always-available tools:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_includes_always_disclosed_tools():
+    skills = [
+        Prompt(
+            name="investigation__triage",
+            description="Triage a graph investigation",
+            arguments=[PromptArgument(name="asset", required=True)],
+        )
+    ]
+    always_disclosed = [
+        Tool(
+            name="sandbox__delegate",
+            description="Delegate a task to an isolated sandbox",
+            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+        )
+    ]
+
+    context = chat_graph.build_capability_context(skills, None, always_disclosed_tools=always_disclosed)
+
+    assert "progressive disclosure is enabled" in context
+    assert "Available skills:" in context
+    assert "investigation__triage" in context
+    assert "Always-available tools:" in context
+    assert "sandbox__delegate" in context
+    assert "Available tools:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_no_skills_only_always_disclosed():
+    always_disclosed = [
+        Tool(
+            name="sandbox__delegate",
+            description="Delegate a task to an isolated sandbox",
+            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+        )
+    ]
+
+    context = chat_graph.build_capability_context([], None, always_disclosed_tools=always_disclosed)
+
+    assert "progressive disclosure is enabled" in context
+    assert "Always-available tools:" in context
+    assert "sandbox__delegate" in context
+    assert "Available skills:" not in context
+
+
+def test_build_capability_context_progressive_disclosure_empty_returns_empty():
+    context = chat_graph.build_capability_context([], None, always_disclosed_tools=[])
+    assert context == ""
 
 
 def test_build_capability_context_full_disclosure_lists_skills_and_tools():

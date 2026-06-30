@@ -1,7 +1,7 @@
 import json
 
 from reporting.authnz import CurrentUser
-from reporting.authnz.permissions import Permission
+from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
 from reporting.schema.report_config import ReportAccess, ReportListItem, User
@@ -374,6 +374,86 @@ async def test_chat_safe_confirmation_gated_builtin_triggers_confirmation_not_bl
     data = json.loads(outcome.text)
     assert data["confirmation_required"] is True
     assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+
+
+async def test_confirmation_gated_builtin_fails_closed_without_confirmation_source(mocker):
+    """A confirmation-gated builtin reached with neither a confirmation source nor
+    bypass must be refused, not executed ungated. Both real entry points always
+    pass a source; this backstops an internal caller (e.g. a subagent) that omits
+    the confirmation context."""
+    delete_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.delete_report")
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        # No confirmation_source and no bypass_confirmations: the gate cannot run.
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+    assert "requires action confirmation" in json.loads(outcome.text)["error"]
+    delete_report.assert_not_called()
+
+
+async def test_pre_approved_confirmation_executes_without_gate(mocker):
+    """The post-approval executor path: an already-approved, already-claimed
+    confirmation runs the handler directly via confirmation_pre_approved, even with
+    no confirmation_source. Without this, the fail-closed guard would block it."""
+    delete_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        include_chat_only=True,
+        confirmation_pre_approved=True,
+    )
+
+    assert outcome.blocked is None
+    delete_report.assert_called_once()
+
+
+async def test_pre_approved_confirmation_requires_authenticated_user():
+    """Pre-approved execution still needs an authenticated user to attribute the write."""
+    outcome = await mcp_runtime.call_tool_for_chat(
+        None,
+        "reports__delete",
+        {"report_id": "r1"},
+        permissions=ALL_PERMISSIONS,
+        chat_safe_only=True,
+        include_chat_only=True,
+        confirmation_pre_approved=True,
+    )
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+
+
+async def test_list_tools_exclude_confirmation_gated_keeps_readonly_and_user_tools(mocker):
+    """exclude_confirmation_gated drops only confirmation-gated builtins; read-only
+    builtins, the no-confirmation exceptions, and user-defined tools all stay — so
+    the sandbox subagent keeps an efficient toolset without any ungated mutators."""
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools", return_value=[_tool()])
+    current = _user(ALL_PERMISSIONS)
+
+    tools = await mcp_runtime.list_tools_for_user(
+        current,
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        exclude_confirmation_gated=True,
+    )
+
+    names = {tool.name for tool in tools}
+    assert "reports__delete" not in names  # confirmation-gated → excluded
+    assert "graph__query" in names  # read-only → kept
+    assert "reports__create" in names  # no-confirmation exception → kept
+    assert "security__lookup" in names  # user-defined toolset tool → kept
 
 
 async def test_unapproved_mutating_builtin_returns_confirmation_without_handler(mocker):

@@ -494,8 +494,45 @@ MCP_ENABLED = bool_env("MCP_ENABLED", True)
 # Unset or empty → all groups enabled (default).
 # "none"         → all built-in groups disabled (user-defined toolsets unaffected).
 # Comma-separated list (e.g. "graph,reports") → only those groups.
-# Known groups: graph, reports, roles, scheduled_queries, skillsets, toolsets.
+# Known groups: graph, reports, roles, sandbox, scheduled_queries, skillsets, toolsets.
+# Note: the sandbox group is chat-only (never exposed via the MCP server endpoint
+# regardless of this setting) and also requires SANDBOX_ENABLED=true.
 MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
+
+# ---------------------------------------------------------------------------
+# Sandbox delegation (sandbox__delegate chat tool)
+# ---------------------------------------------------------------------------
+
+# Set to true to enable the sandbox__delegate tool in the chat agent.
+# Requires SANDBOX_API_KEY when using E2B (https://e2b.dev).
+# For self-hosted sandboxes (e.g. OpenKruise Agents), set SANDBOX_DOMAIN to
+# the sandbox service hostname — the E2B-compatible API is used in both cases.
+SANDBOX_ENABLED = bool_env("SANDBOX_ENABLED", False)
+
+# Hostname of the sandbox API (no scheme, no trailing slash).
+# Empty → E2B's default cloud endpoint.
+# For OpenKruise Agents: set to your cluster's sandbox ingress hostname.
+SANDBOX_DOMAIN = str_env("SANDBOX_DOMAIN", "")
+
+# API key for the sandbox service.  Required when using E2B.
+# Leave empty for self-hosted deployments that use internal auth.
+SANDBOX_API_KEY = str_env("SANDBOX_API_KEY", "")
+
+# Allow sandboxes to make outbound internet connections.
+# Defaults to false: sandboxes are network-isolated from the public internet.
+# Set to true only when the task explicitly requires external network access
+# (e.g. fetching a URL, cloning a public repo).
+SANDBOX_ALLOW_INTERNET = bool_env("SANDBOX_ALLOW_INTERNET", False)
+
+# Hard timeout for a single sandbox__delegate invocation (seconds).
+SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
+
+# Maximum bytes of sandbox agent output returned to the outer chat agent.
+SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+
+# LiteLLM model id for the sandbox subagent.  Empty → inherits CHAT_LLM_MODEL.
+# Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.
+SANDBOX_LLM_MODEL = str_env("SANDBOX_LLM_MODEL", "")
 
 # OAuth 2.0 Authorization Server Metadata (RFC 8414) for MCP clients.
 # When set, Seizu exposes /.well-known/oauth-authorization-server so MCP clients

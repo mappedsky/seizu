@@ -70,14 +70,32 @@ const OUTPUT_LIMIT_TOOL_NOTICE =
   '\n\nSeizu completed tool work before the cutoff, but the final answer may be incomplete.';
 
 // 'routing' | 'plan' | 'step' | 'verify' are emitted by the chat orchestrator
-// (plan->dispatch->verify); the rest come from the single-agent path.
+// (plan->dispatch->verify); 'subagent' wraps a delegated run (e.g. sandbox) whose
+// inner tool calls are carried in `children`; the rest come from the single-agent path.
 type SeizuChatDetail = {
-  kind: 'thinking' | 'skill' | 'tool' | 'routing' | 'plan' | 'step' | 'verify';
+  kind:
+    | 'thinking'
+    | 'skill'
+    | 'tool'
+    | 'routing'
+    | 'plan'
+    | 'step'
+    | 'verify'
+    | 'subagent';
   title: string;
   status?: string;
   arguments?: string;
   body?: string;
   step_id?: string;
+  // Stable ID emitted alongside the event data so child events can reference
+  // this entry as their parent without needing the SSE-level event id.
+  detail_id?: string;
+  // ID of the parent detail entry; the frontend groups this as a child of that
+  // entry. Legacy flat-grouping mechanism, kept for messages persisted before
+  // subagent details carried their rows inline in `children`.
+  parent_id?: string;
+  // Inner rows of a subagent run, rendered nested under this entry.
+  children?: SeizuChatDetail[];
 };
 
 const KNOWN_DETAIL_KINDS = [
@@ -88,6 +106,7 @@ const KNOWN_DETAIL_KINDS = [
   'plan',
   'step',
   'verify',
+  'subagent',
 ] as const;
 
 function detailKindIcon(kind: SeizuChatDetail['kind']) {
@@ -101,6 +120,8 @@ function detailKindIcon(kind: SeizuChatDetail['kind']) {
       return <PlayArrow sx={sx} />;
     case 'verify':
       return <FactCheck sx={sx} />;
+    case 'subagent':
+      return <SmartToy sx={sx} />;
     default:
       return null;
   }
@@ -141,45 +162,46 @@ function shouldPollChatHistory(messages: SeizuChatMessage[]): boolean {
   return lastMessage?.role === 'user';
 }
 
+function parseDetail(raw: unknown): SeizuChatDetail | null {
+  if (
+    typeof raw !== 'object' ||
+    raw === null ||
+    !('title' in raw) ||
+    typeof raw.title !== 'string'
+  ) {
+    return null;
+  }
+  const detail = raw as Record<string, unknown>;
+  const kind =
+    typeof detail.kind === 'string' &&
+    (KNOWN_DETAIL_KINDS as readonly string[]).includes(detail.kind)
+      ? (detail.kind as SeizuChatDetail['kind'])
+      : 'tool';
+  const str = (key: string): string | undefined =>
+    typeof detail[key] === 'string' ? (detail[key] as string) : undefined;
+  const children = Array.isArray(detail.children)
+    ? detail.children
+        .map(parseDetail)
+        .filter((child): child is SeizuChatDetail => child !== null)
+    : undefined;
+  return {
+    kind,
+    title: detail.title as string,
+    status: str('status'),
+    arguments: str('arguments'),
+    body: str('body'),
+    step_id: str('step_id'),
+    detail_id: str('detail_id'),
+    parent_id: str('parent_id'),
+    children: children && children.length > 0 ? children : undefined,
+  };
+}
+
 function messageDetails(message: SeizuChatMessage): SeizuChatDetail[] {
   return message.parts
     .map((part): SeizuChatDetail | null => {
       if (!part.type.startsWith('data-') || !('data' in part)) return null;
-      const detail = part.data;
-      if (
-        typeof detail !== 'object' ||
-        detail === null ||
-        !('title' in detail) ||
-        typeof detail.title !== 'string'
-      ) {
-        return null;
-      }
-      const kind =
-        'kind' in detail &&
-        typeof detail.kind === 'string' &&
-        (KNOWN_DETAIL_KINDS as readonly string[]).includes(detail.kind)
-          ? (detail.kind as SeizuChatDetail['kind'])
-          : 'tool';
-      return {
-        kind,
-        title: detail.title,
-        status:
-          'status' in detail && typeof detail.status === 'string'
-            ? detail.status
-            : undefined,
-        arguments:
-          'arguments' in detail && typeof detail.arguments === 'string'
-            ? detail.arguments
-            : undefined,
-        body:
-          'body' in detail && typeof detail.body === 'string'
-            ? detail.body
-            : undefined,
-        step_id:
-          'step_id' in detail && typeof detail.step_id === 'string'
-            ? detail.step_id
-            : undefined,
-      };
+      return parseDetail(part.data);
     })
     .filter((detail): detail is SeizuChatDetail => detail !== null);
 }
@@ -287,34 +309,97 @@ function detailsEqual(
       detail.status === candidate.status &&
       detail.arguments === candidate.arguments &&
       detail.body === candidate.body &&
-      detail.step_id === candidate.step_id
+      detail.step_id === candidate.step_id &&
+      detail.detail_id === candidate.detail_id &&
+      detail.parent_id === candidate.parent_id &&
+      detailsEqual(detail.children ?? [], candidate.children ?? [])
     );
   });
 }
 
-type DetailNode = { detail: SeizuChatDetail; children: SeizuChatDetail[] };
+type DetailNode = { detail: SeizuChatDetail; children: DetailNode[] };
 
-// Group the flat detail stream into a step hierarchy: a `step` detail opens a
-// group, and the tool/verify details tagged with its step_id nest under it.
+// Wrap a detail (and its inline children, recursively) as a node. A subagent's
+// children carry their own children in turn, so the tree can be arbitrarily deep
+// (e.g. step -> subagent -> inner tool calls).
+function toDetailNode(detail: SeizuChatDetail): DetailNode {
+  return { detail, children: (detail.children ?? []).map(toDetailNode) };
+}
+
+// Group the flat detail stream into a hierarchy.  Three mechanisms coexist:
+//
+// 1. inline children: a subagent detail (e.g. sandbox__delegate) carries its
+//    inner rows in `detail.children`; they seed the node's children directly.
+//    This is the primary, reload-safe grouping — one detail id holds the whole
+//    run, so nothing depends on event ordering or sibling reconciliation.
+//
+// 2. parent_id grouping (legacy): a detail with parent_id is attached as a child
+//    of the detail whose detail_id matches.  Kept so messages persisted before
+//    inline children still group on reload.  Pass 1 keys a node map by detail_id;
+//    pass 2 assigns these children.
+//
+// 3. step_id grouping (orchestrator): a `step` detail opens a group; tool/
+//    verify details tagged with its step_id nest under it.  A subagent grouped
+//    here keeps its own inline children, so the orchestrator trace nests two deep.
+//
 // Ungrouped details (routing, plan, top-level thinking) stay at the root.
 function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
-  const nodes: DetailNode[] = [];
-  let currentStep: DetailNode | null = null;
+  // Pass 1: build a node for every detail.  Events with a detail_id are
+  // upserted: if an earlier event already created a node for that id, we
+  // update its detail in-place rather than creating a second node.  This
+  // handles the case where the AI SDK appends both the "running" and
+  // "completed" events as separate parts instead of updating the first one.
+  const nodeMap = new Map<string, DetailNode>();
+  const allNodes: DetailNode[] = [];
   for (const detail of details) {
+    if (detail.detail_id && nodeMap.has(detail.detail_id)) {
+      // Update the existing node in-place so its position in allNodes is
+      // preserved.  Refresh inline children from the newest frame.
+      const existing = nodeMap.get(detail.detail_id)!;
+      existing.detail = detail;
+      if (detail.children && detail.children.length > 0) {
+        existing.children = detail.children.map(toDetailNode);
+      }
+    } else {
+      const node = toDetailNode(detail);
+      allNodes.push(node);
+      if (detail.detail_id) nodeMap.set(detail.detail_id, node);
+    }
+  }
+
+  // Pass 2: assign each node to either a parent (by parent_id or step_id) or
+  // to the root list.  Nodes (not bare details) are attached so a grouped
+  // subagent keeps its own children.
+  const roots: DetailNode[] = [];
+  let currentStep: DetailNode | null = null;
+
+  for (const node of allNodes) {
+    const { detail } = node;
+
+    if (detail.parent_id) {
+      const parent = nodeMap.get(detail.parent_id);
+      if (parent) {
+        parent.children.push(node);
+        continue;
+      }
+      // Parent not found (e.g. older message without detail_id) — fall through.
+    }
+
     if (detail.kind === 'step') {
-      currentStep = { detail, children: [] };
-      nodes.push(currentStep);
+      currentStep = node;
+      roots.push(node);
     } else if (
       detail.step_id &&
       currentStep &&
       currentStep.detail.step_id === detail.step_id
     ) {
-      currentStep.children.push(detail);
+      currentStep.children.push(node);
     } else {
-      nodes.push({ detail, children: [] });
+      roots.push(node);
     }
   }
-  return nodes;
+
+  return roots;
 }
 
 // Status icons replace text labels: a checkmark/spinner/hourglass/error reads at
@@ -413,6 +498,38 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
   );
 }
 
+// Render a detail node and, recursively, its children — indented under the row
+// that owns them. Recursion lets the orchestrator trace nest two deep (a step's
+// subagent call keeps its own inner tool rows) without special-casing a depth.
+function DetailTreeRow({ node }: { node: DetailNode }) {
+  return (
+    <Box>
+      <DetailRow detail={node.detail} />
+      {node.children.length > 0 ? (
+        <Box
+          sx={{
+            ml: 1,
+            mt: 0.5,
+            pl: 1,
+            borderLeft: 2,
+            borderColor: 'divider',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0.5,
+          }}
+        >
+          {node.children.map((child, childIndex) => (
+            <DetailTreeRow
+              key={`${child.detail.detail_id ?? child.detail.title}-${childIndex}`}
+              node={child}
+            />
+          ))}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
 const ChatMessageDetails = memo(
   function ChatMessageDetails({
     details,
@@ -426,7 +543,12 @@ const ChatMessageDetails = memo(
     const [expanded, setExpanded] = useState(Boolean(isStreaming));
 
     useEffect(() => {
-      setExpanded(Boolean(isStreaming));
+      // Auto-expand when streaming starts so the user sees tool calls as they
+      // arrive, but do NOT auto-collapse when streaming ends — the user can
+      // close the panel manually if they want to.
+      if (isStreaming) {
+        setExpanded(true);
+      }
     }, [isStreaming]);
 
     // Follow the content while it streams, but only when the user is already near
@@ -499,30 +621,10 @@ const ChatMessageDetails = memo(
             }}
           >
             {tree.map((node, index) => (
-              <Box key={`${node.detail.step_id ?? node.detail.title}-${index}`}>
-                <DetailRow detail={node.detail} />
-                {node.children.length > 0 ? (
-                  <Box
-                    sx={{
-                      ml: 1,
-                      mt: 0.5,
-                      pl: 1,
-                      borderLeft: 2,
-                      borderColor: 'divider',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 0.5,
-                    }}
-                  >
-                    {node.children.map((child, childIndex) => (
-                      <DetailRow
-                        key={`${child.title}-${childIndex}`}
-                        detail={child}
-                      />
-                    ))}
-                  </Box>
-                ) : null}
-              </Box>
+              <DetailTreeRow
+                key={`${node.detail.step_id ?? node.detail.detail_id ?? node.detail.title}-${index}`}
+                node={node}
+              />
             ))}
           </Box>
         </AccordionDetails>

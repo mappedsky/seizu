@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 # Detail kinds preserved in history so a reloaded turn keeps its full trace —
 # single-agent (thinking/skill/tool) plus the orchestration trace.
-_HISTORY_DETAIL_KINDS = frozenset({"thinking", "skill", "tool", "routing", "plan", "step", "verify"})
+_HISTORY_DETAIL_KINDS = frozenset({"thinking", "skill", "tool", "routing", "plan", "step", "verify", "subagent"})
 _CONTINUE_RESPONSE_PROMPT = (
     "Continue the previous assistant response from where it stopped because of the output limit. "
     "Do not repeat earlier content."
@@ -284,23 +284,7 @@ def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, o
             metadata["budget"] = safe_budget
         details = response_metadata.get("seizu_details")
         if isinstance(details, list):
-            safe_details: list[dict[str, object]] = []
-            for detail in details:
-                if not isinstance(detail, dict):
-                    continue
-                title = detail.get("title")
-                kind = detail.get("kind")
-                # Keep the full orchestration trace (routing/plan/step/verify), not
-                # just single-agent kinds, so an orchestrated turn's details survive
-                # a reload. step_id/route carry the hierarchy and routing decision.
-                if not isinstance(title, str) or kind not in _HISTORY_DETAIL_KINDS:
-                    continue
-                safe_detail: dict[str, object] = {"kind": kind, "title": title}
-                for key in ("status", "arguments", "body", "step_id", "route"):
-                    value = detail.get(key)
-                    if isinstance(value, str):
-                        safe_detail[key] = value
-                safe_details.append(safe_detail)
+            safe_details = [safe for detail in details if (safe := _safe_history_detail(detail)) is not None]
             if safe_details:
                 metadata["details"] = safe_details
 
@@ -313,6 +297,42 @@ def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, o
             metadata.update({"finish_reason": "length", "response_cut_off": True})
 
     return metadata or None
+
+
+def _safe_history_detail(detail: object, *, allow_children: bool = True) -> dict[str, object] | None:
+    """Sanitize one persisted detail for the history API, recursing one level into
+    a subagent's ``children``.
+
+    Keeps the full orchestration trace (routing/plan/step/verify) and subagent
+    entries, not just single-agent kinds, so an orchestrated or sandbox turn keeps
+    its trace across a reload. ``step_id``/``route`` carry the hierarchy and routing
+    decision; ``detail_id``/``parent_id`` carry the legacy flat grouping; ``children``
+    carries the nested subagent rows.
+    """
+    if not isinstance(detail, dict):
+        return None
+    title = detail.get("title")
+    kind = detail.get("kind")
+    if not isinstance(title, str) or kind not in _HISTORY_DETAIL_KINDS:
+        return None
+    safe: dict[str, object] = {"kind": kind, "title": title}
+    for key in ("status", "arguments", "body", "step_id", "route", "detail_id", "parent_id"):
+        value = detail.get(key)
+        if isinstance(value, str):
+            safe[key] = value
+    # Recurse once into a subagent's children; children are leaf rows, so a second
+    # level is dropped to bound the structure.
+    if allow_children:
+        raw_children = detail.get("children")
+        if isinstance(raw_children, list):
+            safe_children = [
+                child
+                for item in raw_children
+                if (child := _safe_history_detail(item, allow_children=False)) is not None
+            ]
+            if safe_children:
+                safe["children"] = safe_children
+    return safe
 
 
 @router.get("/api/v1/chat/sessions", response_model=ChatSessionsResponse)

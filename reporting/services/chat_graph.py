@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Annotated, Any, Literal, NotRequired, Protocol
@@ -35,7 +36,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
-from reporting.services import action_confirmations, mcp_runtime, report_store
+from reporting.services import action_confirmations, mcp_builtins, mcp_runtime, report_store
 from reporting.services.chat_budget import (
     BudgetExceeded,
     budget_controller_from_config,
@@ -55,6 +56,26 @@ from reporting.services.mcp_runtime import ChatBlockReason
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
+
+# Holds the outer detail event ID for the currently-executing tool call so that
+# a subagent tool handler (e.g. sandbox__delegate) can address the same detail
+# entry the outer loop pre-emitted and grow its nested children list in place.
+# Set inside _run_tool_call_batch.run_one before calling the handler; each
+# asyncio.gather task gets its own context copy so parallel calls don't interfere.
+_current_tool_detail_id: ContextVar[str | None] = ContextVar("_current_tool_detail_id", default=None)
+
+# Collects the nested child details produced by a subagent tool handler, keyed by
+# the outer tool call's detail id.  A handler (e.g. sandbox) appends/updates its
+# inner-tool detail dicts in the list for its own detail id; the outer loop reads
+# them back to attach a ``children`` array to that tool's final/persisted detail,
+# so the whole subagent run is one entry that survives a page reload.  Set to a
+# fresh dict before each _run_tool_call_batch call; asyncio tasks inherit the same
+# dict reference, so parallel calls share it safely (each writes a distinct key).
+_child_detail_event_accumulator: ContextVar[dict[str, list[dict[str, Any]]] | None] = ContextVar(
+    "_child_detail_event_accumulator", default=None
+)
+
+# Carries the outer chat agent's currently-disclosed tool names into builtin
 
 
 class ChatState(TypedDict):
@@ -325,18 +346,25 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     skills = await _list_chat_prompts(current_user)
     tools: list[Tool] = []
     progressive_disclosure = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
+    _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive_disclosure else frozenset()
     # Carry forward tools the conversation already unlocked in earlier turns so a
     # resumed/follow-up turn can call them directly (the in-turn disclosure set
     # is otherwise reset each turn — see ChatState.disclosed_tools).
     disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
     if not progressive_disclosure:
         tools = await _list_chat_tools(current_user)
-    elif disclosed_tool_names:
+    elif disclosed_tool_names or _always_disclosed_names:
         # Resolve the persisted names against the live store; names whose tool
-        # no longer exists simply drop out.
+        # no longer exists simply drop out.  Also fetch when always-disclosed
+        # tools exist so they can appear in the capability context.
         tools = await _list_chat_tools(current_user)
 
-    capability_context = build_capability_context(skills, tools if not progressive_disclosure else None)
+    always_disclosed_tools = [t for t in tools if t.name in _always_disclosed_names] if progressive_disclosure else []
+    capability_context = build_capability_context(
+        skills,
+        tools if not progressive_disclosure else None,
+        always_disclosed_tools=always_disclosed_tools,
+    )
     if capability_context:
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
 
@@ -345,7 +373,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     if not progressive_disclosure:
         tool_specs = _mcp_tool_specs(tools)
     else:
-        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
+        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
 
     action_count = 0
     action_summaries: list[str] = []
@@ -469,6 +497,14 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         action_count += len(batch)
         executed_action_keys.update(_tool_request_key(request) for request in batch)
         batch_id = _confirmation_batch_id_for_requests(batch)
+        # Emit "running" events before the batch so the UI shows each tool
+        # immediately.  The same request.id is the SSE event id for both the
+        # running and completed events; the AI SDK updates the part in-place.
+        for request in batch:
+            running_data = _tool_call_running_detail_data(request)
+            writer({"kind": "detail", "id": request.id, "data": running_data})
+        child_details: dict[str, list[dict[str, Any]]] = {}
+        _child_detail_event_accumulator.set(child_details)
         results = await _run_tool_call_batch(
             batch,
             current_user,
@@ -476,10 +512,19 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             batch_id=batch_id,
             bypass_confirmations=_bypass_confirmations_from_config(config),
         )
+        _child_detail_event_accumulator.set(None)
         for result in results:
             detail_data = _tool_call_detail_data(result)
+            # A subagent handler (e.g. sandbox) records its inner-tool calls under
+            # this tool's detail id.  Fold them into a single ``subagent`` entry with
+            # a nested ``children`` array so the whole run is one collapsible section
+            # that persists as a unit and survives a page reload.
+            children = child_details.get(result.request.id)
+            if children:
+                detail_data["kind"] = "subagent"
+                detail_data["children"] = children
             detail_events.append(detail_data)
-            writer({"kind": "detail", "id": f"detail_{uuid.uuid4().hex}", "data": detail_data})
+            writer({"kind": "detail", "id": result.request.id, "data": detail_data})
         action_summaries.append(_tool_call_user_summary(results))
         blocked_results = _blocked_tool_call_results(results)
         tool_ai_message = _ai_message_for_tool_results(ai_message, results)
@@ -506,7 +551,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names)
+                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
@@ -891,8 +936,13 @@ async def _execute_confirmations(
             c.arguments,
             gate_permission=Permission.CHAT_TOOLS_CALL,
             chat_safe_only=True,
+            include_chat_only=True,
             result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
             result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+            # The confirmation was approved and claimed just above; run it without
+            # re-entering the gate (which, with no confirmation_source, would now
+            # fail closed).
+            confirmation_pre_approved=True,
         )
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")
@@ -1562,6 +1612,7 @@ async def _list_chat_tools(current_user: CurrentUser | None) -> list[Tool]:
         current_user,
         gate_permission=Permission.CHAT_TOOLS_CALL,
         chat_safe_only=True,
+        include_chat_only=True,
     )
 
 
@@ -1656,6 +1707,10 @@ async def _run_tool_call_batch(
     semaphore = asyncio.Semaphore(max_parallel) if max_parallel > 0 else None
 
     async def run_one(request: ToolCallRequest) -> ToolCallResult:
+        # Expose this tool call's detail ID to the handler so it can stamp
+        # parent_id on any child detail events.  Each asyncio.gather task gets
+        # its own context copy, so parallel calls don't clobber each other.
+        _current_tool_detail_id.set(request.id)
         if semaphore is None:
             return await _run_tool_call(
                 request,
@@ -1741,6 +1796,7 @@ async def _run_tool_call(
     call_kwargs: dict[str, Any] = {
         "gate_permission": Permission.CHAT_TOOLS_CALL,
         "chat_safe_only": True,
+        "include_chat_only": True,
         "result_max_rows": settings.CHAT_TOOL_RESULT_MAX_ROWS,
         "result_max_bytes": settings.CHAT_TOOL_RESULT_MAX_BYTES,
     }
@@ -1784,6 +1840,23 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
     user_context = f"\nCurrent Seizu user display name: {json.dumps(display_name)}." if display_name else ""
     provider_note = _provider_prompt_note(provider_name)
     answer_budget = _answer_budget()
+    _sandbox_available = settings.SANDBOX_ENABLED and (
+        current_user is None or Permission.SANDBOX_DELEGATE.value in current_user.permissions
+    )
+    sandbox_note = (
+        (
+            "\n\nA sandbox code-execution environment is available via sandbox__delegate. "
+            "Prefer it over in-response computation for: statistical analysis or aggregation over datasets "
+            "(averages, percentiles, distributions, rankings), data transformation or reformatting of "
+            "structured results, and any task that requires running code to produce a verified output. "
+            "Do not compute statistics, sort data, or transform structured payloads in your response "
+            "text — numbers computed by the model without running code are unreliable. "
+            "When you have tool results that need numeric or programmatic processing, delegate to the "
+            "sandbox rather than reasoning through the calculation yourself."
+        )
+        if _sandbox_available
+        else ""
+    )
     return (
         "You are Seizu's AI investigation assistant inside a security graph dashboard. "
         "Seizu is a configuration-driven reporting platform for Neo4j security graph data; "
@@ -1819,7 +1892,7 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "result. After you have run one or more skills or tools, finish the turn by calling the "
         f"`{_FINAL_ANSWER_TOOL}` tool with your complete final answer; do not deliver a post-action answer as plain "
         "text, and never describe tool work you have not performed."
-        f"{user_context}{provider_note}"
+        f"{sandbox_note}{user_context}{provider_note}"
     )
 
 
@@ -1888,6 +1961,23 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
     )
 
 
+def _tool_call_running_detail_data(request: ToolCallRequest) -> dict[str, Any]:
+    """Minimal detail event emitted before a tool call runs.
+
+    The same ``request.id`` is used as the SSE event id so the AI SDK updates
+    this part in-place when the completed event arrives.  Including ``detail_id``
+    in the data lets the frontend match child events' ``parent_id`` to this entry
+    without needing access to the SSE-level event id.
+    """
+    action = "Skill" if request.spec.kind == "skill" else "Tool"
+    return {
+        "kind": request.spec.kind,
+        "title": f"{action}: {request.name}",
+        "status": "running",
+        "detail_id": request.id,
+    }
+
+
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
     # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
@@ -1902,6 +1992,7 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",
         "status": status,
+        "detail_id": result.request.id,
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
     }
@@ -2409,33 +2500,46 @@ def _json_dump(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
 
 
-def build_capability_context(skills: list[Prompt], tools: list[Tool] | None) -> str:
+def build_capability_context(
+    skills: list[Prompt],
+    tools: list[Tool] | None,
+    always_disclosed_tools: list[Tool] | None = None,
+) -> str:
     """Build the capability section of the system prompt from already-listed data.
 
     The caller fetches the listings once per chat turn and threads them through
     here — keeps the hot path to a single store roundtrip per listing instead
     of re-listing once per consumer (capability context, skill specs, tool
     specs). Pass ``tools=None`` to render the progressive-disclosure variant
-    (skills only).
+    (skills + always-disclosed tools only).
     """
     if tools is None:
-        return _progressive_capability_context(skills)
+        return _progressive_capability_context(skills, always_disclosed_tools or [])
     return _full_capability_context(skills, tools)
 
 
-def _progressive_capability_context(skills: list[Prompt]) -> str:
-    if not skills:
+def _progressive_capability_context(
+    skills: list[Prompt],
+    always_disclosed_tools: list[Tool] | None = None,
+) -> str:
+    if not skills and not always_disclosed_tools:
         return ""
-    return (
+    header = (
         "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
         "tools. When the task needs a workflow, call the relevant skill tool with every required argument. Seizu will "
         "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
         "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
-        "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill or by prior "
-        "conversation context. Skill descriptions can include trigger phrases; if the current user request matches a "
-        "trigger phrase, call that skill now instead of describing how to trigger it.\n\n"
-        f"Available skills:\n{_format_skills(skills)}"
+        "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill, by prior "
+        "conversation context, or listed below as always available. Skill descriptions can include trigger phrases; "
+        "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
+        "trigger it."
     )
+    sections: list[str] = [header]
+    if skills:
+        sections.append(f"Available skills:\n{_format_skills(skills)}")
+    if always_disclosed_tools:
+        sections.append(f"Always-available tools:\n{_format_tools(always_disclosed_tools)}")
+    return "\n\n".join(sections)
 
 
 def _full_capability_context(skills: list[Prompt], tools: list[Tool]) -> str:
