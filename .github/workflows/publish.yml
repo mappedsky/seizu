@@ -8,6 +8,9 @@ on:
       - "v*"
       - "server-v*"
       - "cli-v*"
+      - "dev-v*"
+      - "server-dev-v*"
+      - "cli-dev-v*"
   workflow_dispatch: {}
 
 # Deny all permissions by default; grant only what each job needs.
@@ -15,7 +18,11 @@ permissions: {}
 
 jobs:
   publish-server-package:
-    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/server-v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/server-v') ||
+      startsWith(github.ref, 'refs/tags/dev-v') ||
+      startsWith(github.ref, 'refs/tags/server-dev-v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,8 +41,34 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME}"
-          version="${tag#server-v}"
-          version="${version#v}"
+          dev_release=false
+
+          case "$tag" in
+            server-dev-v*)
+              version="${tag#server-dev-v}"
+              dev_release=true
+              ;;
+            server-v*)
+              version="${tag#server-v}"
+              ;;
+            dev-v*)
+              version="${tag#dev-v}"
+              dev_release=true
+              ;;
+            v*)
+              version="${tag#v}"
+              ;;
+            *)
+              echo "::error::Unsupported server release tag: $tag"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$dev_release" == "true" && "$version" != *.dev* ]]; then
+            echo "::error::Development release tags must resolve to a PEP 440 dev version such as 3.1.0.dev1"
+            exit 1
+          fi
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Build frontend
         run: |
@@ -49,7 +82,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
   publish-cli-package:
-    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/cli-v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/cli-v') ||
+      startsWith(github.ref, 'refs/tags/dev-v') ||
+      startsWith(github.ref, 'refs/tags/cli-dev-v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,8 +104,34 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME}"
-          version="${tag#cli-v}"
-          version="${version#v}"
+          dev_release=false
+
+          case "$tag" in
+            cli-dev-v*)
+              version="${tag#cli-dev-v}"
+              dev_release=true
+              ;;
+            cli-v*)
+              version="${tag#cli-v}"
+              ;;
+            dev-v*)
+              version="${tag#dev-v}"
+              dev_release=true
+              ;;
+            v*)
+              version="${tag#v}"
+              ;;
+            *)
+              echo "::error::Unsupported CLI release tag: $tag"
+              exit 1
+              ;;
+          esac
+
+          if [[ "$dev_release" == "true" && "$version" != *.dev* ]]; then
+            echo "::error::Development release tags must resolve to a PEP 440 dev version such as 3.1.0.dev1"
+            exit 1
+          fi
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Build CLI package
         run: |
@@ -78,7 +141,13 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
   build-and-publish-to-ghcr:
-    if: github.event_name != 'push' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/server-v')
+    if: >-
+      github.event_name != 'push' ||
+      github.ref == 'refs/heads/master' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      startsWith(github.ref, 'refs/tags/server-v') ||
+      startsWith(github.ref, 'refs/tags/dev-v') ||
+      startsWith(github.ref, 'refs/tags/server-dev-v')
     permissions:
       contents: read
       packages: write
@@ -94,6 +163,8 @@ jobs:
           tags: |
             type=match,pattern=v(.*),group=1
             type=match,pattern=server-v(.*),group=1
+            type=match,pattern=dev-v(.*),group=1
+            type=match,pattern=server-dev-v(.*),group=1
             type=raw,value=latest,enable={{is_default_branch}}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
