@@ -29,6 +29,14 @@ Release tags drive package versions in GitHub Actions:
 | `vX.Y.Z` | `seizu`, `seizu-cli`, and the Docker image |
 | `server-vX.Y.Z` | `seizu` and the Docker image |
 | `cli-vX.Y.Z` | `seizu-cli` only |
+| `dev-vX.Y.Z.devN` | Development release of `seizu`, `seizu-cli`, and the Docker image |
+| `server-dev-vX.Y.Z.devN` | Development release of `seizu` and the Docker image |
+| `cli-dev-vX.Y.Z.devN` | Development release of `seizu-cli` only |
+
+Development release tags publish normal PyPI prerelease artifacts using the
+PEP 440 version after the prefix, such as `3.1.0.dev1`. The Docker image is
+published to GHCR with the same version tag, such as
+`ghcr.io/mappedsky/seizu:3.1.0.dev1`; development tags do not update `latest`.
 
 ## Node dependencies
 
