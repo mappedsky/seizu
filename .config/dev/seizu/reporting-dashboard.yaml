@@ -40,7 +40,7 @@ reports:
           {surface: 'Reports', seeded: true, example: 'Seizu Overview, CVEs, Panel Examples, GitHub Organization Security Overview'},
           {surface: 'Scheduled queries', seeded: true, example: 'Recently published HIGH/CRITICAL CVEs and CVE severity counts'},
           {surface: 'Toolsets', seeded: true, example: 'CVE Analysis, Graph Exploration, GitHub Security'},
-          {surface: 'Skillsets', seeded: true, example: 'GitHub Security Investigations'},
+          {surface: 'Skillsets', seeded: true, example: 'GitHub Security Investigations, Report Authoring'},
           {surface: 'Dashboard pointer', seeded: true, example: 'Seizu Overview is the default dashboard'}
         ] AS surface
         WITH count(*) AS denominator,
@@ -51,7 +51,7 @@ reports:
           {surface: 'Reports', seeded: true, example: 'Seizu Overview, CVEs, Panel Examples, GitHub Organization Security Overview'},
           {surface: 'Scheduled queries', seeded: true, example: 'Recently published HIGH/CRITICAL CVEs and CVE severity counts'},
           {surface: 'Toolsets', seeded: true, example: 'CVE Analysis, Graph Exploration, GitHub Security'},
-          {surface: 'Skillsets', seeded: true, example: 'GitHub Security Investigations'},
+          {surface: 'Skillsets', seeded: true, example: 'GitHub Security Investigations, Report Authoring'},
           {surface: 'Dashboard pointer', seeded: true, example: 'Seizu Overview is the default dashboard'}
         ] AS surface
         RETURN surface.surface AS surface,
@@ -1840,6 +1840,343 @@ skillsets:
           - graph__schema
           - graph__validate_query
           - graph__explain
+        enabled: true
+  report_authoring:
+    name: Seizu Report Authoring
+    description: >-
+      Workflows for creating, updating, cloning, pinning, and publishing Seizu
+      reports through the built-in reports MCP tools.
+    enabled: true
+    skills:
+      create_update_reports:
+        name: Create or Update Reports
+        description: >-
+          Create new reports or update existing report configs, with an
+          optional clone-review-apply-cleanup workflow for testing changes
+          before touching the original report.
+        template: |-
+          Help create or update a Seizu report for this request:
+
+          `{% $request %}`
+
+          Workflow inputs (these are inputs to THIS skill, not arguments to any tool):
+          - request: `{% $request %}`
+          - target_report_id: `{% $target_report_id %}`
+          - report_name: `{% $report_name %}`
+          - use_review_clone: `{% $use_review_clone %}`
+          - review_clone_name: `{% $review_clone_name %}`
+          - delete_review_clone_after_apply: `{% $delete_review_clone_after_apply %}`
+          - dry_run: `{% $dry_run %}`
+
+          Tool arguments - use exactly these field names and no others:
+          - reports__list: no arguments
+          - reports__get: report_id
+          - reports__create: name
+          - reports__create_version: report_id, config, comment
+          - reports__clone: report_id, name
+          - reports__delete: report_id
+          - reports__list_versions: report_id
+          - graph__schema: no arguments
+          - graph__validate_query: query
+          - graph__explain: query
+
+          Report config rules:
+          - `reports__create_version` replaces the full latest config for the target report. Always call `reports__get` first for an existing report and send a complete merged config, preserving every field not intentionally changed.
+          - A valid report config has `schema_version`, `name`, `queries`, optional `inputs`, and `rows`. `queries` is an object mapping query names to Cypher strings, not a list.
+          - Panels must live under `rows[].panels`; never create a top-level `panels` field.
+          - Markdown panel content must be in the `markdown` field, exactly this shape: `{"type": "markdown", "w": 12, "markdown": "## Findings..."}`. Do not use `content` or `config` for markdown text.
+          - Keep panel `cypher` fields aligned with `config.queries`: use a query key when referring to a named query, or a literal Cypher query only when that is deliberate.
+          - Preserve report `name` unless the user explicitly asks to rename it; if renamed, update both `config.name` and the report version comment so the change is clear.
+
+          Cypher checks for report queries:
+          1. Call `graph__schema` once before adding or changing report Cypher.
+          2. Call `graph__validate_query` with each new or changed query. If `valid` is false, fix and re-validate before saving.
+          3. Call `graph__explain` for material report queries and inspect the plan. Prefer indexed label/property matches where available; surface unavoidable large scans as a risk.
+          4. Keep query parameters and report inputs/panel params in sync. Every panel parameter should either have a literal `value` or an `input_id` that exists in `inputs`.
+
+          Operating rules:
+          - If `dry_run=true`, do not call `reports__create`, `reports__create_version`, `reports__clone`, or `reports__delete`; produce exact proposed payloads and validation results only.
+          - If creating a report, call `reports__create` first, then `reports__create_version` with the complete initial config.
+          - If updating an existing report and `use_review_clone=false`, call `reports__get`, build the complete merged config, validate changed Cypher, then call `reports__create_version` on `target_report_id`.
+          - If updating an existing report and `use_review_clone=true`, use the staged workflow below. This is the default because it lets users test a rendered report before the original is changed.
+
+          Staged clone-review-apply-cleanup workflow:
+          1. Call `reports__get` for `target_report_id` and keep the source config as the baseline.
+          2. Create a temporary private review copy. If `review_clone_name` is non-empty, pass it as `name` to `reports__clone`; otherwise derive a name from the original report name plus ` Review`.
+          3. Call `reports__get` for the new clone, build the complete merged config on top of the clone's latest config, and call `reports__create_version` on the clone with a comment like `Review copy for updating <original report_id>`.
+          4. Tell the user the clone report_id and what to review. If the user has not explicitly asked you to apply after review in the same turn, stop after creating or describing the clone.
+          5. After the user approves the reviewed clone, call `reports__get` for the clone and use the clone's latest `config` as the complete payload for `reports__create_version` on the original `target_report_id`.
+          6. Only after the original update succeeds, if `delete_review_clone_after_apply=true`, call `reports__delete` for the clone report_id. Never delete the clone if the original update failed or was not approved.
+
+          Workflow:
+          1. Call `reports__list` unless `target_report_id` is already known and the request does not require name lookup.
+          2. Decide whether the request is create, direct update, staged update, or apply reviewed clone to original.
+          3. Call `reports__get` for every report whose config you will read or write.
+          4. Validate any changed Cypher with the graph tools.
+          5. Apply writes only when `dry_run=false` and the user requested an apply path. Writes are confirmation-gated, so still expect approvals.
+          6. After writing, call `reports__get` on the affected report and confirm the latest version/config matches the intended result.
+
+          Output format:
+          - `Intent`: create, direct update, staged update, or apply reviewed clone.
+          - `Current State`: report IDs, names, latest versions, access scope, and relevant existing config.
+          - `Plan`: ordered steps and whether a review clone will be used.
+          - `Validation`: report schema and Cypher checks performed.
+          - `Payloads`: exact `reports__create`, `reports__create_version`, `reports__clone`, or `reports__delete` payloads you used or would use.
+          - `Applied Changes`: tool calls made and resulting report IDs/versions.
+          - `Review Instructions`: for staged updates, identify the clone and what the user should inspect before approving the original update.
+          - `Risks and Follow-up`: permission limits, unvalidated data, performance risks, or cleanup still required.
+        parameters:
+          - name: request
+            type: string
+            description: The report create or update request to design or apply.
+            required: true
+          - name: target_report_id
+            type: string
+            description: Existing report ID to update, if known.
+            required: false
+            default: ""
+          - name: report_name
+            type: string
+            description: Desired new report name, or an existing report name to look up.
+            required: false
+            default: ""
+          - name: use_review_clone
+            type: boolean
+            description: Use a temporary clone to review updates before changing the original report.
+            required: false
+            default: true
+          - name: review_clone_name
+            type: string
+            description: Optional explicit name for the temporary review clone.
+            required: false
+            default: ""
+          - name: delete_review_clone_after_apply
+            type: boolean
+            description: Delete the temporary review clone after its config has been applied to the original.
+            required: false
+            default: true
+          - name: dry_run
+            type: boolean
+            description: When true, produce payloads without creating, cloning, updating, or deleting reports.
+            required: false
+            default: false
+        triggers:
+          - create a Seizu report
+          - update a Seizu report
+          - modify a report safely
+          - review report changes in a clone
+          - test report updates before applying
+          - add panels to a report
+        tools_required:
+          - reports__list
+          - reports__get
+          - reports__create
+          - reports__create_version
+          - reports__clone
+          - reports__delete
+          - reports__list_versions
+          - graph__schema
+          - graph__validate_query
+          - graph__explain
+        enabled: true
+      clone_reports:
+        name: Clone Reports
+        description: >-
+          Clone an existing report into a new private report and verify the
+          copied report config.
+        template: |-
+          Clone a Seizu report for this request:
+
+          `{% $request %}`
+
+          Inputs:
+          - request: `{% $request %}`
+          - source_report_id: `{% $source_report_id %}`
+          - clone_name: `{% $clone_name %}`
+          - dry_run: `{% $dry_run %}`
+
+          Tool arguments - use exactly these field names and no others:
+          - reports__list: no arguments
+          - reports__get: report_id
+          - reports__clone: report_id, name
+
+          Workflow:
+          1. If `source_report_id` is empty, call `reports__list` and identify the source report from the request. If there is ambiguity, ask for the exact report.
+          2. Call `reports__get` for the source report and summarize its name, version, access scope, and major rows/panels.
+          3. Determine the clone name. Use `clone_name` when provided; otherwise choose a clear name based on the source report and request.
+          4. If `dry_run=true`, stop before calling `reports__clone` and show the exact payload.
+          5. If `dry_run=false`, call `reports__clone` with `report_id=source_report_id` and the chosen `name`.
+          6. Call `reports__get` for the clone and verify its latest config exists and carries the clone name.
+
+          Output format:
+          - `Source`: source report_id, name, version, access scope.
+          - `Clone Plan`: clone name and why it was chosen.
+          - `Applied Changes`: clone report_id when created, or the dry-run payload.
+          - `Verification`: clone config/version check.
+          - `Next Steps`: whether the clone is ready for editing, review, publishing, or pinning.
+        parameters:
+          - name: request
+            type: string
+            description: The cloning goal or context.
+            required: true
+          - name: source_report_id
+            type: string
+            description: Report ID to clone, if known.
+            required: false
+            default: ""
+          - name: clone_name
+            type: string
+            description: Name for the cloned report.
+            required: false
+            default: ""
+          - name: dry_run
+            type: boolean
+            description: When true, show the clone payload without creating the clone.
+            required: false
+            default: false
+        triggers:
+          - clone a Seizu report
+          - copy a report
+          - duplicate a report
+          - make a report review copy
+        tools_required:
+          - reports__list
+          - reports__get
+          - reports__clone
+        enabled: true
+      pin_reports:
+        name: Pin Reports
+        description: >-
+          Pin or unpin reports in the dashboard navigation after checking the
+          target report.
+        template: |-
+          Pin or unpin a Seizu report for this request:
+
+          `{% $request %}`
+
+          Inputs:
+          - request: `{% $request %}`
+          - target_report_id: `{% $target_report_id %}`
+          - pinned: `{% $pinned %}`
+          - dry_run: `{% $dry_run %}`
+
+          Tool arguments - use exactly these field names and no others:
+          - reports__list: no arguments
+          - reports__get: report_id
+          - reports__pin: report_id, pinned
+
+          Workflow:
+          1. If `target_report_id` is empty, call `reports__list` and identify the target report from the request. If more than one report matches, ask for the exact report.
+          2. Call `reports__get` and confirm the report name, latest version, access scope, and current pinned state if visible from report metadata/list output.
+          3. Interpret `pinned=true` as pin and `pinned=false` as unpin. Do not change report content.
+          4. If `dry_run=true`, stop before calling `reports__pin` and show the exact payload.
+          5. If `dry_run=false`, call `reports__pin` with `report_id` and `pinned`, then call `reports__list` or `reports__get` again to verify the state.
+
+          Output format:
+          - `Target`: report_id, name, access scope, latest version.
+          - `Action`: pin or unpin.
+          - `Applied Changes`: tool call result, or the dry-run payload.
+          - `Verification`: evidence that the report is now pinned or unpinned.
+        parameters:
+          - name: request
+            type: string
+            description: The pinning or unpinning request.
+            required: true
+          - name: target_report_id
+            type: string
+            description: Report ID to pin or unpin, if known.
+            required: false
+            default: ""
+          - name: pinned
+            type: boolean
+            description: True to pin the report; false to unpin it.
+            required: false
+            default: true
+          - name: dry_run
+            type: boolean
+            description: When true, show the pin payload without applying it.
+            required: false
+            default: false
+        triggers:
+          - pin a Seizu report
+          - unpin a Seizu report
+          - add report to dashboard navigation
+          - remove report from dashboard navigation
+        tools_required:
+          - reports__list
+          - reports__get
+          - reports__pin
+        enabled: true
+      publish_reports:
+        name: Publish Reports
+        description: >-
+          Publish or unpublish reports by updating report visibility while
+          preserving the report content version.
+        template: |-
+          Publish or unpublish a Seizu report for this request:
+
+          `{% $request %}`
+
+          Inputs:
+          - request: `{% $request %}`
+          - target_report_id: `{% $target_report_id %}`
+          - publish: `{% $publish %}`
+          - dry_run: `{% $dry_run %}`
+
+          Tool arguments - use exactly these field names and no others:
+          - reports__list: no arguments
+          - reports__get: report_id
+          - reports__update_visibility: report_id, access
+
+          Visibility rules:
+          - Publishing means `access: {"scope": "public"}`.
+          - Unpublishing means `access: {"scope": "private"}`.
+          - Updating visibility does not create a report content version.
+          - Private visibility can be blocked if the report is pinned or is the default dashboard report. If that happens, report the block and do not try to work around it unless the user explicitly asks to unpin or change the dashboard.
+
+          Workflow:
+          1. If `target_report_id` is empty, call `reports__list` and identify the target report from the request. If there is ambiguity, ask for the exact report.
+          2. Call `reports__get` and confirm the report name, latest version, and current access scope.
+          3. Build the payload using `publish`: public when true, private when false.
+          4. If `dry_run=true`, stop before calling `reports__update_visibility` and show the exact payload.
+          5. If `dry_run=false`, call `reports__update_visibility`, then call `reports__get` again to verify the access scope.
+
+          Output format:
+          - `Target`: report_id, name, current access scope, latest version.
+          - `Action`: publish or unpublish.
+          - `Payload`: exact `reports__update_visibility` payload.
+          - `Applied Changes`: tool call result, or dry-run status.
+          - `Verification`: final access scope or the reason the change was blocked.
+        parameters:
+          - name: request
+            type: string
+            description: The publish or unpublish request.
+            required: true
+          - name: target_report_id
+            type: string
+            description: Report ID to publish or unpublish, if known.
+            required: false
+            default: ""
+          - name: publish
+            type: boolean
+            description: True to make the report public; false to make it private.
+            required: false
+            default: true
+          - name: dry_run
+            type: boolean
+            description: When true, show the visibility payload without applying it.
+            required: false
+            default: false
+        triggers:
+          - publish a Seizu report
+          - unpublish a Seizu report
+          - make a report public
+          - make a report private
+          - change report visibility
+        tools_required:
+          - reports__list
+          - reports__get
+          - reports__update_visibility
         enabled: true
   cve_response:
     name: CVE Response
