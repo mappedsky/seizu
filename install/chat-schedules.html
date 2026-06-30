@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Scheduled Chats - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Temporal Workflows" href="temporal-workflows.html" /><link rel="prev" title="Scheduled Queries" href="scheduled-queries.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Scheduled Chats"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#purpose">Purpose</a></li>
+<li><a class="reference internal" href="#managing-scheduled-chats">Managing scheduled chats</a></li>
+<li><a class="reference internal" href="#run-sessions">Run sessions</a></li>
+<li><a class="reference internal" href="#how-runs-execute">How runs execute</a></li>
+<li><a class="reference internal" href="#configuration">Configuration</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Scheduled Chats</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="scheduled-chats">
+<h1>Scheduled Chats<a class="headerlink" href="#scheduled-chats" title="Link to this heading">¶</a></h1>
+<section id="purpose">
+<h2>Purpose<a class="headerlink" href="#purpose" title="Link to this heading">¶</a></h2>
+<p>Scheduled chats run the chat agent on a recurring schedule with a prompt you write — no Cypher required, since the agent uses its chat tools to query the graph itself. Each run records a chat session whose full transcript (tool calls included) is reviewable from the Scheduled Chats page afterwards.</p>
+<p>Typical uses: a daily digest of new critical CVEs, a weekly security posture summary, or a recurring check that files findings into a report.</p>
+</section>
+<section id="managing-scheduled-chats">
+<h2>Managing scheduled chats<a class="headerlink" href="#managing-scheduled-chats" title="Link to this heading">¶</a></h2>
+<p>Schedules live in the <strong>Scheduled Chats</strong> page, linked from the app sidebar. Clicking a schedule’s name opens its <strong>detail view</strong>: panels describing the schedule (status, trigger, owner, version, recent errors, and the prompt) alongside its runs, with an Edit button and an actions menu (history, delete) in the header. Schedules are personal: you only see and manage your own.</p>
+<blockquote>
+<div><p><strong>Permissions:</strong> managing scheduled chats requires the <code class="docutils literal notranslate"><span class="pre">chat:schedule</span></code> permission (<code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> and above). The page and sidebar link are hidden without it, and the API rejects requests. Holders of <code class="docutils literal notranslate"><span class="pre">chat:schedule:read_all</span></code> (<code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code>) additionally get a <strong>Show all users</strong> toggle that lists every user’s schedules with an owner column and a per-user facet filter in the table toolbar (the same filter UI as the reports list), plus read access to their runs, transcripts, and version history — mutations always stay owner-only.</p>
+</div></blockquote>
+<p>Every save creates a new configuration version; the history page (<code class="docutils literal notranslate"><span class="pre">/app/scheduled-chats/&lt;id&gt;/history</span></code>) lists versions with author and comment, and lets you restore an older one.</p>
+<p>A schedule has:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>name</p></td>
+<td><p>Display name; also used as the chat session title prefix for each run.</p></td>
+</tr>
+<tr class="row-odd"><td><p>prompt</p></td>
+<td><p>Instructions for the agent. It runs headlessly as you, with your permissions, and can use chat tools to query the graph, render skills, and (with <code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code>) create or update resources.</p></td>
+</tr>
+<tr class="row-even"><td><p>trigger</p></td>
+<td><p>A <strong>schedule</strong> or <strong>watch scans</strong> (run when matching Cartography <code class="docutils literal notranslate"><span class="pre">SyncMetadata</span></code> records update — same semantics as scheduled query <code class="docutils literal notranslate"><span class="pre">watch_scans</span></code>; the fields autocomplete from the values present in the graph).</p></td>
+</tr>
+<tr class="row-odd"><td><p>enabled</p></td>
+<td><p>Whether the worker runs this schedule.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Schedules repeat <strong>hourly</strong>, <strong>daily</strong>, or <strong>monthly</strong> (all times UTC):</p>
+<ul class="simple">
+<li><p><strong>Hourly</strong> — every N hours, anchored to the last run; a new hourly schedule runs immediately.</p></li>
+<li><p><strong>Daily</strong> — on selected days of the week at a chosen hour. A new schedule waits for its first selected occurrence (creating “Mondays at 09:00” on a Tuesday first runs the following Monday).</p></li>
+<li><p><strong>Monthly</strong> — on selected days of the month (1–31) at 00:00. Months that don’t have a selected day run on their <strong>last day</strong> instead (31 → Apr 30, Feb 28/29); the form warns when you select day 29, 30, or 31. Days that collapse to the same date (e.g. 30 and 31 in April) run once, not twice.</p></li>
+</ul>
+<p>The list shows each schedule’s trigger and the status of its last run; run errors are recorded on the schedule (last five).</p>
+</section>
+<section id="run-sessions">
+<h2>Run sessions<a class="headerlink" href="#run-sessions" title="Link to this heading">¶</a></h2>
+<p>Each run creates a chat session owned by the schedule’s creator, but these sessions are kept out of the chat sidebar’s session list so scheduled runs don’t crowd out interactive conversations. The detail view lists a schedule’s runs as collapsed entries; expanding one shows the full transcript — the prompt, the assistant’s response, and an expandable <strong>Details</strong> section with the run’s thinking and tool calls (arguments and output included). Run transcripts are <strong>read-only</strong>: the web UI cannot send messages to a scheduled session, and the API rejects attempts to continue one.</p>
+</section>
+<section id="how-runs-execute">
+<h2>How runs execute<a class="headerlink" href="#how-runs-execute" title="Link to this heading">¶</a></h2>
+<p>The <code class="docutils literal notranslate"><span class="pre">seizu-scheduled-chats</span></code> worker (<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">reporting.scheduled_chats</span></code>) polls for due schedules and runs each as a headless agent session <strong>owned by the schedule’s creator</strong>:</p>
+<ul class="simple">
+<li><p>The creator’s RBAC permissions apply to every tool call, resolved from the last role claim seen on one of their authenticated requests. Archived users’ schedules stop running and record failures.</p></li>
+<li><p>Stored role claims do not refresh in the background. An identity-provider
+downgrade has an unbounded propagation delay until the creator next
+authenticates, so a previously granted <code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code> may remain
+effective. Archive the Seizu user or disable their schedules when revocation
+must be immediate.</p></li>
+<li><p>Action confirmations are bypassed only while the creator holds <code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code>; otherwise confirmation-gated tools fail closed for the run.</p></li>
+<li><p>The headless system prompt tells the model nobody is present: it won’t ask for confirmation and summarizes any blocked action instead of retrying.</p></li>
+<li><p>A distributed lock guarantees one run per due window even with multiple workers.</p></li>
+</ul>
+</section>
+<section id="configuration">
+<h2>Configuration<a class="headerlink" href="#configuration" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">CHAT_SCHEDULES_ENABLED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Master switch: gates the API routes, the sidebar UI, and the worker. Requires <code class="docutils literal notranslate"><span class="pre">CHAT_ENABLED</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">CHAT_SCHEDULES_POLL_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">20</span></code></p></td>
+<td><p>Worker polling interval.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">CHAT_SCHEDULE_TIMEOUT_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">600</span></code></p></td>
+<td><p>Timeout for one headless agent session.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Scheduled and interactive runs use the same router and chat orchestrator.
+A persisted run-level budget tracks input/output
+tokens, estimated USD cost when LiteLLM knows the model price, LLM call count,
+and usage by planner/worker step/synthesizer phase.
+<code class="docutils literal notranslate"><span class="pre">CHAT_RUN_RESERVE_PERCENT</span></code> keeps part of the budget unavailable to
+normal worker steps so final step summaries and synthesis can produce an
+explicit partial result instead of stopping mid-plan.</p>
+<p>The primary controls are <code class="docutils literal notranslate"><span class="pre">CHAT_RUN_TOKEN_BUDGET</span></code>,
+<code class="docutils literal notranslate"><span class="pre">CHAT_RUN_COST_BUDGET_USD</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAT_RUN_SOFT_LIMIT_PERCENT</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">CHAT_RUN_MAX_LLM_CALLS</span></code>. They apply equally to an interactive turn and the
+same prompt executed by a schedule. Optional <code class="docutils literal notranslate"><span class="pre">CHAT_LLM_*_MODEL</span></code> role overrides
+select separate planner, worker, verifier, and synthesizer models;
+<code class="docutils literal notranslate"><span class="pre">CHAT_LLM_ECONOMY_MODEL</span></code> is used for eligible work after the soft limit.
+<code class="docutils literal notranslate"><span class="pre">CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS</span></code> separately controls plan generation so
+thinking models have enough output room to emit the final structured plan.</p>
+<p>Run outcomes distinguish <code class="docutils literal notranslate"><span class="pre">success</span></code>, <code class="docutils literal notranslate"><span class="pre">partial</span></code>, <code class="docutils literal notranslate"><span class="pre">budget_exhausted</span></code>, <code class="docutils literal notranslate"><span class="pre">blocked</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">failure</span></code>. The transcript metadata includes the final budget ledger.</p>
+<p>The worker needs the same chat configuration as the web app (<code class="docutils literal notranslate"><span class="pre">CHAT_LLM_*</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_*</span></code>); see <code class="docutils literal notranslate"><span class="pre">.env.example</span></code>. Note that <code class="docutils literal notranslate"><span class="pre">CHAT_LLM_PROVIDER=mock</span></code> echoes input and cannot call tools, so meaningful runs need a real LLM provider.</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="scheduled-queries.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Scheduled Queries</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="temporal-workflows.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Temporal Workflows</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

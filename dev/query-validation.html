@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Query validation - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Contributing" href="contributing.html" /><link rel="prev" title="Running Tests" href="test.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Query validation"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../install/quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../install/mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="test.html">Running Tests</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#validation-flow">Validation flow</a></li>
+<li><a class="reference internal" href="#procedure-allowlist">Procedure allowlist</a></li>
+<li><a class="reference internal" href="#changing-validation-behavior">Changing validation behavior</a></li>
+<li><a class="reference internal" href="#hypothesis-fuzz-coverage">Hypothesis fuzz coverage</a></li>
+<li><a class="reference internal" href="#validator-test-workflow">Validator test workflow</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Query validation</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="query-validation">
+<h1>Query validation<a class="headerlink" href="#query-validation" title="Link to this heading">¶</a></h1>
+<p>Seizu validates Cypher before it is executed by the Query Console, report query execution, scheduled queries, MCP graph queries, and Cypher-backed MCP tools. The validator is implemented in <code class="docutils literal notranslate"><span class="pre">reporting/services/query_validator.py</span></code>.</p>
+<p>The validator is a security guardrail for user-provided and configuration-provided Cypher. It is not a replacement for Neo4j authentication, network controls, RBAC, or careful permission assignment. Users who can run read queries can still read data available to the configured Neo4j user.</p>
+<section id="validation-flow">
+<h2>Validation flow<a class="headerlink" href="#validation-flow" title="Link to this heading">¶</a></h2>
+<p>Validation runs in layers:</p>
+<ol class="arabic simple">
+<li><p>Neo4j <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span></code> checks syntax and query classification. Only read-classified queries are allowed; write, read-write, schema, and DBMS operations are blocked.</p></li>
+<li><p>Seizu scans the original query, a comment-stripped query, and Cypher Unicode-decoded forms for dangerous constructs that can be read-classified by Neo4j.</p></li>
+<li><p>Procedure calls are checked against a default allowlist of side-effect-free built-in schema procedures.</p></li>
+<li><p>CyVer schema and property validators run after blocking checks. These produce warnings only; warnings do not prevent execution.</p></li>
+</ol>
+<p>The regex guard currently blocks:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">LOAD</span> <span class="pre">CSV</span></code>, including comment and Unicode obfuscation variants.</p></li>
+<li><p>Neo4j administration and catalog commands such as <code class="docutils literal notranslate"><span class="pre">SHOW</span></code>, database management, privilege management, and server management.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">USE</span></code> clauses that route a query to another graph or database.</p></li>
+<li><p>Procedure calls outside the allowlist, including plugin and custom procedures.</p></li>
+<li><p>Dangerous function namespaces that can execute dynamic Cypher, create graph-catalog state, or send data to external model providers, such as <code class="docutils literal notranslate"><span class="pre">apoc.cypher.*</span></code>, <code class="docutils literal notranslate"><span class="pre">gds.*</span></code>, <code class="docutils literal notranslate"><span class="pre">ai.*</span></code>, and <code class="docutils literal notranslate"><span class="pre">genai.*</span></code>.</p></li>
+</ul>
+</section>
+<section id="procedure-allowlist">
+<h2>Procedure allowlist<a class="headerlink" href="#procedure-allowlist" title="Link to this heading">¶</a></h2>
+<p>The default procedure allowlist is intentionally small. It permits read-only schema introspection procedures such as <code class="docutils literal notranslate"><span class="pre">db.labels</span></code>, <code class="docutils literal notranslate"><span class="pre">db.relationshipTypes</span></code>, <code class="docutils literal notranslate"><span class="pre">db.propertyKeys</span></code>, and <code class="docutils literal notranslate"><span class="pre">db.schema.*</span></code>.</p>
+<p>Operators can allow extra procedures with <code class="docutils literal notranslate"><span class="pre">QUERY_VALIDATOR_ALLOWED_PROCEDURES</span></code>. The setting is a comma-separated list:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nv">QUERY_VALIDATOR_ALLOWED_PROCEDURES</span><span class="o">=</span>apoc.meta.stats,custom.readOnlyProcedure,gds.
+</span></pre></div>
+</div>
+<p>Each entry is either an exact procedure name or a namespace prefix ending in a dot. Prefixes allow matching <code class="docutils literal notranslate"><span class="pre">CALL</span></code> procedure invocations only. They do not permit dangerous function namespaces in the same namespace; for example, <code class="docutils literal notranslate"><span class="pre">apoc.</span></code> does not permit <code class="docutils literal notranslate"><span class="pre">apoc.cypher.*</span></code>, and <code class="docutils literal notranslate"><span class="pre">gds.</span></code> does not permit <code class="docutils literal notranslate"><span class="pre">gds.*</span></code> functions.</p>
+<p>Use exact procedure names when possible. Namespace prefixes are broader and should only be used when every procedure in that namespace is acceptable for the Seizu deployment.</p>
+</section>
+<section id="changing-validation-behavior">
+<h2>Changing validation behavior<a class="headerlink" href="#changing-validation-behavior" title="Link to this heading">¶</a></h2>
+<p>When changing validation, update the centralized case lists in <code class="docutils literal notranslate"><span class="pre">tests/query_validator_cases.py</span></code> first. The unit and live integration suites both import those cases, which keeps mocked and Neo4j-backed regression coverage aligned.</p>
+<p>For each new risky Cypher feature or bypass attempt:</p>
+<ol class="arabic simple">
+<li><p>Add the query to the appropriate case family in <code class="docutils literal notranslate"><span class="pre">tests/query_validator_cases.py</span></code>.</p></li>
+<li><p>Add or update targeted unit tests in <code class="docutils literal notranslate"><span class="pre">tests/unit/reporting/services/query_validator_test.py</span></code> when the behavior depends on settings or validator internals.</p></li>
+<li><p>Add or update Hypothesis coverage in <code class="docutils literal notranslate"><span class="pre">tests/unit/reporting/fuzz/query_validator_fuzz_test.py</span></code> when the rule can be expressed as generated permutations.</p></li>
+<li><p>Append a row to <code class="docutils literal notranslate"><span class="pre">tests/data/query-fuzzing.csv</span></code> with the technique, query, observed result, blocking layer, and notes.</p></li>
+<li><p>Update <code class="docutils literal notranslate"><span class="pre">reporting/services/query_validator.py</span></code>.</p></li>
+<li><p>If you add or change a setting, update <code class="docutils literal notranslate"><span class="pre">.env.example</span></code> and the backend configuration docs.</p></li>
+</ol>
+<p>Prefer tests that show both sides of a rule: the dangerous form is blocked, and a nearby legitimate read-only form remains allowed. This is especially important for clause-start regexes and procedure-call parsing.</p>
+</section>
+<section id="hypothesis-fuzz-coverage">
+<h2>Hypothesis fuzz coverage<a class="headerlink" href="#hypothesis-fuzz-coverage" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/unit/reporting/fuzz/query_validator_fuzz_test.py</span></code> uses Hypothesis to generate families of validation inputs. These tests mock Neo4j <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span></code> as read-only, so they exercise Seizu’s own guard logic directly instead of relying on Neo4j syntax errors or query classification.</p>
+<p>The current fuzz tests cover generated variants of:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">LOAD</span> <span class="pre">CSV</span></code> separators and obfuscation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CALL</span> <span class="pre">apoc.*</span></code> separators and obfuscation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SHOW</span></code> administration commands with arbitrary prefix/suffix text.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">USE</span></code> clauses across clause-start anchors, graph reference forms, following clauses, casing, comments, newlines, and Unicode escapes.</p></li>
+<li><p>Allowed false positives near the <code class="docutils literal notranslate"><span class="pre">USE</span></code> guard, such as CASE expressions using a variable named <code class="docutils literal notranslate"><span class="pre">use</span></code> and map keys named <code class="docutils literal notranslate"><span class="pre">use</span></code>.</p></li>
+</ul>
+<p>Use Hypothesis when a validator rule has meaningful dimensions to permute. Good strategy dimensions include:</p>
+<ul class="simple">
+<li><p>Keyword spelling: uppercase, lowercase, and Cypher Unicode escapes.</p></li>
+<li><p>Separators: spaces, tabs, newlines, block comments, and Unicode whitespace escapes.</p></li>
+<li><p>Clause anchors: query start, <code class="docutils literal notranslate"><span class="pre">UNION</span></code>, <code class="docutils literal notranslate"><span class="pre">NEXT</span></code>, conditional-query branches, and <code class="docutils literal notranslate"><span class="pre">CALL</span> <span class="pre">{}</span></code> subqueries.</p></li>
+<li><p>Identifier forms: bare names, dotted names, backtick-quoted names, and names that collide with Cypher keywords.</p></li>
+<li><p>Adjacent safe forms that should stay allowed.</p></li>
+</ul>
+<p>Keep generated examples focused. Prefer small <code class="docutils literal notranslate"><span class="pre">sampled_from(...)</span></code> vocabularies that describe known Cypher shapes over unconstrained text generation. A focused strategy gives better signal and avoids spending examples on syntax that Neo4j would never accept.</p>
+<p>When extending Hypothesis coverage:</p>
+<ol class="arabic simple">
+<li><p>Add reusable strategies near the top of <code class="docutils literal notranslate"><span class="pre">tests/unit/reporting/fuzz/query_validator_fuzz_test.py</span></code>.</p></li>
+<li><p>Mock <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span></code> as read-only with <code class="docutils literal notranslate"><span class="pre">_validate_with_mocked_neo4j(...)</span></code>.</p></li>
+<li><p>Assert dangerous generated variants produce <code class="docutils literal notranslate"><span class="pre">result.has_errors</span></code>.</p></li>
+<li><p>Add a paired allowed test for nearby legitimate Cypher when false positives are plausible.</p></li>
+<li><p>Keep <code class="docutils literal notranslate"><span class="pre">max_examples</span></code> large enough to combine the important dimensions but small enough for the unit suite to remain fast.</p></li>
+</ol>
+<p>Run the fuzz module directly while developing:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>seizu<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>--frozen<span class="w"> </span>--no-sync<span class="w"> </span>pytest<span class="w"> </span>tests/unit/reporting/fuzz/query_validator_fuzz_test.py<span class="w"> </span>-q
+</span></pre></div>
+</div>
+<p>If Hypothesis finds a counterexample, add the minimized query to <code class="docutils literal notranslate"><span class="pre">tests/query_validator_cases.py</span></code> or <code class="docutils literal notranslate"><span class="pre">tests/data/query-fuzzing.csv</span></code> when it represents a meaningful regression.</p>
+</section>
+<section id="validator-test-workflow">
+<h2>Validator test workflow<a class="headerlink" href="#validator-test-workflow" title="Link to this heading">¶</a></h2>
+<p>Run the unit regression suite after any validator change:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>seizu<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>--frozen<span class="w"> </span>--no-sync<span class="w"> </span>pytest<span class="w"> </span>tests/unit/reporting/services/query_validator_test.py<span class="w"> </span>-v
+</span></pre></div>
+</div>
+<p>Run the generated fuzz tests when changing regex guards or keyword scanning:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">docker<span class="w"> </span>compose<span class="w"> </span>run<span class="w"> </span>--rm<span class="w"> </span>seizu<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>--frozen<span class="w"> </span>--no-sync<span class="w"> </span>pytest<span class="w"> </span>tests/unit/reporting/fuzz/query_validator_fuzz_test.py<span class="w"> </span>-q
+</span></pre></div>
+</div>
+<p>Run the live Neo4j-backed suite when the change depends on real Cypher parsing, query classification, Neo4j version behavior, or plugin behavior:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>test_query_validator_live
+</span></pre></div>
+</div>
+<p>To compare the configured development Neo4j version with the latest supported Neo4j image, switch versions and rerun the live suite:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>neo4j_current
+</span><span data-line="2">make<span class="w"> </span>down<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>up
+</span><span data-line="3">make<span class="w"> </span>test_query_validator_live
+</span><span data-line="4">
+</span><span data-line="5">make<span class="w"> </span>neo4j_latest
+</span><span data-line="6">make<span class="w"> </span>down<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>up
+</span><span data-line="7">make<span class="w"> </span>test_query_validator_live
+</span></pre></div>
+</div>
+<p>The latest-version target uses a separate Neo4j data volume so the normal development database is not upgraded in place.</p>
+<p>Before opening a pull request, run the normal project checks:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">pre-commit<span class="w"> </span>run<span class="w"> </span>--all-files
+</span><span data-line="2">make<span class="w"> </span>docs
+</span></pre></div>
+</div>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="test.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Running Tests</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="contributing.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Contributing</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Backend Installation &amp; Configuration - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Dashboard Configuration" href="dashboard.html" /><link rel="prev" title="Quickstart" href="quickstart.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=9454f7d5" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Backend Installation &amp; Configuration"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#demo-quickstart-development">Demo/Quickstart/Development</a></li>
+<li><a class="reference internal" href="#installation-using-docker-image">Installation using docker image</a></li>
+<li><a class="reference internal" href="#installation-using-python-packages">Installation using Python packages</a></li>
+<li><a class="reference internal" href="#backend-configuration">Backend configuration</a><ul>
+<li><a class="reference internal" href="#basic-configuration">Basic configuration</a></li>
+<li><a class="reference internal" href="#frontend-configuration">Frontend configuration</a></li>
+<li><a class="reference internal" href="#neo4j-configuration">Neo4j configuration</a></li>
+<li><a class="reference internal" href="#report-storage-configuration">Report storage configuration</a></li>
+<li><a class="reference internal" href="#dynamodb-configuration">DynamoDB configuration</a></li>
+<li><a class="reference internal" href="#sql-configuration">SQL configuration</a></li>
+<li><a class="reference internal" href="#chat-checkpoint-storage">Chat checkpoint storage</a><ul>
+<li><a class="reference internal" href="#dynamodb-checkpoint-configuration">DynamoDB checkpoint configuration</a></li>
+<li><a class="reference internal" href="#sql-checkpoint-configuration">SQL checkpoint configuration</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#auth-configuration">Auth configuration</a><ul>
+<li><a class="reference internal" href="#oidc-jwt-configuration">OIDC / JWT configuration</a></li>
+<li><a class="reference internal" href="#security-cookie-settings">Security / cookie settings</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#rbac-configuration">RBAC configuration</a><ul>
+<li><a class="reference internal" href="#built-in-roles">Built-in roles</a></li>
+<li><a class="reference internal" href="#role-claim">Role claim</a></li>
+<li><a class="reference internal" href="#user-defined-roles">User-defined roles</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#mcp-server">MCP server</a><ul>
+<li><a class="reference internal" href="#connecting-mcp-clients">Connecting MCP clients</a><ul>
+<li><a class="reference internal" href="#claude-code">Claude Code</a></li>
+<li><a class="reference internal" href="#codex">Codex</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#mcp-oauth-metadata-optional">MCP OAuth metadata (optional)</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#sandbox-delegation">Sandbox delegation</a></li>
+<li><a class="reference internal" href="#scheduled-queries">Scheduled queries</a></li>
+<li><a class="reference internal" href="#statsd-configuration">StatsD configuration</a></li>
+<li><a class="reference internal" href="#logging-configuration">Logging configuration</a></li>
+</ul>
+</li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Backend Installation &amp; Configuration</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="backend-installation-configuration">
+<h1>Backend Installation &amp; Configuration<a class="headerlink" href="#backend-installation-configuration" title="Link to this heading">¶</a></h1>
+<section id="demo-quickstart-development">
+<h2>Demo/Quickstart/Development<a class="headerlink" href="#demo-quickstart-development" title="Link to this heading">¶</a></h2>
+<p>If you’re just wanting to quickly evaluate or demo Seizu, please see the <a class="reference internal" href="#quickstart.html"><span class="xref myst">quickstart documentation</span></a>.</p>
+</section>
+<section id="installation-using-docker-image">
+<h2>Installation using docker image<a class="headerlink" href="#installation-using-docker-image" title="Link to this heading">¶</a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># first setup your environment in an env file, according to the configuration instructions</span>
+</span><span data-line="2">docker<span class="w"> </span>pull<span class="w"> </span>ghcr.io/mappedsky/seizu:latest
+</span><span data-line="3">docker<span class="w"> </span>run<span class="w"> </span>--env-file<span class="w"> </span>&lt;your-env-file&gt;<span class="w"> </span>ghcr.io/mappedsky/seizu:latest
+</span></pre></div>
+</div>
+</section>
+<section id="installation-using-python-packages">
+<h2>Installation using Python packages<a class="headerlink" href="#installation-using-python-packages" title="Link to this heading">¶</a></h2>
+<p>Seizu also publishes Python wheels for environments where running without Docker is useful.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">seizu</span></code> package includes the FastAPI backend, scheduled query worker, CLI, shared schema models, and the generated frontend bundle. The packaged frontend includes the full Vite build output: <code class="docutils literal notranslate"><span class="pre">index.html</span></code>, JavaScript, CSS, manifest, favicon, and any other files emitted into <code class="docutils literal notranslate"><span class="pre">build/</span></code> at release time.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv
+</span><span data-line="2">.<span class="w"> </span>.venv/bin/activate
+</span><span data-line="3">pip<span class="w"> </span>install<span class="w"> </span>seizu
+</span><span data-line="4">
+</span><span data-line="5"><span class="c1"># Web/API process</span>
+</span><span data-line="6">seizu-server
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Scheduled query worker, usually run as a separate process</span>
+</span><span data-line="9">seizu-scheduled-queries
+</span></pre></div>
+</div>
+<p>The separately published <code class="docutils literal notranslate"><span class="pre">seizu-cli</span></code> package installs only the CLI and shared schema code:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">pip<span class="w"> </span>install<span class="w"> </span>seizu-cli
+</span><span data-line="2">seizu<span class="w"> </span>--api-url<span class="w"> </span>https://seizu.example.com<span class="w"> </span>reports<span class="w"> </span>list
+</span></pre></div>
+</div>
+<p>See the <a class="reference internal" href="#cli.html"><span class="xref myst">CLI documentation</span></a> for authentication, configuration, seed/export, and common command examples.</p>
+</section>
+<section id="backend-configuration">
+<h2>Backend configuration<a class="headerlink" href="#backend-configuration" title="Link to this heading">¶</a></h2>
+<section id="basic-configuration">
+<h3>Basic configuration<a class="headerlink" href="#basic-configuration" title="Link to this heading">¶</a></h3>
+<p>When using the docker image, the defaults should be sufficient for basic configuration.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">DEBUG</span></code>: Whether or not seizu is run in debug mode. This should never be set outside of development; default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">HOST</span></code>: IP address to listen on; default: <code class="docutils literal notranslate"><span class="pre">0.0.0.0</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PORT</span></code>: Port to listen on; default: <code class="docutils literal notranslate"><span class="pre">8080</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">STATIC_FOLDER</span></code>: location of the React app build directory. In the Docker image this is <code class="docutils literal notranslate"><span class="pre">/build</span></code>. In the Python wheel, Seizu defaults to the packaged frontend at <code class="docutils literal notranslate"><span class="pre">reporting/static_dist</span></code>. Set this explicitly to serve a different build directory.</p></li>
+</ul>
+</section>
+<section id="frontend-configuration">
+<h3>Frontend configuration<a class="headerlink" href="#frontend-configuration" title="Link to this heading">¶</a></h3>
+<p>seizu passes configuration to the frontend via a configuration endpoint.
+Report and dashboard configurations are stored in the configured report store, which supports DynamoDB and SQL backends. Use <code class="docutils literal notranslate"><span class="pre">seizu</span> <span class="pre">seed</span></code> to populate the store from a YAML file.</p>
+</section>
+<section id="neo4j-configuration">
+<h3>Neo4j configuration<a class="headerlink" href="#neo4j-configuration" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">NEO4J_URI</span></code>: the URL to connect to neo4j; default: <code class="docutils literal notranslate"><span class="pre">bolt://localhost:7687</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">NEO4J_USER</span></code>: the username to use to connect; default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">NEO4J_PASSWORD</span></code>: the password to use to connect; default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">NEO4J_MAX_CONNECTION_LIFETIME</span></code>: maximum duration in seconds a driver will keep a connection before removing it from its pool; default: <code class="docutils literal notranslate"><span class="pre">3600</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">NEO4J_NOTIFICATIONS_MIN_SEVERITY</span></code>: minimum severity for Neo4j query notifications logged by the driver (<code class="docutils literal notranslate"><span class="pre">WARNING</span></code>, <code class="docutils literal notranslate"><span class="pre">INFORMATION</span></code>, <code class="docutils literal notranslate"><span class="pre">OFF</span></code>). Set to <code class="docutils literal notranslate"><span class="pre">OFF</span></code> to suppress schema warnings when the database is not fully populated; default: <code class="docutils literal notranslate"><span class="pre">WARNING</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">QUERY_VALIDATOR_ALLOWED_PROCEDURES</span></code>: comma-separated list of extra Neo4j procedures the Cypher validator permits in addition to Seizu’s built-in read-only schema procedures. Entries are normalized lowercase and may be exact names such as <code class="docutils literal notranslate"><span class="pre">apoc.meta.stats</span></code> or namespace prefixes ending in a dot such as <code class="docutils literal notranslate"><span class="pre">apoc.</span></code> or <code class="docutils literal notranslate"><span class="pre">gds.</span></code>. This setting only permits <code class="docutils literal notranslate"><span class="pre">CALL</span></code> procedure invocations; dangerous function namespaces such as <code class="docutils literal notranslate"><span class="pre">apoc.cypher.*</span></code> and <code class="docutils literal notranslate"><span class="pre">gds.*</span></code> remain blocked. Empty by default.</p></li>
+</ul>
+</section>
+<section id="report-storage-configuration">
+<h3>Report storage configuration<a class="headerlink" href="#report-storage-configuration" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">REPORT_STORE_BACKEND</span></code>: storage backend to use for Seizu-managed configuration objects, including reports, dashboards, scheduled queries, roles, toolsets, tools, skillsets, and skills. Supported values: <code class="docutils literal notranslate"><span class="pre">dynamodb</span></code> (default), <code class="docutils literal notranslate"><span class="pre">sqlmodel</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">REPORT_QUERY_SIGNING_SECRET</span></code>: cryptographically random secret used to sign report-query capability tokens. Use at least 32 bytes of entropy, 64 bytes preferred. Encode it as hex or base64, store it in a secret manager or deployment env var, and keep it stable across restarts so existing report tokens remain valid until they expire. If you use hex, 32 bytes becomes 64 characters and 64 bytes becomes 128 characters; if you use base64, 32 bytes is typically 44 characters with padding. Rotate it if exposed; rotation invalidates outstanding report tokens.</p></li>
+</ul>
+</section>
+<section id="dynamodb-configuration">
+<h3>DynamoDB configuration<a class="headerlink" href="#dynamodb-configuration" title="Link to this heading">¶</a></h3>
+<p>Used when <code class="docutils literal notranslate"><span class="pre">REPORT_STORE_BACKEND=dynamodb</span></code>. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">DYNAMODB_TABLE_NAME</span></code>: name of the DynamoDB table; default: <code class="docutils literal notranslate"><span class="pre">seizu-reports</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DYNAMODB_REGION</span></code>: AWS region for DynamoDB; default: <code class="docutils literal notranslate"><span class="pre">us-east-1</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DYNAMODB_ENDPOINT_URL</span></code>: override the DynamoDB endpoint URL (e.g. <code class="docutils literal notranslate"><span class="pre">http://dynamodb:8000</span></code> for local DynamoDB); default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (uses AWS endpoint)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DYNAMODB_CREATE_TABLE</span></code>: when <code class="docutils literal notranslate"><span class="pre">true</span></code>, creates the table automatically on startup if it does not exist. Enable in local development; default: <code class="docutils literal notranslate"><span class="pre">false</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SNOWFLAKE_MACHINE_ID</span></code>: Snowflake ID generator machine ID (0–1023). Set a unique value per instance when running multiple replicas to avoid ID collisions; default: <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+</ul>
+</section>
+<section id="sql-configuration">
+<h3>SQL configuration<a class="headerlink" href="#sql-configuration" title="Link to this heading">¶</a></h3>
+<p>Used when <code class="docutils literal notranslate"><span class="pre">REPORT_STORE_BACKEND=sqlmodel</span></code>.</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_URL</span></code>: SQLAlchemy database URL without credentials. Any SQLAlchemy-compatible database is supported. Credential-bearing URLs remain supported for backward compatibility. Examples:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">postgresql://host:5432/seizu</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">sqlite:///./seizu.db</span></code></p></li>
+</ul>
+<p>default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_USER</span></code>: optional username overlaid on <code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_URL</span></code>; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_PASSWORD</span></code>: optional password overlaid on <code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_URL</span></code>; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code>. Store this value in a secret manager independently of the non-secret URL.</p></li>
+</ul>
+</section>
+<section id="chat-checkpoint-storage">
+<h3>Chat checkpoint storage<a class="headerlink" href="#chat-checkpoint-storage" title="Link to this heading">¶</a></h3>
+<p>LangGraph chat history can use DynamoDB or PostgreSQL independently of the report store.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_BACKEND</span></code>: checkpoint backend. Supported values: <code class="docutils literal notranslate"><span class="pre">dynamodb</span></code> (default), <code class="docutils literal notranslate"><span class="pre">postgres</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_CREATE_TABLE</span></code>: create or migrate the configured checkpoint tables during startup; default: <code class="docutils literal notranslate"><span class="pre">false</span></code></p></li>
+</ul>
+<section id="dynamodb-checkpoint-configuration">
+<h4>DynamoDB checkpoint configuration<a class="headerlink" href="#dynamodb-checkpoint-configuration" title="Link to this heading">¶</a></h4>
+<p>Used when <code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_BACKEND=dynamodb</span></code>. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_TABLE_NAME</span></code>: name of the DynamoDB checkpoint table; default: <code class="docutils literal notranslate"><span class="pre">seizu-chat-checkpoints</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_TTL_SECONDS</span></code>: checkpoint lifetime in seconds. Set to <code class="docutils literal notranslate"><span class="pre">0</span></code> to disable automatic expiration; default: <code class="docutils literal notranslate"><span class="pre">0</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_ENABLE_COMPRESSION</span></code>: compress serialized checkpoint payloads; default: <code class="docutils literal notranslate"><span class="pre">true</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_S3_BUCKET</span></code>: S3 bucket used to offload checkpoint payloads larger than 350 KB; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_S3_ENDPOINT_URL</span></code>: override the S3 endpoint URL (for example, <code class="docutils literal notranslate"><span class="pre">http://minio:9000</span></code> for local development); default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (uses the AWS endpoint)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_S3_KEY_PREFIX</span></code>: object key prefix for checkpoint payloads stored in S3; default: <code class="docutils literal notranslate"><span class="pre">seizu/langgraph</span></code></p></li>
+</ul>
+</section>
+<section id="sql-checkpoint-configuration">
+<h4>SQL checkpoint configuration<a class="headerlink" href="#sql-checkpoint-configuration" title="Link to this heading">¶</a></h4>
+<p>Used when <code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_BACKEND=postgres</span></code>. The current SQL checkpointer requires PostgreSQL.</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_DATABASE_URL</span></code>: checkpoint database URL without credentials. A dedicated database is recommended so checkpoint migrations, retention, backups, and deletion remain isolated from application tables. Credential-bearing URLs remain supported for backward compatibility. Example:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">postgresql://host:5432/seizu-chat-checkpoints</span></code></p></li>
+</ul>
+<p>default: <code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_URL</span></code></p>
+</li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_DATABASE_USER</span></code>: optional checkpoint username. Defaults to <code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_USER</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_DATABASE_PASSWORD</span></code>: optional checkpoint password. Defaults to <code class="docutils literal notranslate"><span class="pre">SQL_DATABASE_PASSWORD</span></code> and can be managed as an independent secret.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE</span></code>: minimum async database connections per application process; default: <code class="docutils literal notranslate"><span class="pre">1</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE</span></code>: maximum async database connections per application process; default: <code class="docutils literal notranslate"><span class="pre">10</span></code></p></li>
+</ul>
+<p>For local development, <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">sqlmodel_enable</span></code> selects both the SQLModel report store and PostgreSQL chat checkpoints. Compose idempotently creates a dedicated <code class="docutils literal notranslate"><span class="pre">seizu-chat-checkpoints</span></code> database before starting Seizu. <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">sqlmodel_disable</span></code> restores both to DynamoDB.</p>
+</section>
+</section>
+<section id="auth-configuration">
+<h3>Auth configuration<a class="headerlink" href="#auth-configuration" title="Link to this heading">¶</a></h3>
+<section id="oidc-jwt-configuration">
+<h4>OIDC / JWT configuration<a class="headerlink" href="#oidc-jwt-configuration" title="Link to this heading">¶</a></h4>
+<p>seizu validates JWTs using <code class="docutils literal notranslate"><span class="pre">PyJWKClient</span></code> against any standard OIDC JWKS endpoint. Set <code class="docutils literal notranslate"><span class="pre">JWKS_URL</span></code> to your provider’s JWKS JSON endpoint and configure the frontend OIDC settings so the browser can complete the PKCE flow.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">JWKS_URL</span></code>: JWKS JSON endpoint used to validate JWTs (e.g. <code class="docutils literal notranslate"><span class="pre">https://idp.example.com/application/o/seizu/jwks/</span></code>); default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JWT_HEADER_NAME</span></code>: request header carrying the token; default: <code class="docutils literal notranslate"><span class="pre">Authorization</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JWT_EMAIL_CLAIM</span></code>: optional JWT claim for the user’s email address; default: <code class="docutils literal notranslate"><span class="pre">email</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JWT_USERNAME_CLAIM</span></code>: optional JWT claim for the user’s preferred username; default: <code class="docutils literal notranslate"><span class="pre">preferred_username</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JWT_ISSUER</span></code>: optional issuer to validate in the JWT; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (skips issuer validation)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JWT_AUDIENCE</span></code>: optional audience to validate; must match the OIDC client ID when using providers (like Authentik) that always set <code class="docutils literal notranslate"><span class="pre">aud</span></code>; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ALLOWED_JWT_ALGORITHMS</span></code>: comma-separated list of allowed JWT signing algorithms; default: <code class="docutils literal notranslate"><span class="pre">RS256,ES256,ES512</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_AUTHORITY</span></code>: OIDC provider base URL; passed to the frontend via <code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/api/v1/config</span></code> and also added to the <code class="docutils literal notranslate"><span class="pre">connect-src</span></code> Content-Security-Policy directive so the browser can reach the discovery document and token endpoint; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_CLIENT_ID</span></code>: OIDC client ID; passed to the frontend; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_REDIRECT_URI</span></code>: OIDC callback URL; passed to the frontend via <code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/api/v1/config</span></code> but <strong>not used by the frontend</strong> — the browser derives the redirect URI from <code class="docutils literal notranslate"><span class="pre">window.location.origin</span></code> so the PKCE callback always returns to the same origin that initiated the flow; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_SCOPE</span></code>: OIDC scope; <code class="docutils literal notranslate"><span class="pre">offline_access</span></code> is required so the IDP issues a refresh token for the BFF flow; default: <code class="docutils literal notranslate"><span class="pre">openid</span> <span class="pre">email</span> <span class="pre">offline_access</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_AUTHORIZE_EXTRA_PARAMS</span></code>: comma-separated <code class="docutils literal notranslate"><span class="pre">key=value</span></code> pairs merged into the authorize request, for provider knobs the scope can’t express. Google, for example, only issues a refresh token with <code class="docutils literal notranslate"><span class="pre">access_type=offline,prompt=consent</span></code> instead of the <code class="docutils literal notranslate"><span class="pre">offline_access</span></code> scope; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_ENABLE_TOKEN_INTROSPECTION</span></code>: validate opaque (non-JWT) access tokens via RFC 7662 introspection when local JWT validation fails. Required for IDPs (such as Google) that issue opaque access tokens; pairs with a confidential client. The introspection response must include <code class="docutils literal notranslate"><span class="pre">active:</span> <span class="pre">true</span></code>, the configured subject claim, and either an <code class="docutils literal notranslate"><span class="pre">aud</span></code> value or <code class="docutils literal notranslate"><span class="pre">client_id</span></code> matching Seizu’s configured audience/client. If the response omits the issuer claim, Seizu uses the configured provider issuer from discovery. Email and preferred username are optional profile data; default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_INTROSPECTION_ENDPOINT_AUTH_METHOD</span></code>: Authlib client-auth method for the introspection endpoint; default: the value of <code class="docutils literal notranslate"><span class="pre">OIDC_TOKEN_ENDPOINT_AUTH_METHOD</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_DISCOVERY_CACHE_TTL_SECONDS</span></code>: how long to cache the OIDC discovery document before re-fetching, bounding endpoint/JWKS staleness without a restart; default: <code class="docutils literal notranslate"><span class="pre">3600</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">OIDC_VALIDATE_ID_TOKEN</span></code>: validate the ID token from the BFF code exchange (signature via the discovery JWKS, audience, issuer, and the login nonce). Secure by default; disable only for non-conformant providers; default: <code class="docutils literal notranslate"><span class="pre">True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DEVELOPMENT_ONLY_REQUIRE_AUTH</span></code>: whether or not to require authentication. This option should only be changed in development; default: <code class="docutils literal notranslate"><span class="pre">True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DEVELOPMENT_ONLY_AUTH_USER_EMAIL</span></code>: the email address of the fake user when authentication is disabled. This option should only be changed in development; default: <code class="docutils literal notranslate"><span class="pre">testuser</span></code></p></li>
+</ul>
+<p>For browser sessions, Seizu stores the IDP refresh token and the ID token in an encrypted, HttpOnly session cookie. The ID token is kept so logout can send it back to the provider as <code class="docutils literal notranslate"><span class="pre">id_token_hint</span></code> for RP-initiated logout. Configure the OIDC provider to issue compact Seizu-specific ID tokens: include standard identity claims, optional display profile claims, and one Seizu role claim, but avoid all-groups, nested-groups, permissions arrays, or large profile/custom claims. Large ID tokens can exceed browser or proxy cookie limits and cause login, refresh, or logout failures. As a practical target, keep Seizu ID tokens below roughly 2 KB, especially when the provider issues long refresh tokens.</p>
+</section>
+<section id="security-cookie-settings">
+<h4>Security / cookie settings<a class="headerlink" href="#security-cookie-settings" title="Link to this heading">¶</a></h4>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">TALISMAN_FORCE_HTTPS</span></code>: redirect HTTP requests to HTTPS and enable HSTS. Set to <code class="docutils literal notranslate"><span class="pre">False</span></code> when running behind an SSL-terminating load balancer or in local development; default: <code class="docutils literal notranslate"><span class="pre">True</span></code></p></li>
+</ul>
+</section>
+</section>
+<section id="rbac-configuration">
+<h3>RBAC configuration<a class="headerlink" href="#rbac-configuration" title="Link to this heading">¶</a></h3>
+<p>Seizu uses Role-Based Access Control (RBAC) to restrict API and MCP access. Every authenticated request has a role resolved from the JWT, which maps to a set of granular permissions.</p>
+<section id="built-in-roles">
+<h4>Built-in roles<a class="headerlink" href="#built-in-roles" title="Link to this heading">¶</a></h4>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Role</p></th>
+<th class="head"><p>Capabilities</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>seizu-viewer</strong></p></td>
+<td><p>Read reports and dashboard. No ad-hoc query console or query history access.</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>seizu-editor</strong></p></td>
+<td><p>All Viewer capabilities + create/edit/delete reports, set default dashboard</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>seizu-admin</strong></p></td>
+<td><p>All Editor capabilities + manage toolsets, tools, skillsets, skills, scheduled queries, and user-defined roles</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="role-claim">
+<h4>Role claim<a class="headerlink" href="#role-claim" title="Link to this heading">¶</a></h4>
+<p>Seizu reads the user’s role from a single JWT claim set by the OIDC provider. Configure your provider to embed the role name (e.g. <code class="docutils literal notranslate"><span class="pre">&quot;seizu-admin&quot;</span></code>) as a claim in every issued token. Most providers support this via property mappings or claim enrichment rules on group membership.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">RBAC_ROLE_CLAIM</span></code>: JWT claim name that holds the user’s Seizu role; default: <code class="docutils literal notranslate"><span class="pre">seizu_role</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">RBAC_DEFAULT_ROLE</span></code>: Role assigned when the JWT has no <code class="docutils literal notranslate"><span class="pre">RBAC_ROLE_CLAIM</span></code>. Set to <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> to deny access to users without an explicit role claim. Valid values: <code class="docutils literal notranslate"><span class="pre">&quot;seizu-viewer&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;seizu-editor&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;seizu-admin&quot;</span></code>, or any user-defined role name; default: <code class="docutils literal notranslate"><span class="pre">&quot;seizu-viewer&quot;</span></code></p></li>
+</ul>
+<p>Prefer mapping provider groups to a single Seizu role claim instead of sending full group membership to Seizu. This keeps tokens small, avoids exposing unrelated group names to Seizu, and makes user-defined role resolution independent of provider-specific group naming.</p>
+<p>If a user needs ad-hoc Cypher access, create a narrow custom role that includes <code class="docutils literal notranslate"><span class="pre">query:execute</span></code> and assign it only to trusted operators. Keep general report consumers on <code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code> so they can use signed report panels without console access.</p>
+<p><strong>Authentik example</strong> — create a Property Mapping with expression:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">seizu_group_role_map</span> <span class="o">=</span> <span class="p">{</span>
+</span><span data-line="2">    <span class="s2">&quot;seizu-admins&quot;</span><span class="p">:</span> <span class="s2">&quot;seizu-admin&quot;</span><span class="p">,</span>
+</span><span data-line="3">    <span class="s2">&quot;seizu-editors&quot;</span><span class="p">:</span> <span class="s2">&quot;seizu-editor&quot;</span><span class="p">,</span>
+</span><span data-line="4"><span class="p">}</span>
+</span><span data-line="5"><span class="k">for</span> <span class="n">group</span> <span class="ow">in</span> <span class="n">request</span><span class="o">.</span><span class="n">user</span><span class="o">.</span><span class="n">groups</span><span class="o">.</span><span class="n">all</span><span class="p">():</span>
+</span><span data-line="6">    <span class="k">if</span> <span class="n">group</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="n">seizu_group_role_map</span><span class="p">:</span>
+</span><span data-line="7">        <span class="k">return</span> <span class="n">seizu_group_role_map</span><span class="p">[</span><span class="n">group</span><span class="o">.</span><span class="n">name</span><span class="p">]</span>
+</span><span data-line="8"><span class="k">return</span> <span class="s2">&quot;seizu-viewer&quot;</span>
+</span></pre></div>
+</div>
+<p>Bind the mapping to the Seizu OAuth2 provider as a custom token property mapping with scope <code class="docutils literal notranslate"><span class="pre">openid</span></code>.</p>
+</section>
+<section id="user-defined-roles">
+<h4>User-defined roles<a class="headerlink" href="#user-defined-roles" title="Link to this heading">¶</a></h4>
+<p>Admins can create and update custom roles with arbitrary permission subsets in the UI, via the API (<code class="docutils literal notranslate"><span class="pre">POST</span> <span class="pre">/api/v1/roles</span></code> and <code class="docutils literal notranslate"><span class="pre">PUT</span> <span class="pre">/api/v1/roles/&lt;id&gt;</span></code>), or through the MCP built-in role tools (for example, <code class="docutils literal notranslate"><span class="pre">roles__create</span></code> and <code class="docutils literal notranslate"><span class="pre">roles__update</span></code>). When a JWT contains a user-defined role name in <code class="docutils literal notranslate"><span class="pre">RBAC_ROLE_CLAIM</span></code>, Seizu does a single database lookup to resolve its permissions. Built-in role resolution requires no database I/O.</p>
+</section>
+</section>
+<section id="mcp-server">
+<h3>MCP server<a class="headerlink" href="#mcp-server" title="Link to this heading">¶</a></h3>
+<p>Seizu exposes a <a class="reference external" href="https://modelcontextprotocol.io/">Model Context Protocol (MCP)</a> server at <code class="docutils literal notranslate"><span class="pre">/api/v1/mcp</span></code>, allowing LLM agents such as Claude to query the Neo4j graph database using user-defined tools and a set of built-in management tools.</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">MCP_ENABLED</span></code>: Enable or disable the MCP server endpoint. Set to <code class="docutils literal notranslate"><span class="pre">False</span></code> to turn off the endpoint entirely; default: <code class="docutils literal notranslate"><span class="pre">True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MCP_ENABLED_BUILTINS</span></code>: Controls which built-in tool groups are exposed. User-defined toolsets are always available regardless of this setting. Three modes:</p>
+<ul class="simple">
+<li><p>Unset or empty (default) — all built-in groups are enabled.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">none</span></code> — all built-in groups are disabled; only user-defined toolsets are visible.</p></li>
+<li><p>Comma-separated list (e.g. <code class="docutils literal notranslate"><span class="pre">graph,reports</span></code>) — only the listed groups are enabled.</p></li>
+</ul>
+<p>Known groups: <code class="docutils literal notranslate"><span class="pre">graph</span></code>, <code class="docutils literal notranslate"><span class="pre">reports</span></code>, <code class="docutils literal notranslate"><span class="pre">scheduled_queries</span></code>, <code class="docutils literal notranslate"><span class="pre">toolsets</span></code>, <code class="docutils literal notranslate"><span class="pre">roles</span></code>.</p>
+</li>
+</ul>
+<section id="connecting-mcp-clients">
+<h4>Connecting MCP clients<a class="headerlink" href="#connecting-mcp-clients" title="Link to this heading">¶</a></h4>
+<p>Point MCP clients at the backend endpoint directly:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">https://your-seizu-host/api/v1/mcp
+</span></pre></div>
+</div>
+<p>For local development, this is usually:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">http://localhost:8080/api/v1/mcp
+</span></pre></div>
+</div>
+<p>The frontend development server does not proxy MCP traffic, so do not use port <code class="docutils literal notranslate"><span class="pre">3000</span></code> for MCP clients. If Seizu is behind a reverse proxy or load balancer, use the public backend URL and set <code class="docutils literal notranslate"><span class="pre">MCP_RESOURCE_URL</span></code> to the same MCP endpoint so OAuth discovery metadata advertises the reachable URL.</p>
+<section id="claude-code">
+<h5>Claude Code<a class="headerlink" href="#claude-code" title="Link to this heading">¶</a></h5>
+<p>Add Seizu as an HTTP MCP server:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">claude<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>--transport<span class="w"> </span>http<span class="w"> </span>--callback-port<span class="w"> </span><span class="m">8888</span><span class="w"> </span>seizu<span class="w"> </span>https://your-seizu-host/api/v1/mcp
+</span></pre></div>
+</div>
+<p>The fixed callback port is useful for OAuth because the redirect URI must be registered with the OIDC provider:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span><span data-line="1">http://localhost:8888/callback
+</span></pre></div>
+</div>
+<p>For the development Authentik stack this callback is pre-configured. For other OIDC providers, add it to the client manually.</p>
+</section>
+<section id="codex">
+<h5>Codex<a class="headerlink" href="#codex" title="Link to this heading">¶</a></h5>
+<p>Add Seizu as a streamable HTTP MCP server:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">codex<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>seizu<span class="w"> </span>--url<span class="w"> </span>https://your-seizu-host/api/v1/mcp
+</span></pre></div>
+</div>
+<p>This writes an entry like the following to <code class="docutils literal notranslate"><span class="pre">~/.codex/config.toml</span></code>:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="k">[mcp_servers.seizu]</span>
+</span><span data-line="2"><span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;https://your-seizu-host/api/v1/mcp&quot;</span>
+</span></pre></div>
+</div>
+<p>If Seizu requires OAuth and the MCP OAuth metadata endpoint is enabled, authenticate the configured server:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">codex<span class="w"> </span>mcp<span class="w"> </span>login<span class="w"> </span>seizu
+</span></pre></div>
+</div>
+<p>For token-based automation, configure Codex to read a bearer token from an environment variable:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">codex<span class="w"> </span>mcp<span class="w"> </span>add<span class="w"> </span>seizu<span class="w"> </span>--url<span class="w"> </span>https://your-seizu-host/api/v1/mcp<span class="w"> </span>--bearer-token-env-var<span class="w"> </span>SEIZU_TOKEN
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="mcp-oauth-metadata-optional">
+<h4>MCP OAuth metadata (optional)<a class="headerlink" href="#mcp-oauth-metadata-optional" title="Link to this heading">¶</a></h4>
+<p>When <code class="docutils literal notranslate"><span class="pre">MCP_OAUTH_AUTHORIZATION_ENDPOINT</span></code> and <code class="docutils literal notranslate"><span class="pre">MCP_OAUTH_TOKEN_ENDPOINT</span></code> are set, Seizu publishes an <a class="reference external" href="https://datatracker.ietf.org/doc/html/rfc8414">RFC 8414</a> OAuth 2.0 Authorization Server Metadata document at <code class="docutils literal notranslate"><span class="pre">/api/v1/mcp/.well-known/oauth-authorization-server</span></code>. MCP clients that support in-client authentication (e.g. Claude Desktop) can use this endpoint to discover the OIDC provider and authenticate users without a pre-issued token.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">MCP_OAUTH_AUTHORIZATION_ENDPOINT</span></code>: OIDC authorization endpoint URL; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (metadata endpoint disabled)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MCP_OAUTH_TOKEN_ENDPOINT</span></code>: OIDC token endpoint URL; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (metadata endpoint disabled)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">MCP_OAUTH_ISSUER</span></code>: Issuer value for the metadata document. Defaults to <code class="docutils literal notranslate"><span class="pre">JWT_ISSUER</span></code> if unset; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+</ul>
+</section>
+</section>
+<section id="sandbox-delegation">
+<h3>Sandbox delegation<a class="headerlink" href="#sandbox-delegation" title="Link to this heading">¶</a></h3>
+<p>The sandbox delegation feature lets the chat agent run Python code, execute shell commands, and read/write files in an isolated ephemeral sandbox. See the <a class="reference internal" href="#sandbox.html"><span class="xref myst">sandbox documentation</span></a> for architecture details, provider options, and development setup.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_ENABLED</span></code>: Enable the <code class="docutils literal notranslate"><span class="pre">sandbox__delegate</span></code> chat tool; default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_API_KEY</span></code>: API key for the sandbox provider. Required for E2B cloud; leave empty for self-hosted deployments that use internal auth; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_DOMAIN</span></code>: Sandbox service hostname. Empty → E2B cloud. Set to your cluster ingress hostname for self-hosted deployments (e.g. OpenKruise Agents); default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_ALLOW_INTERNET</span></code>: Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access; default: <code class="docutils literal notranslate"><span class="pre">False</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_TIMEOUT_SECONDS</span></code>: Maximum wall-clock seconds for one sandbox task before it is aborted; default: <code class="docutils literal notranslate"><span class="pre">120</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_MAX_OUTPUT_BYTES</span></code>: Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result returned to the chat agent; larger output is truncated; default: <code class="docutils literal notranslate"><span class="pre">50000</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_LLM_MODEL</span></code>: LiteLLM model ID for the inner sandbox subagent. Empty → inherits <code class="docutils literal notranslate"><span class="pre">CHAT_LLM_MODEL</span></code>; default: <code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></li>
+</ul>
+</section>
+<section id="scheduled-queries">
+<h3>Scheduled queries<a class="headerlink" href="#scheduled-queries" title="Link to this heading">¶</a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ENABLE_SCHEDULED_QUERIES</span></code>: Whether or not scheduled queries should be enabled. Note that if the worker is not running, scheduled queries will not run, even if this is set to true; default: <code class="docutils literal notranslate"><span class="pre">True</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SCHEDULED_QUERY_FREQUENCY</span></code>: The frequency in seconds for how often we’ll attempt to run scheduled queries; default: <code class="docutils literal notranslate"><span class="pre">20</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SCHEDULED_QUERY_MODULES</span></code>: A comma separated list of python import locations for available scheduled query modules; default: <code class="docutils literal notranslate"><span class="pre">reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.statsd</span></code></p></li>
+</ul>
+</section>
+<section id="statsd-configuration">
+<h3>StatsD configuration<a class="headerlink" href="#statsd-configuration" title="Link to this heading">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">statsd</span></code> scheduled query action module sends numeric query results to a StatsD server.
+Note that the StatsD support uses DogStatsD tag extensions, so your StatsD server must also support tags (e.g. Telegraf with <code class="docutils literal notranslate"><span class="pre">datadog_extensions</span> <span class="pre">=</span> <span class="pre">true</span></code>).</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">STATSD_HOST</span></code>: The hostname of the StatsD server; default: <code class="docutils literal notranslate"><span class="pre">None</span></code> (module logs a warning and skips when unset)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">STATSD_PORT</span></code>: The port of the StatsD server; default: <code class="docutils literal notranslate"><span class="pre">8125</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">STATSD_CONSTANT_TAGS</span></code>: A comma-separated list of <code class="docutils literal notranslate"><span class="pre">tag_name:tag_value</span></code> tags attached to every metric; default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p></li>
+</ul>
+</section>
+<section id="logging-configuration">
+<h3>Logging configuration<a class="headerlink" href="#logging-configuration" title="Link to this heading">¶</a></h3>
+<p>seizu ships with a sane json structured logging configuration, and good defaults, but you can override them via a config file.
+Note that this setting is for the workers.
+You’ll also need to change gunicorn’s logging configuration file setting to change the web process.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">LOG_CONFIG_FILE</span></code>: Location of the logging configuration file. In the Docker image this defaults to <code class="docutils literal notranslate"><span class="pre">/home/seizu/seizu/logging.conf</span></code>. In the Python wheel, Seizu defaults to the packaged <code class="docutils literal notranslate"><span class="pre">reporting/logging.conf</span></code>.</p></li>
+</ul>
+</section>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="quickstart.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Quickstart</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="dashboard.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Dashboard Configuration</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>
