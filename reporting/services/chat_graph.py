@@ -939,6 +939,10 @@ async def _execute_confirmations(
             include_chat_only=True,
             result_max_rows=settings.CHAT_TOOL_RESULT_MAX_ROWS,
             result_max_bytes=settings.CHAT_TOOL_RESULT_MAX_BYTES,
+            # The confirmation was approved and claimed just above; run it without
+            # re-entering the gate (which, with no confirmation_source, would now
+            # fail closed).
+            confirmation_pre_approved=True,
         )
         if outcome.blocked is not None:
             errors.append(f"`{c.tool_name}`: {_blocked_tool_call_body(outcome.text)}")

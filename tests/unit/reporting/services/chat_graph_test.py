@@ -1767,6 +1767,49 @@ async def test_resume_expired_approved_confirmation_does_not_execute(mocker):
     call_tool.assert_not_called()
 
 
+async def test_execute_confirmations_runs_approved_tool_through_real_runtime(mocker):
+    """Regression: an approved + claimed confirmation must actually execute. This
+    drives _execute_confirmations through the *real* mcp_runtime (call_tool_for_chat
+    is NOT mocked), so the fail-closed confirmation guard can't silently block it
+    again — the bug the earlier mocked tests missed."""
+    confirmation = ActionConfirmation.model_validate(
+        {
+            "confirmation_id": "confirm-run",
+            "user_id": "user-1",
+            "source": "chat",
+            "session_key": "hashed-session",
+            "tool_name": "reports__delete",
+            "action": "delete",
+            "resource_type": "report",
+            "resource_id": "report-1",
+            "arguments": {"report_id": "report-1"},
+            "arguments_hash": "hash",
+            "status": "approved",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:30:00+00:00",
+        }
+    )
+    # Claim succeeds (returns the approved confirmation), then the real runtime runs.
+    mocker.patch(
+        "reporting.services.chat_graph.report_store.claim_action_confirmation_for_execution",
+        return_value=confirmation,
+    )
+    delete_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True
+    )
+    user = CurrentUser(
+        user=User(user_id="user-1", sub="sub", iss="iss", email="u@example.com", created_at=_NOW, last_login=_NOW),
+        jwt_claims={},
+        permissions=frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}),
+    )
+
+    outcomes, errors, _details = await chat_graph._execute_confirmations([confirmation], user)
+
+    assert errors == []
+    assert [name for name, _ in outcomes] == ["reports__delete"]
+    delete_report.assert_called_once()
+
+
 async def test_resume_confirmation_must_belong_to_active_chat_thread(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 

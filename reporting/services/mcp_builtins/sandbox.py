@@ -276,6 +276,7 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
         tool_name = tool.name
 
         async def call(_tool_name: str = tool_name, **kwargs: Any) -> str:
+            from reporting import settings as _settings
             from reporting.services import mcp_runtime as _rt
 
             outcome = await _rt.call_tool_for_chat(
@@ -284,10 +285,15 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
                 kwargs,
                 gate_permission=Permission.CHAT_TOOLS_CALL,
                 chat_safe_only=True,
+                # Bound the result the same way the outer chat agent does, then byte-
+                # cap as a final guard, so a large graph__query / user-tool result
+                # can't blow up the inner model's context (mirrors _build_sandbox_tools).
+                result_max_rows=_settings.CHAT_TOOL_RESULT_MAX_ROWS,
+                result_max_bytes=_settings.CHAT_TOOL_RESULT_MAX_BYTES,
             )
             if outcome.blocked:
                 return f"[blocked: {outcome.blocked}]"
-            return outcome.text or "(no output)"
+            return _truncate_bytes(outcome.text or "(no output)", _settings.SANDBOX_MAX_OUTPUT_BYTES)
 
         result.append(
             StructuredTool.from_function(

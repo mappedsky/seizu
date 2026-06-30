@@ -286,8 +286,9 @@ The sandbox delegation feature lets the chat agent run Python code, execute shel
 * ``SANDBOX_ENABLED``: Enable the ``sandbox__delegate`` chat tool; default: ``False``
 * ``SANDBOX_API_KEY``: API key for the sandbox provider. Required for E2B cloud; leave empty for self-hosted deployments that use internal auth; default: ``""``
 * ``SANDBOX_DOMAIN``: Sandbox service hostname. Empty → E2B cloud. Set to your cluster ingress hostname for self-hosted deployments (e.g. OpenKruise Agents); default: ``""``
+* ``SANDBOX_ALLOW_INTERNET``: Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access; default: ``False``
 * ``SANDBOX_TIMEOUT_SECONDS``: Maximum wall-clock seconds for one sandbox task before it is aborted; default: ``120``
-* ``SANDBOX_MAX_OUTPUT_BYTES``: Maximum bytes in the result returned to the chat agent; larger output is truncated; default: ``50000``
+* ``SANDBOX_MAX_OUTPUT_BYTES``: Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result returned to the chat agent; larger output is truncated; default: ``50000``
 * ``SANDBOX_LLM_MODEL``: LiteLLM model ID for the inner sandbox subagent. Empty → inherits ``CHAT_LLM_MODEL``; default: ``""``
 
 ### Scheduled queries

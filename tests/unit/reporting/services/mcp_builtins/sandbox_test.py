@@ -506,6 +506,30 @@ async def test_build_seizu_tools_requests_confirmation_gated_excluded() -> None:
     assert list_mock.await_args.kwargs["chat_safe_only"] is True
 
 
+async def test_build_seizu_tools_bounds_tool_results() -> None:
+    """Seizu tools handed to the subagent bound their results (rows/bytes) and
+    byte-cap the text, so a huge graph__query result can't blow up the inner model."""
+    seizu_tool = Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})
+    big_outcome = MagicMock(blocked=None, text="y" * 10_000)
+    call_mock = AsyncMock(return_value=big_outcome)
+    with (
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[seizu_tool])),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", call_mock),
+        patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 50),
+        patch("reporting.settings.CHAT_TOOL_RESULT_MAX_BYTES", 4_000),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 100),
+    ):
+        tools = await _build_seizu_tools(_current_user())
+        out = await tools[0].coroutine()  # type: ignore[misc]
+
+    # Bounds were passed through to the underlying chat tool call...
+    assert call_mock.await_args.kwargs["result_max_rows"] == 50
+    assert call_mock.await_args.kwargs["result_max_bytes"] == 4_000
+    # ...and the text was byte-capped as a final guard.
+    assert len(out.encode()) <= 100 + len("\n[truncated]")
+    assert out.endswith("[truncated]")
+
+
 async def test_build_sandbox_tools_caps_result_bytes() -> None:
     """Every inner tool result is byte-capped before reaching the inner agent, not
     just the final answer — a large read can't blow up the inner model's context."""

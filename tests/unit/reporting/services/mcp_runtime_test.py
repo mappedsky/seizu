@@ -398,6 +398,43 @@ async def test_confirmation_gated_builtin_fails_closed_without_confirmation_sour
     delete_report.assert_not_called()
 
 
+async def test_pre_approved_confirmation_executes_without_gate(mocker):
+    """The post-approval executor path: an already-approved, already-claimed
+    confirmation runs the handler directly via confirmation_pre_approved, even with
+    no confirmation_source. Without this, the fail-closed guard would block it."""
+    delete_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_DELETE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__delete",
+        {"report_id": "r1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        include_chat_only=True,
+        confirmation_pre_approved=True,
+    )
+
+    assert outcome.blocked is None
+    delete_report.assert_called_once()
+
+
+async def test_pre_approved_confirmation_requires_authenticated_user():
+    """Pre-approved execution still needs an authenticated user to attribute the write."""
+    outcome = await mcp_runtime.call_tool_for_chat(
+        None,
+        "reports__delete",
+        {"report_id": "r1"},
+        permissions=ALL_PERMISSIONS,
+        chat_safe_only=True,
+        include_chat_only=True,
+        confirmation_pre_approved=True,
+    )
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+
+
 async def test_list_tools_exclude_confirmation_gated_keeps_readonly_and_user_tools(mocker):
     """exclude_confirmation_gated drops only confirmation-gated builtins; read-only
     builtins, the no-confirmation exceptions, and user-defined tools all stay — so
