@@ -73,6 +73,39 @@ their existing `CVEMetadata` records to produce per-repository rows. This
 detects a newly observed repository exposure even when the CVE itself was
 published earlier.
 
+## The cve_dependency_remediation workflow
+
+Where `cve_repo_report` *assesses*, `cve_dependency_remediation` *fixes*: per
+(repository, vulnerable dependency package) group, it runs an AI chat session
+that drives a headless coding-agent CLI (Claude Code by default) in an isolated
+sandbox via the `sandbox__delegate_subagent` tool (see
+[Sandbox delegation](sandbox.md)). The coding agent clones the repository,
+creates a deterministic branch (`seizu/cve-remediation/{ecosystem}-{package}`),
+upgrades the dependency in every affected manifest — including any code changes
+needed for compatibility, not just a version bump — runs the repository's test
+suite, and opens a pull request whose body lists the CVE IDs, the version
+change, the compatibility changes, and the test results.
+
+Input rows must carry `repo` and `package` keys; multiple CVEs (or manifests)
+for the same package in the same repository collapse into one chat and one PR.
+Groups run sequentially to bound concurrent LLM spend, and the per-group
+activity uses `maximum_attempts=1`: a retry would repeat a very expensive
+coding-agent session and risk duplicate PRs. Manual re-runs are safe — the
+deterministic branch name makes the agent update the existing PR instead of
+opening another. A failing group records an error without aborting the rest.
+
+Requirements on top of `cve_repo_report`'s: `SANDBOX_ENABLED=true`,
+`SANDBOX_SUBAGENT_ENABLED=true`, `SANDBOX_GITHUB_TOKEN`, a provider API key,
+and the scheduled query creator must hold `sandbox:delegate_subagent`
+(Editor+). Nothing lands without human review: keep branch protection on —
+the PR review is the gate.
+
+The seeded scheduled query **New CVE dependencies requiring remediation** uses
+the same watch-scan trigger and `SecurityIssue.created_at` window as the
+assessment query, additionally requires `dependency_package_name`, and returns
+per-dependency rows (ecosystem, manifest path, vulnerable range, patched
+version) that the remediation prompt is built from.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -83,6 +116,7 @@ published earlier.
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
+| `TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS` | `2400` | Per-dependency remediation chat activity timeout (full clone → upgrade → test → PR cycle). Keep above `SANDBOX_SUBAGENT_TIMEOUT_SECONDS`. |
 
 The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) because it drives headless chat sessions. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools — exercising the CVE workflow end-to-end requires a real LLM provider.
 

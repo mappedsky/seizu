@@ -44,6 +44,7 @@ def test_action_config_schema():
     schema = {field.name: field for field in temporal.action_config_schema()}
     assert schema["workflow"].required is True
     assert "cve_repo_report" in (schema["workflow"].options or [])
+    assert "cve_dependency_remediation" in (schema["workflow"].options or [])
     assert "accept_confirmation_bypass" not in schema
 
 

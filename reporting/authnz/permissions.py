@@ -71,6 +71,7 @@ class Permission(StrEnum):
 
     # Sandbox delegation
     SANDBOX_DELEGATE = "sandbox:delegate"
+    SANDBOX_DELEGATE_SUBAGENT = "sandbox:delegate_subagent"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +108,7 @@ EDITOR_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.CHAT_BYPASS_PERMISSIONS,
         Permission.CHAT_SCHEDULE,
         Permission.SANDBOX_DELEGATE,
+        Permission.SANDBOX_DELEGATE_SUBAGENT,
     }
 )
 

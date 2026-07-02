@@ -20,3 +20,40 @@ def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
             "groupid": "https://github.com/mappedsky",
         }
     ]
+
+
+def test_cve_dependency_remediation_scheduled_query() -> None:
+    config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    scheduled_query = next(
+        item for item in config["scheduled_queries"] if item["name"] == "New CVE dependencies requiring remediation"
+    )
+
+    # Same "new" convention as the assessment query: newly observed open
+    # security issues, not CVE publication dates or firstseen.
+    assert "datetime(s.created_at) > window_start" in scheduled_query["cypher"]
+    assert "s.firstseen" not in scheduled_query["cypher"]
+    assert "datetime(c.published_date) > window_start" not in scheduled_query["cypher"]
+    # Remediation needs a concrete package to upgrade.
+    assert "s.dependency_package_name IS NOT NULL" in scheduled_query["cypher"]
+    assert scheduled_query["watch_scans"] == [
+        {
+            "grouptype": "GitHubOrganization",
+            "syncedtype": "GitHubOrganization",
+            "groupid": "https://github.com/mappedsky",
+        }
+    ]
+    assert scheduled_query["actions"] == [
+        {"action_type": "temporal", "action_config": {"workflow": "cve_dependency_remediation"}}
+    ]
+
+
+def test_cve_dependency_remediation_skill_seeded() -> None:
+    config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    skill = config["skillsets"]["cve_response"]["skills"]["cve_dependency_remediation"]
+
+    assert skill["enabled"] is True
+    assert skill["tools_required"] == ["sandbox__delegate_subagent"]
+    assert {p["name"] for p in skill["parameters"]} == {"repo", "package", "cves"}
+    assert all(p["required"] for p in skill["parameters"])

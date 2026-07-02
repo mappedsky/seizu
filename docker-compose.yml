@@ -313,6 +313,8 @@ services:
       - STATSD_HOST=telegraf
       - STATSD_CONSTANT_TAGS
       - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      - TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS
       - REPORT_STORE_BACKEND
       - DYNAMODB_TABLE_NAME=seizu-reports
       - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
@@ -414,6 +416,23 @@ services:
       - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
       - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+      # Sandbox delegation — scheduled headless chat sessions run here and may
+      # call the sandbox__delegate / sandbox__delegate_subagent tools.
+      - SANDBOX_ENABLED
+      - SANDBOX_API_KEY
+      - SANDBOX_DOMAIN
+      - SANDBOX_ALLOW_INTERNET
+      - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_LLM_MODEL
+      - SANDBOX_SUBAGENT_ENABLED
+      - SANDBOX_SUBAGENT_PROVIDER
+      - SANDBOX_SUBAGENT_API_KEY
+      - SANDBOX_SUBAGENT_MODEL
+      - SANDBOX_SUBAGENT_TIMEOUT_SECONDS
+      - SANDBOX_GITHUB_TOKEN
+      - SANDBOX_SUBAGENT_GIT_USER
+      - SANDBOX_SUBAGENT_GIT_EMAIL
     command: python -m reporting.scheduled_chats
     volumes:
       - .:/home/seizu/seizu
@@ -445,6 +464,7 @@ services:
       - TEMPORAL_TASK_QUEUE
       - TEMPORAL_WORKER_ENABLED
       - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      - TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS
       # Workflow chat sessions enforce the creator's stored role unless dev
       # mode is on; keep this aligned with the seizu service.
       - DEVELOPMENT_ONLY_REQUIRE_AUTH
@@ -509,6 +529,23 @@ services:
       - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
       - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+      # Sandbox delegation — workflow chat sessions run here and may call the
+      # sandbox__delegate / sandbox__delegate_subagent tools.
+      - SANDBOX_ENABLED
+      - SANDBOX_API_KEY
+      - SANDBOX_DOMAIN
+      - SANDBOX_ALLOW_INTERNET
+      - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_LLM_MODEL
+      - SANDBOX_SUBAGENT_ENABLED
+      - SANDBOX_SUBAGENT_PROVIDER
+      - SANDBOX_SUBAGENT_API_KEY
+      - SANDBOX_SUBAGENT_MODEL
+      - SANDBOX_SUBAGENT_TIMEOUT_SECONDS
+      - SANDBOX_GITHUB_TOKEN
+      - SANDBOX_SUBAGENT_GIT_USER
+      - SANDBOX_SUBAGENT_GIT_EMAIL
     command: python -m reporting.temporal_worker
     volumes:
       - .:/home/seizu/seizu
@@ -645,6 +682,17 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_LLM_MODEL
+      # Sandbox subagent delegation (sandbox__delegate_subagent) — separate
+      # opt-in; injects SANDBOX_GITHUB_TOKEN + the provider API key into the
+      # sandbox so a coding-agent CLI can clone/push/open PRs.
+      - SANDBOX_SUBAGENT_ENABLED
+      - SANDBOX_SUBAGENT_PROVIDER
+      - SANDBOX_SUBAGENT_API_KEY
+      - SANDBOX_SUBAGENT_MODEL
+      - SANDBOX_SUBAGENT_TIMEOUT_SECONDS
+      - SANDBOX_GITHUB_TOKEN
+      - SANDBOX_SUBAGENT_GIT_USER
+      - SANDBOX_SUBAGENT_GIT_EMAIL
       # In dev the project is bind-mounted here; the production image copies
       # the frontend build to /build via the Dockerfile nodebuilder stage.
       - STATIC_FOLDER=/home/seizu/seizu/build

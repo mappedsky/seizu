@@ -263,6 +263,12 @@ TEMPORAL_WORKER_ENABLED = bool_env("TEMPORAL_WORKER_ENABLED", True)
 TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS", 200)
 # Per-activity timeout in seconds for AI chat sessions run by workflows.
 TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
+# Per-activity timeout in seconds for CVE dependency remediation chat sessions
+# (cve_dependency_remediation workflow). These sessions run a full clone →
+# upgrade → test → PR cycle via sandbox__delegate_subagent, so they need far
+# more headroom than a plain assessment chat. Keep it above
+# SANDBOX_SUBAGENT_TIMEOUT_SECONDS.
+TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS = int_env("TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS", 2400)
 
 # Timeout in seconds for the overall FastAPI request handling. Requests that
 # exceed this limit receive a 504 response.
@@ -533,6 +539,46 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # LiteLLM model id for the sandbox subagent.  Empty → inherits CHAT_LLM_MODEL.
 # Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.
 SANDBOX_LLM_MODEL = str_env("SANDBOX_LLM_MODEL", "")
+
+# ---------------------------------------------------------------------------
+# Sandbox subagent delegation (sandbox__delegate_subagent chat tool)
+# ---------------------------------------------------------------------------
+
+# Set to true to enable the sandbox__delegate_subagent tool: a headless
+# coding-agent CLI (Claude Code by default) run inside the sandbox against a
+# cloned GitHub repository (branch, edit, test, push, open a PR).
+# Separate opt-in on top of SANDBOX_ENABLED because — unlike sandbox__delegate —
+# this mode injects credentials (SANDBOX_GITHUB_TOKEN + the provider API key)
+# into the sandbox and enables outbound internet for the call. Requires the
+# sandbox:delegate_subagent permission (Editor+).
+SANDBOX_SUBAGENT_ENABLED = bool_env("SANDBOX_SUBAGENT_ENABLED", False)
+
+# Which coding-agent CLI to run: "claude" (Claude Code) or "codex".
+SANDBOX_SUBAGENT_PROVIDER = str_env("SANDBOX_SUBAGENT_PROVIDER", "claude")
+
+# API key for the coding-agent CLI (exported into the sandbox as the provider's
+# key env var, e.g. ANTHROPIC_API_KEY). Empty → falls back to ANTHROPIC_API_KEY
+# for the "claude" provider.
+SANDBOX_SUBAGENT_API_KEY = str_env("SANDBOX_SUBAGENT_API_KEY", "")
+
+# Model override for the coding-agent CLI (e.g. "claude-sonnet-4-6" for Claude
+# Code's ANTHROPIC_MODEL). Empty → the CLI's own default.
+SANDBOX_SUBAGENT_MODEL = str_env("SANDBOX_SUBAGENT_MODEL", "")
+
+# Hard timeout for one sandbox__delegate_subagent run (seconds). A full
+# clone → upgrade → test → PR cycle on a large repo can take tens of minutes.
+SANDBOX_SUBAGENT_TIMEOUT_SECONDS = int_env("SANDBOX_SUBAGENT_TIMEOUT_SECONDS", 1800)
+
+# GitHub token the subagent uses to clone, push, and open PRs. Use a
+# fine-grained PAT scoped to only the target org/repos with contents:write and
+# pull_requests:write — assume it can be exfiltrated by a prompt-injected agent
+# and scope it accordingly. Keep branch protection on so nothing lands without
+# human PR review.
+SANDBOX_GITHUB_TOKEN = str_env("SANDBOX_GITHUB_TOKEN", "")
+
+# git author identity for the subagent's commits.
+SANDBOX_SUBAGENT_GIT_USER = str_env("SANDBOX_SUBAGENT_GIT_USER", "seizu-remediation-bot")
+SANDBOX_SUBAGENT_GIT_EMAIL = str_env("SANDBOX_SUBAGENT_GIT_EMAIL", "seizu-remediation@localhost")
 
 # OAuth 2.0 Authorization Server Metadata (RFC 8414) for MCP clients.
 # When set, Seizu exposes /.well-known/oauth-authorization-server so MCP clients

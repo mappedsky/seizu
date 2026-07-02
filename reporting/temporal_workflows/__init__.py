@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from reporting.temporal_workflows.shared import CveRepoReportInput
+from reporting.temporal_workflows.shared import CveDependencyRemediationInput, CveRepoReportInput
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,21 @@ def _cve_repo_report_input(context: WorkflowInputContext) -> CveRepoReportInput:
         creator_user_id=context.creator_user_id,
         rows=context.rows,
         chat_timeout_seconds=context.chat_timeout_seconds,
+    )
+
+
+def _cve_dependency_remediation_input(context: WorkflowInputContext) -> CveDependencyRemediationInput:
+    # Remediation sessions run a full clone → upgrade → test → PR cycle, so
+    # they get their own (much larger) timeout instead of the context's
+    # generic chat activity timeout. Lazy import keeps this module light for
+    # the web process.
+    from reporting import settings
+
+    return CveDependencyRemediationInput(
+        scheduled_query_id=context.scheduled_query_id,
+        creator_user_id=context.creator_user_id,
+        rows=context.rows,
+        chat_timeout_seconds=settings.TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS,
     )
 
 
@@ -56,6 +71,19 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
             " creates/updates a versioned 'CVE Findings' report."
         ),
         input_factory=_cve_repo_report_input,
+    ),
+    "cve_dependency_remediation": WorkflowSpec(
+        name="cve_dependency_remediation",
+        description=(
+            "Per (repository, vulnerable dependency), runs an AI chat session"
+            " as the scheduled query's creator that remediates newly discovered"
+            " CVEs: a coding-agent CLI in an isolated sandbox updates the"
+            " dependency (with any code changes needed for compatibility), runs"
+            " the tests, and opens a pull request. Requires"
+            " SANDBOX_SUBAGENT_ENABLED and the creator to hold"
+            " sandbox:delegate_subagent."
+        ),
+        input_factory=_cve_dependency_remediation_input,
     ),
 }
 

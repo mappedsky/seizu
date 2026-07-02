@@ -19,6 +19,7 @@ from reporting.services.mcp_builtins.sandbox import (
     _E2BSandboxBackend,
     _get_sandbox_model,
     _handle_delegate,
+    _handle_delegate_subagent,
     _ToolMessageNormalizingModel,
     _wrap_with_detail_events,
 )
@@ -50,6 +51,7 @@ def _make_fake_backend() -> MagicMock:
     backend.read_file = AsyncMock(return_value="file content")
     backend.write_file = AsyncMock(return_value="Wrote 12 bytes to /tmp/test.txt")
     backend.list_files = AsyncMock(return_value="")
+    backend.run_bash_streaming = AsyncMock(return_value="")
     return backend
 
 
@@ -774,3 +776,305 @@ def test_get_sandbox_model_returns_normalizing_model() -> None:
         model = _get_sandbox_model()
 
     assert isinstance(model, _ToolMessageNormalizingModel)
+
+
+# ---------------------------------------------------------------------------
+# sandbox__delegate_subagent
+# ---------------------------------------------------------------------------
+
+_GH_TOKEN = "ghp_supersecret123"
+_PROVIDER_KEY = "sk-ant-providerkey456"
+
+
+def _make_fake_subagent_backend(output: str = "done") -> MagicMock:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="Wrote")
+
+    async def _stream(cmd: str, *, timeout_seconds: int, on_output: Any) -> str:
+        on_output(output)
+        return output
+
+    backend.run_bash_streaming = AsyncMock(side_effect=_stream)
+    return backend
+
+
+def _capture_open_backend(fake_backend: MagicMock, captured: dict[str, Any]) -> Any:
+    """Return a patched _open_backend that yields fake_backend and records kwargs."""
+
+    @asynccontextmanager
+    async def _ctx(**kwargs: Any):  # type: ignore[misc]
+        captured.update(kwargs)
+        yield fake_backend
+
+    return _ctx
+
+
+def _subagent_settings(**overrides: Any) -> Any:
+    """Context manager stack patching the subagent settings to a working config."""
+    from contextlib import ExitStack
+
+    values: dict[str, Any] = {
+        "SANDBOX_ENABLED": True,
+        "SANDBOX_SUBAGENT_ENABLED": True,
+        "SANDBOX_SUBAGENT_PROVIDER": "claude",
+        "SANDBOX_SUBAGENT_API_KEY": _PROVIDER_KEY,
+        "SANDBOX_SUBAGENT_MODEL": "",
+        "SANDBOX_SUBAGENT_TIMEOUT_SECONDS": 100,
+        "SANDBOX_GITHUB_TOKEN": _GH_TOKEN,
+        "SANDBOX_API_KEY": "e2b-key",
+        "SANDBOX_DOMAIN": "",
+        "SANDBOX_MAX_OUTPUT_BYTES": 50_000,
+    }
+    values.update(overrides)
+    stack = ExitStack()
+    for name, value in values.items():
+        stack.enter_context(patch(f"reporting.settings.{name}", value))
+    return stack
+
+
+_SUBAGENT_ARGS: dict[str, Any] = {
+    "repo": "org/app",
+    "base_branch": "main",
+    "branch_name": "seizu/cve-remediation/pip-requests",
+    "prompt": "Update requests to 2.32.4 and open a PR",
+}
+
+
+def test_subagent_absent_without_optin() -> None:
+    """SANDBOX_ENABLED alone must not expose the subagent tool."""
+    with patch("reporting.settings.SANDBOX_ENABLED", True), patch("reporting.settings.SANDBOX_SUBAGENT_ENABLED", False):
+        assert find_builtin("sandbox__delegate_subagent", include_chat_only=True) is None
+        tools = list_builtin_tools(include_chat_only=True)
+        assert not any(t.name == "sandbox__delegate_subagent" for t in tools)
+
+
+def test_subagent_present_with_optin_chat_only() -> None:
+    with patch("reporting.settings.SANDBOX_ENABLED", True), patch("reporting.settings.SANDBOX_SUBAGENT_ENABLED", True):
+        # Never on the MCP server path.
+        assert not any(t.name == "sandbox__delegate_subagent" for t in list_builtin_tools())
+        tool = find_builtin("sandbox__delegate_subagent", include_chat_only=True)
+    assert tool is not None
+    assert tool.group == "sandbox"
+    assert Permission.SANDBOX_DELEGATE_SUBAGENT.value in tool.required_permissions
+    assert tool.chat_safe_without_confirmation is True
+    # Not always-disclosed: only a skill's tools_required unlocks it.
+    assert tool.always_disclosed is False
+
+
+async def test_subagent_handler_disabled_returns_error() -> None:
+    with _subagent_settings(SANDBOX_SUBAGENT_ENABLED=False):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "disabled" in result["error"]
+
+
+async def test_subagent_handler_unknown_provider_returns_error() -> None:
+    with _subagent_settings(SANDBOX_SUBAGENT_PROVIDER="gemini-cli"):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "Unknown subagent provider" in result["error"]
+
+
+async def test_subagent_handler_missing_api_key_returns_error() -> None:
+    with _subagent_settings(SANDBOX_SUBAGENT_API_KEY=""), patch("reporting.settings.ANTHROPIC_API_KEY", ""):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "No API key" in result["error"]
+
+
+async def test_subagent_handler_falls_back_to_anthropic_key_for_claude() -> None:
+    fake_backend = _make_fake_subagent_backend()
+    captured: dict[str, Any] = {}
+    with (
+        _subagent_settings(SANDBOX_SUBAGENT_API_KEY=""),
+        patch("reporting.settings.ANTHROPIC_API_KEY", "anthropic-fallback"),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_capture_open_backend(fake_backend, captured),
+        ),
+    ):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "error" not in result
+    assert captured["envs"]["ANTHROPIC_API_KEY"] == "anthropic-fallback"
+
+
+async def test_subagent_handler_missing_github_token_returns_error() -> None:
+    with _subagent_settings(SANDBOX_GITHUB_TOKEN=""):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "SANDBOX_GITHUB_TOKEN" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repo", "x; rm -rf /"),
+        ("repo", "org/app/extra"),
+        ("repo", "$(whoami)/app"),
+        ("base_branch", "main; curl evil"),
+        ("base_branch", "-oProxyCommand=evil"),
+        ("branch_name", "a..b"),
+        ("branch_name", "fix`id`"),
+    ],
+)
+async def test_subagent_handler_rejects_unsafe_args(field: str, value: str) -> None:
+    args = dict(_SUBAGENT_ARGS, **{field: value})
+    fake_backend = _make_fake_subagent_backend()
+    with (
+        _subagent_settings(),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_open_backend_ctx(fake_backend),
+        ),
+    ):
+        result = await _handle_delegate_subagent(args, _current_user())
+    assert "Invalid" in result["error"]
+    fake_backend.run_bash_streaming.assert_not_called()
+
+
+async def test_subagent_handler_success_masks_tokens_and_extracts_pr_url() -> None:
+    output = f"cloning with {_GH_TOKEN}\nkey {_PROVIDER_KEY}\nOpened https://github.com/org/app/pull/42\n"
+    fake_backend = _make_fake_subagent_backend(output)
+    captured: dict[str, Any] = {}
+    with (
+        _subagent_settings(),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_capture_open_backend(fake_backend, captured),
+        ),
+    ):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+
+    assert result["pr_url"] == "https://github.com/org/app/pull/42"
+    assert _GH_TOKEN not in result["result"]
+    assert _PROVIDER_KEY not in result["result"]
+    assert "***" in result["result"]
+
+    # Credentials and model-supplied values flow via envs, never interpolation.
+    envs = captured["envs"]
+    assert envs["GH_TOKEN"] == _GH_TOKEN
+    assert envs["GITHUB_TOKEN"] == _GH_TOKEN
+    assert envs["ANTHROPIC_API_KEY"] == _PROVIDER_KEY
+    assert envs["SEIZU_REPO"] == "org/app"
+    assert envs["SEIZU_BASE_BRANCH"] == "main"
+    assert envs["SEIZU_BRANCH"] == "seizu/cve-remediation/pip-requests"
+    # Outbound internet is forced on for the call; lifetime outlasts the run.
+    assert captured["allow_internet"] is True
+    assert captured["timeout_seconds"] == 100 + 120
+
+    # The prompt file carries the security preamble, the caller's prompt, and
+    # the operational footer — and no credentials.
+    prompt_path, prompt_content = fake_backend.write_file.await_args.args
+    assert prompt_path == "/home/user/prompt.md"
+    assert "Security boundary" in prompt_content
+    assert "Update requests to 2.32.4" in prompt_content
+    assert "Operational facts" in prompt_content
+    assert _GH_TOKEN not in prompt_content
+
+    # The bootstrap never contains the model-supplied values literally.
+    bootstrap = fake_backend.run_bash_streaming.await_args.args[0]
+    assert "$SEIZU_REPO" in bootstrap
+    assert "org/app" not in bootstrap
+    assert "gh auth setup-git" in bootstrap
+    assert fake_backend.run_bash_streaming.await_args.kwargs["timeout_seconds"] == 100
+
+
+async def test_subagent_handler_clamps_timeout_arg() -> None:
+    fake_backend = _make_fake_subagent_backend()
+    with (
+        _subagent_settings(SANDBOX_SUBAGENT_TIMEOUT_SECONDS=100),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_open_backend_ctx(fake_backend),
+        ),
+    ):
+        await _handle_delegate_subagent(dict(_SUBAGENT_ARGS, timeout_seconds=9999), _current_user())
+    assert fake_backend.run_bash_streaming.await_args.kwargs["timeout_seconds"] == 100
+
+    fake_backend = _make_fake_subagent_backend()
+    with (
+        _subagent_settings(SANDBOX_SUBAGENT_TIMEOUT_SECONDS=100),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_open_backend_ctx(fake_backend),
+        ),
+    ):
+        await _handle_delegate_subagent(dict(_SUBAGENT_ARGS, timeout_seconds=30), _current_user())
+    assert fake_backend.run_bash_streaming.await_args.kwargs["timeout_seconds"] == 30
+
+
+async def test_subagent_handler_failure_returns_masked_output_tail() -> None:
+    fake_backend = _make_fake_subagent_backend()
+
+    async def _boom(cmd: str, *, timeout_seconds: int, on_output: Any) -> str:
+        on_output(f"partial output with {_GH_TOKEN}")
+        raise RuntimeError("command exited with code 1")
+
+    fake_backend.run_bash_streaming = AsyncMock(side_effect=_boom)
+    with (
+        _subagent_settings(),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_open_backend_ctx(fake_backend),
+        ),
+    ):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+
+    assert "failed" in result["error"]
+    assert _GH_TOKEN not in result["output"]
+    assert "partial output" in result["output"]
+
+
+async def test_subagent_handler_timeout_returns_error() -> None:
+    fake_backend = _make_fake_subagent_backend()
+    fake_backend.run_bash_streaming = AsyncMock(side_effect=TimeoutError())
+    with (
+        _subagent_settings(),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_open_backend_ctx(fake_backend),
+        ),
+    ):
+        result = await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert "timed out" in result["error"]
+
+
+async def test_subagent_handler_passes_model_env_when_configured() -> None:
+    fake_backend = _make_fake_subagent_backend()
+    captured: dict[str, Any] = {}
+    with (
+        _subagent_settings(SANDBOX_SUBAGENT_MODEL="claude-sonnet-4-6"),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_capture_open_backend(fake_backend, captured),
+        ),
+    ):
+        await _handle_delegate_subagent(dict(_SUBAGENT_ARGS), _current_user())
+    assert captured["envs"]["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
+
+
+async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:
+    """The plain delegate path must keep passing no envs/allow_internet override,
+    so the pre-existing security defaults still apply."""
+    fake_backend = _make_fake_backend()
+    captured: dict[str, Any] = {}
+    fake_result = _make_fake_agent_result("ok")
+    with (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch(
+            "reporting.services.mcp_builtins.sandbox._open_backend",
+            new=_capture_open_backend(fake_backend, captured),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.sandbox.create_react_agent",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_result)),
+        ),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ):
+        await _handle_delegate({"task": "compute"}, _current_user())
+
+    assert "envs" not in captured
+    assert "allow_internet" not in captured
+    assert "timeout_seconds" not in captured
