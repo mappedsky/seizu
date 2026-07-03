@@ -80,12 +80,24 @@ Where `cve_repo_report` *assesses*, `cve_dependency_remediation` *fixes*: per
 an ephemeral sandbox directly (no chat session, no MCP tool) and runs a
 headless coding-agent CLI (Claude Code by default; `codex` also supported via
 `REMEDIATION_AGENT_PROVIDER`). The agent works on a deterministic bot-owned
-branch (`seizu/cve-remediation/{ecosystem}-{package}`): it upgrades the
+branch (`seizu/dependency-update/{ecosystem}-{package}`): it upgrades the
 dependency in every affected manifest — including any code changes needed for
 compatibility, not just a version bump — runs the repository's test suite, and
-writes the PR body. The workflow then pushes the branch and opens (or updates)
-a pull request listing the CVE IDs, the version change, the compatibility
-changes, and the test results.
+writes the PR title and body. The workflow then pushes the branch and opens
+(or updates) the pull request.
+
+Two deliberate policies shape the result:
+
+- **Least-change upgrades.** The agent targets the smallest released version
+  that clears every vulnerable range, preferring the current version family
+  (same major, then same minor); it crosses a major version only when no fixed
+  release exists in the current family.
+- **No CVE references in public artifacts.** Like Dependabot, the branch name,
+  commits, PR title, and body present the change as a routine dependency bump
+  (`Bump requests from 2.31.0 to 2.32.4`), without CVE identifiers or advisory
+  links — a PR is public until merged, and naming the vulnerability would
+  advertise the unpatched window. The CVE context lives in Seizu (workflow
+  results, audit logs), not in the PR.
 
 ### Phase-isolated credentials
 
@@ -122,12 +134,14 @@ expensive run and risk duplicate PRs. Manual re-runs are safe — the
 deterministic branch name means the run updates the existing PR instead of
 opening another. A failing group records an error without aborting the rest.
 
-There is no per-user permission for this workflow: it has direct, fixed
-targets and is reachable only through scheduled queries, which are
-admin-managed (`scheduled_queries:write`). Operators gate it globally with
-`REMEDIATION_ENABLED`, or disable the scheduled query. The scheduled query's
-creator is still resolved before each run, so archived users hard-stop their
-automations, and each run is audit-logged against them.
+There is no per-user permission and no dedicated enable flag for this
+workflow: it has direct, fixed targets and is reachable only through scheduled
+queries, which are admin-managed (`scheduled_queries:write`). It runs only
+when configured (`REMEDIATION_GITHUB_TOKEN` plus an agent API key); operators
+turn it off by disabling the scheduled query, removing the configuration, or
+removing the `temporal` module from `SCHEDULED_QUERY_MODULES`. The scheduled
+query's creator is still resolved before each run, so archived users hard-stop
+their automations, and each run is audit-logged against them.
 
 The seeded scheduled query **New CVE dependencies requiring remediation** uses
 the same watch-scan trigger and `SecurityIssue.created_at` window as the
@@ -145,19 +159,21 @@ version) that the remediation prompt is built from.
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
-| `REMEDIATION_ENABLED` | `false` | Master switch for the `cve_dependency_remediation` workflow. |
 | `REMEDIATION_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code) or `codex`. |
-| `REMEDIATION_AGENT_API_KEY` | `""` | API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. |
+| `REMEDIATION_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |
+| `REMEDIATION_AGENT_API_KEY_COMMAND` | `""` | Command run in the worker before each remediation; its stdout becomes that run's agent API key. Use it to mint **short-lived** credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. |
+| `REMEDIATION_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. |
 | `REMEDIATION_AGENT_MODEL` | `""` | Model override for the CLI (Claude Code's `ANTHROPIC_MODEL`). Empty → the CLI's default. |
 | `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). |
-| `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required. |
+| `REMEDIATION_GITHUB_HOST` | `github.com` | GitHub host the target repositories live on — `github.com` or a GitHub Enterprise Server hostname. Used for the clone URL and `gh` (`GH_HOST`/`GH_ENTERPRISE_TOKEN`). |
+| `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required (configured = enabled). |
 | `REMEDIATION_GIT_USER` / `REMEDIATION_GIT_EMAIL` | `seizu-remediation-bot` / `seizu-remediation@localhost` | git author identity for the remediation commits. |
 
 The remediation workflow also uses the sandbox provider configuration
 (`SANDBOX_API_KEY`, `SANDBOX_DOMAIN`; see [Sandbox delegation](sandbox.md)) —
 `SANDBOX_ENABLED` and the chat tool are not required.
 
-The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) because it drives headless chat sessions. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools — exercising the CVE workflow end-to-end requires a real LLM provider.
+The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) for workflows that drive headless chat sessions (`cve_repo_report`); for that workflow, `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so exercising it end-to-end requires a real LLM provider. The `cve_dependency_remediation` workflow does not use the chat LLM at all — it needs the sandbox provider (`SANDBOX_API_KEY`/`SANDBOX_DOMAIN`) and `REMEDIATION_*` configuration instead.
 
 ## Local development
 

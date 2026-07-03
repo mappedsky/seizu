@@ -79,8 +79,8 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
             " updates the dependency (with any code changes needed for"
             " compatibility), runs the tests, and opens a pull request."
             " Credentials are phase-isolated — the coding agent never sees the"
-            " GitHub token. Requires REMEDIATION_ENABLED plus"
-            " REMEDIATION_GITHUB_TOKEN and an agent API key."
+            " GitHub token. Runs only when configured"
+            " (REMEDIATION_GITHUB_TOKEN plus an agent API key)."
         ),
         input_factory=_cve_dependency_remediation_input,
     ),

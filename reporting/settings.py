@@ -268,15 +268,16 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 # CVE dependency remediation (cve_dependency_remediation workflow)
 # ---------------------------------------------------------------------------
 
-# Set to true to let the cve_dependency_remediation Temporal workflow run: a
-# headless coding-agent CLI (Claude Code by default) in an ephemeral sandbox
-# clones the affected repo, upgrades the vulnerable dependency (with any code
-# changes needed for compatibility), runs the tests, and opens a PR.
-# Credentials are phase-isolated: the coding agent never runs with the GitHub
-# token in its environment. There is no per-user permission — the workflow is
-# reachable only via admin-managed scheduled queries; disable it globally here
-# or disable the scheduled query.
-REMEDIATION_ENABLED = bool_env("REMEDIATION_ENABLED", False)
+# The cve_dependency_remediation Temporal workflow runs a headless coding-agent
+# CLI (Claude Code by default) in an ephemeral sandbox: it clones the affected
+# repo, upgrades the vulnerable dependency (with any code changes needed for
+# compatibility), runs the tests, and opens a PR. Credentials are
+# phase-isolated: the coding agent never runs with the GitHub token in its
+# environment. There is no dedicated enable flag and no per-user permission:
+# the workflow runs only when configured (REMEDIATION_GITHUB_TOKEN + an agent
+# API key) and is reachable only through the temporal scheduled-query action
+# module (SCHEDULED_QUERY_MODULES) via admin-managed scheduled queries —
+# disable the scheduled query or remove this configuration to turn it off.
 
 # Which coding-agent CLI the remediation workflow runs: "claude" (Claude Code)
 # or "codex".
@@ -284,7 +285,21 @@ REMEDIATION_AGENT_PROVIDER = str_env("REMEDIATION_AGENT_PROVIDER", "claude")
 
 # API key for the coding-agent CLI (exported only to the agent phase, e.g. as
 # ANTHROPIC_API_KEY). Empty → falls back to ANTHROPIC_API_KEY for "claude".
+# Prefer REMEDIATION_AGENT_API_KEY_COMMAND for short-lived per-run keys.
 REMEDIATION_AGENT_API_KEY = str_env("REMEDIATION_AGENT_API_KEY", "")
+
+# Optional command run in the worker before each remediation; its stdout
+# (stripped) becomes the agent API key for that run. Use this to mint
+# short-lived credentials from a broker (e.g. Vault, an LLM-gateway virtual
+# key issuer) instead of handing the sandbox the long-lived key attached to
+# the Seizu process. Takes precedence over REMEDIATION_AGENT_API_KEY.
+REMEDIATION_AGENT_API_KEY_COMMAND = str_env("REMEDIATION_AGENT_API_KEY_COMMAND", "")
+
+# Optional base URL exported to the agent phase as the provider's base-url env
+# var (ANTHROPIC_BASE_URL / OPENAI_BASE_URL), so the coding agent talks to an
+# LLM gateway/proxy — typically paired with REMEDIATION_AGENT_API_KEY_COMMAND
+# so the sandbox only ever holds a short-lived gateway key.
+REMEDIATION_AGENT_BASE_URL = str_env("REMEDIATION_AGENT_BASE_URL", "")
 
 # Model override for the coding-agent CLI (e.g. "claude-sonnet-4-6" for Claude
 # Code's ANTHROPIC_MODEL). Empty → the CLI's own default.
@@ -293,6 +308,10 @@ REMEDIATION_AGENT_MODEL = str_env("REMEDIATION_AGENT_MODEL", "")
 # Hard timeout for one remediation run (all sandbox phases). A full clone →
 # upgrade → test → PR cycle on a large repo can take tens of minutes.
 REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
+
+# GitHub host the target repositories live on. "github.com" or a GitHub
+# Enterprise Server hostname (e.g. "github.example.com").
+REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")
 
 # GitHub token used to clone the repo (setup phase) and push/open the PR (push
 # phase) — never present while the coding agent runs. Use a fine-grained PAT

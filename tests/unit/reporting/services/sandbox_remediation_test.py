@@ -20,10 +20,10 @@ _AGENT_KEY = "sk-ant-agentkey456"
 _TARGET: dict[str, Any] = {
     "repo": "org/app",
     "base_branch": "main",
-    "branch_name": "seizu/cve-remediation/pip-requests",
+    "branch_name": "seizu/dependency-update/pip-requests",
     "prompt": "Update requests to 2.32.4",
-    "pr_title": "Fix requests vulnerabilities (CVE-2026-0001)",
-    "pr_body_fallback": "## Automated CVE remediation",
+    "pr_title": "Bump requests",
+    "pr_body_fallback": "Bumps `requests` to a newer version.",
 }
 
 
@@ -66,11 +66,13 @@ def _phase_of(cmd: str) -> str:
 
 def _settings(**overrides: Any) -> ExitStack:
     values: dict[str, Any] = {
-        "REMEDIATION_ENABLED": True,
         "REMEDIATION_AGENT_PROVIDER": "claude",
         "REMEDIATION_AGENT_API_KEY": _AGENT_KEY,
+        "REMEDIATION_AGENT_API_KEY_COMMAND": "",
+        "REMEDIATION_AGENT_BASE_URL": "",
         "REMEDIATION_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
+        "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
         "REMEDIATION_GIT_USER": "bot",
         "REMEDIATION_GIT_EMAIL": "bot@localhost",
@@ -120,8 +122,12 @@ async def test_phases_run_in_order_with_isolated_envs() -> None:
     assert "GITHUB_TOKEN" not in agent_env
     # Phase 4: GitHub token returns for push/PR; no agent key.
     assert push_env["GH_TOKEN"] == _GH_TOKEN
+    assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
+    assert push_env["GH_HOST"] == "github.com"
     assert push_env["SEIZU_PR_TITLE"] == _TARGET["pr_title"]
     assert "ANTHROPIC_API_KEY" not in push_env
+    # Host reaches the clone via env too.
+    assert setup_env["SEIZU_GITHUB_HOST"] == "github.com"
 
     # No secrets at sandbox creation either.
     assert "envs" not in captured
@@ -154,7 +160,7 @@ async def test_target_values_reach_scripts_via_env_not_interpolation() -> None:
     setup_env = next(envs for phase, envs in backend.calls if phase == "setup")
     assert setup_env["SEIZU_REPO"] == "org/app"
     assert setup_env["SEIZU_BASE_BRANCH"] == "main"
-    assert setup_env["SEIZU_BRANCH"] == "seizu/cve-remediation/pip-requests"
+    assert setup_env["SEIZU_BRANCH"] == "seizu/dependency-update/pip-requests"
     # The scripts themselves are fixed constants referencing only env vars.
     assert "$SEIZU_REPO" in sandbox_remediation._SETUP_SCRIPT
     assert "org/app" not in sandbox_remediation._SETUP_SCRIPT
@@ -193,20 +199,76 @@ async def test_agent_key_falls_back_to_anthropic_key_for_claude() -> None:
     assert agent_env["ANTHROPIC_API_KEY"] == "anthropic-fallback"
 
 
+async def test_agent_key_command_mints_per_run_key() -> None:
+    """REMEDIATION_AGENT_API_KEY_COMMAND stdout becomes the run's key — the
+    short-lived-credential path; it takes precedence over the static key."""
+    backend = _FakeBackend()
+    with (
+        _settings(REMEDIATION_AGENT_API_KEY_COMMAND="printf per-run-key"),
+        _patched_backend(backend),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "completed"
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["ANTHROPIC_API_KEY"] == "per-run-key"
+
+
+async def test_agent_key_command_failure_fails_the_run() -> None:
+    backend = _FakeBackend()
+    with _settings(REMEDIATION_AGENT_API_KEY_COMMAND="exit 1"), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert "agent API key unavailable" in (result.error or "")
+    assert backend.calls == []
+
+
+async def test_agent_base_url_exported_to_agent_phase() -> None:
+    backend = _FakeBackend()
+    with (
+        _settings(REMEDIATION_AGENT_BASE_URL="https://llm-gateway.internal"),
+        _patched_backend(backend),
+    ):
+        await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["ANTHROPIC_BASE_URL"] == "https://llm-gateway.internal"
+
+
+async def test_github_enterprise_host() -> None:
+    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.example.com/org/app/pull/7\n"})
+    with _settings(REMEDIATION_GITHUB_HOST="github.example.com"), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    setup_env = next(envs for phase, envs in backend.calls if phase == "setup")
+    push_env = next(envs for phase, envs in backend.calls if phase == "push")
+    assert setup_env["SEIZU_GITHUB_HOST"] == "github.example.com"
+    assert push_env["GH_HOST"] == "github.example.com"
+    assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
+    # The PR URL marker is parsed host-agnostically.
+    assert result.pr_url == "https://github.example.com/org/app/pull/7"
+
+
 # ---------------------------------------------------------------------------
 # Configuration and target validation
 # ---------------------------------------------------------------------------
 
 
 def test_config_error_cases() -> None:
+    # There is no enable flag: fully configured means enabled.
     with _settings():
         assert config_error() is None
-    with _settings(REMEDIATION_ENABLED=False):
-        assert "disabled" in (config_error() or "")
     with _settings(REMEDIATION_AGENT_PROVIDER="gemini-cli"):
         assert "unknown remediation provider" in (config_error() or "")
     with _settings(REMEDIATION_AGENT_API_KEY=""), patch("reporting.settings.ANTHROPIC_API_KEY", ""):
         assert "no API key" in (config_error() or "")
+    # A key-mint command satisfies the API key requirement on its own.
+    with (
+        _settings(REMEDIATION_AGENT_API_KEY="", REMEDIATION_AGENT_API_KEY_COMMAND="printf k"),
+        patch("reporting.settings.ANTHROPIC_API_KEY", ""),
+    ):
+        assert config_error() is None
     with _settings(REMEDIATION_GITHUB_TOKEN=""):
         assert "REMEDIATION_GITHUB_TOKEN" in (config_error() or "")
 
@@ -227,12 +289,12 @@ def test_validate_target_rejects_unsafe_values(repo: str, base_branch: str, bran
     assert validate_target(repo, base_branch, branch_name) is not None
 
 
-async def test_run_fails_closed_when_disabled() -> None:
+async def test_run_fails_closed_when_unconfigured() -> None:
     backend = _FakeBackend()
-    with _settings(REMEDIATION_ENABLED=False), _patched_backend(backend):
+    with _settings(REMEDIATION_GITHUB_TOKEN=""), _patched_backend(backend):
         result = await run_remediation(**_TARGET)
     assert result.status == "failed"
-    assert "disabled" in (result.error or "")
+    assert "REMEDIATION_GITHUB_TOKEN" in (result.error or "")
     assert backend.calls == []
 
 
@@ -303,12 +365,18 @@ def test_setup_script_uses_process_scoped_credential_helper() -> None:
     assert "x-access-token" in sandbox_remediation._SETUP_SCRIPT
     # The token must never be embedded in the clone URL.
     assert "GH_TOKEN@" not in sandbox_remediation._SETUP_SCRIPT
+    # Host comes from env (GitHub Enterprise support), never hardcoded.
+    assert "$SEIZU_GITHUB_HOST" in sandbox_remediation._SETUP_SCRIPT
+    assert "github.com" not in sandbox_remediation._SETUP_SCRIPT
 
 
 def test_push_script_guards_empty_runs_and_reports_pr_url() -> None:
     assert "SEIZU_NO_CHANGES" in sandbox_remediation._PUSH_SCRIPT
     assert "SEIZU_PR_URL=" in sandbox_remediation._PUSH_SCRIPT
     assert "gh pr create" in sandbox_remediation._PUSH_SCRIPT
+    # The agent-written title file wins over the fallback env title.
+    assert sandbox_remediation.PR_TITLE_PATH in sandbox_remediation._PUSH_SCRIPT
+    assert '"$SEIZU_PR_TITLE"' in sandbox_remediation._PUSH_SCRIPT
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:

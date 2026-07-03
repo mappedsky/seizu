@@ -25,10 +25,12 @@ creation; each phase is a separate command with only the environment it needs
 The pushed branch still requires human PR review to land — keep branch
 protection enabled on target repositories.
 
-There is no chat tool and no per-user permission for this flow: it is reachable
-only through the Temporal workflow, whose scheduled query is admin-managed
-(``scheduled_queries:write``); operators gate it globally with
-``REMEDIATION_ENABLED`` and the scheduled query's own enabled flag.
+There is no chat tool, no per-user permission, and no dedicated enable flag for
+this flow: it is reachable only through the Temporal workflow, whose scheduled
+query is admin-managed (``scheduled_queries:write``), and it runs only when
+configured (``REMEDIATION_GITHUB_TOKEN`` + an agent API key). Operators turn it
+off by disabling the scheduled query (or the ``temporal`` action module via
+``SCHEDULED_QUERY_MODULES``) or removing the configuration.
 """
 
 import asyncio
@@ -45,10 +47,14 @@ logger = logging.getLogger(__name__)
 REPO_PATH = "/home/user/repo"
 PROMPT_PATH = "/home/user/prompt.md"
 PR_BODY_PATH = "/home/user/pr_body.md"
+PR_TITLE_PATH = "/home/user/pr_title.txt"
 
 _REPO_FULLNAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
-_PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+# The push phase prints "SEIZU_PR_URL=<url>"; parsing the marker keeps PR URL
+# extraction host-agnostic (github.com and GitHub Enterprise alike).
+_PR_URL_MARKER_RE = re.compile(r"SEIZU_PR_URL=(https?://\S+)")
+_PR_URL_FALLBACK_RE = re.compile(r"https?://[^\s\"']+/pull/\d+")
 
 # Call on_progress at least this often even when a phase produces no output
 # (e.g. the agent quietly running a long test suite), so Temporal heartbeats
@@ -75,6 +81,8 @@ class RemediationProvider:
     api_key_env: str
     # Env var the CLI reads a model override from; None if unsupported.
     model_env: str | None = None
+    # Env var pointing the CLI at an LLM gateway/proxy; None if unsupported.
+    base_url_env: str | None = None
 
 
 PROVIDERS: dict[str, RemediationProvider] = {
@@ -88,12 +96,14 @@ PROVIDERS: dict[str, RemediationProvider] = {
         ),
         api_key_env="ANTHROPIC_API_KEY",
         model_env="ANTHROPIC_MODEL",
+        base_url_env="ANTHROPIC_BASE_URL",
     ),
     "codex": RemediationProvider(
         name="codex",
         install_cmd="npm install -g @openai/codex || sudo npm install -g @openai/codex",
         run_cmd=f'codex exec --full-auto "$(cat {PROMPT_PATH})"',
         api_key_env="OPENAI_API_KEY",
+        base_url_env="OPENAI_BASE_URL",
     ),
 }
 
@@ -126,7 +136,7 @@ export GIT_TERMINAL_PROMPT=0
 git config --global user.name "$SEIZU_GIT_USER"
 git config --global user.email "$SEIZU_GIT_EMAIL"
 git {_GIT_AUTH} \\
-  clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://github.com/$SEIZU_REPO.git" {REPO_PATH}
+  clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
 cd {REPO_PATH}
 git checkout -b "$SEIZU_BRANCH"
 """
@@ -147,8 +157,12 @@ if [ "$(git rev-list --count "origin/$SEIZU_BASE_BRANCH..HEAD")" -eq 0 ]; then
   exit 3
 fi
 git {_GIT_AUTH} push --force -u origin "$SEIZU_BRANCH"
+PR_TITLE="$SEIZU_PR_TITLE"
+if [ -s {PR_TITLE_PATH} ]; then
+  PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
+fi
 PR_URL="$(gh pr create --base "$SEIZU_BASE_BRANCH" --head "$SEIZU_BRANCH" \\
-    --title "$SEIZU_PR_TITLE" --body-file {PR_BODY_PATH} 2>/dev/null \\
+    --title "$PR_TITLE" --body-file {PR_BODY_PATH} 2>/dev/null \\
   || gh pr view "$SEIZU_BRANCH" --json url --jq .url)"
 echo "SEIZU_PR_URL=$PR_URL"
 """
@@ -166,12 +180,14 @@ Operational facts:
 - The repository {repo} is already cloned at {repo_path} (your current
   directory), checked out on the work branch {branch_name} (created from
   {base_branch}).
-- Commit your changes to this branch with messages referencing the CVE IDs.
+- Commit your changes to this branch as ordinary dependency-update commits.
 - You have no network credentials: do NOT push, and do not try to open a pull
   request — that happens automatically after you finish.
-- Write the pull request body to {pr_body_path} (overwrite it): list each CVE
-  ID with severity and advisory URL, the version change, every code change made
-  for compatibility, and the test results.
+- Write the pull request title to {pr_title_path}: a single line such as
+  "Bump <package> from <old version> to <new version>".
+- Write the pull request body to {pr_body_path} (overwrite it): describe the
+  version change, every code change made for compatibility, and the test
+  results.
 """
 
 
@@ -185,15 +201,22 @@ class RemediationRunResult:
 
 
 def config_error() -> str | None:
-    """Return why remediation cannot run under the current settings, or None."""
+    """Return why remediation cannot run under the current settings, or None.
+
+    There is no dedicated enable flag: configured means enabled. Operators turn
+    the workflow off by disabling the scheduled query (or the temporal action
+    module) or by removing this configuration.
+    """
     from reporting import settings
 
-    if not settings.REMEDIATION_ENABLED:
-        return "remediation is disabled (REMEDIATION_ENABLED=false)"
-    if _resolve_provider()[0] is None:
+    provider, static_key = _resolve_provider()
+    if provider is None:
         return f"unknown remediation provider {settings.REMEDIATION_AGENT_PROVIDER!r}"
-    if not _resolve_provider()[1]:
-        return "no API key configured for the remediation agent (REMEDIATION_AGENT_API_KEY)"
+    if not static_key and not settings.REMEDIATION_AGENT_API_KEY_COMMAND:
+        return (
+            "no API key configured for the remediation agent "
+            "(REMEDIATION_AGENT_API_KEY or REMEDIATION_AGENT_API_KEY_COMMAND)"
+        )
     if not settings.REMEDIATION_GITHUB_TOKEN:
         return "REMEDIATION_GITHUB_TOKEN is not configured"
     return None
@@ -215,7 +238,7 @@ def validate_target(repo: str, base_branch: str, branch_name: str) -> str | None
 
 
 def _resolve_provider() -> tuple[RemediationProvider | None, str]:
-    """Return the configured provider and its API key ("" when unresolved)."""
+    """Return the configured provider and its static API key ("" when unset)."""
     from reporting import settings
 
     provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
@@ -225,6 +248,36 @@ def _resolve_provider() -> tuple[RemediationProvider | None, str]:
     if not api_key and provider.api_key_env == "ANTHROPIC_API_KEY":
         api_key = settings.ANTHROPIC_API_KEY
     return provider, api_key
+
+
+async def _mint_agent_api_key() -> str:
+    """Return the agent API key for one run.
+
+    When ``REMEDIATION_AGENT_API_KEY_COMMAND`` is set, run it and use its stdout
+    — this is how operators hand the sandbox a *short-lived* per-run credential
+    from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of the
+    long-lived key attached to the Seizu process. Falls back to the static key.
+    """
+    from reporting import settings
+
+    command = settings.REMEDIATION_AGENT_API_KEY_COMMAND
+    if command:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"REMEDIATION_AGENT_API_KEY_COMMAND failed with exit code {proc.returncode}: "
+                f"{stderr.decode(errors='replace').strip()[:200]}"
+            )
+        key = stdout.decode(errors="replace").strip()
+        if not key:
+            raise RuntimeError("REMEDIATION_AGENT_API_KEY_COMMAND produced no output")
+        return key
+    return _resolve_provider()[1]
 
 
 def _tail_bytes(text: str, max_bytes: int) -> str:
@@ -259,12 +312,19 @@ async def run_remediation(
         return RemediationRunResult(status="failed", error=error)
     if (error := validate_target(repo, base_branch, branch_name)) is not None:
         return RemediationRunResult(status="failed", error=error)
-    maybe_provider, api_key = _resolve_provider()
+    maybe_provider, _static_key = _resolve_provider()
     if maybe_provider is None:  # unreachable: config_error() already checked
         return RemediationRunResult(status="failed", error="unknown remediation provider")
     provider: RemediationProvider = maybe_provider
 
+    try:
+        api_key = await _mint_agent_api_key()
+    except Exception as exc:
+        logger.exception("agent API key minting failed for %s", repo)
+        return RemediationRunResult(status="failed", error=f"agent API key unavailable: {exc}")
+
     github_token = settings.REMEDIATION_GITHUB_TOKEN
+    github_host = settings.REMEDIATION_GITHUB_HOST
     secrets = [s for s in (github_token, api_key) if s]
 
     def _mask(text: str) -> str:
@@ -295,16 +355,20 @@ async def run_remediation(
         "SEIZU_REPO": repo,
         "SEIZU_BASE_BRANCH": base_branch,
         "SEIZU_BRANCH": branch_name,
+        "SEIZU_GITHUB_HOST": github_host,
     }
     agent_env = {provider.api_key_env: api_key}
     if settings.REMEDIATION_AGENT_MODEL and provider.model_env:
         agent_env[provider.model_env] = settings.REMEDIATION_AGENT_MODEL
+    if settings.REMEDIATION_AGENT_BASE_URL and provider.base_url_env:
+        agent_env[provider.base_url_env] = settings.REMEDIATION_AGENT_BASE_URL
 
     full_prompt = f"{_SECURITY_PREAMBLE}\n{prompt}\n\n" + _FOOTER_TEMPLATE.format(
         repo=repo,
         repo_path=REPO_PATH,
         base_branch=base_branch,
         branch_name=branch_name,
+        pr_title_path=PR_TITLE_PATH,
         pr_body_path=PR_BODY_PATH,
     )
 
@@ -349,11 +413,19 @@ async def run_remediation(
                 agent_env,
             )
             # Phase 4: push the bot-owned branch and create/find the PR.
+            # GH_HOST points gh at the right host; gh reads GH_ENTERPRISE_TOKEN
+            # (not GH_TOKEN) for GitHub Enterprise hosts, so set both.
             return await _phase(
                 backend,
                 "push",
                 _PUSH_SCRIPT,
-                {"GH_TOKEN": github_token, "SEIZU_PR_TITLE": pr_title, **target_env},
+                {
+                    "GH_TOKEN": github_token,
+                    "GH_ENTERPRISE_TOKEN": github_token,
+                    "GH_HOST": github_host,
+                    "SEIZU_PR_TITLE": pr_title,
+                    **target_env,
+                },
             )
 
     async def _ticker() -> None:
@@ -381,10 +453,12 @@ async def run_remediation(
     finally:
         ticker.cancel()
 
-    pr_urls = _PR_URL_RE.findall(_mask(push_output))
+    masked_push = _mask(push_output)
+    markers = _PR_URL_MARKER_RE.findall(masked_push)
+    fallbacks = _PR_URL_FALLBACK_RE.findall(masked_push)
     return RemediationRunResult(
         status="completed",
         # The push phase prints the created (or pre-existing) PR URL last.
-        pr_url=pr_urls[-1] if pr_urls else None,
+        pr_url=markers[-1] if markers else (fallbacks[-1] if fallbacks else None),
         output_tail=_tail(),
     )

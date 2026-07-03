@@ -532,12 +532,14 @@ services:
       - SANDBOX_LLM_MODEL
       # CVE dependency remediation — the cve_dependency_remediation activity
       # drives the sandbox directly from this worker; the coding agent phase
-      # never sees REMEDIATION_GITHUB_TOKEN.
-      - REMEDIATION_ENABLED
+      # never sees REMEDIATION_GITHUB_TOKEN. Configured = enabled.
       - REMEDIATION_AGENT_PROVIDER
       - REMEDIATION_AGENT_API_KEY
+      - REMEDIATION_AGENT_API_KEY_COMMAND
+      - REMEDIATION_AGENT_BASE_URL
       - REMEDIATION_AGENT_MODEL
       - REMEDIATION_TIMEOUT_SECONDS
+      - REMEDIATION_GITHUB_HOST
       - REMEDIATION_GITHUB_TOKEN
       - REMEDIATION_GIT_USER
       - REMEDIATION_GIT_EMAIL

@@ -2412,9 +2412,11 @@ scheduled_queries:
       MATCH (sm:SyncMetadata)
       WHERE sm.grouptype = "GitHubOrganization"
         AND sm.syncedtype = "GitHubOrganization"
-        AND toString(sm.groupid) = "https://github.com/mappedsky"
-      WITH datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
-      MATCH (r:GitHubRepository)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
+      WITH toString(sm.groupid) AS org_id,
+           datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+      MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
+      WHERE o.id = org_id
+      MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
       WHERE s.created_at IS NOT NULL
         AND datetime(s.created_at) > window_start
         AND coalesce(r.archived, false) = false
@@ -2436,10 +2438,11 @@ scheduled_queries:
         url: s.html_url,
         created_at: s.created_at
       } AS details
+    # Any GitHub organization sync (no groupid → matches all orgs); each org's
+    # own SyncMetadata window is applied to its repositories in the query.
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
-        groupid: https://github.com/mappedsky
     enabled: true
     actions:
       - action_type: temporal

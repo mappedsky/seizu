@@ -110,9 +110,12 @@ A vulnerable dependency needs remediation in the repository {repo}.
 - cves: {cves}
 
 Task:
-1. From the cves data, determine the target version: the highest patched_version
-   across the CVEs; if none is known, the lowest version that clears every
-   vulnerable_version_range.
+1. From the cves data, determine the target version: the smallest released
+   version that is at or above every patched_version and clears every
+   vulnerable_version_range. Prefer the least disruptive upgrade — stay within
+   the currently used version's family (same major version, and same minor
+   version when possible); move to a new major version only when no fixed
+   release exists within the current family.
 2. Update {package} to the target version in every affected manifest (see
    manifest_path in the data) and its lockfile. Do not just bump version
    strings: review the upgrade's changelog and breaking changes, search the
@@ -122,8 +125,13 @@ Task:
    npm/bun test, go test, etc.) and fix failures caused by the upgrade. If
    tests cannot pass, say so in the pull request body rather than weakening or
    skipping tests.
-4. Commit your work with messages referencing the CVE IDs, and write the pull
-   request body file as described in the operational facts below."""
+4. Commit your work and write the pull request title and body files as
+   described in the operational facts below.
+5. Present this publicly as a routine dependency update (as Dependabot does):
+   do not reference CVE identifiers, advisories, or the vulnerability in the
+   commit messages, pull request title, or body, so the fix is not advertised
+   before it merges. Describe only the version change, the compatibility
+   changes, and the test results."""
 
 # Cap the transcript tail stored in the workflow result: full output stays in
 # worker logs; Temporal history payloads should stay small.
@@ -135,35 +143,29 @@ def _slug(value: str) -> str:
 
 
 def _remediation_branch(rows: list[dict[str, object]], package: str) -> str:
-    """Deterministic bot-owned branch so re-runs update the existing PR."""
+    """Deterministic bot-owned branch so re-runs update the existing PR.
+
+    Like the PR title/body, the branch name deliberately does not reference
+    CVEs — the update is presented as a routine dependency bump.
+    """
     ecosystem = next((str(r["ecosystem"]) for r in rows if r.get("ecosystem")), "dep")
-    return f"seizu/cve-remediation/{_slug(ecosystem)}-{_slug(package)}"
+    return f"seizu/dependency-update/{_slug(ecosystem)}-{_slug(package)}"
 
 
-def _cve_ids(rows: list[dict[str, object]]) -> list[str]:
-    return sorted({str(r["cve_id"]) for r in rows if r.get("cve_id")})
+def _pr_title(package: str) -> str:
+    # Fallback only: the coding agent writes a "Bump X from A to B" title file
+    # with the actual versions, which the push phase prefers.
+    return f"Bump {package}"
 
 
-def _pr_title(package: str, cve_ids: list[str]) -> str:
-    listed = ", ".join(cve_ids[:3]) or "CVEs"
-    if len(cve_ids) > 3:
-        listed += f" +{len(cve_ids) - 3} more"
-    return f"Fix {package} vulnerabilities ({listed})"
-
-
-def _pr_body_fallback(package: str, rows: list[dict[str, object]]) -> str:
-    lines = [f"## Automated CVE remediation for `{package}`", ""]
-    for row in rows:
-        cve = row.get("cve_id") or "unknown CVE"
-        severity = row.get("severity") or "unknown severity"
-        url = row.get("url") or ""
-        lines.append(f"- {cve} ({severity}) {url}".rstrip())
-    lines += [
-        "",
-        "_Opened by the Seizu cve_dependency_remediation workflow. The coding",
-        "agent did not update this body; see the commits for details._",
-    ]
-    return "\n".join(lines)
+def _pr_body_fallback(package: str) -> str:
+    # No CVE identifiers or advisory links: the PR is public until merged, and
+    # (like Dependabot) a routine-looking bump avoids advertising the fix.
+    return (
+        f"Bumps `{package}` to a newer version.\n\n"
+        "_Opened by the Seizu cve_dependency_remediation workflow. The coding "
+        "agent did not update this body; see the commits for details._"
+    )
 
 
 @activity.defn
@@ -186,7 +188,6 @@ async def run_dependency_remediation(input: DependencyRemediationInput) -> Depen
 
     base_branch = next((str(r["default_branch"]) for r in input.cves if r.get("default_branch")), "main")
     branch_name = _remediation_branch(input.cves, input.package)
-    cve_ids = _cve_ids(input.cves)
     prompt = f"{_UNTRUSTED_REMEDIATION_INSTRUCTION}\n\n" + _REMEDIATION_TASK_TEMPLATE.format(
         repo=escape(input.repo),
         package=escape(input.package),
@@ -209,8 +210,8 @@ async def run_dependency_remediation(input: DependencyRemediationInput) -> Depen
         base_branch=base_branch,
         branch_name=branch_name,
         prompt=prompt,
-        pr_title=_pr_title(input.package, cve_ids),
-        pr_body_fallback=_pr_body_fallback(input.package, input.cves),
+        pr_title=_pr_title(input.package),
+        pr_body_fallback=_pr_body_fallback(input.package),
         on_progress=activity.heartbeat,
     )
     return DependencyRemediationResult(

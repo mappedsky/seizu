@@ -36,11 +36,15 @@ def test_cve_dependency_remediation_scheduled_query() -> None:
     assert "datetime(c.published_date) > window_start" not in scheduled_query["cypher"]
     # Remediation needs a concrete package to upgrade.
     assert "s.dependency_package_name IS NOT NULL" in scheduled_query["cypher"]
+    # Org-agnostic: no hardcoded organization; each org's own sync window is
+    # joined to its repositories, and the watch scan matches every org sync
+    # (groupid omitted → ".*").
+    assert "mappedsky" not in scheduled_query["cypher"]
+    assert "o.id = org_id" in scheduled_query["cypher"]
     assert scheduled_query["watch_scans"] == [
         {
             "grouptype": "GitHubOrganization",
             "syncedtype": "GitHubOrganization",
-            "groupid": "https://github.com/mappedsky",
         }
     ]
     assert scheduled_query["actions"] == [
