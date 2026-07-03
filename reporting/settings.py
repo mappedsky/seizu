@@ -261,6 +261,15 @@ TEMPORAL_WORKER_ENABLED = bool_env("TEMPORAL_WORKER_ENABLED", True)
 # Maximum number of scheduled query result rows forwarded into a workflow
 # (Temporal payloads are capped at ~2MB; excess rows are dropped with a warning).
 TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS", 200)
+# Which registered Temporal workflows the temporal scheduled-query action may
+# start. Enabling the temporal module (SCHEDULED_QUERY_MODULES) otherwise makes
+# every registered workflow dispatchable; this narrows that to an allowlist.
+# Empty or unset → all registered workflows. Comma-separated names (e.g.
+# "cve_repo_report") → only those. Unknown names are ignored. The schema's
+# workflow picker only offers enabled workflows, and dispatch refuses disabled
+# ones. Set this on both the web service (for the picker) and the scheduled
+# query worker (for enforcement).
+TEMPORAL_ENABLED_WORKFLOWS = list_env("TEMPORAL_ENABLED_WORKFLOWS", [])
 # Per-activity timeout in seconds for AI chat sessions run by workflows.
 TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
 

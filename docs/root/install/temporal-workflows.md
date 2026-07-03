@@ -138,8 +138,10 @@ There is no per-user permission and no dedicated enable flag for this
 workflow: it has direct, fixed targets and is reachable only through scheduled
 queries, which are admin-managed (`scheduled_queries:write`). It runs only
 when configured (`REMEDIATION_GITHUB_TOKEN` plus an agent API key); operators
-turn it off by disabling the scheduled query, removing the configuration, or
-removing the `temporal` module from `SCHEDULED_QUERY_MODULES`. The scheduled
+turn it off by disabling the scheduled query, removing the configuration,
+dropping `cve_dependency_remediation` from `TEMPORAL_ENABLED_WORKFLOWS` (while
+keeping other workflows), or removing the `temporal` module from
+`SCHEDULED_QUERY_MODULES` entirely. The scheduled
 query's creator is still resolved before each run, so archived users hard-stop
 their automations, and each run is audit-logged against them.
 
@@ -158,6 +160,7 @@ version) that the remediation prompt is built from.
 | `TEMPORAL_TASK_QUEUE` | `seizu-workflows` | Task queue shared by the action module and the worker. |
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
+| `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of workflows the temporal action may start. Enabling the temporal module otherwise makes every registered workflow dispatchable; this narrows it (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow picker only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (picker) and the scheduled query worker (enforcement). |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
 | `REMEDIATION_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code) or `codex`. |
 | `REMEDIATION_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |

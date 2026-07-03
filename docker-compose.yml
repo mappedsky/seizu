@@ -314,6 +314,8 @@ services:
       - STATSD_CONSTANT_TAGS
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      # Allowlist of workflows the temporal action may dispatch (empty → all).
+      - TEMPORAL_ENABLED_WORKFLOWS
       # The cve_dependency_remediation input factory reads the run timeout here.
       - REMEDIATION_TIMEOUT_SECONDS
       - REPORT_STORE_BACKEND

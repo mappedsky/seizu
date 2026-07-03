@@ -1,4 +1,10 @@
-from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowInputContext, get_workflow_spec
+from reporting.temporal_workflows import (
+    WORKFLOW_REGISTRY,
+    WorkflowInputContext,
+    enabled_workflow_names,
+    get_enabled_workflow_spec,
+    get_workflow_spec,
+)
 from reporting.temporal_workflows.shared import (
     CveDependencyRemediationInput,
     group_rows_by_repo,
@@ -35,6 +41,25 @@ def test_registry_contains_cve_dependency_remediation(mocker):
 
 def test_registry_unknown_workflow():
     assert get_workflow_spec("nope") is None
+
+
+def test_enabled_workflow_names_defaults_to_all(mocker):
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", [])
+    assert enabled_workflow_names() == sorted(WORKFLOW_REGISTRY)
+
+
+def test_enabled_workflow_names_allowlist(mocker):
+    # Unknown names are ignored; only registered + configured survive.
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report", "does_not_exist"])
+    assert enabled_workflow_names() == ["cve_repo_report"]
+
+
+def test_get_enabled_workflow_spec_gates_on_allowlist(mocker):
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
+    assert get_enabled_workflow_spec("cve_repo_report") is not None
+    # Registered but not enabled.
+    assert get_enabled_workflow_spec("cve_dependency_remediation") is None
+    assert get_workflow_spec("cve_dependency_remediation") is not None
 
 
 def test_registry_names_match_specs():

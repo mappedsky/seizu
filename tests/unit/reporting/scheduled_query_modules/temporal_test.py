@@ -48,6 +48,29 @@ def test_action_config_schema():
     assert "accept_confirmation_bypass" not in schema
 
 
+def test_action_config_schema_honors_enabled_allowlist(mocker):
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
+    schema = {field.name: field for field in temporal.action_config_schema()}
+    assert schema["workflow"].options == ["cve_repo_report"]
+    # Only the enabled workflow's description is surfaced in the picker help.
+    assert "cve_dependency_remediation" not in schema["workflow"].description
+
+
+async def test_handle_results_refuses_disabled_workflow(mocker):
+    client = _patch_client(mocker)
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
+    mocker.patch(
+        "reporting.services.report_store.get_scheduled_query",
+        mocker.AsyncMock(return_value=_item()),
+    )
+    results = [{"details": {"repo": "org/app", "package": "requests"}}]
+
+    await temporal.handle_results("sq-1", _action(workflow="cve_dependency_remediation"), results)
+
+    # Registered but not in the allowlist → not dispatched.
+    client.start_workflow.assert_not_called()
+
+
 async def test_setup():
     assert await temporal.setup() is None
 
