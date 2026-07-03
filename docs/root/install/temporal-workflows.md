@@ -76,29 +76,58 @@ published earlier.
 ## The cve_dependency_remediation workflow
 
 Where `cve_repo_report` *assesses*, `cve_dependency_remediation` *fixes*: per
-(repository, vulnerable dependency package) group, it runs an AI chat session
-that drives a headless coding-agent CLI (Claude Code by default) in an isolated
-sandbox via the `sandbox__delegate_subagent` tool (see
-[Sandbox delegation](sandbox.md)). The coding agent clones the repository,
-creates a deterministic branch (`seizu/cve-remediation/{ecosystem}-{package}`),
-upgrades the dependency in every affected manifest — including any code changes
-needed for compatibility, not just a version bump — runs the repository's test
-suite, and opens a pull request whose body lists the CVE IDs, the version
-change, the compatibility changes, and the test results.
+(repository, vulnerable dependency package) group, the workflow activity drives
+an ephemeral sandbox directly (no chat session, no MCP tool) and runs a
+headless coding-agent CLI (Claude Code by default; `codex` also supported via
+`REMEDIATION_AGENT_PROVIDER`). The agent works on a deterministic bot-owned
+branch (`seizu/cve-remediation/{ecosystem}-{package}`): it upgrades the
+dependency in every affected manifest — including any code changes needed for
+compatibility, not just a version bump — runs the repository's test suite, and
+writes the PR body. The workflow then pushes the branch and opens (or updates)
+a pull request listing the CVE IDs, the version change, the compatibility
+changes, and the test results.
+
+### Phase-isolated credentials
+
+The run is split into four sandbox commands, each receiving only the
+environment it needs (per-command env injection — secrets are never set on the
+sandbox itself):
+
+1. **install** — install `gh` and the coding-agent CLI. *No secrets*: npm
+   packages execute third-party postinstall scripts.
+2. **setup** — clone the repository and create the work branch. *GitHub token
+   only*, consumed by a process-scoped git credential helper (`git -c`), so
+   nothing token-derived is written to disk.
+3. **agent** — run the coding-agent CLI with permission prompts disabled.
+   *Provider API key only* — **no GitHub token exists anywhere in the sandbox
+   during this phase**, so a prompt-injected agent (repository contents and
+   advisory text are untrusted input) has no token to exfiltrate and no
+   ability to push.
+4. **push** — verify the agent committed changes, force-push the bot-owned
+   branch, and create or find the PR. *GitHub token only.*
+
+Still keep branch protection on and scope `REMEDIATION_GITHUB_TOKEN` to the
+target org/repos with only `contents:write` + `pull_requests:write` — nothing
+lands without human PR review. Workflow-supplied values (repo, branch names)
+are strictly validated and reach the phase scripts only via environment
+variables; tokens are masked in all captured output.
+
+### Behavior and access control
 
 Input rows must carry `repo` and `package` keys; multiple CVEs (or manifests)
-for the same package in the same repository collapse into one chat and one PR.
-Groups run sequentially to bound concurrent LLM spend, and the per-group
-activity uses `maximum_attempts=1`: a retry would repeat a very expensive
-coding-agent session and risk duplicate PRs. Manual re-runs are safe — the
-deterministic branch name makes the agent update the existing PR instead of
+for the same package in one repository collapse into one run and one PR.
+Groups run sequentially to bound concurrent coding-agent spend, and the
+per-group activity uses `maximum_attempts=1`: a retry would repeat a very
+expensive run and risk duplicate PRs. Manual re-runs are safe — the
+deterministic branch name means the run updates the existing PR instead of
 opening another. A failing group records an error without aborting the rest.
 
-Requirements on top of `cve_repo_report`'s: `SANDBOX_ENABLED=true`,
-`SANDBOX_SUBAGENT_ENABLED=true`, `SANDBOX_GITHUB_TOKEN`, a provider API key,
-and the scheduled query creator must hold `sandbox:delegate_subagent`
-(Editor+). Nothing lands without human review: keep branch protection on —
-the PR review is the gate.
+There is no per-user permission for this workflow: it has direct, fixed
+targets and is reachable only through scheduled queries, which are
+admin-managed (`scheduled_queries:write`). Operators gate it globally with
+`REMEDIATION_ENABLED`, or disable the scheduled query. The scheduled query's
+creator is still resolved before each run, so archived users hard-stop their
+automations, and each run is audit-logged against them.
 
 The seeded scheduled query **New CVE dependencies requiring remediation** uses
 the same watch-scan trigger and `SecurityIssue.created_at` window as the
@@ -116,7 +145,17 @@ version) that the remediation prompt is built from.
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
-| `TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS` | `2400` | Per-dependency remediation chat activity timeout (full clone → upgrade → test → PR cycle). Keep above `SANDBOX_SUBAGENT_TIMEOUT_SECONDS`. |
+| `REMEDIATION_ENABLED` | `false` | Master switch for the `cve_dependency_remediation` workflow. |
+| `REMEDIATION_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code) or `codex`. |
+| `REMEDIATION_AGENT_API_KEY` | `""` | API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. |
+| `REMEDIATION_AGENT_MODEL` | `""` | Model override for the CLI (Claude Code's `ANTHROPIC_MODEL`). Empty → the CLI's default. |
+| `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). |
+| `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required. |
+| `REMEDIATION_GIT_USER` / `REMEDIATION_GIT_EMAIL` | `seizu-remediation-bot` / `seizu-remediation@localhost` | git author identity for the remediation commits. |
+
+The remediation workflow also uses the sandbox provider configuration
+(`SANDBOX_API_KEY`, `SANDBOX_DOMAIN`; see [Sandbox delegation](sandbox.md)) —
+`SANDBOX_ENABLED` and the chat tool are not required.
 
 The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) because it drives headless chat sessions. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools — exercising the CVE workflow end-to-end requires a real LLM provider.
 

@@ -1,0 +1,322 @@
+"""Tests for the phase-isolated sandbox remediation service."""
+
+from contextlib import ExitStack, asynccontextmanager
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from reporting.services import sandbox_remediation
+from reporting.services.sandbox_remediation import (
+    RemediationRunResult,
+    config_error,
+    run_remediation,
+    validate_target,
+)
+
+_GH_TOKEN = "ghp_supersecret123"
+_AGENT_KEY = "sk-ant-agentkey456"
+
+_TARGET: dict[str, Any] = {
+    "repo": "org/app",
+    "base_branch": "main",
+    "branch_name": "seizu/cve-remediation/pip-requests",
+    "prompt": "Update requests to 2.32.4",
+    "pr_title": "Fix requests vulnerabilities (CVE-2026-0001)",
+    "pr_body_fallback": "## Automated CVE remediation",
+}
+
+
+class _FakeBackend:
+    """Records every phase command with the envs it received."""
+
+    def __init__(self, outputs: dict[str, str] | None = None, fail_phase: str | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, str]]] = []
+        self.files: dict[str, str] = {}
+        self._outputs = outputs or {}
+        self._fail_phase = fail_phase
+
+    async def write_file(self, path: str, content: str) -> str:
+        self.files[path] = content
+        return f"Wrote {path}"
+
+    async def run_bash_streaming(
+        self, cmd: str, *, timeout_seconds: int, on_output: Any, envs: dict[str, str] | None = None
+    ) -> str:
+        phase = _phase_of(cmd)
+        self.calls.append((phase, dict(envs or {})))
+        output = self._outputs.get(phase, f"{phase} ok\n")
+        on_output(output)
+        if self._fail_phase == phase:
+            raise RuntimeError(f"command exited with code 1 in {phase}")
+        return output
+
+
+def _phase_of(cmd: str) -> str:
+    if "npm install -g" in cmd or "cli/cli/releases" in cmd:
+        return "install"
+    if "git checkout -b" in cmd or " clone " in cmd:
+        return "setup"
+    if "claude -p" in cmd or "codex exec" in cmd:
+        return "agent"
+    if "gh pr create" in cmd:
+        return "push"
+    return "unknown"
+
+
+def _settings(**overrides: Any) -> ExitStack:
+    values: dict[str, Any] = {
+        "REMEDIATION_ENABLED": True,
+        "REMEDIATION_AGENT_PROVIDER": "claude",
+        "REMEDIATION_AGENT_API_KEY": _AGENT_KEY,
+        "REMEDIATION_AGENT_MODEL": "",
+        "REMEDIATION_TIMEOUT_SECONDS": 100,
+        "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
+        "REMEDIATION_GIT_USER": "bot",
+        "REMEDIATION_GIT_EMAIL": "bot@localhost",
+        "SANDBOX_API_KEY": "e2b-key",
+        "SANDBOX_DOMAIN": "",
+        "SANDBOX_MAX_OUTPUT_BYTES": 50_000,
+    }
+    values.update(overrides)
+    stack = ExitStack()
+    for name, value in values.items():
+        stack.enter_context(patch(f"reporting.settings.{name}", value))
+    return stack
+
+
+def _patched_backend(backend: _FakeBackend, captured: dict[str, Any] | None = None) -> Any:
+    @asynccontextmanager
+    async def _ctx(**kwargs: Any):  # type: ignore[misc]
+        if captured is not None:
+            captured.update(kwargs)
+        yield backend
+
+    return patch("reporting.services.sandbox_remediation._open_backend", new=_ctx)
+
+
+# ---------------------------------------------------------------------------
+# Credential phase isolation — the core security property
+# ---------------------------------------------------------------------------
+
+
+async def test_phases_run_in_order_with_isolated_envs() -> None:
+    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    captured: dict[str, Any] = {}
+    with _settings(), _patched_backend(backend, captured):
+        result = await run_remediation(**_TARGET)
+
+    assert [phase for phase, _ in backend.calls] == ["install", "setup", "agent", "push"]
+    install_env, setup_env, agent_env, push_env = (envs for _, envs in backend.calls)
+
+    # Phase 1: third-party install scripts run with no secrets at all.
+    assert install_env == {}
+    # Phase 2: GitHub token present for the clone; no agent key.
+    assert setup_env["GH_TOKEN"] == _GH_TOKEN
+    assert "ANTHROPIC_API_KEY" not in setup_env
+    # Phase 3: THE invariant — the coding agent never sees the GitHub token.
+    assert agent_env == {"ANTHROPIC_API_KEY": _AGENT_KEY}
+    assert "GH_TOKEN" not in agent_env
+    assert "GITHUB_TOKEN" not in agent_env
+    # Phase 4: GitHub token returns for push/PR; no agent key.
+    assert push_env["GH_TOKEN"] == _GH_TOKEN
+    assert push_env["SEIZU_PR_TITLE"] == _TARGET["pr_title"]
+    assert "ANTHROPIC_API_KEY" not in push_env
+
+    # No secrets at sandbox creation either.
+    assert "envs" not in captured
+    assert captured["allow_internet"] is True
+    assert captured["timeout_seconds"] == 100 + 120
+
+    assert result.status == "completed"
+    assert result.pr_url == "https://github.com/org/app/pull/42"
+
+
+async def test_no_secrets_written_to_sandbox_files() -> None:
+    backend = _FakeBackend()
+    with _settings(), _patched_backend(backend):
+        await run_remediation(**_TARGET)
+
+    prompt = backend.files[sandbox_remediation.PROMPT_PATH]
+    assert "Security boundary" in prompt
+    assert "Update requests to 2.32.4" in prompt
+    assert "do NOT push" in prompt
+    assert _GH_TOKEN not in prompt
+    assert _AGENT_KEY not in prompt
+    assert _GH_TOKEN not in backend.files[sandbox_remediation.PR_BODY_PATH]
+
+
+async def test_target_values_reach_scripts_via_env_not_interpolation() -> None:
+    backend = _FakeBackend()
+    with _settings(), _patched_backend(backend):
+        await run_remediation(**_TARGET)
+
+    setup_env = next(envs for phase, envs in backend.calls if phase == "setup")
+    assert setup_env["SEIZU_REPO"] == "org/app"
+    assert setup_env["SEIZU_BASE_BRANCH"] == "main"
+    assert setup_env["SEIZU_BRANCH"] == "seizu/cve-remediation/pip-requests"
+    # The scripts themselves are fixed constants referencing only env vars.
+    assert "$SEIZU_REPO" in sandbox_remediation._SETUP_SCRIPT
+    assert "org/app" not in sandbox_remediation._SETUP_SCRIPT
+
+
+async def test_tokens_masked_in_output_tail() -> None:
+    backend = _FakeBackend(outputs={"agent": f"leaked {_GH_TOKEN} and {_AGENT_KEY}\n"})
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert _GH_TOKEN not in result.output_tail
+    assert _AGENT_KEY not in result.output_tail
+    assert "***" in result.output_tail
+
+
+async def test_model_env_only_in_agent_phase_when_configured() -> None:
+    backend = _FakeBackend()
+    with _settings(REMEDIATION_AGENT_MODEL="claude-sonnet-4-6"), _patched_backend(backend):
+        await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["ANTHROPIC_MODEL"] == "claude-sonnet-4-6"
+
+
+async def test_agent_key_falls_back_to_anthropic_key_for_claude() -> None:
+    backend = _FakeBackend()
+    with (
+        _settings(REMEDIATION_AGENT_API_KEY=""),
+        patch("reporting.settings.ANTHROPIC_API_KEY", "anthropic-fallback"),
+        _patched_backend(backend),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "completed"
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["ANTHROPIC_API_KEY"] == "anthropic-fallback"
+
+
+# ---------------------------------------------------------------------------
+# Configuration and target validation
+# ---------------------------------------------------------------------------
+
+
+def test_config_error_cases() -> None:
+    with _settings():
+        assert config_error() is None
+    with _settings(REMEDIATION_ENABLED=False):
+        assert "disabled" in (config_error() or "")
+    with _settings(REMEDIATION_AGENT_PROVIDER="gemini-cli"):
+        assert "unknown remediation provider" in (config_error() or "")
+    with _settings(REMEDIATION_AGENT_API_KEY=""), patch("reporting.settings.ANTHROPIC_API_KEY", ""):
+        assert "no API key" in (config_error() or "")
+    with _settings(REMEDIATION_GITHUB_TOKEN=""):
+        assert "REMEDIATION_GITHUB_TOKEN" in (config_error() or "")
+
+
+@pytest.mark.parametrize(
+    "repo,base_branch,branch_name",
+    [
+        ("x; rm -rf /", "main", "fix"),
+        ("org/app/extra", "main", "fix"),
+        ("$(whoami)/app", "main", "fix"),
+        ("org/app", "main; curl evil", "fix"),
+        ("org/app", "-oProxyCommand=evil", "fix"),
+        ("org/app", "main", "a..b"),
+        ("org/app", "main", "fix`id`"),
+    ],
+)
+def test_validate_target_rejects_unsafe_values(repo: str, base_branch: str, branch_name: str) -> None:
+    assert validate_target(repo, base_branch, branch_name) is not None
+
+
+async def test_run_fails_closed_when_disabled() -> None:
+    backend = _FakeBackend()
+    with _settings(REMEDIATION_ENABLED=False), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+    assert result.status == "failed"
+    assert "disabled" in (result.error or "")
+    assert backend.calls == []
+
+
+async def test_run_fails_closed_on_invalid_target() -> None:
+    backend = _FakeBackend()
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**{**_TARGET, "repo": "x; rm -rf /"})
+    assert result.status == "failed"
+    assert "invalid repo" in (result.error or "")
+    assert backend.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Failure handling
+# ---------------------------------------------------------------------------
+
+
+async def test_phase_failure_returns_masked_output() -> None:
+    backend = _FakeBackend(outputs={"agent": f"partial with {_GH_TOKEN}\n"}, fail_phase="agent")
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert _GH_TOKEN not in (result.error or "")
+    assert _GH_TOKEN not in result.output_tail
+    assert "partial with" in result.output_tail
+    # The push phase never ran after the agent failed.
+    assert [phase for phase, _ in backend.calls] == ["install", "setup", "agent"]
+
+
+async def test_no_changes_committed_is_a_distinct_error() -> None:
+    backend = _FakeBackend(outputs={"push": "SEIZU_NO_CHANGES\n"}, fail_phase="push")
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert "committed no changes" in (result.error or "")
+
+
+async def test_timeout_returns_failed_result() -> None:
+    backend = _FakeBackend()
+    backend.run_bash_streaming = AsyncMock(side_effect=TimeoutError())  # type: ignore[method-assign]
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert "timed out" in (result.error or "")
+
+
+async def test_on_progress_called_for_output_chunks() -> None:
+    backend = _FakeBackend()
+    progress = MagicMock()
+    with _settings(), _patched_backend(backend):
+        await run_remediation(**_TARGET, on_progress=progress)
+    # One chunk per phase at minimum.
+    assert progress.call_count >= 4
+
+
+# ---------------------------------------------------------------------------
+# Script invariants
+# ---------------------------------------------------------------------------
+
+
+def test_setup_script_uses_process_scoped_credential_helper() -> None:
+    # `git -c` scopes the helper to the clone process; nothing token-derived is
+    # persisted into the repo config for the agent phase to read.
+    assert "credential.helper" in sandbox_remediation._SETUP_SCRIPT
+    assert "x-access-token" in sandbox_remediation._SETUP_SCRIPT
+    # The token must never be embedded in the clone URL.
+    assert "GH_TOKEN@" not in sandbox_remediation._SETUP_SCRIPT
+
+
+def test_push_script_guards_empty_runs_and_reports_pr_url() -> None:
+    assert "SEIZU_NO_CHANGES" in sandbox_remediation._PUSH_SCRIPT
+    assert "SEIZU_PR_URL=" in sandbox_remediation._PUSH_SCRIPT
+    assert "gh pr create" in sandbox_remediation._PUSH_SCRIPT
+
+
+def test_agent_scripts_read_prompt_from_file() -> None:
+    for provider in sandbox_remediation.PROVIDERS.values():
+        assert sandbox_remediation.PROMPT_PATH in provider.run_cmd
+
+
+def test_result_dataclass_defaults() -> None:
+    result = RemediationRunResult(status="failed", error="x")
+    assert result.pr_url is None
+    assert result.output_tail == ""

@@ -36,17 +36,16 @@ def _cve_repo_report_input(context: WorkflowInputContext) -> CveRepoReportInput:
 
 
 def _cve_dependency_remediation_input(context: WorkflowInputContext) -> CveDependencyRemediationInput:
-    # Remediation sessions run a full clone → upgrade → test → PR cycle, so
-    # they get their own (much larger) timeout instead of the context's
-    # generic chat activity timeout. Lazy import keeps this module light for
-    # the web process.
+    # Remediation runs a full clone → upgrade → test → PR cycle, so it gets its
+    # own (much larger) timeout instead of the context's generic chat activity
+    # timeout. Lazy import keeps this module light for the web process.
     from reporting import settings
 
     return CveDependencyRemediationInput(
         scheduled_query_id=context.scheduled_query_id,
         creator_user_id=context.creator_user_id,
         rows=context.rows,
-        chat_timeout_seconds=settings.TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS,
+        timeout_seconds=settings.REMEDIATION_TIMEOUT_SECONDS,
     )
 
 
@@ -75,13 +74,13 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
     "cve_dependency_remediation": WorkflowSpec(
         name="cve_dependency_remediation",
         description=(
-            "Per (repository, vulnerable dependency), runs an AI chat session"
-            " as the scheduled query's creator that remediates newly discovered"
-            " CVEs: a coding-agent CLI in an isolated sandbox updates the"
-            " dependency (with any code changes needed for compatibility), runs"
-            " the tests, and opens a pull request. Requires"
-            " SANDBOX_SUBAGENT_ENABLED and the creator to hold"
-            " sandbox:delegate_subagent."
+            "Per (repository, vulnerable dependency), remediates newly"
+            " discovered CVEs: a coding-agent CLI in an isolated sandbox"
+            " updates the dependency (with any code changes needed for"
+            " compatibility), runs the tests, and opens a pull request."
+            " Credentials are phase-isolated — the coding agent never sees the"
+            " GitHub token. Requires REMEDIATION_ENABLED plus"
+            " REMEDIATION_GITHUB_TOKEN and an agent API key."
         ),
         input_factory=_cve_dependency_remediation_input,
     ),

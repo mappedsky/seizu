@@ -73,39 +73,15 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |
 
-## Subagent delegation (`sandbox__delegate_subagent`)
+## Other sandbox consumers
 
-The `sandbox__delegate_subagent` chat tool runs a **headless coding-agent CLI** (Claude Code by default; Codex is also supported via `SANDBOX_SUBAGENT_PROVIDER`) inside the sandbox against a cloned GitHub repository. The handler runs a fixed bootstrap — configure git, install `gh` and the provider CLI, clone the repo, run the CLI with the caller's prompt — and the coding agent then works autonomously: create a branch, edit code, run tests, commit, push, and open a pull request. The tool returns the run output and the PR URL. This powers the `cve_dependency_remediation` Temporal workflow (see [Temporal workflows](temporal-workflows.md)), and can be driven by any skill that lists it in `tools_required`.
-
-### How it differs from `sandbox__delegate` — amended security model
-
-Unlike plain delegation, subagent delegation **deliberately weakens the "no credentials, network-isolated" model**, which is why it sits behind its own opt-in and permission:
-
-- A GitHub token (`SANDBOX_GITHUB_TOKEN`) and the coding-agent provider's API key are injected into the sandbox environment at creation.
-- Outbound internet is enabled for the call (regardless of `SANDBOX_ALLOW_INTERNET`) so the sandbox can clone, install the CLI, and push.
-- The coding agent runs with its permission prompts disabled (e.g. Claude Code's `--dangerously-skip-permissions`) — sandbox isolation, not per-action confirmation, bounds what it can touch.
-
-Mitigations, and what you must do on your side:
-
-- **Scope the token as if it will be exfiltrated.** The cloned repository contents and any advisory text in the prompt are untrusted input to the coding agent; a prompt-injected agent could read `GH_TOKEN` from its environment. Use a fine-grained PAT restricted to the target org/repos with only `contents:write` and `pull_requests:write`.
-- **Keep branch protection on.** The agent pushes a new branch and opens a PR; nothing lands without human review. The PR review is the real gate.
-- Model-supplied tool arguments (`repo`, branch names) are validated against strict patterns and passed to the bootstrap via environment variables, never interpolated into shell.
-- Tokens are masked (`***`) in all tool output and streamed progress; the token is never embedded in clone URLs (`gh auth setup-git` configures the credential helper).
-- The tool is `chat_only` (never on the MCP endpoint), is not always-disclosed (only a skill's `tools_required` unlocks it), and requires the `sandbox:delegate_subagent` permission (`seizu-editor` and above).
-- No Seizu credentials ever enter the sandbox, and `allow_public_traffic` stays off.
-
-### Subagent configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SANDBOX_SUBAGENT_ENABLED` | `false` | Opt-in switch on top of `SANDBOX_ENABLED`. Both must be `true` for the tool to appear. |
-| `SANDBOX_SUBAGENT_PROVIDER` | `claude` | Which coding-agent CLI to run: `claude` (Claude Code) or `codex`. |
-| `SANDBOX_SUBAGENT_API_KEY` | `""` | API key exported into the sandbox as the provider's key env var (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`). Empty → falls back to `ANTHROPIC_API_KEY` for the `claude` provider. |
-| `SANDBOX_SUBAGENT_MODEL` | `""` | Model override for the CLI (Claude Code's `ANTHROPIC_MODEL`). Empty → the CLI's default. |
-| `SANDBOX_SUBAGENT_TIMEOUT_SECONDS` | `1800` | Hard cap for one run. A full clone → upgrade → test → PR cycle on a large repo can take tens of minutes. The sandbox lifetime is set to this value plus slack. |
-| `SANDBOX_GITHUB_TOKEN` | `""` | Fine-grained PAT the subagent uses to clone, push, and open PRs. Required. |
-| `SANDBOX_SUBAGENT_GIT_USER` | `seizu-remediation-bot` | git author name for the subagent's commits. |
-| `SANDBOX_SUBAGENT_GIT_EMAIL` | `seizu-remediation@localhost` | git author email for the subagent's commits. |
+The `SandboxBackend` protocol is also used outside the chat tool: the
+`cve_dependency_remediation` Temporal workflow drives the sandbox directly
+(no chat session, no tool call) to run a coding-agent CLI against a cloned
+repository with phase-isolated credentials. See
+[Temporal workflows](temporal-workflows.md) for its design and configuration
+(`REMEDIATION_*`); it shares `SANDBOX_API_KEY`/`SANDBOX_DOMAIN` for the
+sandbox provider itself.
 
 ## Providers
 

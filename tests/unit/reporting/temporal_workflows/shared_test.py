@@ -17,7 +17,7 @@ def test_registry_contains_cve_dependency_remediation(mocker):
     assert spec is not None
     assert spec.description
 
-    mocker.patch("reporting.settings.TEMPORAL_REMEDIATION_CHAT_TIMEOUT_SECONDS", 3600)
+    mocker.patch("reporting.settings.REMEDIATION_TIMEOUT_SECONDS", 3600)
     workflow_input = spec.build_input(
         WorkflowInputContext(
             scheduled_query_id="sq-1",
@@ -30,7 +30,7 @@ def test_registry_contains_cve_dependency_remediation(mocker):
     assert workflow_input.rows == [{"repo": "org/app", "package": "requests"}]
     # Remediation runs a full clone → upgrade → test → PR cycle, so its input
     # uses the dedicated (larger) timeout, not the context's generic one.
-    assert workflow_input.chat_timeout_seconds == 3600
+    assert workflow_input.timeout_seconds == 3600
 
 
 def test_registry_unknown_workflow():

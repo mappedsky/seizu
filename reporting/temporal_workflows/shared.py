@@ -48,11 +48,12 @@ class CveDependencyRemediationInput:
     # Projected query result rows (the per-row data map, e.g. the "details"
     # attribute), each expected to carry "repo" and "package" keys.
     rows: list[dict[str, Any]] = field(default_factory=list)
-    chat_timeout_seconds: int = 2400
+    # Bound for one remediation run (all sandbox phases).
+    timeout_seconds: int = 1800
 
 
 @dataclass
-class DependencyChatInput:
+class DependencyRemediationInput:
     repo: str
     package: str
     cves: list[dict[str, Any]]
@@ -61,19 +62,19 @@ class DependencyChatInput:
 
 
 @dataclass
-class DependencyChatResult:
+class DependencyRemediationResult:
     repo: str
     package: str
-    thread_id: str | None
-    summary: str
+    pr_url: str | None = None
     error: str | None = None
     status: str = "completed"
-    budget: dict[str, Any] | None = None
+    # Short masked tail of the sandbox run output, for debugging failed runs.
+    output_tail: str = ""
 
 
 @dataclass
 class CveDependencyRemediationResult:
-    per_dependency: list[DependencyChatResult] = field(default_factory=list)
+    per_dependency: list[DependencyRemediationResult] = field(default_factory=list)
 
 
 def group_rows_by_repo(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
