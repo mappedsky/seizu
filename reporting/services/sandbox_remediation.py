@@ -12,7 +12,9 @@ creation; each phase is a separate command with only the environment it needs
 (per-command ``envs`` on :meth:`SandboxBackend.run_bash_streaming`):
 
 1. **install** — install ``gh`` + the provider CLI. No secrets: npm packages run
-   third-party postinstall scripts.
+   third-party postinstall scripts. Idempotent (``command -v … ||``), so it is a
+   near no-op when a prebuilt template already ships the CLI
+   (``REMEDIATION_SANDBOX_TEMPLATE``) and a full install on the base image.
 2. **setup** — clone the repo and create the work branch. ``GH_TOKEN`` only,
    consumed by a process-scoped git credential helper (``git -c``), so nothing
    token-derived is written to disk.
@@ -75,10 +77,17 @@ class RemediationProvider:
     """
 
     name: str
+    # Self-guarding install command (``command -v <cli> || …``) so it is a no-op
+    # when the CLI is already present (prebuilt template) and installs otherwise
+    # (base image / self-hosted). Trusted constant; never workflow-derived.
     install_cmd: str
     run_cmd: str
-    # Env var the CLI reads its API key from (scoped to the agent phase only).
-    api_key_env: str
+    # Env vars the CLI reads its API key from, scoped to the agent phase only.
+    # A tuple because some CLIs (codex) accept more than one name.
+    api_key_envs: tuple[str, ...]
+    # E2B prebuilt template with this CLI preinstalled (E2B cloud only; ignored
+    # on self-hosted backends, where the install command runs instead).
+    default_template: str
     # Env var the CLI reads a model override from; None if unsupported.
     model_env: str | None = None
     # Env var pointing the CLI at an LLM gateway/proxy; None if unsupported.
@@ -88,21 +97,30 @@ class RemediationProvider:
 PROVIDERS: dict[str, RemediationProvider] = {
     "claude": RemediationProvider(
         name="claude",
-        install_cmd=("npm install -g @anthropic-ai/claude-code || sudo npm install -g @anthropic-ai/claude-code"),
+        install_cmd=(
+            "command -v claude >/dev/null 2>&1 || "
+            "npm install -g @anthropic-ai/claude-code || sudo npm install -g @anthropic-ai/claude-code"
+        ),
         # stream-json keeps output flowing while the agent works (heartbeats);
         # plain text would stay silent until the very end of the run.
         run_cmd=(
             f'claude -p "$(cat {PROMPT_PATH})" --dangerously-skip-permissions --output-format stream-json --verbose'
         ),
-        api_key_env="ANTHROPIC_API_KEY",
+        api_key_envs=("ANTHROPIC_API_KEY",),
+        default_template="claude",
         model_env="ANTHROPIC_MODEL",
         base_url_env="ANTHROPIC_BASE_URL",
     ),
     "codex": RemediationProvider(
         name="codex",
-        install_cmd="npm install -g @openai/codex || sudo npm install -g @openai/codex",
+        install_cmd=(
+            "command -v codex >/dev/null 2>&1 || npm install -g @openai/codex || sudo npm install -g @openai/codex"
+        ),
         run_cmd=f'codex exec --full-auto "$(cat {PROMPT_PATH})"',
-        api_key_env="OPENAI_API_KEY",
+        # The codex CLI reads OPENAI_API_KEY; E2B's prebuilt template documents
+        # CODEX_API_KEY. Set both so either resolution path works.
+        api_key_envs=("OPENAI_API_KEY", "CODEX_API_KEY"),
+        default_template="codex",
         base_url_env="OPENAI_BASE_URL",
     ),
 }
@@ -245,9 +263,26 @@ def _resolve_provider() -> tuple[RemediationProvider | None, str]:
     if provider is None:
         return None, ""
     api_key = settings.REMEDIATION_AGENT_API_KEY
-    if not api_key and provider.api_key_env == "ANTHROPIC_API_KEY":
+    if not api_key and "ANTHROPIC_API_KEY" in provider.api_key_envs:
         api_key = settings.ANTHROPIC_API_KEY
     return provider, api_key
+
+
+def _resolve_template(provider: RemediationProvider) -> str | None:
+    """Return the E2B template for this provider, or None to use the base image.
+
+    ``REMEDIATION_SANDBOX_TEMPLATE`` empty → the provider's official prebuilt
+    template (recommended: CLI preinstalled, no per-run npm postinstall). A
+    template name → that template. The literal ``none`` → the base image (the
+    install command installs the CLI). Self-hosted backends ignore templates
+    regardless (see :func:`_open_backend`).
+    """
+    from reporting import settings
+
+    configured = settings.REMEDIATION_SANDBOX_TEMPLATE.strip()
+    if configured.lower() == "none":
+        return None
+    return configured or provider.default_template
 
 
 async def _mint_agent_api_key() -> str:
@@ -357,11 +392,13 @@ async def run_remediation(
         "SEIZU_BRANCH": branch_name,
         "SEIZU_GITHUB_HOST": github_host,
     }
-    agent_env = {provider.api_key_env: api_key}
+    agent_env = {env: api_key for env in provider.api_key_envs}
     if settings.REMEDIATION_AGENT_MODEL and provider.model_env:
         agent_env[provider.model_env] = settings.REMEDIATION_AGENT_MODEL
     if settings.REMEDIATION_AGENT_BASE_URL and provider.base_url_env:
         agent_env[provider.base_url_env] = settings.REMEDIATION_AGENT_BASE_URL
+
+    template = _resolve_template(provider)
 
     full_prompt = f"{_SECURITY_PREAMBLE}\n{prompt}\n\n" + _FOOTER_TEMPLATE.format(
         repo=repo,
@@ -386,6 +423,10 @@ async def run_remediation(
             # the global sandbox default.
             allow_internet=True,
             timeout_seconds=timeout + _SANDBOX_LIFETIME_SLACK_SECONDS,
+            # Prebuilt template with the CLI already installed (E2B cloud); the
+            # install phase stays as an idempotent fallback for base images and
+            # self-hosted backends.
+            template=template,
         ) as backend:
             # Neither file contains secrets.
             await backend.write_file(PROMPT_PATH, full_prompt)

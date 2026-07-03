@@ -173,6 +173,7 @@ async def _open_backend(
     domain: str,
     allow_internet: bool | None = None,
     timeout_seconds: int | None = None,
+    template: str | None = None,
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -200,6 +201,13 @@ async def _open_backend(
     no way to inject environment variables at creation: secrets enter only via
     per-command ``envs`` on :meth:`SandboxBackend.run_bash_streaming`, scoped to
     a single phase.
+
+    ``template`` selects a prebuilt E2B template (e.g. the official ``claude``
+    image with the CLI preinstalled).  Templates are an E2B-cloud feature, so it
+    is ignored when ``domain`` is set (self-hosted backends such as OpenKruise
+    Agents); callers keep an idempotent install step so the base image still
+    works.  The template only provides tools — no credentials — so credential
+    phase-isolation is unaffected.
     """
     from e2b_code_interpreter import AsyncSandbox
 
@@ -214,6 +222,10 @@ async def _open_backend(
         # because non-E2B deployments issue tokens that don't match "e2b_*".
         create_kwargs["domain"] = domain
         create_kwargs["validate_api_key"] = False
+    if template and not domain:
+        create_kwargs["template"] = template
+    elif template and domain:
+        logger.debug("Ignoring sandbox template %r on self-hosted backend (domain=%r)", template, domain)
     if timeout_seconds is not None:
         create_kwargs["timeout"] = timeout_seconds
     # Security hardening — applied unconditionally so the defaults are safe

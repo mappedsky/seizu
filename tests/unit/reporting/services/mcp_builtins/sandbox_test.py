@@ -19,6 +19,7 @@ from reporting.services.mcp_builtins.sandbox import (
     _E2BSandboxBackend,
     _get_sandbox_model,
     _handle_delegate,
+    _open_backend,
     _ToolMessageNormalizingModel,
     _wrap_with_detail_events,
 )
@@ -805,6 +806,45 @@ def _capture_open_backend(fake_backend: MagicMock, captured: dict[str, Any]) -> 
         yield fake_backend
 
     return _ctx
+
+
+def _patch_async_sandbox(created: dict[str, Any]) -> Any:
+    """Patch the lazily-imported e2b AsyncSandbox and record create() kwargs."""
+
+    class _FakeSandbox:
+        async def __aenter__(self) -> "_FakeSandbox":
+            return self
+
+        async def __aexit__(self, *_a: Any) -> bool:
+            return False
+
+    async def _create(**kwargs: Any) -> "_FakeSandbox":
+        created.update(kwargs)
+        return _FakeSandbox()
+
+    module = MagicMock()
+    module.AsyncSandbox.create = AsyncMock(side_effect=_create)
+    return patch.dict("sys.modules", {"e2b_code_interpreter": module})
+
+
+async def test_open_backend_passes_template_on_e2b_cloud() -> None:
+    """On E2B cloud (no domain), the template reaches AsyncSandbox.create."""
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created), patch("reporting.settings.SANDBOX_ALLOW_INTERNET", False):
+        async with _open_backend(api_key="k", domain="", template="claude"):
+            pass
+    assert created["template"] == "claude"
+
+
+async def test_open_backend_ignores_template_when_self_hosted() -> None:
+    """Templates are an E2B-cloud feature; a self-hosted domain must not get one,
+    so the base-image install path still works on OpenKruise Agents."""
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created), patch("reporting.settings.SANDBOX_ALLOW_INTERNET", False):
+        async with _open_backend(api_key="k", domain="sandbox.internal", template="claude"):
+            pass
+    assert "template" not in created
+    assert created["domain"] == "sandbox.internal"
 
 
 async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:

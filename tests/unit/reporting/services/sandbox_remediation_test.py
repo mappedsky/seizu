@@ -72,6 +72,7 @@ def _settings(**overrides: Any) -> ExitStack:
         "REMEDIATION_AGENT_BASE_URL": "",
         "REMEDIATION_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
+        "REMEDIATION_SANDBOX_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
         "REMEDIATION_GIT_USER": "bot",
@@ -133,6 +134,8 @@ async def test_phases_run_in_order_with_isolated_envs() -> None:
     assert "envs" not in captured
     assert captured["allow_internet"] is True
     assert captured["timeout_seconds"] == 100 + 120
+    # Empty setting → the provider's official prebuilt template.
+    assert captured["template"] == "claude"
 
     assert result.status == "completed"
     assert result.pr_url == "https://github.com/org/app/pull/42"
@@ -234,6 +237,51 @@ async def test_agent_base_url_exported_to_agent_phase() -> None:
 
     agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
     assert agent_env["ANTHROPIC_BASE_URL"] == "https://llm-gateway.internal"
+
+
+async def test_template_none_uses_base_image() -> None:
+    backend = _FakeBackend()
+    captured: dict[str, Any] = {}
+    with _settings(REMEDIATION_SANDBOX_TEMPLATE="none"), _patched_backend(backend, captured):
+        await run_remediation(**_TARGET)
+    # "none" → base image; the install phase installs the CLI itself.
+    assert captured["template"] is None
+
+
+async def test_template_explicit_override() -> None:
+    backend = _FakeBackend()
+    captured: dict[str, Any] = {}
+    with _settings(REMEDIATION_SANDBOX_TEMPLATE="my-pinned-claude"), _patched_backend(backend, captured):
+        await run_remediation(**_TARGET)
+    assert captured["template"] == "my-pinned-claude"
+
+
+async def test_codex_provider_sets_both_api_key_envs() -> None:
+    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/9\n"})
+    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    # codex reads OPENAI_API_KEY; E2B's template documents CODEX_API_KEY — set both.
+    assert agent_env["OPENAI_API_KEY"] == _AGENT_KEY
+    assert agent_env["CODEX_API_KEY"] == _AGENT_KEY
+    # Still no GitHub token in the agent phase.
+    assert "GH_TOKEN" not in agent_env
+    assert result.status == "completed"
+
+
+async def test_codex_provider_uses_codex_template() -> None:
+    backend = _FakeBackend()
+    captured: dict[str, Any] = {}
+    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_backend(backend, captured):
+        await run_remediation(**_TARGET)
+    assert captured["template"] == "codex"
+
+
+async def test_install_command_is_idempotent() -> None:
+    # Guarded with `command -v` so a prebuilt-template CLI is not reinstalled.
+    for provider in sandbox_remediation.PROVIDERS.values():
+        assert provider.install_cmd.startswith("command -v ")
 
 
 async def test_github_enterprise_host() -> None:

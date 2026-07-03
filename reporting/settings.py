@@ -292,6 +292,15 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 # or "codex".
 REMEDIATION_AGENT_PROVIDER = str_env("REMEDIATION_AGENT_PROVIDER", "claude")
 
+# E2B sandbox template for the remediation run. Empty → the provider's official
+# prebuilt template (E2B ships "claude"/"codex" images with the CLI installed),
+# which avoids a per-run npm install and its postinstall scripts. A template
+# name → that template. The literal "none" → the plain base image (the run
+# installs the CLI itself). Ignored on self-hosted backends (SANDBOX_DOMAIN set)
+# since templates are an E2B-cloud feature; the install step covers those.
+# The template provides tools only, not credentials — phase isolation is intact.
+REMEDIATION_SANDBOX_TEMPLATE = str_env("REMEDIATION_SANDBOX_TEMPLATE", "")
+
 # API key for the coding-agent CLI (exported only to the agent phase, e.g. as
 # ANTHROPIC_API_KEY). Empty → falls back to ANTHROPIC_API_KEY for "claude".
 # Prefer REMEDIATION_AGENT_API_KEY_COMMAND for short-lived per-run keys.

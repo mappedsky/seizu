@@ -106,7 +106,9 @@ environment it needs (per-command env injection — secrets are never set on the
 sandbox itself):
 
 1. **install** — install `gh` and the coding-agent CLI. *No secrets*: npm
-   packages execute third-party postinstall scripts.
+   packages execute third-party postinstall scripts. The step is idempotent
+   (`command -v … ||`), so with a prebuilt template (see below) it is a near
+   no-op, and on a plain base image it installs the tools.
 2. **setup** — clone the repository and create the work branch. *GitHub token
    only*, consumed by a process-scoped git credential helper (`git -c`), so
    nothing token-derived is written to disk.
@@ -163,6 +165,7 @@ version) that the remediation prompt is built from.
 | `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of workflows the temporal action may start. Enabling the temporal module otherwise makes every registered workflow dispatchable; this narrows it (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow picker only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (picker) and the scheduled query worker (enforcement). |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
 | `REMEDIATION_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code) or `codex`. |
+| `REMEDIATION_SANDBOX_TEMPLATE` | `""` (official) | E2B sandbox template. Empty → the provider's official prebuilt template (E2B ships first-party `claude`/`codex` images with the CLI installed), which removes the per-run `npm install` and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). `none` → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (`SANDBOX_DOMAIN` set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged. |
 | `REMEDIATION_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |
 | `REMEDIATION_AGENT_API_KEY_COMMAND` | `""` | Command run in the worker before each remediation; its stdout becomes that run's agent API key. Use it to mint **short-lived** credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. |
 | `REMEDIATION_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. |
