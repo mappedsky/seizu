@@ -360,6 +360,9 @@ async def test_github_enterprise_host() -> None:
     setup_env = next(envs for phase, envs in backend.calls if phase == "setup")
     push_env = next(envs for phase, envs in backend.calls if phase == "push")
     assert setup_env["SEIZU_GITHUB_HOST"] == "github.example.com"
+    # setup runs `gh auth setup-git` for the clone, so it needs the GHES gh env too.
+    assert setup_env["GH_HOST"] == "github.example.com"
+    assert setup_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
     assert push_env["GH_HOST"] == "github.example.com"
     assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
     # The PR URL marker is parsed host-agnostically.

@@ -305,8 +305,12 @@ REMEDIATION_AGENT_PROVIDER = str_env("REMEDIATION_AGENT_PROVIDER", "claude")
 REMEDIATION_SANDBOX_TEMPLATE = str_env("REMEDIATION_SANDBOX_TEMPLATE", "")
 
 # API key for the coding-agent CLI (exported only to the agent phase, e.g. as
-# ANTHROPIC_API_KEY). Empty → falls back to ANTHROPIC_API_KEY for "claude".
-# Prefer REMEDIATION_AGENT_API_KEY_COMMAND for short-lived per-run keys.
+# ANTHROPIC_API_KEY). Empty → falls back to the model provider's global
+# *_API_KEY (ANTHROPIC_API_KEY for claude/codex; for opencode, the one matching
+# the model prefix, e.g. DEEPSEEK_API_KEY). Prefer REMEDIATION_AGENT_API_KEY_COMMAND
+# for short-lived per-run keys. NOTE for opencode: this key must belong to the
+# provider named in REMEDIATION_AGENT_MODEL — an Anthropic key with a
+# "deepseek/…" model is exported as DEEPSEEK_API_KEY and will fail auth.
 REMEDIATION_AGENT_API_KEY = str_env("REMEDIATION_AGENT_API_KEY", "")
 
 # Optional command run in the worker before each remediation; its stdout
