@@ -57,7 +57,7 @@ def _phase_of(cmd: str) -> str:
         return "install"
     if "git checkout -b" in cmd or " clone " in cmd:
         return "setup"
-    if "claude -p" in cmd or "codex exec" in cmd:
+    if "claude -p" in cmd or "codex exec" in cmd or "opencode run" in cmd:
         return "agent"
     if "gh pr create" in cmd:
         return "push"
@@ -282,6 +282,69 @@ async def test_install_command_is_idempotent() -> None:
     # Guarded with `command -v` so a prebuilt-template CLI is not reinstalled.
     for provider in sandbox_remediation.PROVIDERS.values():
         assert provider.install_cmd.startswith("command -v ")
+
+
+# ---------------------------------------------------------------------------
+# opencode (multi-provider — e.g. DeepSeek)
+# ---------------------------------------------------------------------------
+
+
+async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
+    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/5\n"})
+    captured: dict[str, Any] = {}
+    with (
+        _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL="deepseek/deepseek-chat"),
+        _patched_backend(backend, captured),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    # The model provider prefix selects the key env opencode reads.
+    assert agent_env["DEEPSEEK_API_KEY"] == _AGENT_KEY
+    # opencode takes the model as a --model flag, passed via env.
+    assert agent_env["SEIZU_AGENT_MODEL"] == "deepseek/deepseek-chat"
+    # Still no GitHub token in the agent phase, and no unrelated provider keys.
+    assert "GH_TOKEN" not in agent_env
+    assert "ANTHROPIC_API_KEY" not in agent_env
+    assert captured["template"] == "opencode"
+    assert result.status == "completed"
+
+
+async def test_opencode_falls_back_to_global_provider_key() -> None:
+    # Parity with the chat assistant: an operator who already set DEEPSEEK_API_KEY
+    # for chat needs no remediation-specific key.
+    backend = _FakeBackend()
+    with (
+        _settings(
+            REMEDIATION_AGENT_PROVIDER="opencode",
+            REMEDIATION_AGENT_MODEL="deepseek/deepseek-reasoner",
+            REMEDIATION_AGENT_API_KEY="",
+        ),
+        patch("reporting.settings.DEEPSEEK_API_KEY", "global-deepseek-key"),
+        _patched_backend(backend),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["DEEPSEEK_API_KEY"] == "global-deepseek-key"
+    assert result.status == "completed"
+
+
+def test_opencode_requires_a_model() -> None:
+    with _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL=""):
+        assert "requires REMEDIATION_AGENT_MODEL" in (config_error() or "")
+
+
+def test_opencode_rejects_unsupported_model_provider() -> None:
+    with _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL="frobnicator/x"):
+        assert "not supported" in (config_error() or "")
+
+
+async def test_opencode_run_command_is_headless() -> None:
+    provider = sandbox_remediation.PROVIDERS["opencode"]
+    assert provider.run_cmd.startswith("opencode run ")
+    assert "$SEIZU_AGENT_MODEL" in provider.run_cmd
+    assert sandbox_remediation.PROMPT_PATH in provider.run_cmd
 
 
 async def test_github_enterprise_host() -> None:

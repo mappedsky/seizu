@@ -288,8 +288,11 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 # module (SCHEDULED_QUERY_MODULES) via admin-managed scheduled queries —
 # disable the scheduled query or remove this configuration to turn it off.
 
-# Which coding-agent CLI the remediation workflow runs: "claude" (Claude Code)
-# or "codex".
+# Which coding-agent CLI the remediation workflow runs: "claude" (Claude Code),
+# "codex", or "opencode". opencode is multi-provider — set REMEDIATION_AGENT_MODEL
+# to a "provider/model" id (e.g. "deepseek/deepseek-chat") and the matching
+# provider key is used, falling back to the same global *_API_KEY the chat
+# assistant uses (e.g. DEEPSEEK_API_KEY).
 REMEDIATION_AGENT_PROVIDER = str_env("REMEDIATION_AGENT_PROVIDER", "claude")
 
 # E2B sandbox template for the remediation run. Empty → the provider's official
@@ -319,8 +322,10 @@ REMEDIATION_AGENT_API_KEY_COMMAND = str_env("REMEDIATION_AGENT_API_KEY_COMMAND",
 # so the sandbox only ever holds a short-lived gateway key.
 REMEDIATION_AGENT_BASE_URL = str_env("REMEDIATION_AGENT_BASE_URL", "")
 
-# Model override for the coding-agent CLI (e.g. "claude-sonnet-4-6" for Claude
-# Code's ANTHROPIC_MODEL). Empty → the CLI's own default.
+# Model for the coding-agent CLI. For claude/codex a bare model override
+# (e.g. "claude-sonnet-4-6" for Claude Code's ANTHROPIC_MODEL); empty → the
+# CLI's default. For opencode this is required and takes the form
+# "provider/model" (e.g. "deepseek/deepseek-chat"), passed as --model.
 REMEDIATION_AGENT_MODEL = str_env("REMEDIATION_AGENT_MODEL", "")
 
 # Hard timeout for one remediation run (all sandbox phases). A full clone →

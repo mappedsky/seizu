@@ -92,6 +92,24 @@ class RemediationProvider:
     model_env: str | None = None
     # Env var pointing the CLI at an LLM gateway/proxy; None if unsupported.
     base_url_env: str | None = None
+    # Multi-provider CLI (opencode): the configured model's provider prefix
+    # (e.g. "deepseek" in "deepseek/deepseek-chat") selects both which standard
+    # API key env var the CLI reads and which global *_API_KEY setting we fall
+    # back to. The model is passed as a --model flag (via SEIZU_AGENT_MODEL)
+    # rather than a provider-specific model env var.
+    model_selects_key: bool = False
+
+
+# For opencode, map a model's provider prefix to (env var the CLI reads, the
+# global settings attribute we fall back to — shared with the chat assistant,
+# so an operator who already configured DeepSeek/etc. for chat needs no new key).
+_OPENCODE_MODEL_PROVIDERS: dict[str, tuple[str, str]] = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+    "openai": ("OPENAI_API_KEY", "OPENAI_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GEMINI_API_KEY"),
+    "google": ("GEMINI_API_KEY", "GEMINI_API_KEY"),
+    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
+}
 
 
 PROVIDERS: dict[str, RemediationProvider] = {
@@ -122,6 +140,21 @@ PROVIDERS: dict[str, RemediationProvider] = {
         api_key_envs=("OPENAI_API_KEY", "CODEX_API_KEY"),
         default_template="codex",
         base_url_env="OPENAI_BASE_URL",
+    ),
+    "opencode": RemediationProvider(
+        name="opencode",
+        install_cmd=(
+            "command -v opencode >/dev/null 2>&1 || npm install -g opencode-ai || sudo npm install -g opencode-ai"
+        ),
+        # opencode run is the non-interactive/headless mode; --model picks the
+        # provider/model (e.g. deepseek/deepseek-chat), read here from an env var
+        # so the operator-configured model never lands in the .format() call.
+        run_cmd=f'opencode run --model "$SEIZU_AGENT_MODEL" "$(cat {PROMPT_PATH})"',
+        # Key env is derived from the model provider prefix (see model_selects_key),
+        # so no static list applies here.
+        api_key_envs=(),
+        default_template="opencode",
+        model_selects_key=True,
     ),
 }
 
@@ -227,10 +260,13 @@ def config_error() -> str | None:
     """
     from reporting import settings
 
-    provider, static_key = _resolve_provider()
+    provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
     if provider is None:
         return f"unknown remediation provider {settings.REMEDIATION_AGENT_PROVIDER!r}"
-    if not static_key and not settings.REMEDIATION_AGENT_API_KEY_COMMAND:
+    _key_envs, fallback, err = _resolve_key_envs_and_fallback(provider)
+    if err is not None:
+        return err
+    if not (settings.REMEDIATION_AGENT_API_KEY or settings.REMEDIATION_AGENT_API_KEY_COMMAND or fallback):
         return (
             "no API key configured for the remediation agent "
             "(REMEDIATION_AGENT_API_KEY or REMEDIATION_AGENT_API_KEY_COMMAND)"
@@ -255,17 +291,29 @@ def validate_target(repo: str, base_branch: str, branch_name: str) -> str | None
     return None
 
 
-def _resolve_provider() -> tuple[RemediationProvider | None, str]:
-    """Return the configured provider and its static API key ("" when unset)."""
+def _resolve_key_envs_and_fallback(provider: RemediationProvider) -> tuple[tuple[str, ...], str, str | None]:
+    """Return ``(env var names to set, global fallback key, error)``.
+
+    For single-provider CLIs (claude/codex) the env vars are static and the
+    fallback is the global ``ANTHROPIC_API_KEY`` for claude. For opencode the
+    configured model's provider prefix selects the env var and the matching
+    global ``*_API_KEY`` fallback; a missing or unsupported model is an error.
+    """
     from reporting import settings
 
-    provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
-    if provider is None:
-        return None, ""
-    api_key = settings.REMEDIATION_AGENT_API_KEY
-    if not api_key and "ANTHROPIC_API_KEY" in provider.api_key_envs:
-        api_key = settings.ANTHROPIC_API_KEY
-    return provider, api_key
+    if not provider.model_selects_key:
+        fallback = settings.ANTHROPIC_API_KEY if "ANTHROPIC_API_KEY" in provider.api_key_envs else ""
+        return provider.api_key_envs, fallback, None
+
+    model = settings.REMEDIATION_AGENT_MODEL.strip()
+    if not model:
+        return (), "", f"{provider.name} requires REMEDIATION_AGENT_MODEL (e.g. deepseek/deepseek-chat)"
+    prefix = model.split("/", 1)[0].lower()
+    mapping = _OPENCODE_MODEL_PROVIDERS.get(prefix)
+    if mapping is None:
+        return (), "", f"model provider {prefix!r} is not supported for {provider.name}"
+    key_env, fallback_attr = mapping
+    return (key_env,), getattr(settings, fallback_attr, ""), None
 
 
 def _resolve_template(provider: RemediationProvider) -> str | None:
@@ -285,13 +333,14 @@ def _resolve_template(provider: RemediationProvider) -> str | None:
     return configured or provider.default_template
 
 
-async def _mint_agent_api_key() -> str:
+async def _mint_agent_api_key(fallback: str) -> str:
     """Return the agent API key for one run.
 
     When ``REMEDIATION_AGENT_API_KEY_COMMAND`` is set, run it and use its stdout
     — this is how operators hand the sandbox a *short-lived* per-run credential
     from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of the
-    long-lived key attached to the Seizu process. Falls back to the static key.
+    long-lived key attached to the Seizu process. Otherwise use the static
+    ``REMEDIATION_AGENT_API_KEY``, or the provider/model ``fallback`` global key.
     """
     from reporting import settings
 
@@ -312,7 +361,7 @@ async def _mint_agent_api_key() -> str:
         if not key:
             raise RuntimeError("REMEDIATION_AGENT_API_KEY_COMMAND produced no output")
         return key
-    return _resolve_provider()[1]
+    return settings.REMEDIATION_AGENT_API_KEY or fallback
 
 
 def _tail_bytes(text: str, max_bytes: int) -> str:
@@ -347,13 +396,15 @@ async def run_remediation(
         return RemediationRunResult(status="failed", error=error)
     if (error := validate_target(repo, base_branch, branch_name)) is not None:
         return RemediationRunResult(status="failed", error=error)
-    maybe_provider, _static_key = _resolve_provider()
+    maybe_provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
     if maybe_provider is None:  # unreachable: config_error() already checked
         return RemediationRunResult(status="failed", error="unknown remediation provider")
     provider: RemediationProvider = maybe_provider
+    # config_error() already validated the model/prefix, so err is None here.
+    key_envs, key_fallback, _err = _resolve_key_envs_and_fallback(provider)
 
     try:
-        api_key = await _mint_agent_api_key()
+        api_key = await _mint_agent_api_key(key_fallback)
     except Exception as exc:
         logger.exception("agent API key minting failed for %s", repo)
         return RemediationRunResult(status="failed", error=f"agent API key unavailable: {exc}")
@@ -392,8 +443,11 @@ async def run_remediation(
         "SEIZU_BRANCH": branch_name,
         "SEIZU_GITHUB_HOST": github_host,
     }
-    agent_env = {env: api_key for env in provider.api_key_envs}
-    if settings.REMEDIATION_AGENT_MODEL and provider.model_env:
+    agent_env = {env: api_key for env in key_envs}
+    if provider.model_selects_key:
+        # opencode reads the model from the --model flag (SEIZU_AGENT_MODEL in run_cmd).
+        agent_env["SEIZU_AGENT_MODEL"] = settings.REMEDIATION_AGENT_MODEL.strip()
+    elif settings.REMEDIATION_AGENT_MODEL and provider.model_env:
         agent_env[provider.model_env] = settings.REMEDIATION_AGENT_MODEL
     if settings.REMEDIATION_AGENT_BASE_URL and provider.base_url_env:
         agent_env[provider.base_url_env] = settings.REMEDIATION_AGENT_BASE_URL
