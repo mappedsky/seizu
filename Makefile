@@ -31,6 +31,16 @@ test_integration:
 test_query_validator_live: config_setup
 	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
 
+.PHONY: remediation_smoke
+# Manual, real-network smoke test of the CVE remediation sandbox auth path
+# (install gh, gh auth setup-git, clone, push a throwaway branch, delete it).
+# Runs in the temporal worker service so it inherits the SANDBOX_*/REMEDIATION_*
+# config. Requires SANDBOX_API_KEY + REMEDIATION_GITHUB_TOKEN configured.
+# Usage: make remediation_smoke SMOKE_REPO=org/repo
+remediation_smoke:
+	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) \
+		seizu-temporal-worker uv run --frozen --no-sync python scripts/remediation_smoke.py
+
 .PHONY: test_frontend
 test_frontend:
 	@docker compose run --rm --no-deps seizu-node bun run type-check
