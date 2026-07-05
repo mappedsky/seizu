@@ -100,6 +100,14 @@ class RemediationProvider:
     model_selects_key: bool = False
 
 
+# opencode prompts for edit/bash approval by default, which would stall a
+# headless run. This project config grants blanket approval (the sandbox
+# isolation is the safety boundary, as with claude's --dangerously-skip-
+# permissions). Kept out of the PR via .git/info/exclude below. Defined as a
+# plain (non-f) string so its braces don't collide with f-string/.format().
+_OPENCODE_CONFIG_JSON = '{"$schema":"https://opencode.ai/config.json","permission":"allow"}'
+
+
 # For opencode, map a model's provider prefix to (env var the CLI reads, the
 # global settings attribute we fall back to — shared with the chat assistant,
 # so an operator who already configured DeepSeek/etc. for chat needs no new key).
@@ -146,10 +154,18 @@ PROVIDERS: dict[str, RemediationProvider] = {
         install_cmd=(
             "command -v opencode >/dev/null 2>&1 || npm install -g opencode-ai || sudo npm install -g opencode-ai"
         ),
-        # opencode run is the non-interactive/headless mode; --model picks the
-        # provider/model (e.g. deepseek/deepseek-chat), read here from an env var
-        # so the operator-configured model never lands in the .format() call.
-        run_cmd=f'opencode run --model "$SEIZU_AGENT_MODEL" "$(cat {PROMPT_PATH})"',
+        # Write the blanket-approval config (project opencode.json, read from the
+        # repo root), exclude it from the PR via .git/info/exclude, then run.
+        # `opencode run` is the non-interactive/headless mode; --model picks the
+        # provider/model (e.g. deepseek/deepseek-chat), read from an env var so
+        # the operator-configured model never lands in the .format() call.
+        run_cmd=(
+            "cat > opencode.json <<'OPENCODE_EOF'\n"
+            f"{_OPENCODE_CONFIG_JSON}\n"
+            "OPENCODE_EOF\n"
+            "printf '%s\\n' 'opencode.json' '.opencode/' >> .git/info/exclude\n"
+            f'opencode run --model "$SEIZU_AGENT_MODEL" "$(cat {PROMPT_PATH})"'
+        ),
         # Key env is derived from the model provider prefix (see model_selects_key),
         # so no static list applies here.
         api_key_envs=(),

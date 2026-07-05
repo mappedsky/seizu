@@ -342,9 +342,14 @@ def test_opencode_rejects_unsupported_model_provider() -> None:
 
 async def test_opencode_run_command_is_headless() -> None:
     provider = sandbox_remediation.PROVIDERS["opencode"]
-    assert provider.run_cmd.startswith("opencode run ")
-    assert "$SEIZU_AGENT_MODEL" in provider.run_cmd
-    assert sandbox_remediation.PROMPT_PATH in provider.run_cmd
+    run_cmd = provider.run_cmd
+    assert 'opencode run --model "$SEIZU_AGENT_MODEL"' in run_cmd
+    assert sandbox_remediation.PROMPT_PATH in run_cmd
+    # Blanket-approval config so the headless run never stalls on a prompt...
+    assert '"permission":"allow"' in run_cmd
+    assert "opencode.json" in run_cmd
+    # ...written to the repo but kept out of the PR.
+    assert ".git/info/exclude" in run_cmd
 
 
 async def test_github_enterprise_host() -> None:
