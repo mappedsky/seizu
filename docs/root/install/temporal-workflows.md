@@ -110,8 +110,10 @@ sandbox itself):
    (`command -v … ||`), so with a prebuilt template (see below) it is a near
    no-op, and on a plain base image it installs the tools.
 2. **setup** — clone the repository and create the work branch. *GitHub token
-   only*, consumed by a process-scoped git credential helper (`git -c`), so
-   nothing token-derived is written to disk.
+   only*, supplied to `gh auth setup-git`, which configures git to authenticate
+   through `gh`'s credential helper reading the token from this command's
+   environment. No token is written to disk and none is embedded in the clone
+   URL, so nothing token-derived persists into the agent phase.
 3. **agent** — run the coding-agent CLI with permission prompts disabled.
    *Provider API key only* — **no GitHub token exists anywhere in the sandbox
    during this phase**, so a prompt-injected agent (repository contents and

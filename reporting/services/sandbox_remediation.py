@@ -192,18 +192,20 @@ fi
 {install_cmd}
 """
 
-# The credential helper reads GH_TOKEN from this command's environment at
-# credential-request time; `git -c` is process-scoped, so neither the token nor
-# the helper survives into the repository config for later phases.
-_GIT_AUTH = '-c credential.helper=\'!f() { echo "username=x-access-token"; echo "password=${GH_TOKEN}"; }; f\''
-
+# Auth goes through `gh` rather than a hand-rolled git credential helper: gh
+# installs its own correctly-quoted helper (`gh auth git-credential`) into git
+# config and authenticates from GH_TOKEN / GH_ENTERPRISE_TOKEN in the *current
+# command's* environment. It stores no token on disk, so the config persisting
+# into later phases is harmless — the agent phase has no token in its env, so
+# gh returns no credentials there. Never run `gh auth login` (that would persist
+# a token to ~/.config/gh). The clone/push URLs stay tokenless.
 _SETUP_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 git config --global user.name "$SEIZU_GIT_USER"
 git config --global user.email "$SEIZU_GIT_EMAIL"
-git {_GIT_AUTH} \\
-  clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
+gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
+git clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
 cd {REPO_PATH}
 git checkout -b "$SEIZU_BRANCH"
 """
@@ -223,7 +225,9 @@ if [ "$(git rev-list --count "origin/$SEIZU_BASE_BRANCH..HEAD")" -eq 0 ]; then
   echo "SEIZU_NO_CHANGES"
   exit 3
 fi
-git {_GIT_AUTH} push --force -u origin "$SEIZU_BRANCH"
+# Re-assert the gh credential helper (defensive; setup already configured it).
+gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
+git push --force -u origin "$SEIZU_BRANCH"
 PR_TITLE="$SEIZU_PR_TITLE"
 if [ -s {PR_TITLE_PATH} ]; then
   PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
@@ -510,6 +514,11 @@ async def run_remediation(
                 _SETUP_SCRIPT,
                 {
                     "GH_TOKEN": github_token,
+                    # gh reads GH_ENTERPRISE_TOKEN (not GH_TOKEN) for non-github.com
+                    # hosts, and GH_HOST scopes the credential helper; set both so
+                    # setup-git + clone authenticate on GitHub Enterprise too.
+                    "GH_ENTERPRISE_TOKEN": github_token,
+                    "GH_HOST": github_host,
                     "SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER,
                     "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL,
                     **target_env,

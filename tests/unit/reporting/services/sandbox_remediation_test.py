@@ -474,25 +474,32 @@ async def test_on_progress_called_for_output_chunks() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_setup_script_uses_process_scoped_credential_helper() -> None:
-    # `git -c` scopes the helper to the clone process; nothing token-derived is
-    # persisted into the repo config for the agent phase to read.
-    assert "credential.helper" in sandbox_remediation._SETUP_SCRIPT
-    assert "x-access-token" in sandbox_remediation._SETUP_SCRIPT
-    # The token must never be embedded in the clone URL.
-    assert "GH_TOKEN@" not in sandbox_remediation._SETUP_SCRIPT
+def test_setup_authenticates_via_gh_with_no_token_in_url() -> None:
+    setup = sandbox_remediation._SETUP_SCRIPT
+    # Auth is delegated to gh's own credential helper (correctly quoted by gh),
+    # not a hand-rolled inline helper.
+    assert "gh auth setup-git" in setup
+    assert "credential.helper='!f" not in setup
+    # The token is never interpolated into the clone URL or the script.
+    assert "$GH_TOKEN" not in setup
+    assert "GH_TOKEN@" not in setup
     # Host comes from env (GitHub Enterprise support), never hardcoded.
-    assert "$SEIZU_GITHUB_HOST" in sandbox_remediation._SETUP_SCRIPT
-    assert "github.com" not in sandbox_remediation._SETUP_SCRIPT
+    assert "$SEIZU_GITHUB_HOST" in setup
+    assert "github.com" not in setup
 
 
-def test_push_script_guards_empty_runs_and_reports_pr_url() -> None:
-    assert "SEIZU_NO_CHANGES" in sandbox_remediation._PUSH_SCRIPT
-    assert "SEIZU_PR_URL=" in sandbox_remediation._PUSH_SCRIPT
-    assert "gh pr create" in sandbox_remediation._PUSH_SCRIPT
+def test_push_uses_gh_auth_and_reports_pr_url() -> None:
+    push = sandbox_remediation._PUSH_SCRIPT
+    assert "SEIZU_NO_CHANGES" in push
+    assert "SEIZU_PR_URL=" in push
+    assert "gh pr create" in push
+    assert "gh auth setup-git" in push
+    assert "git push --force" in push
+    # gh's helper supplies auth; the token is never in the push command.
+    assert "$GH_TOKEN" not in push
     # The agent-written title file wins over the fallback env title.
-    assert sandbox_remediation.PR_TITLE_PATH in sandbox_remediation._PUSH_SCRIPT
-    assert '"$SEIZU_PR_TITLE"' in sandbox_remediation._PUSH_SCRIPT
+    assert sandbox_remediation.PR_TITLE_PATH in push
+    assert '"$SEIZU_PR_TITLE"' in push
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:
