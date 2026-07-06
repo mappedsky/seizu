@@ -255,6 +255,10 @@ PR_TITLE="$SEIZU_PR_TITLE"
 if [ -s {PR_TITLE_PATH} ]; then
   PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
 fi
+# Enforce the "no CVE references in public artifacts" policy deterministically on
+# the PR title/body the agent wrote, rather than trusting the prompt alone.
+PR_TITLE="$(printf '%s' "$PR_TITLE" | sed -E 's/CVE-[0-9]{{4}}-[0-9]+//g')"
+sed -i -E 's/CVE-[0-9]{{4}}-[0-9]+//g' {PR_BODY_PATH} || true
 PR_URL="$(gh pr create --base "$SEIZU_BASE_BRANCH" --head "$SEIZU_BRANCH" \\
     --title "$PR_TITLE" --body-file {PR_BODY_PATH} 2>/dev/null \\
   || gh pr view "$SEIZU_BRANCH" --json url --jq .url)"
@@ -338,14 +342,17 @@ def _resolve_key_envs_and_fallback(provider: RemediationProvider) -> tuple[tuple
     """Return ``(env var names to set, global fallback key, error)``.
 
     For single-provider CLIs (claude/codex) the env vars are static and the
-    fallback is the global ``ANTHROPIC_API_KEY`` for claude. For opencode the
-    configured model's provider prefix selects the env var and the matching
-    global ``*_API_KEY`` fallback; a missing or unsupported model is an error.
+    fallback is the global setting matching one of them (``ANTHROPIC_API_KEY`` for
+    claude, ``OPENAI_API_KEY`` for codex). For opencode the configured model's
+    provider prefix selects the env var and the matching global ``*_API_KEY``
+    fallback; a missing or unsupported model is an error.
     """
     from reporting import settings
 
     if not provider.model_selects_key:
-        fallback = settings.ANTHROPIC_API_KEY if "ANTHROPIC_API_KEY" in provider.api_key_envs else ""
+        # Fall back to the global provider key matching one of the CLI's key env
+        # vars (e.g. codex → OPENAI_API_KEY), not just ANTHROPIC_API_KEY.
+        fallback = next((v for env in provider.api_key_envs if (v := getattr(settings, env, ""))), "")
         return provider.api_key_envs, fallback, None
 
     model = settings.REMEDIATION_AGENT_MODEL.strip()
@@ -389,6 +396,8 @@ async def _mint_agent_api_key(fallback: str) -> str:
 
     command = settings.REMEDIATION_AGENT_API_KEY_COMMAND
     if command:
+        # Shell is intentional: the command is operator-configured and often a
+        # pipeline (e.g. `vault read … | jq -r .token`).
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
@@ -396,10 +405,14 @@ async def _mint_agent_api_key(fallback: str) -> str:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"REMEDIATION_AGENT_API_KEY_COMMAND failed with exit code {proc.returncode}: "
-                f"{stderr.decode(errors='replace').strip()[:200]}"
+            # Broker stderr can carry sensitive context — log it server-side only
+            # and surface a generic error (it flows into the workflow result).
+            logger.warning(
+                "REMEDIATION_AGENT_API_KEY_COMMAND failed (exit %s): %s",
+                proc.returncode,
+                stderr.decode(errors="replace").strip()[:200],
             )
+            raise RuntimeError(f"REMEDIATION_AGENT_API_KEY_COMMAND failed with exit code {proc.returncode}")
         key = stdout.decode(errors="replace").strip()
         if not key:
             raise RuntimeError("REMEDIATION_AGENT_API_KEY_COMMAND produced no output")

@@ -16,7 +16,7 @@ from reporting.temporal_workflows.shared import DependencyRemediationInput, Repo
 _NOW = "2024-01-01T00:00:00+00:00"
 
 
-def _current_user() -> CurrentUser:
+def _current_user(permissions: frozenset[str] | None = None) -> CurrentUser:
     return CurrentUser(
         user=User(
             user_id="user-1",
@@ -28,7 +28,9 @@ def _current_user() -> CurrentUser:
             role="seizu-admin",
         ),
         jwt_claims={},
-        permissions=frozenset({"chat:skills:call", "skills:render", "chat:bypass_permissions"}),
+        permissions=permissions
+        if permissions is not None
+        else frozenset({"chat:skills:call", "skills:render", "chat:bypass_permissions", "scheduled_queries:write"}),
     )
 
 
@@ -308,4 +310,21 @@ async def test_remediation_config_error_is_non_retryable(mocker):
     with pytest.raises(ApplicationError) as exc_info:
         await ActivityEnvironment().run(run_dependency_remediation, _remediation_input())
     assert exc_info.value.non_retryable is True
+    run.assert_not_called()
+
+
+async def test_remediation_requires_scheduled_queries_write_at_runtime(mocker):
+    # Re-check authority per run: a creator whose role no longer grants
+    # scheduled_queries:write (downgrade / custom role) is refused, without
+    # needing archival — the run wields a global GitHub write token.
+    mocker.patch(
+        "reporting.temporal_workflows.activities.resolve_stored_user",
+        mocker.AsyncMock(return_value=_current_user(permissions=frozenset({"chat:skills:call"}))),
+    )
+    run = mocker.patch("reporting.services.sandbox_remediation.run_remediation")
+
+    with pytest.raises(ApplicationError) as exc_info:
+        await ActivityEnvironment().run(run_dependency_remediation, _remediation_input())
+    assert exc_info.value.non_retryable is True
+    assert "scheduled_queries:write" in str(exc_info.value)
     run.assert_not_called()

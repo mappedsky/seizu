@@ -208,16 +208,25 @@ def _pr_body_fallback(package: str) -> str:
 async def run_dependency_remediation(input: DependencyRemediationInput) -> DependencyRemediationResult:
     """Remediate one vulnerable dependency in one repository via the sandbox.
 
-    Drives ``sandbox_remediation.run_remediation`` directly — no chat session
-    and no per-user permission. The scheduled query's creator is still resolved
-    so archived users hard-stop their automations, and the run is audit-logged
-    against them. Credential isolation (the coding agent never sees the GitHub
-    token) is handled inside the remediation service.
+    Drives ``sandbox_remediation.run_remediation`` directly — no chat session.
+    The scheduled query's creator is resolved so archived users hard-stop their
+    automations, and — because this workflow wields a global GitHub write token —
+    their authority to run it is re-checked each run: they must still hold
+    ``scheduled_queries:write`` (the permission that gated creating the schedule).
+    This catches a role downgrade or a custom role that never had it, not only
+    archival. The run is audit-logged against them; credential isolation (the
+    coding agent never sees the GitHub token) is handled in the remediation service.
     """
     try:
         current_user = await resolve_stored_user(input.creator_user_id)
     except HeadlessIdentityError as exc:
         raise ApplicationError(str(exc), non_retryable=True) from exc
+
+    if Permission.SCHEDULED_QUERIES_WRITE not in current_user.permissions:
+        raise ApplicationError(
+            f"Creator {current_user.user.user_id} lacks scheduled_queries:write; refusing remediation",
+            non_retryable=True,
+        )
 
     if (config_error := sandbox_remediation.config_error()) is not None:
         raise ApplicationError(f"Remediation unavailable: {config_error}", non_retryable=True)

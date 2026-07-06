@@ -294,6 +294,22 @@ async def test_codex_provider_sets_both_api_key_envs() -> None:
     assert result.status == "completed"
 
 
+async def test_codex_falls_back_to_global_openai_key() -> None:
+    # codex must fall back to the global OPENAI_API_KEY (not ANTHROPIC), matching
+    # the provider-global fallback the docs promise.
+    backend = _FakeBackend()
+    with (
+        _settings(REMEDIATION_AGENT_PROVIDER="codex", REMEDIATION_AGENT_API_KEY=""),
+        patch("reporting.settings.OPENAI_API_KEY", "global-openai-key"),
+        _patched_backend(backend),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    assert agent_env["OPENAI_API_KEY"] == "global-openai-key"
+    assert result.status == "completed"
+
+
 async def test_codex_provider_uses_codex_template() -> None:
     backend = _FakeBackend()
     captured: dict[str, Any] = {}
@@ -527,6 +543,10 @@ def test_push_uses_gh_auth_and_reports_pr_url() -> None:
     # The agent-written title file wins over the fallback env title.
     assert sandbox_remediation.PR_TITLE_PATH in push
     assert '"$SEIZU_PR_TITLE"' in push
+    # CVE identifiers are scrubbed from the PR title/body deterministically,
+    # not just requested in the prompt.
+    assert "CVE-[0-9]" in push
+    assert push.index("sed") < push.index("gh pr create")
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:
