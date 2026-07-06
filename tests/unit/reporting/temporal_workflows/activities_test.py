@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -153,6 +155,7 @@ def _remediation_input() -> DependencyRemediationInput:
                 "ecosystem": "pip",
                 "default_branch": "develop",
                 "severity": "HIGH",
+                "patched_version": "2.32.4",
                 "url": "https://github.com/org/app/security/dependabot/1",
             }
         ],
@@ -189,9 +192,10 @@ async def test_run_dependency_remediation(mocker):
 
     kwargs = run.await_args.kwargs
     assert kwargs["repo"] == "org/app"
-    # base_branch comes from the row data; branch name is deterministic.
+    # base_branch comes from the row data; the branch is keyed on the target
+    # version so re-runs of the same fix converge and later fixes get their own.
     assert kwargs["base_branch"] == "develop"
-    assert kwargs["branch_name"] == "seizu/dependency-update/pip-requests"
+    assert kwargs["branch_name"] == "seizu/dependency-update/pip-requests-2.32.4"
     # Public PR artifacts present a routine dependency bump — no CVE ids
     # (Dependabot-style; the fix is not advertised before it merges).
     assert kwargs["pr_title"] == "Bump requests"
@@ -251,7 +255,32 @@ async def test_run_dependency_remediation_defaults_missing_fields(mocker):
 
     kwargs = run.await_args.kwargs
     assert kwargs["base_branch"] == "main"
-    assert kwargs["branch_name"] == "seizu/dependency-update/dep-requests"
+    # No ecosystem and no patched_version → hash fallback keeps the branch unique.
+    assert re.fullmatch(r"seizu/dependency-update/dep-requests-[0-9a-f]{10}", kwargs["branch_name"])
+
+
+def test_remediation_branch_keys_on_highest_target_version():
+    from reporting.temporal_workflows.activities import _remediation_branch
+
+    rows = [
+        {"ecosystem": "pip", "cve_id": "CVE-1", "patched_version": "2.9.0"},
+        {"ecosystem": "pip", "cve_id": "CVE-2", "patched_version": "2.10.0"},
+    ]
+    # Numeric ordering (2.10.0 > 2.9.0), not lexical; dots preserved for readability.
+    assert _remediation_branch(rows, "urllib3") == "seizu/dependency-update/pip-urllib3-2.10.0"
+
+
+def test_remediation_branch_hash_fallback_is_stable_and_distinct():
+    from reporting.temporal_workflows.activities import _remediation_branch
+
+    base = [{"ecosystem": "npm", "cve_id": "CVE-1"}, {"ecosystem": "npm", "cve_id": "CVE-2"}]
+    # Same CVE set (any order) → same branch; a new CVE → a different branch.
+    b1 = _remediation_branch(base, "lodash")
+    b2 = _remediation_branch(list(reversed(base)), "lodash")
+    b3 = _remediation_branch(base + [{"ecosystem": "npm", "cve_id": "CVE-3"}], "lodash")
+    assert b1 == b2
+    assert b1 != b3
+    assert b1.startswith("seizu/dependency-update/npm-lodash-")
 
 
 async def test_remediation_identity_failure_is_non_retryable(mocker):

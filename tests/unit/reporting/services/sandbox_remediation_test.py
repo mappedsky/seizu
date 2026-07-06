@@ -57,6 +57,8 @@ def _phase_of(cmd: str) -> str:
         return "install"
     if "git checkout -b" in cmd or " clone " in cmd:
         return "setup"
+    if "gh pr list --head" in cmd:
+        return "guard"
     if "claude -p" in cmd or "codex exec" in cmd or "opencode run" in cmd:
         return "agent"
     if "gh pr create" in cmd:
@@ -109,19 +111,22 @@ async def test_phases_run_in_order_with_isolated_envs() -> None:
     with _settings(), _patched_backend(backend, captured):
         result = await run_remediation(**_TARGET)
 
-    assert [phase for phase, _ in backend.calls] == ["install", "setup", "agent", "push"]
-    install_env, setup_env, agent_env, push_env = (envs for _, envs in backend.calls)
+    assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard", "agent", "push"]
+    install_env, setup_env, guard_env, agent_env, push_env = (envs for _, envs in backend.calls)
 
     # Phase 1: third-party install scripts run with no secrets at all.
     assert install_env == {}
     # Phase 2: GitHub token present for the clone; no agent key.
     assert setup_env["GH_TOKEN"] == _GH_TOKEN
     assert "ANTHROPIC_API_KEY" not in setup_env
-    # Phase 3: THE invariant — the coding agent never sees the GitHub token.
+    # Guard: GitHub token (to query PRs), no agent key.
+    assert guard_env["GH_TOKEN"] == _GH_TOKEN
+    assert "ANTHROPIC_API_KEY" not in guard_env
+    # Agent phase: THE invariant — the coding agent never sees the GitHub token.
     assert agent_env == {"ANTHROPIC_API_KEY": _AGENT_KEY}
     assert "GH_TOKEN" not in agent_env
     assert "GITHUB_TOKEN" not in agent_env
-    # Phase 4: GitHub token returns for push/PR; no agent key.
+    # Push: GitHub token returns for push/PR; no agent key.
     assert push_env["GH_TOKEN"] == _GH_TOKEN
     assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
     assert push_env["GH_HOST"] == "github.com"
@@ -139,6 +144,25 @@ async def test_phases_run_in_order_with_isolated_envs() -> None:
 
     assert result.status == "completed"
     assert result.pr_url == "https://github.com/org/app/pull/42"
+
+
+async def test_guard_skips_agent_and_push_when_open_pr_exists() -> None:
+    # The guard phase finds an existing open PR → the expensive agent and the
+    # push never run, and the result reports the existing PR as skipped.
+    backend = _FakeBackend(outputs={"guard": "SEIZU_PR_EXISTS=https://github.com/org/app/pull/9\n"})
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard"]
+    assert result.status == "skipped"
+    assert result.pr_url == "https://github.com/org/app/pull/9"
+
+
+def test_guard_script_checks_for_open_pr() -> None:
+    guard = sandbox_remediation._GUARD_SCRIPT
+    assert "gh pr list --head" in guard
+    assert "--state open" in guard
+    assert "SEIZU_PR_EXISTS=" in guard
 
 
 async def test_no_secrets_written_to_sandbox_files() -> None:
@@ -441,7 +465,7 @@ async def test_phase_failure_returns_masked_output() -> None:
     assert _GH_TOKEN not in result.output_tail
     assert "partial with" in result.output_tail
     # The push phase never ran after the agent failed.
-    assert [phase for phase, _ in backend.calls] == ["install", "setup", "agent"]
+    assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard", "agent"]
 
 
 async def test_no_changes_committed_is_a_distinct_error() -> None:

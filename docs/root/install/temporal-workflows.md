@@ -79,12 +79,20 @@ Where `cve_repo_report` *assesses*, `cve_dependency_remediation` *fixes*: per
 (repository, vulnerable dependency package) group, the workflow activity drives
 an ephemeral sandbox directly (no chat session, no MCP tool) and runs a
 headless coding-agent CLI (Claude Code by default; `codex` also supported via
-`REMEDIATION_AGENT_PROVIDER`). The agent works on a deterministic bot-owned
-branch (`seizu/dependency-update/{ecosystem}-{package}`): it upgrades the
-dependency in every affected manifest — including any code changes needed for
-compatibility, not just a version bump — runs the repository's test suite, and
-writes the PR title and body. The workflow then pushes the branch and opens
-(or updates) the pull request.
+`REMEDIATION_AGENT_PROVIDER`). The agent works on a bot-owned branch keyed on
+the target version (`seizu/dependency-update/{ecosystem}-{package}-{version}`,
+Dependabot-style; a short CVE-set hash replaces the version when no fixed
+version is known): it upgrades the dependency in every affected manifest —
+including any code changes needed for compatibility, not just a version bump —
+runs the repository's test suite, and writes the PR title and body. The
+workflow then pushes the branch and opens (or updates) the pull request.
+
+Before the agent runs, a guard checks whether an open PR already exists for the
+branch and, if so, skips the run entirely (status `skipped`) — so repeated
+syncs that re-select the same pending fix don't re-run the expensive agent or
+force-push over a PR under review. Because the branch is version-keyed, a
+*later* fix that needs a higher version gets its own branch and PR instead of
+colliding with (or clobbering) the earlier one.
 
 Two deliberate policies shape the result:
 

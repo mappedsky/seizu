@@ -5,6 +5,7 @@ the workflow sandbox, so they may use the chat graph, the report store, and
 MCP runtime freely.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -142,14 +143,49 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "dep"
 
 
-def _remediation_branch(rows: list[dict[str, object]], package: str) -> str:
-    """Deterministic bot-owned branch so re-runs update the existing PR.
+def _version_slug(version: str) -> str:
+    """Sanitize a version for a git branch, keeping dots (2.32.4 → 2.32.4)."""
+    slug = re.sub(r"\.\.+", ".", re.sub(r"[^a-z0-9.]+", "-", version.lower())).strip("-.")
+    return slug or "0"
 
-    Like the PR title/body, the branch name deliberately does not reference
-    CVEs — the update is presented as a routine dependency bump.
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """Numeric ordering key for a version string (2.10.0 > 2.9.0), dependency-free.
+
+    Ignores non-numeric suffixes (pre-release tags etc.); good enough to pick the
+    highest patched version deterministically for a branch name.
+    """
+    return tuple(int(p) for p in re.findall(r"\d+", version)) or (0,)
+
+
+def _target_version(rows: list[dict[str, object]]) -> str | None:
+    """Highest known ``patched_version`` across the rows, or None if none known."""
+    versions = sorted({str(r["patched_version"]).strip() for r in rows if r.get("patched_version")})
+    return max(versions, key=_version_key) if versions else None
+
+
+def _cve_ids(rows: list[dict[str, object]]) -> list[str]:
+    return sorted({str(r["cve_id"]) for r in rows if r.get("cve_id")})
+
+
+def _remediation_branch(rows: list[dict[str, object]], package: str) -> str:
+    """Deterministic bot-owned branch, keyed on the target so re-runs of the
+    *same* fix converge (one PR) while a *later, different* fix for the same
+    package gets its own branch instead of colliding with the earlier one.
+
+    The key is the target version (Dependabot-style, e.g. ``…-urllib-2.2.0``);
+    when no fixed version is known it falls back to a short hash of the CVE set,
+    so distinct vulnerability sets still get distinct branches. Like the PR
+    title/body, the branch never contains CVE ids — the update is presented as a
+    routine dependency bump.
     """
     ecosystem = next((str(r["ecosystem"]) for r in rows if r.get("ecosystem")), "dep")
-    return f"seizu/dependency-update/{_slug(ecosystem)}-{_slug(package)}"
+    base = f"seizu/dependency-update/{_slug(ecosystem)}-{_slug(package)}"
+    target = _target_version(rows)
+    if target:
+        return f"{base}-{_version_slug(target)}"
+    digest = hashlib.sha1("\n".join(_cve_ids(rows)).encode()).hexdigest()[:10]
+    return f"{base}-{digest}"
 
 
 def _pr_title(package: str) -> str:

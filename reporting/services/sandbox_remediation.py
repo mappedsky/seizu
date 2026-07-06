@@ -16,13 +16,19 @@ creation; each phase is a separate command with only the environment it needs
    near no-op when a prebuilt template already ships the CLI
    (``REMEDIATION_SANDBOX_TEMPLATE``) and a full install on the base image.
 2. **setup** — clone the repo and create the work branch. ``GH_TOKEN`` only,
-   consumed by a process-scoped git credential helper (``git -c``), so nothing
-   token-derived is written to disk.
-3. **agent** — run the coding-agent CLI. Provider API key only; **no GitHub
+   authenticated via ``gh auth setup-git`` (gh's own credential helper reads the
+   token from this command's env), so nothing token-derived is written to disk.
+3. **guard** — if an open PR already exists for the branch, print a marker and
+   stop before the agent runs (skips the expensive coding-agent work). ``GH_TOKEN`` only.
+4. **agent** — run the coding-agent CLI. Provider API key only; **no GitHub
    token exists anywhere in the sandbox during this phase**, so a prompt-injected
    agent has nothing to exfiltrate and no ability to push.
-4. **push** — verify the agent committed changes, force-push the bot-owned
+5. **push** — verify the agent committed changes, force-push the bot-owned
    branch, and create (or find) the PR. ``GH_TOKEN`` only.
+
+The work branch is keyed on the target version (``…/{ecosystem}-{package}-{version}``),
+so re-runs of the same pending fix converge on one PR while a later, different
+fix for the same package gets its own branch.
 
 The pushed branch still requires human PR review to land — keep branch
 protection enabled on target repositories.
@@ -57,6 +63,9 @@ _GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 # extraction host-agnostic (github.com and GitHub Enterprise alike).
 _PR_URL_MARKER_RE = re.compile(r"SEIZU_PR_URL=(https?://\S+)")
 _PR_URL_FALLBACK_RE = re.compile(r"https?://[^\s\"']+/pull/\d+")
+# The guard phase prints this when an open PR for the branch already exists,
+# so the run skips the coding agent and push entirely.
+_PR_EXISTS_MARKER_RE = re.compile(r"SEIZU_PR_EXISTS=(https?://\S+)")
 
 # Call on_progress at least this often even when a phase produces no output
 # (e.g. the agent quietly running a long test suite), so Temporal heartbeats
@@ -215,6 +224,20 @@ set -euo pipefail
 export PATH="$PATH:/usr/local/bin:$HOME/.local/bin:$(npm prefix -g 2>/dev/null)/bin"
 cd {REPO_PATH}
 {{run_cmd}}
+"""
+
+# Guard: if an open PR already exists for this branch, there is nothing to do —
+# skip the expensive coding-agent run. Runs after the clone (origin is set, gh
+# is configured). `gh pr list --head` matches by branch name on the remote.
+_GUARD_SCRIPT = f"""\
+set -euo pipefail
+export GIT_TERMINAL_PROMPT=0
+cd {REPO_PATH}
+gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
+URL="$(gh pr list --head "$SEIZU_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)"
+if [ -n "$URL" ]; then
+  echo "SEIZU_PR_EXISTS=$URL"
+fi
 """
 
 _PUSH_SCRIPT = f"""\
@@ -502,28 +525,32 @@ async def run_remediation(
             # self-hosted backends.
             template=template,
         ) as backend:
+            # gh reads GH_ENTERPRISE_TOKEN (not GH_TOKEN) for non-github.com hosts,
+            # and GH_HOST scopes the credential helper; set both so gh works on
+            # GitHub Enterprise too. Shared by the setup, guard, and push phases.
+            gh_env = {"GH_TOKEN": github_token, "GH_ENTERPRISE_TOKEN": github_token, "GH_HOST": github_host}
             # Neither file contains secrets.
             await backend.write_file(PROMPT_PATH, full_prompt)
             await backend.write_file(PR_BODY_PATH, pr_body_fallback)
             # Phase 1: no secrets while third-party install scripts run.
             await _phase(backend, "install", _INSTALL_SCRIPT_TEMPLATE.format(install_cmd=provider.install_cmd), {})
-            # Phase 2: GitHub token only, consumed by a process-scoped helper.
+            # Phase 2: clone + branch. GitHub token only (gh credential helper).
             await _phase(
                 backend,
                 "setup",
                 _SETUP_SCRIPT,
                 {
-                    "GH_TOKEN": github_token,
-                    # gh reads GH_ENTERPRISE_TOKEN (not GH_TOKEN) for non-github.com
-                    # hosts, and GH_HOST scopes the credential helper; set both so
-                    # setup-git + clone authenticate on GitHub Enterprise too.
-                    "GH_ENTERPRISE_TOKEN": github_token,
-                    "GH_HOST": github_host,
+                    **gh_env,
                     "SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER,
                     "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL,
                     **target_env,
                 },
             )
+            # Guard: if an open PR already exists for this branch, stop here —
+            # skip the expensive coding-agent run and the push.
+            guard_output = await _phase(backend, "guard", _GUARD_SCRIPT, {**gh_env, **target_env})
+            if _PR_EXISTS_MARKER_RE.search(guard_output):
+                return guard_output
             # Phase 3: the coding agent runs with no GitHub token anywhere in
             # the sandbox — it can commit locally but cannot push or leak it.
             await _phase(
@@ -533,20 +560,7 @@ async def run_remediation(
                 agent_env,
             )
             # Phase 4: push the bot-owned branch and create/find the PR.
-            # GH_HOST points gh at the right host; gh reads GH_ENTERPRISE_TOKEN
-            # (not GH_TOKEN) for GitHub Enterprise hosts, so set both.
-            return await _phase(
-                backend,
-                "push",
-                _PUSH_SCRIPT,
-                {
-                    "GH_TOKEN": github_token,
-                    "GH_ENTERPRISE_TOKEN": github_token,
-                    "GH_HOST": github_host,
-                    "SEIZU_PR_TITLE": pr_title,
-                    **target_env,
-                },
-            )
+            return await _phase(backend, "push", _PUSH_SCRIPT, {**gh_env, "SEIZU_PR_TITLE": pr_title, **target_env})
 
     async def _ticker() -> None:
         while True:
@@ -558,7 +572,7 @@ async def run_remediation(
     try:
         # _remaining() bounds each phase; the outer wait_for also covers sandbox
         # creation and file writes.
-        push_output = await asyncio.wait_for(_run(), timeout=timeout + 60)
+        final_output = await asyncio.wait_for(_run(), timeout=timeout + 60)
     except TimeoutError:
         return RemediationRunResult(
             status="failed", error=f"remediation timed out after {timeout}s", output_tail=_tail()
@@ -573,9 +587,12 @@ async def run_remediation(
     finally:
         ticker.cancel()
 
-    masked_push = _mask(push_output)
-    markers = _PR_URL_MARKER_RE.findall(masked_push)
-    fallbacks = _PR_URL_FALLBACK_RE.findall(masked_push)
+    masked = _mask(final_output)
+    # Guard short-circuit: an open PR already existed, so nothing was run/pushed.
+    if existing := _PR_EXISTS_MARKER_RE.findall(masked):
+        return RemediationRunResult(status="skipped", pr_url=existing[-1], output_tail=_tail())
+    markers = _PR_URL_MARKER_RE.findall(masked)
+    fallbacks = _PR_URL_FALLBACK_RE.findall(masked)
     return RemediationRunResult(
         status="completed",
         # The push phase prints the created (or pre-existing) PR URL last.
