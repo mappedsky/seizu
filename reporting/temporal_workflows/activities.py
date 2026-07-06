@@ -150,18 +150,28 @@ def _version_slug(version: str) -> str:
 
 
 def _version_key(version: str) -> tuple[int, ...]:
-    """Numeric ordering key for a version string (2.10.0 > 2.9.0), dependency-free.
-
-    Ignores non-numeric suffixes (pre-release tags etc.); good enough to pick the
-    highest patched version deterministically for a branch name.
-    """
+    """Dependency-free numeric ordering key (2.10.0 > 2.9.0). Ignores non-numeric
+    suffixes; a deterministic fallback for versions ``packaging`` can't parse."""
     return tuple(int(p) for p in re.findall(r"\d+", version)) or (0,)
 
 
 def _target_version(rows: list[dict[str, object]]) -> str | None:
-    """Highest known ``patched_version`` across the rows, or None if none known."""
+    """Highest known ``patched_version`` across the rows, or None if none known.
+
+    Uses ``packaging.version`` (correct PEP 440 ordering, incl. pre-releases) when
+    every version parses; falls back to :func:`_version_key` for ecosystems it
+    doesn't understand (npm ranges, etc.). Only picks a deterministic branch-name
+    label — the agent installs the actual version.
+    """
     versions = sorted({str(r["patched_version"]).strip() for r in rows if r.get("patched_version")})
-    return max(versions, key=_version_key) if versions else None
+    if not versions:
+        return None
+    try:
+        from packaging.version import Version
+
+        return max(versions, key=Version)
+    except Exception:
+        return max(versions, key=_version_key)
 
 
 def _cve_ids(rows: list[dict[str, object]]) -> list[str]:

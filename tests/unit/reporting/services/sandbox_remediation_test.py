@@ -1,5 +1,6 @@
 """Tests for the phase-isolated sandbox remediation service."""
 
+import logging
 from contextlib import ExitStack, asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -118,6 +119,7 @@ def _settings(**overrides: Any) -> ExitStack:
         "REMEDIATION_AGENT_BASE_URL": "",
         "REMEDIATION_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
+        "REMEDIATION_GH_SHA256": "",
         "REMEDIATION_SANDBOX_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
@@ -602,9 +604,8 @@ def test_push_script_applies_patch_in_a_fresh_clone_and_reports_pr_url() -> None
     # The agent-written title file wins over the fallback env title.
     assert sandbox_remediation.PR_TITLE_PATH in push
     assert '"$SEIZU_PR_TITLE"' in push
-    # CVE identifiers are scrubbed from the title/body/commit deterministically.
-    assert "CVE-[0-9]" in push
-    assert push.index("sed") < push.index("gh pr create")
+    # No CVE scrubbing — the policy is left to the agent prompt (CVEs are public).
+    assert "sed" not in push
 
 
 def test_push_install_has_no_agent_cli_or_npm() -> None:
@@ -614,6 +615,50 @@ def test_push_install_has_no_agent_cli_or_npm() -> None:
     # Pinned, checksum-verified gh (no "latest").
     assert "sha256sum -c" in sandbox_remediation._GH_INSTALL
     assert "releases/latest" not in sandbox_remediation._GH_INSTALL
+
+
+def test_gh_install_supports_independent_sha256_pin() -> None:
+    # When REMEDIATION_GH_SHA256 is set, gh is verified against that out-of-band
+    # digest; otherwise against the release's own checksums.
+    assert "SEIZU_GH_SHA256" in sandbox_remediation._GH_INSTALL
+    assert "gh_checksums.txt" in sandbox_remediation._GH_INSTALL  # fallback path
+
+
+async def test_gh_sha256_digest_reaches_the_install_phases() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    opens: list[dict[str, Any]] = []
+    with _settings(REMEDIATION_GH_SHA256="abc123"), _patched_open([agent, push], opens):
+        await run_remediation(**_TARGET)
+
+    assert dict(agent.calls)["install"]["SEIZU_GH_SHA256"] == "abc123"
+    assert dict(push.calls)["push_install"]["SEIZU_GH_SHA256"] == "abc123"
+
+
+async def test_gh_sha256_absent_by_default() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    with _settings(), _patched_open([agent, push], []):
+        await run_remediation(**_TARGET)
+    # Empty setting → no SEIZU_GH_SHA256 (falls back to release checksums).
+    assert "SEIZU_GH_SHA256" not in dict(agent.calls)["install"]
+
+
+async def test_warns_when_using_a_long_lived_agent_key(caplog: pytest.LogCaptureFixture) -> None:
+    # A static key (no key-mint command) is exposed to untrusted repo code — warn.
+    sandbox_remediation._warned_static_key = False
+    try:
+        agent = _FakeBackend()
+        push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+        with (
+            _settings(REMEDIATION_AGENT_API_KEY_COMMAND=""),
+            _patched_open([agent, push], []),
+            caplog.at_level(logging.WARNING),
+        ):
+            await run_remediation(**_TARGET)
+        assert any("long-lived API key" in r.message for r in caplog.records)
+    finally:
+        sandbox_remediation._warned_static_key = False
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:

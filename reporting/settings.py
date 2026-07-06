@@ -336,6 +336,13 @@ REMEDIATION_AGENT_MODEL = str_env("REMEDIATION_AGENT_MODEL", "")
 # upgrade → test → PR cycle on a large repo can take tens of minutes.
 REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 
+# Optional expected SHA-256 of the pinned gh linux_amd64 release tarball. When
+# set, the install verifies gh against this out-of-band digest (an independent
+# pin) instead of the release's own checksums file. Since the installed gh later
+# handles the GitHub token, set this (or bake gh into a pinned sandbox image) for
+# a supply-chain guarantee. Empty → verify against the release checksums only.
+REMEDIATION_GH_SHA256 = str_env("REMEDIATION_GH_SHA256", "")
+
 # GitHub host the target repositories live on. "github.com" or a GitHub
 # Enterprise Server hostname (e.g. "github.example.com").
 REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")

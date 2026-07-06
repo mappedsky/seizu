@@ -100,12 +100,11 @@ Two deliberate policies shape the result:
   that clears every vulnerable range, preferring the current version family
   (same major, then same minor); it crosses a major version only when no fixed
   release exists in the current family.
-- **No CVE references in public artifacts.** Like Dependabot, the branch name,
-  commits, PR title, and body present the change as a routine dependency bump
-  (`Bump requests from 2.31.0 to 2.32.4`), without CVE identifiers or advisory
-  links — a PR is public until merged, and naming the vulnerability would
-  advertise the unpatched window. The CVE context lives in Seizu (workflow
-  results, audit logs), not in the PR.
+- **Routine-looking PRs.** The agent is prompted to present the change as an
+  ordinary dependency bump (`Bump requests from 2.31.0 to 2.32.4`) without CVE
+  identifiers — a Dependabot-style convention. This is prompt guidance only,
+  not enforced: CVE ids are public and discoverable from the repo's dependency
+  manifest anyway, so it is a nicety rather than a security control.
 
 ### Phase-isolated credentials
 
@@ -177,10 +176,11 @@ version) that the remediation prompt is built from.
 | `REMEDIATION_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code), `codex`, or `opencode`. `opencode` is multi-provider — set `REMEDIATION_AGENT_MODEL` to a `provider/model` id (e.g. `deepseek/deepseek-chat`) and it uses that provider's key, reusing the same global `*_API_KEY` (e.g. `DEEPSEEK_API_KEY`) the chat assistant uses. For opencode, an explicit `REMEDIATION_AGENT_API_KEY` must belong to the model's provider — an Anthropic key with a `deepseek/…` model is exported as `DEEPSEEK_API_KEY` and fails auth. |
 | `REMEDIATION_SANDBOX_TEMPLATE` | `""` (official) | E2B sandbox template. Empty → the provider's official prebuilt template (E2B ships first-party `claude`/`codex` images with the CLI installed), which removes the per-run `npm install` and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). `none` → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (`SANDBOX_DOMAIN` set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged. |
 | `REMEDIATION_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |
-| `REMEDIATION_AGENT_API_KEY_COMMAND` | `""` | Command run in the worker before each remediation; its stdout becomes that run's agent API key. Use it to mint **short-lived** credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. |
+| `REMEDIATION_AGENT_API_KEY_COMMAND` | `""` | Command run in the worker before each remediation; its stdout becomes that run's agent API key. Use it to mint **short-lived** credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. **Recommended for production:** unlike the GitHub token (kept out of the agent sandbox), the agent's provider key is present while it runs untrusted repo code with internet on, so a long-lived key is stealable — the worker logs a warning when a static key is used. |
 | `REMEDIATION_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. |
 | `REMEDIATION_AGENT_MODEL` | `""` | Model override for the CLI (Claude Code's `ANTHROPIC_MODEL`). Empty → the CLI's default. |
 | `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). |
+| `REMEDIATION_GH_SHA256` | `""` | Expected SHA-256 of the pinned `gh` linux_amd64 tarball. Set it (out of band) for an independent supply-chain pin, or bake `gh` into a pinned sandbox image — since the installed `gh` later handles the token. Empty → verify against the release's own checksums (integrity only). |
 | `REMEDIATION_GITHUB_HOST` | `github.com` | GitHub host the target repositories live on — `github.com` or a GitHub Enterprise Server hostname. Used for the clone URL and `gh` (`GH_HOST`/`GH_ENTERPRISE_TOKEN`). |
 | `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required (configured = enabled). |
 | `REMEDIATION_GIT_USER` / `REMEDIATION_GIT_EMAIL` | `seizu-remediation-bot` / `seizu-remediation@localhost` | git author identity for the remediation commits. |

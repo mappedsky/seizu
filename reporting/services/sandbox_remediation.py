@@ -202,8 +202,11 @@ PROVIDERS: dict[str, RemediationProvider] = {
 
 # Pinned gh install (verified against the release's checksums) instead of
 # "latest" — removes version drift and detects a corrupted download. Operators
-# wanting a stronger supply-chain guarantee should bake gh into a pinned
-# template. Bump deliberately.
+# wanting the strongest guarantee should either set REMEDIATION_GH_SHA256 to the
+# expected linux_amd64 tarball digest (an independent, out-of-band pin verified
+# via SEIZU_GH_SHA256) or bake gh into a pinned sandbox image. When no digest is
+# given we fall back to the release's own checksums (integrity, not provenance).
+# Bump the version deliberately.
 _GH_VERSION = "2.62.0"
 _GH_INSTALL = f"""\
 if ! command -v gh >/dev/null 2>&1; then
@@ -211,8 +214,12 @@ if ! command -v gh >/dev/null 2>&1; then
   GH_TAR="gh_${{GH_VER}}_linux_amd64.tar.gz"
   GH_BASE="https://github.com/cli/cli/releases/download/v${{GH_VER}}"
   curl -fsSL "$GH_BASE/$GH_TAR" -o "/tmp/$GH_TAR"
-  curl -fsSL "$GH_BASE/gh_${{GH_VER}}_checksums.txt" -o /tmp/gh_checksums.txt
-  (cd /tmp && grep -F "  $GH_TAR" gh_checksums.txt | sha256sum -c -)
+  if [ -n "${{SEIZU_GH_SHA256:-}}" ]; then
+    echo "${{SEIZU_GH_SHA256}}  /tmp/$GH_TAR" | sha256sum -c -
+  else
+    curl -fsSL "$GH_BASE/gh_${{GH_VER}}_checksums.txt" -o /tmp/gh_checksums.txt
+    (cd /tmp && grep -F "  $GH_TAR" gh_checksums.txt | sha256sum -c -)
+  fi
   sudo tar -xzf "/tmp/$GH_TAR" -C /usr/local --strip-components=1
 fi"""
 
@@ -288,9 +295,11 @@ echo "SEIZU_EXTRACT_OK"
 
 # Push (fresh, trusted sandbox that never ran the agent or repo tests): clone
 # fresh, apply the patch (data only — no hooks run, cannot write into .git/),
-# squash into a single deterministic commit (which also enforces no-CVE in the
-# commit message), push, and open the PR. The GitHub token only ever lives here
-# and in the agent sandbox's pre-agent clone — never after untrusted execution.
+# commit as one squashed commit (a property of applying a single diff), push,
+# and open the PR. The GitHub token only ever lives here and in the agent
+# sandbox's pre-agent clone — never after untrusted execution. Keeping CVE ids
+# out of the title/body/commit is left to the agent prompt (they are public and
+# discoverable from the repo's dependency manifest anyway).
 _PUSH_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
@@ -305,11 +314,6 @@ PR_TITLE="$SEIZU_PR_TITLE"
 if [ -s {PR_TITLE_PATH} ]; then
   PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
 fi
-# Enforce the "no CVE references in public artifacts" policy deterministically on
-# the title, body, and the single squashed commit message (the agent's own
-# commit messages are discarded), rather than trusting the prompt alone.
-PR_TITLE="$(printf '%s' "$PR_TITLE" | sed -E 's/CVE-[0-9]{{4}}-[0-9]+//g')"
-sed -i -E 's/CVE-[0-9]{{4}}-[0-9]+//g' {PR_BODY_PATH} || true
 git commit -q -m "$PR_TITLE"
 git push --force -u origin "$SEIZU_BRANCH"
 PR_URL="$(gh pr create --base "$SEIZU_BASE_BRANCH" --head "$SEIZU_BRANCH" \\
@@ -344,7 +348,7 @@ Operational facts:
 
 @dataclass
 class RemediationRunResult:
-    status: str  # "completed" | "failed"
+    status: str  # "completed" | "failed" | "skipped"
     pr_url: str | None = None
     error: str | None = None
     # Masked tail of the run transcript, for the workflow result / debugging.
@@ -473,6 +477,30 @@ async def _mint_agent_api_key(fallback: str) -> str:
     return settings.REMEDIATION_AGENT_API_KEY or fallback
 
 
+_warned_static_key = False
+
+
+def _warn_long_lived_agent_key() -> None:
+    """Warn once that the coding agent runs with a long-lived API key.
+
+    Unlike the GitHub token (kept out of the agent sandbox entirely), the agent
+    needs its provider key while it runs untrusted repo code/tests with internet
+    on, so that key is stealable. The production path is a short-lived per-run
+    key via REMEDIATION_AGENT_API_KEY_COMMAND (optionally through a gateway with
+    REMEDIATION_AGENT_BASE_URL); warn when a static key is used instead.
+    """
+    global _warned_static_key
+    if _warned_static_key:
+        return
+    _warned_static_key = True
+    logger.warning(
+        "Remediation runs the coding agent with a long-lived API key exposed to "
+        "untrusted repo code. Prefer REMEDIATION_AGENT_API_KEY_COMMAND for a "
+        "short-lived per-run key.",
+        extra={"type": "AUDIT"},
+    )
+
+
 def _tail_bytes(text: str, max_bytes: int) -> str:
     """Cap text to its *last* ``max_bytes`` UTF-8 bytes (the summary/PR URL end)."""
     encoded = text.encode()
@@ -511,6 +539,9 @@ async def run_remediation(
     provider: RemediationProvider = maybe_provider
     # config_error() already validated the model/prefix, so err is None here.
     key_envs, key_fallback, _err = _resolve_key_envs_and_fallback(provider)
+
+    if not settings.REMEDIATION_AGENT_API_KEY_COMMAND:
+        _warn_long_lived_agent_key()
 
     try:
         api_key = await _mint_agent_api_key(key_fallback)
@@ -552,6 +583,8 @@ async def run_remediation(
         "SEIZU_BRANCH": branch_name,
         "SEIZU_GITHUB_HOST": github_host,
     }
+    # gh install has no secrets; the (non-secret) digest pins gh independently.
+    gh_install_env = {"SEIZU_GH_SHA256": settings.REMEDIATION_GH_SHA256} if settings.REMEDIATION_GH_SHA256 else {}
     agent_env = {env: api_key for env in key_envs}
     if provider.model_selects_key:
         # opencode reads the model from the --model flag (SEIZU_AGENT_MODEL in run_cmd).
@@ -599,7 +632,7 @@ async def run_remediation(
         ) as backend:
             await backend.write_file(PROMPT_PATH, full_prompt)  # no secrets
             await backend.write_file(PR_BODY_PATH, pr_body_fallback)
-            await _phase(backend, "install", _agent_install_script(provider.install_cmd), {})
+            await _phase(backend, "install", _agent_install_script(provider.install_cmd), gh_install_env)
             # setup runs before any untrusted code, so the token here is safe.
             await _phase(backend, "setup", _SETUP_SCRIPT, {**gh_env, **git_id_env, **target_env})
             guard_output = await _phase(backend, "guard", _GUARD_SCRIPT, {**gh_env, **target_env})
@@ -627,7 +660,7 @@ async def run_remediation(
             await backend.write_file(CHANGES_B64_PATH, handoff["patch"])
             await backend.write_file(PR_TITLE_PATH, handoff["title"])
             await backend.write_file(PR_BODY_PATH, handoff["body"])
-            await _phase(backend, "push_install", _PUSH_INSTALL, {}, timeout_seconds=_PUSH_TIMEOUT_SECONDS)
+            await _phase(backend, "push_install", _PUSH_INSTALL, gh_install_env, timeout_seconds=_PUSH_TIMEOUT_SECONDS)
             return await _phase(
                 backend,
                 "push",
