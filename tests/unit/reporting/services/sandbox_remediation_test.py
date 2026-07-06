@@ -47,8 +47,12 @@ class _FakeBackend:
             sandbox_remediation.CHANGES_B64_PATH: "cGF0Y2g=",  # base64("patch")
             sandbox_remediation.PR_TITLE_PATH: "Bump requests",
             sandbox_remediation.PR_BODY_PATH: "Bumps requests.",
+            sandbox_remediation.VKEY_PATH: "sk-litellm-vkey",
         }
         return self.files.get(path, defaults.get(path, ""))
+
+    async def get_host(self, port: int) -> str:
+        return f"{port}-fakesandbox.e2b.app"
 
     async def run_bash_streaming(
         self, cmd: str, *, timeout_seconds: int, on_output: Any, envs: dict[str, str] | None = None
@@ -65,6 +69,12 @@ class _FakeBackend:
 def _phase_of(cmd: str) -> str:
     # Order matters: both the setup and push scripts clone, so match the more
     # specific markers (agent CLI, gh pr create) before the generic clone check.
+    if "/key/generate" in cmd:
+        return "proxy_mint"
+    if "litellm --config" in cmd:
+        return "proxy_start"
+    if "litellm[proxy]" in cmd:
+        return "proxy_install"
     if "npm install -g" in cmd:
         return "install"  # agent-sandbox install (gh + provider CLI)
     if "gh pr list --head" in cmd:
@@ -120,6 +130,8 @@ def _settings(**overrides: Any) -> ExitStack:
         "REMEDIATION_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
         "REMEDIATION_GH_SHA256": "",
+        "REMEDIATION_CREDENTIAL_PROXY_ENABLED": False,
+        "REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET": "5",
         "REMEDIATION_SANDBOX_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
@@ -184,6 +196,53 @@ async def test_two_sandboxes_isolate_the_token_from_the_agent() -> None:
 
     assert result.status == "completed"
     assert result.pr_url == "https://github.com/org/app/pull/42"
+
+
+async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> None:
+    # Proxy mode: a THIRD sandbox runs LiteLLM with the real key; the agent
+    # sandbox gets only a virtual key + the proxy's base URL. The real key never
+    # touches the agent VM.
+    proxy = _FakeBackend()
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    opens: list[dict[str, Any]] = []
+    with (
+        _settings(REMEDIATION_CREDENTIAL_PROXY_ENABLED=True, REMEDIATION_AGENT_API_KEY="real-anthropic-key"),
+        _patched_open([proxy, agent, push], opens),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    # Three sandboxes: proxy, agent, push. The proxy is publicly reachable and
+    # uses no coding-agent template.
+    assert len(opens) == 3
+    assert opens[0]["allow_public_traffic"] is True
+    assert opens[0].get("template") is None
+    assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start", "proxy_mint"]
+
+    # The REAL key only ever seeds the proxy sandbox.
+    proxy_start_env = dict(proxy.calls)["proxy_start"]
+    assert proxy_start_env["PROXY_REAL_KEY"] == "real-anthropic-key"
+
+    # The agent gets the minted virtual key + the proxy base URL — never the real key.
+    agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
+    assert agent_env["ANTHROPIC_API_KEY"] == "sk-litellm-vkey"
+    assert agent_env["ANTHROPIC_BASE_URL"] == "https://4000-fakesandbox.e2b.app"
+    assert "real-anthropic-key" not in agent_env.values()
+    assert result.status == "completed"
+
+
+async def test_credential_proxy_unsupported_for_opencode() -> None:
+    with _settings(
+        REMEDIATION_CREDENTIAL_PROXY_ENABLED=True,
+        REMEDIATION_AGENT_PROVIDER="opencode",
+        REMEDIATION_AGENT_MODEL="deepseek/deepseek-chat",
+    ):
+        assert "credential proxy is not supported" in (config_error() or "")
+
+
+async def test_credential_proxy_conflicts_with_base_url() -> None:
+    with _settings(REMEDIATION_CREDENTIAL_PROXY_ENABLED=True, REMEDIATION_AGENT_BASE_URL="https://gw"):
+        assert "mutually exclusive" in (config_error() or "")
 
 
 async def test_guard_skips_agent_and_push_when_open_pr_exists() -> None:

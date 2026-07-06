@@ -336,6 +336,20 @@ REMEDIATION_AGENT_MODEL = str_env("REMEDIATION_AGENT_MODEL", "")
 # upgrade → test → PR cycle on a large repo can take tens of minutes.
 REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 
+# Ephemeral credential-proxy sandbox. When true (and the provider uses a base
+# URL — claude/codex, not opencode), a *second, separate* sandbox runs a
+# short-lived LiteLLM proxy holding the real provider key, and the agent sandbox
+# gets only a budget-capped virtual key pointed at that proxy. The real key never
+# enters the untrusted agent VM, and the virtual key dies when the proxy sandbox
+# is torn down (its lifetime == the run), so a leak is worthless after the run.
+# Off by default. Mutually exclusive with REMEDIATION_AGENT_BASE_URL. Requires a
+# real key (REMEDIATION_AGENT_API_KEY or the global provider key) to seed the
+# proxy — the key command is not used in this mode.
+REMEDIATION_CREDENTIAL_PROXY_ENABLED = bool_env("REMEDIATION_CREDENTIAL_PROXY_ENABLED", False)
+# Max spend (USD) allowed on the per-run virtual key — bounds real-time abuse of
+# a key stolen while the proxy is up.
+REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET = str_env("REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET", "5")
+
 # Optional expected SHA-256 of the pinned gh linux_amd64 release tarball. When
 # set, the install verifies gh against this out-of-band digest (an independent
 # pin) instead of the release's own checksums file. Since the installed gh later

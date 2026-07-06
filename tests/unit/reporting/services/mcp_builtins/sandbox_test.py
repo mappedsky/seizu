@@ -51,6 +51,7 @@ def _make_fake_backend() -> MagicMock:
     backend.write_file = AsyncMock(return_value="Wrote 12 bytes to /tmp/test.txt")
     backend.list_files = AsyncMock(return_value="")
     backend.run_bash_streaming = AsyncMock(return_value="")
+    backend.get_host = AsyncMock(return_value="host")
     return backend
 
 

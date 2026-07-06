@@ -67,6 +67,15 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def get_host(self, port: int) -> str:
+        """Return a hostname another party can reach this sandbox's ``port`` on.
+
+        Used to let one sandbox call a service running in another (e.g. the
+        ephemeral credential-proxy sandbox). Returns bare ``host[:port]``; the
+        caller prepends the scheme.
+        """
+        ...
+
 
 class _E2BSandboxBackend:
     """SandboxBackend backed by an ``e2b_code_interpreter.AsyncSandbox``."""
@@ -137,6 +146,10 @@ class _E2BSandboxBackend:
         )
         return "".join(chunks)
 
+    async def get_host(self, port: int) -> str:
+        result = self._sandbox.get_host(port)
+        return await result if asyncio.iscoroutine(result) else result
+
 
 @asynccontextmanager
 async def open_backend(
@@ -146,6 +159,7 @@ async def open_backend(
     allow_internet: bool | None = None,
     timeout_seconds: int | None = None,
     template: str | None = None,
+    allow_public_traffic: bool = False,
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -180,6 +194,12 @@ async def open_backend(
     Agents); callers keep an idempotent install step so the base image still
     works.  The template only provides tools — no credentials — so credential
     phase-isolation is unaffected.
+
+    ``allow_public_traffic`` opens the sandbox's exposed ports to the internet
+    without the ``e2b-traffic-access-token`` header — required when another
+    sandbox (whose agent CLI can't send that header) must reach a service here,
+    as with the ephemeral credential-proxy sandbox.  Access is then gated by the
+    service's own auth (a budget-capped virtual key), not the E2B token.
     """
     from e2b_code_interpreter import AsyncSandbox
 
@@ -205,7 +225,7 @@ async def open_backend(
     create_kwargs["allow_internet_access"] = (
         allow_internet if allow_internet is not None else _settings.SANDBOX_ALLOW_INTERNET
     )
-    create_kwargs["network"] = {"allow_public_traffic": False}
+    create_kwargs["network"] = {"allow_public_traffic": allow_public_traffic}
     sandbox = await AsyncSandbox.create(**create_kwargs)
     async with sandbox:
         yield _E2BSandboxBackend(sandbox)
