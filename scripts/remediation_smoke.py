@@ -27,9 +27,14 @@ import os
 import sys
 import uuid
 
-from reporting import settings
-from reporting.services import sandbox_remediation as sr
-from reporting.services.sandbox_backend import SandboxBackend, open_backend
+# Work both as a module (python -m scripts.remediation_smoke) and as a plain
+# script (python scripts/remediation_smoke.py): the workspace package is not
+# pip-installed in the dev image, so put the project root on the path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from reporting import settings  # noqa: E402
+from reporting.services import sandbox_remediation as sr  # noqa: E402
+from reporting.services.sandbox_backend import SandboxBackend, open_backend  # noqa: E402
 
 # Agent sandbox: gh only (the real agent CLI is irrelevant to this plumbing test).
 _INSTALL = sr._agent_install_script("true")

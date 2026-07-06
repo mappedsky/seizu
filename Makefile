@@ -39,7 +39,7 @@ test_query_validator_live: config_setup
 # Usage: make remediation_smoke SMOKE_REPO=org/repo
 remediation_smoke:
 	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) \
-		seizu-temporal-worker uv run --frozen --no-sync python scripts/remediation_smoke.py
+		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
 .PHONY: test_frontend
 test_frontend:
