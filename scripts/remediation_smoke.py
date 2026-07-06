@@ -24,10 +24,10 @@ import uuid
 
 from reporting import settings
 from reporting.services import sandbox_remediation as sr
-from reporting.services.mcp_builtins.sandbox import _open_backend
+from reporting.services.sandbox_backend import open_backend
 
 # gh only — skip the agent CLI (irrelevant to the auth path, and slow).
-_INSTALL = sr._INSTALL_SCRIPT_TEMPLATE.format(install_cmd="true")
+_INSTALL = sr._agent_install_script("true")
 
 # These mirror the real setup/push phases' auth mechanism (gh auth setup-git,
 # tokenless URLs, per-command token env). The clone omits --branch so the smoke
@@ -105,7 +105,7 @@ async def _run() -> int:
     }
 
     print(f"Smoke test: repo={repo} host={host} branch={branch} template={template or '(base image)'}")
-    async with _open_backend(
+    async with open_backend(
         api_key=settings.SANDBOX_API_KEY,
         domain=settings.SANDBOX_DOMAIN,
         allow_internet=True,

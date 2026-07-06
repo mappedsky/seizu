@@ -40,6 +40,15 @@ class _FakeBackend:
         self.files[path] = content
         return f"Wrote {path}"
 
+    async def read_file(self, path: str) -> str:
+        # Handoff files the agent sandbox reads for the push sandbox.
+        defaults = {
+            sandbox_remediation.CHANGES_B64_PATH: "cGF0Y2g=",  # base64("patch")
+            sandbox_remediation.PR_TITLE_PATH: "Bump requests",
+            sandbox_remediation.PR_BODY_PATH: "Bumps requests.",
+        }
+        return self.files.get(path, defaults.get(path, ""))
+
     async def run_bash_streaming(
         self, cmd: str, *, timeout_seconds: int, on_output: Any, envs: dict[str, str] | None = None
     ) -> str:
@@ -53,17 +62,52 @@ class _FakeBackend:
 
 
 def _phase_of(cmd: str) -> str:
-    if "npm install -g" in cmd or "cli/cli/releases" in cmd:
-        return "install"
-    if "git checkout -b" in cmd or " clone " in cmd:
-        return "setup"
+    # Order matters: both the setup and push scripts clone, so match the more
+    # specific markers (agent CLI, gh pr create) before the generic clone check.
+    if "npm install -g" in cmd:
+        return "install"  # agent-sandbox install (gh + provider CLI)
     if "gh pr list --head" in cmd:
         return "guard"
     if "claude -p" in cmd or "codex exec" in cmd or "opencode run" in cmd:
         return "agent"
+    if "git diff --binary" in cmd:
+        return "extract"
     if "gh pr create" in cmd:
-        return "push"
+        return "push"  # push-sandbox script (clone + apply + commit + push + PR)
+    if "git clone" in cmd or "git checkout -b" in cmd:
+        return "setup"  # agent-sandbox clone + branch (no PR)
+    if "cli/cli/releases" in cmd:
+        return "push_install"  # push-sandbox install (gh only, no npm/git)
     return "unknown"
+
+
+def _patched_backend(backend: _FakeBackend, captured: dict[str, Any] | None = None) -> Any:
+    """Yield the SAME backend for every open_backend() call (both sandboxes),
+    accumulating all phases on one .calls list — for tests that only inspect the
+    agent sandbox. ``captured`` records the LAST open's kwargs."""
+
+    @asynccontextmanager
+    async def _ctx(**kwargs: Any):  # type: ignore[misc]
+        if captured is not None:
+            captured.update(kwargs)
+        yield backend
+
+    return patch("reporting.services.sandbox_remediation.open_backend", new=_ctx)
+
+
+def _patched_open(backends: list[_FakeBackend], opens: list[dict[str, Any]]) -> Any:
+    """Yield a distinct backend per open_backend() call and record each open's
+    kwargs — for tests that assert the two-sandbox split (agent vs push)."""
+    state = {"n": 0}
+
+    @asynccontextmanager
+    async def _ctx(**kwargs: Any):  # type: ignore[misc]
+        opens.append(kwargs)
+        idx = state["n"]
+        state["n"] += 1
+        yield backends[idx] if idx < len(backends) else _FakeBackend()
+
+    return patch("reporting.services.sandbox_remediation.open_backend", new=_ctx)
 
 
 def _settings(**overrides: Any) -> ExitStack:
@@ -90,70 +134,66 @@ def _settings(**overrides: Any) -> ExitStack:
     return stack
 
 
-def _patched_backend(backend: _FakeBackend, captured: dict[str, Any] | None = None) -> Any:
-    @asynccontextmanager
-    async def _ctx(**kwargs: Any):  # type: ignore[misc]
-        if captured is not None:
-            captured.update(kwargs)
-        yield backend
-
-    return patch("reporting.services.sandbox_remediation._open_backend", new=_ctx)
-
-
 # ---------------------------------------------------------------------------
 # Credential phase isolation — the core security property
 # ---------------------------------------------------------------------------
 
 
-async def test_phases_run_in_order_with_isolated_envs() -> None:
-    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
-    captured: dict[str, Any] = {}
-    with _settings(), _patched_backend(backend, captured):
+async def test_two_sandboxes_isolate_the_token_from_the_agent() -> None:
+    # THE core property: the untrusted agent runs in one sandbox (never with the
+    # GitHub token); the push runs in a SEPARATE fresh sandbox that never ran the
+    # agent — so a persistence attack planted during the agent phase can't reach
+    # the token.
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    opens: list[dict[str, Any]] = []
+    with _settings(), _patched_open([agent, push], opens):
         result = await run_remediation(**_TARGET)
 
-    assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard", "agent", "push"]
-    install_env, setup_env, guard_env, agent_env, push_env = (envs for _, envs in backend.calls)
+    # Two distinct sandboxes.
+    assert len(opens) == 2
+    assert [p for p, _ in agent.calls] == ["install", "setup", "guard", "agent", "extract"]
+    assert [p for p, _ in push.calls] == ["push_install", "push"]
 
-    # Phase 1: third-party install scripts run with no secrets at all.
-    assert install_env == {}
-    # Phase 2: GitHub token present for the clone; no agent key.
-    assert setup_env["GH_TOKEN"] == _GH_TOKEN
-    assert "ANTHROPIC_API_KEY" not in setup_env
-    # Guard: GitHub token (to query PRs), no agent key.
-    assert guard_env["GH_TOKEN"] == _GH_TOKEN
-    assert "ANTHROPIC_API_KEY" not in guard_env
-    # Agent phase: THE invariant — the coding agent never sees the GitHub token.
-    assert agent_env == {"ANTHROPIC_API_KEY": _AGENT_KEY}
-    assert "GH_TOKEN" not in agent_env
-    assert "GITHUB_TOKEN" not in agent_env
-    # Push: GitHub token returns for push/PR; no agent key.
+    envs = dict(agent.calls)
+    # Install runs with no secrets; setup/guard have the token (pre-agent, trusted).
+    assert envs["install"] == {}
+    assert envs["setup"]["GH_TOKEN"] == _GH_TOKEN
+    assert envs["guard"]["GH_TOKEN"] == _GH_TOKEN
+    # THE invariant — the agent never sees the GitHub token, and neither does
+    # the extract phase that runs after it in the same (now-tainted) sandbox.
+    assert envs["agent"] == {"ANTHROPIC_API_KEY": _AGENT_KEY}
+    assert "GH_TOKEN" not in envs["agent"]
+    assert "GH_TOKEN" not in envs["extract"]
+
+    # The push sandbox holds the token, but it never ran the agent.
+    push_env = dict(push.calls)["push"]
     assert push_env["GH_TOKEN"] == _GH_TOKEN
     assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
-    assert push_env["GH_HOST"] == "github.com"
     assert push_env["SEIZU_PR_TITLE"] == _TARGET["pr_title"]
     assert "ANTHROPIC_API_KEY" not in push_env
-    # Host reaches the clone via env too.
-    assert setup_env["SEIZU_GITHUB_HOST"] == "github.com"
 
-    # No secrets at sandbox creation either.
-    assert "envs" not in captured
-    assert captured["allow_internet"] is True
-    assert captured["timeout_seconds"] == 100 + 120
-    # Empty setting → the provider's official prebuilt template.
-    assert captured["template"] == "claude"
+    # No secrets at creation for either sandbox; the agent sandbox uses the
+    # provider template, the push sandbox uses the base image (no agent CLI).
+    assert all("envs" not in o for o in opens)
+    assert opens[0]["template"] == "claude"
+    assert opens[0]["allow_internet"] is True
+    assert opens[1]["template"] is None
 
     assert result.status == "completed"
     assert result.pr_url == "https://github.com/org/app/pull/42"
 
 
 async def test_guard_skips_agent_and_push_when_open_pr_exists() -> None:
-    # The guard phase finds an existing open PR → the expensive agent and the
-    # push never run, and the result reports the existing PR as skipped.
-    backend = _FakeBackend(outputs={"guard": "SEIZU_PR_EXISTS=https://github.com/org/app/pull/9\n"})
-    with _settings(), _patched_backend(backend):
+    # The guard finds an existing open PR → the agent, extract, and the entire
+    # push sandbox never run; the result reports the existing PR as skipped.
+    agent = _FakeBackend(outputs={"guard": "SEIZU_PR_EXISTS=https://github.com/org/app/pull/9\n"})
+    opens: list[dict[str, Any]] = []
+    with _settings(), _patched_open([agent], opens):
         result = await run_remediation(**_TARGET)
 
-    assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard"]
+    assert len(opens) == 1  # push sandbox never opened
+    assert [p for p, _ in agent.calls] == ["install", "setup", "guard"]
     assert result.status == "skipped"
     assert result.pr_url == "https://github.com/org/app/pull/9"
 
@@ -264,20 +304,20 @@ async def test_agent_base_url_exported_to_agent_phase() -> None:
 
 
 async def test_template_none_uses_base_image() -> None:
-    backend = _FakeBackend()
-    captured: dict[str, Any] = {}
-    with _settings(REMEDIATION_SANDBOX_TEMPLATE="none"), _patched_backend(backend, captured):
+    opens: list[dict[str, Any]] = []
+    with _settings(REMEDIATION_SANDBOX_TEMPLATE="none"), _patched_open([], opens):
         await run_remediation(**_TARGET)
-    # "none" → base image; the install phase installs the CLI itself.
-    assert captured["template"] is None
+    # "none" → base image for the agent sandbox; install installs the CLI itself.
+    assert opens[0]["template"] is None
 
 
 async def test_template_explicit_override() -> None:
-    backend = _FakeBackend()
-    captured: dict[str, Any] = {}
-    with _settings(REMEDIATION_SANDBOX_TEMPLATE="my-pinned-claude"), _patched_backend(backend, captured):
+    opens: list[dict[str, Any]] = []
+    with _settings(REMEDIATION_SANDBOX_TEMPLATE="my-pinned-claude"), _patched_open([], opens):
         await run_remediation(**_TARGET)
-    assert captured["template"] == "my-pinned-claude"
+    # The agent sandbox uses the operator's template; the push sandbox stays base.
+    assert opens[0]["template"] == "my-pinned-claude"
+    assert opens[1]["template"] is None
 
 
 async def test_codex_provider_sets_both_api_key_envs() -> None:
@@ -311,11 +351,10 @@ async def test_codex_falls_back_to_global_openai_key() -> None:
 
 
 async def test_codex_provider_uses_codex_template() -> None:
-    backend = _FakeBackend()
-    captured: dict[str, Any] = {}
-    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_backend(backend, captured):
+    opens: list[dict[str, Any]] = []
+    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_open([], opens):
         await run_remediation(**_TARGET)
-    assert captured["template"] == "codex"
+    assert opens[0]["template"] == "codex"
 
 
 async def test_install_command_is_idempotent() -> None:
@@ -330,15 +369,16 @@ async def test_install_command_is_idempotent() -> None:
 
 
 async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
-    backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/5\n"})
-    captured: dict[str, Any] = {}
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/5\n"})
+    opens: list[dict[str, Any]] = []
     with (
         _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL="deepseek/deepseek-chat"),
-        _patched_backend(backend, captured),
+        _patched_open([agent, push], opens),
     ):
         result = await run_remediation(**_TARGET)
 
-    agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
+    agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
     # The model provider prefix selects the key env opencode reads.
     assert agent_env["DEEPSEEK_API_KEY"] == _AGENT_KEY
     # opencode takes the model as a --model flag, passed via env.
@@ -346,7 +386,7 @@ async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
     # Still no GitHub token in the agent phase, and no unrelated provider keys.
     assert "GH_TOKEN" not in agent_env
     assert "ANTHROPIC_API_KEY" not in agent_env
-    assert captured["template"] == "opencode"
+    assert opens[0]["template"] == "opencode"
     assert result.status == "completed"
 
 
@@ -485,12 +525,16 @@ async def test_phase_failure_returns_masked_output() -> None:
 
 
 async def test_no_changes_committed_is_a_distinct_error() -> None:
-    backend = _FakeBackend(outputs={"push": "SEIZU_NO_CHANGES\n"}, fail_phase="push")
-    with _settings(), _patched_backend(backend):
+    # The extract phase (agent sandbox) detects an empty diff and exits; the
+    # push sandbox never opens.
+    agent = _FakeBackend(outputs={"extract": "SEIZU_NO_CHANGES\n"}, fail_phase="extract")
+    opens: list[dict[str, Any]] = []
+    with _settings(), _patched_open([agent], opens):
         result = await run_remediation(**_TARGET)
 
     assert result.status == "failed"
     assert "committed no changes" in (result.error or "")
+    assert len(opens) == 1  # no push sandbox
 
 
 async def test_timeout_returns_failed_result() -> None:
@@ -531,9 +575,24 @@ def test_setup_authenticates_via_gh_with_no_token_in_url() -> None:
     assert "github.com" not in setup
 
 
-def test_push_uses_gh_auth_and_reports_pr_url() -> None:
+def test_extract_script_detects_no_changes_and_emits_patch() -> None:
+    extract = sandbox_remediation._EXTRACT_SCRIPT
+    assert "SEIZU_NO_CHANGES" in extract
+    assert "git diff --binary" in extract
+    assert "base64" in extract
+    assert sandbox_remediation.CHANGES_B64_PATH in extract
+    # The extract phase must never carry the token.
+    assert "$GH_TOKEN" not in extract
+
+
+def test_push_script_applies_patch_in_a_fresh_clone_and_reports_pr_url() -> None:
     push = sandbox_remediation._PUSH_SCRIPT
-    assert "SEIZU_NO_CHANGES" in push
+    # The push sandbox clones FRESH (never ran the agent) and applies the patch.
+    assert "git clone" in push
+    assert "git apply" in push
+    assert sandbox_remediation.CHANGES_B64_PATH in push
+    # Squash into one deterministic commit (enforces no-CVE in the commit message).
+    assert "git commit" in push
     assert "SEIZU_PR_URL=" in push
     assert "gh pr create" in push
     assert "gh auth setup-git" in push
@@ -543,10 +602,18 @@ def test_push_uses_gh_auth_and_reports_pr_url() -> None:
     # The agent-written title file wins over the fallback env title.
     assert sandbox_remediation.PR_TITLE_PATH in push
     assert '"$SEIZU_PR_TITLE"' in push
-    # CVE identifiers are scrubbed from the PR title/body deterministically,
-    # not just requested in the prompt.
+    # CVE identifiers are scrubbed from the title/body/commit deterministically.
     assert "CVE-[0-9]" in push
     assert push.index("sed") < push.index("gh pr create")
+
+
+def test_push_install_has_no_agent_cli_or_npm() -> None:
+    # The push sandbox installs only gh — never npm/agent/test code runs there.
+    assert "npm" not in sandbox_remediation._PUSH_INSTALL
+    assert "gh" in sandbox_remediation._PUSH_INSTALL
+    # Pinned, checksum-verified gh (no "latest").
+    assert "sha256sum -c" in sandbox_remediation._GH_INSTALL
+    assert "releases/latest" not in sandbox_remediation._GH_INSTALL
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:

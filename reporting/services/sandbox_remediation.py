@@ -7,24 +7,30 @@ repository inside an ephemeral sandbox: upgrade a vulnerable dependency, make
 any code changes needed for compatibility, run the tests, and open a pull
 request.
 
-Credential isolation is the core design. Secrets are never injected at sandbox
-creation; each phase is a separate command with only the environment it needs
-(per-command ``envs`` on :meth:`SandboxBackend.run_bash_streaming`):
+Credential isolation is the core design, across **two sandboxes** so the GitHub
+token never shares a VM with untrusted execution. Secrets are never injected at
+sandbox creation; each phase is a separate command with only the env it needs
+(per-command ``envs`` on :meth:`SandboxBackend.run_bash_streaming`).
 
-1. **install** — install ``gh`` + the provider CLI. No secrets: npm packages run
-   third-party postinstall scripts. Idempotent (``command -v … ||``), so it is a
-   near no-op when a prebuilt template already ships the CLI
-   (``REMEDIATION_SANDBOX_TEMPLATE``) and a full install on the base image.
-2. **setup** — clone the repo and create the work branch. ``GH_TOKEN`` only,
-   authenticated via ``gh auth setup-git`` (gh's own credential helper reads the
-   token from this command's env), so nothing token-derived is written to disk.
-3. **guard** — if an open PR already exists for the branch, print a marker and
-   stop before the agent runs (skips the expensive coding-agent work). ``GH_TOKEN`` only.
-4. **agent** — run the coding-agent CLI. Provider API key only; **no GitHub
-   token exists anywhere in the sandbox during this phase**, so a prompt-injected
-   agent has nothing to exfiltrate and no ability to push.
-5. **push** — verify the agent committed changes, force-push the bot-owned
-   branch, and create (or find) the PR. ``GH_TOKEN`` only.
+*Agent sandbox* (may run untrusted repo code — the coding agent and the repo's
+own test suite):
+
+1. **install** — pinned ``gh`` + the (idempotent) provider CLI. No secrets.
+2. **setup** — clone + create the work branch. ``GH_TOKEN`` only, via
+   ``gh auth setup-git`` (no token on disk, tokenless clone URL). Runs *before*
+   the agent, so nothing untrusted has executed yet.
+3. **guard** — skip (marker) if an open PR already exists. ``GH_TOKEN`` only.
+4. **agent** — the coding-agent CLI. Provider API key only; **no GitHub token
+   exists in this sandbox from here on.**
+5. **extract** — capture the agent's commits as a base64 git diff. No token.
+
+*Push sandbox* (fresh; never runs the agent, npm, or repo tests):
+
+6. **push** — clone fresh, apply the patch (data only — no hooks run, cannot
+   write into ``.git/``), squash into one deterministic commit, push, open the
+   PR. ``GH_TOKEN`` only. Because this VM never executed untrusted code, an
+   agent-planted ``pre-push`` hook / PATH shadow / ``.git/config`` tamper cannot
+   reach the token.
 
 The work branch is keyed on the target version (``…/{ecosystem}-{package}-{version}``),
 so re-runs of the same pending fix converge on one PR while a later, different
@@ -48,7 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from reporting.services.mcp_builtins.sandbox import SandboxBackend, _open_backend
+from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,8 @@ REPO_PATH = "/home/user/repo"
 PROMPT_PATH = "/home/user/prompt.md"
 PR_BODY_PATH = "/home/user/pr_body.md"
 PR_TITLE_PATH = "/home/user/pr_title.txt"
+# base64 git diff handed from the agent sandbox to the fresh push sandbox.
+CHANGES_B64_PATH = "/home/user/changes.b64"
 
 _REPO_FULLNAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -73,6 +81,8 @@ _PR_EXISTS_MARKER_RE = re.compile(r"SEIZU_PR_EXISTS=(https?://\S+)")
 _PROGRESS_TICK_SECONDS = 30.0
 # Extra sandbox lifetime beyond the run deadline so E2B never reaps it mid-run.
 _SANDBOX_LIFETIME_SLACK_SECONDS = 120
+# Bound for the (quick) push sandbox: fresh clone → apply patch → push → PR.
+_PUSH_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -190,24 +200,44 @@ PROVIDERS: dict[str, RemediationProvider] = {
 # constants; literal shell ${...} in .format()ed templates uses doubled braces.
 # File paths are hardcoded to the module constants above; keep them in sync.
 
-_INSTALL_SCRIPT_TEMPLATE = """\
-set -euo pipefail
+# Pinned gh install (verified against the release's checksums) instead of
+# "latest" — removes version drift and detects a corrupted download. Operators
+# wanting a stronger supply-chain guarantee should bake gh into a pinned
+# template. Bump deliberately.
+_GH_VERSION = "2.62.0"
+_GH_INSTALL = f"""\
 if ! command -v gh >/dev/null 2>&1; then
-  GH_RELEASE="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest)"
-  GH_VERSION="$(printf '%s' "$GH_RELEASE" | grep -om1 '"tag_name": *"v[^"]*"' | cut -d'"' -f4)"
-  curl -fsSL "https://github.com/cli/cli/releases/download/${{GH_VERSION}}/gh_${{GH_VERSION#v}}_linux_amd64.tar.gz" \\
-    | sudo tar -xz -C /usr/local --strip-components=1
-fi
-{install_cmd}
+  GH_VER="{_GH_VERSION}"
+  GH_TAR="gh_${{GH_VER}}_linux_amd64.tar.gz"
+  GH_BASE="https://github.com/cli/cli/releases/download/v${{GH_VER}}"
+  curl -fsSL "$GH_BASE/$GH_TAR" -o "/tmp/$GH_TAR"
+  curl -fsSL "$GH_BASE/gh_${{GH_VER}}_checksums.txt" -o /tmp/gh_checksums.txt
+  (cd /tmp && grep -F "  $GH_TAR" gh_checksums.txt | sha256sum -c -)
+  sudo tar -xzf "/tmp/$GH_TAR" -C /usr/local --strip-components=1
+fi"""
+
+# Push sandbox install: pinned gh only. No npm, no agent CLI, no test code ever
+# runs in the push sandbox — that is the whole point (see run_remediation).
+_PUSH_INSTALL = f"""\
+set -euo pipefail
+{_GH_INSTALL}
 """
+
+
+def _agent_install_script(install_cmd: str) -> str:
+    """Agent sandbox install: pinned gh + the (idempotent) provider CLI.
+
+    Built by concatenation (not ``.format``) because ``_GH_INSTALL`` contains
+    literal shell ``${...}`` that would collide with ``str.format``.
+    """
+    return f"set -euo pipefail\n{_GH_INSTALL}\n{install_cmd}\n"
+
 
 # Auth goes through `gh` rather than a hand-rolled git credential helper: gh
 # installs its own correctly-quoted helper (`gh auth git-credential`) into git
 # config and authenticates from GH_TOKEN / GH_ENTERPRISE_TOKEN in the *current
-# command's* environment. It stores no token on disk, so the config persisting
-# into later phases is harmless — the agent phase has no token in its env, so
-# gh returns no credentials there. Never run `gh auth login` (that would persist
-# a token to ~/.config/gh). The clone/push URLs stay tokenless.
+# command's* environment. It stores no token on disk. Never run `gh auth login`
+# (that would persist a token to ~/.config/gh). The clone/push URLs stay tokenless.
 _SETUP_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
@@ -240,25 +270,48 @@ if [ -n "$URL" ]; then
 fi
 """
 
-_PUSH_SCRIPT = f"""\
+# Extract (agent sandbox, NO token): capture the agent's commits as a base64
+# git diff for the push sandbox to apply. Never runs with the GitHub token, so
+# a persistence attack planted by the agent has nothing to steal and nothing to
+# push. The push sandbox applies this patch to a *fresh* clone.
+_EXTRACT_SCRIPT = f"""\
 set -euo pipefail
-export GIT_TERMINAL_PROMPT=0
 cd {REPO_PATH}
 if [ "$(git rev-list --count "origin/$SEIZU_BASE_BRANCH..HEAD")" -eq 0 ]; then
   echo "SEIZU_NO_CHANGES"
   exit 3
 fi
-# Re-assert the gh credential helper (defensive; setup already configured it).
+git diff --binary "origin/$SEIZU_BASE_BRANCH..HEAD" | base64 -w0 > {CHANGES_B64_PATH}
+[ -s {PR_TITLE_PATH} ] || printf '%s' "$SEIZU_PR_TITLE" > {PR_TITLE_PATH}
+echo "SEIZU_EXTRACT_OK"
+"""
+
+# Push (fresh, trusted sandbox that never ran the agent or repo tests): clone
+# fresh, apply the patch (data only — no hooks run, cannot write into .git/),
+# squash into a single deterministic commit (which also enforces no-CVE in the
+# commit message), push, and open the PR. The GitHub token only ever lives here
+# and in the agent sandbox's pre-agent clone — never after untrusted execution.
+_PUSH_SCRIPT = f"""\
+set -euo pipefail
+export GIT_TERMINAL_PROMPT=0
+git config --global user.name "$SEIZU_GIT_USER"
+git config --global user.email "$SEIZU_GIT_EMAIL"
 gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
-git push --force -u origin "$SEIZU_BRANCH"
+git clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
+cd {REPO_PATH}
+git checkout -b "$SEIZU_BRANCH"
+base64 -d {CHANGES_B64_PATH} | git apply --index --whitespace=nowarn
 PR_TITLE="$SEIZU_PR_TITLE"
 if [ -s {PR_TITLE_PATH} ]; then
   PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
 fi
 # Enforce the "no CVE references in public artifacts" policy deterministically on
-# the PR title/body the agent wrote, rather than trusting the prompt alone.
+# the title, body, and the single squashed commit message (the agent's own
+# commit messages are discarded), rather than trusting the prompt alone.
 PR_TITLE="$(printf '%s' "$PR_TITLE" | sed -E 's/CVE-[0-9]{{4}}-[0-9]+//g')"
 sed -i -E 's/CVE-[0-9]{{4}}-[0-9]+//g' {PR_BODY_PATH} || true
+git commit -q -m "$PR_TITLE"
+git push --force -u origin "$SEIZU_BRANCH"
 PR_URL="$(gh pr create --base "$SEIZU_BASE_BRANCH" --head "$SEIZU_BRANCH" \\
     --title "$PR_TITLE" --body-file {PR_BODY_PATH} 2>/dev/null \\
   || gh pr view "$SEIZU_BRANCH" --json url --jq .url)"
@@ -373,7 +426,7 @@ def _resolve_template(provider: RemediationProvider) -> str | None:
     template (recommended: CLI preinstalled, no per-run npm postinstall). A
     template name → that template. The literal ``none`` → the base image (the
     install command installs the CLI). Self-hosted backends ignore templates
-    regardless (see :func:`_open_backend`).
+    regardless (see :func:`open_backend`).
     """
     from reporting import settings
 
@@ -519,61 +572,69 @@ async def run_remediation(
         pr_body_path=PR_BODY_PATH,
     )
 
-    async def _phase(backend: SandboxBackend, name: str, script: str, envs: dict[str, str]) -> str:
-        transcript.append(f"\n--- phase: {name} ---\n")
-        return await backend.run_bash_streaming(
-            script, timeout_seconds=_remaining(name), on_output=_on_output, envs=envs
-        )
+    # gh reads GH_ENTERPRISE_TOKEN (not GH_TOKEN) for non-github.com hosts, and
+    # GH_HOST scopes the credential helper; set both so gh works on GHES too.
+    gh_env = {"GH_TOKEN": github_token, "GH_ENTERPRISE_TOKEN": github_token, "GH_HOST": github_host}
+    git_id_env = {"SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER, "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL}
 
-    async def _run() -> str:
-        async with _open_backend(
+    async def _phase(
+        backend: SandboxBackend, name: str, script: str, envs: dict[str, str], timeout_seconds: int | None = None
+    ) -> str:
+        transcript.append(f"\n--- phase: {name} ---\n")
+        bound = timeout_seconds if timeout_seconds is not None else _remaining(name)
+        return await backend.run_bash_streaming(script, timeout_seconds=bound, on_output=_on_output, envs=envs)
+
+    # Handoff from the agent sandbox to the push sandbox (base64 diff + PR text).
+    handoff: dict[str, str] = {}
+
+    async def _run_agent() -> str | None:
+        """Run the untrusted agent sandbox. Returns the guard output when an open
+        PR already exists (skip); otherwise fills ``handoff`` and returns None."""
+        async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
-            # Clone, CLI install, and push need outbound access regardless of
-            # the global sandbox default.
             allow_internet=True,
             timeout_seconds=timeout + _SANDBOX_LIFETIME_SLACK_SECONDS,
-            # Prebuilt template with the CLI already installed (E2B cloud); the
-            # install phase stays as an idempotent fallback for base images and
-            # self-hosted backends.
             template=template,
         ) as backend:
-            # gh reads GH_ENTERPRISE_TOKEN (not GH_TOKEN) for non-github.com hosts,
-            # and GH_HOST scopes the credential helper; set both so gh works on
-            # GitHub Enterprise too. Shared by the setup, guard, and push phases.
-            gh_env = {"GH_TOKEN": github_token, "GH_ENTERPRISE_TOKEN": github_token, "GH_HOST": github_host}
-            # Neither file contains secrets.
-            await backend.write_file(PROMPT_PATH, full_prompt)
+            await backend.write_file(PROMPT_PATH, full_prompt)  # no secrets
             await backend.write_file(PR_BODY_PATH, pr_body_fallback)
-            # Phase 1: no secrets while third-party install scripts run.
-            await _phase(backend, "install", _INSTALL_SCRIPT_TEMPLATE.format(install_cmd=provider.install_cmd), {})
-            # Phase 2: clone + branch. GitHub token only (gh credential helper).
-            await _phase(
-                backend,
-                "setup",
-                _SETUP_SCRIPT,
-                {
-                    **gh_env,
-                    "SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER,
-                    "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL,
-                    **target_env,
-                },
-            )
-            # Guard: if an open PR already exists for this branch, stop here —
-            # skip the expensive coding-agent run and the push.
+            await _phase(backend, "install", _agent_install_script(provider.install_cmd), {})
+            # setup runs before any untrusted code, so the token here is safe.
+            await _phase(backend, "setup", _SETUP_SCRIPT, {**gh_env, **git_id_env, **target_env})
             guard_output = await _phase(backend, "guard", _GUARD_SCRIPT, {**gh_env, **target_env})
             if _PR_EXISTS_MARKER_RE.search(guard_output):
                 return guard_output
-            # Phase 3: the coding agent runs with no GitHub token anywhere in
-            # the sandbox — it can commit locally but cannot push or leak it.
-            await _phase(
+            # The agent runs with no GitHub token anywhere in this sandbox.
+            await _phase(backend, "agent", _AGENT_SCRIPT_TEMPLATE.format(run_cmd=provider.run_cmd), agent_env)
+            # Extract the change as a patch — still no token.
+            await _phase(backend, "extract", _EXTRACT_SCRIPT, {**target_env, "SEIZU_PR_TITLE": pr_title})
+            handoff["patch"] = await backend.read_file(CHANGES_B64_PATH)
+            handoff["title"] = await backend.read_file(PR_TITLE_PATH)
+            handoff["body"] = await backend.read_file(PR_BODY_PATH)
+            return None
+
+    async def _run_push() -> str:
+        """Push from a FRESH sandbox that never ran the agent — so a persistence
+        attack planted during the agent phase cannot reach the GitHub token."""
+        async with open_backend(
+            api_key=settings.SANDBOX_API_KEY,
+            domain=settings.SANDBOX_DOMAIN,
+            allow_internet=True,
+            timeout_seconds=_PUSH_TIMEOUT_SECONDS + _SANDBOX_LIFETIME_SLACK_SECONDS,
+            template=None,  # base image + pinned gh only; no agent CLI, no npm
+        ) as backend:
+            await backend.write_file(CHANGES_B64_PATH, handoff["patch"])
+            await backend.write_file(PR_TITLE_PATH, handoff["title"])
+            await backend.write_file(PR_BODY_PATH, handoff["body"])
+            await _phase(backend, "push_install", _PUSH_INSTALL, {}, timeout_seconds=_PUSH_TIMEOUT_SECONDS)
+            return await _phase(
                 backend,
-                "agent",
-                _AGENT_SCRIPT_TEMPLATE.format(run_cmd=provider.run_cmd),
-                agent_env,
+                "push",
+                _PUSH_SCRIPT,
+                {**gh_env, **git_id_env, "SEIZU_PR_TITLE": pr_title, **target_env},
+                timeout_seconds=_PUSH_TIMEOUT_SECONDS,
             )
-            # Phase 4: push the bot-owned branch and create/find the PR.
-            return await _phase(backend, "push", _PUSH_SCRIPT, {**gh_env, "SEIZU_PR_TITLE": pr_title, **target_env})
 
     async def _ticker() -> None:
         while True:
@@ -583,9 +644,15 @@ async def run_remediation(
 
     ticker = asyncio.create_task(_ticker())
     try:
-        # _remaining() bounds each phase; the outer wait_for also covers sandbox
-        # creation and file writes.
-        final_output = await asyncio.wait_for(_run(), timeout=timeout + 60)
+        # _remaining() bounds each agent-sandbox phase; the outer wait_for also
+        # covers sandbox creation and file writes.
+        guard_or_none = await asyncio.wait_for(_run_agent(), timeout=timeout + 60)
+        # Guard skip → no push sandbox; otherwise push from the fresh sandbox.
+        final_output = (
+            guard_or_none
+            if guard_or_none is not None
+            else await asyncio.wait_for(_run_push(), timeout=_PUSH_TIMEOUT_SECONDS + 60)
+        )
     except TimeoutError:
         return RemediationRunResult(
             status="failed", error=f"remediation timed out after {timeout}s", output_tail=_tail()
