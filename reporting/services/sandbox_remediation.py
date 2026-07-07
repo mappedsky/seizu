@@ -88,6 +88,8 @@ general_settings:
   master_key: os.environ/PROXY_MASTER_KEY
 """
 _PROXY_INSTALL = "set -euo pipefail\ncommand -v litellm >/dev/null 2>&1 || pip install --quiet 'litellm[proxy]'\n"
+# Header E2B requires to reach a non-public sandbox's exposed ports.
+_E2B_TRAFFIC_HEADER = "e2b-traffic-access-token"
 
 _REPO_FULLNAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -140,6 +142,11 @@ class RemediationProvider:
     # Anthropic (Claude Code) shape.
     proxy_llm_namespace: str | None = None
     proxy_base_suffix: str = ""
+    # Env var the CLI reads a literal "Name: value" request header from. When set,
+    # the credential-proxy sandbox can stay non-public: the CLI sends E2B's
+    # traffic-access token as a header instead of the proxy being world-reachable.
+    # None → the proxy falls back to public traffic gated by the virtual key.
+    proxy_header_env: str | None = None
     # Multi-provider CLI (opencode): the configured model's provider prefix
     # (e.g. "deepseek" in "deepseek/deepseek-chat") selects both which standard
     # API key env var the CLI reads and which global *_API_KEY setting we fall
@@ -185,6 +192,7 @@ PROVIDERS: dict[str, RemediationProvider] = {
         model_env="ANTHROPIC_MODEL",
         base_url_env="ANTHROPIC_BASE_URL",
         proxy_llm_namespace="anthropic",  # LiteLLM serves the Anthropic /v1/messages shape
+        proxy_header_env="ANTHROPIC_CUSTOM_HEADERS",  # lets the proxy stay non-public
     ),
     "codex": RemediationProvider(
         name="codex",
@@ -679,11 +687,13 @@ async def run_remediation(
     handoff: dict[str, str] = {}
 
     @asynccontextmanager
-    async def _credential_proxy() -> AsyncIterator[tuple[str, str]]:
+    async def _credential_proxy() -> AsyncIterator[tuple[str, str, dict[str, str]]]:
         """Open a *separate* sandbox running a LiteLLM proxy seeded with the real
         provider key, mint a budget-capped per-run virtual key, and yield
-        ``(base_url, virtual_key)`` for the agent. The real key never enters the
-        agent sandbox; the virtual key dies when this sandbox is torn down."""
+        ``(base_url, virtual_key, header_env)`` for the agent. The real key never
+        enters the agent sandbox; the virtual key dies when this sandbox is torn
+        down. ``header_env`` carries any extra env the agent needs to authenticate
+        to a non-public proxy (the E2B traffic-access token as a custom header)."""
         master_key = "sk-seizu-" + secrets.token_urlsafe(24)
         mask_secrets.append(master_key)
         budget = settings.REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET
@@ -701,14 +711,16 @@ async def run_remediation(
             f"curl -sf http://localhost:{_PROXY_PORT}/health/liveliness >/dev/null 2>&1 "
             "|| { echo SEIZU_PROXY_UNHEALTHY; cat /home/user/litellm.log; exit 1; }\n"
         )
-        # allow_public_traffic: the agent CLI can't send E2B's traffic-token
-        # header, so the proxy port is reachable and gated by the virtual key.
+        # If the CLI can send a custom header (proxy_header_env), keep the proxy
+        # private and gate it with E2B's traffic-access token; otherwise fall back
+        # to a public port gated only by the virtual key.
+        private = provider.proxy_header_env is not None
         async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
             allow_internet=True,
             timeout_seconds=timeout + _SANDBOX_LIFETIME_SLACK_SECONDS,
-            allow_public_traffic=True,
+            allow_public_traffic=not private,
         ) as proxy:
             await proxy.write_file(LITELLM_CONFIG_PATH, _LITELLM_CONFIG.format(namespace=provider.proxy_llm_namespace))
             proxy_env = {"PROXY_REAL_KEY": proxy_real_key, "PROXY_MASTER_KEY": master_key}
@@ -718,7 +730,16 @@ async def run_remediation(
             vkey = (await proxy.read_file(VKEY_PATH)).strip()
             mask_secrets.append(vkey)
             host = await proxy.get_host(_PROXY_PORT)
-            yield f"https://{host}{provider.proxy_base_suffix}", vkey
+
+            header_env: dict[str, str] = {}
+            if private:
+                access_token = await proxy.get_traffic_access_token()
+                if not access_token:
+                    raise RuntimeError("proxy sandbox exposed no traffic-access token for the private proxy")
+                mask_secrets.append(access_token)
+                assert provider.proxy_header_env is not None  # narrowed by `private`
+                header_env[provider.proxy_header_env] = f"{_E2B_TRAFFIC_HEADER}: {access_token}"
+            yield f"https://{host}{provider.proxy_base_suffix}", vkey, header_env
 
     async def _agent_sandbox(agent_env: dict[str, str]) -> str | None:
         async with open_backend(
@@ -749,8 +770,8 @@ async def run_remediation(
         """Run the untrusted agent sandbox, optionally alongside an ephemeral
         credential-proxy sandbox that keeps the real provider key out of it."""
         if use_proxy:
-            async with _credential_proxy() as (base_url, vkey):
-                return await _agent_sandbox(_build_agent_env(vkey, base_url))
+            async with _credential_proxy() as (base_url, vkey, header_env):
+                return await _agent_sandbox({**_build_agent_env(vkey, base_url), **header_env})
         return await _agent_sandbox(_build_agent_env(api_key, settings.REMEDIATION_AGENT_BASE_URL or None))
 
     async def _run_push() -> str:

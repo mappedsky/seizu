@@ -52,6 +52,7 @@ def _make_fake_backend() -> MagicMock:
     backend.list_files = AsyncMock(return_value="")
     backend.run_bash_streaming = AsyncMock(return_value="")
     backend.get_host = AsyncMock(return_value="host")
+    backend.get_traffic_access_token = AsyncMock(return_value="")
     return backend
 
 

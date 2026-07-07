@@ -76,6 +76,16 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    async def get_traffic_access_token(self) -> str:
+        """Return the token required to reach this sandbox's exposed ports when
+        it was created with ``allow_public_traffic=False``.
+
+        Callers send it as the ``e2b-traffic-access-token`` request header (agent
+        CLIs support custom headers), so a proxy sandbox can stay non-public.
+        Returns ``""`` if the backend has no such token.
+        """
+        ...
+
 
 class _E2BSandboxBackend:
     """SandboxBackend backed by an ``e2b_code_interpreter.AsyncSandbox``."""
@@ -150,6 +160,15 @@ class _E2BSandboxBackend:
         result = self._sandbox.get_host(port)
         return await result if asyncio.iscoroutine(result) else result
 
+    async def get_traffic_access_token(self) -> str:
+        # The exact attribute name is E2B-SDK-specific; try the known spellings.
+        # Verify against your SDK version (part of the unverified proxy path).
+        for attr in ("traffic_access_token", "_traffic_access_token", "envd_access_token"):
+            value = getattr(self._sandbox, attr, None)
+            if value:
+                return str(await value if asyncio.iscoroutine(value) else value)
+        return ""
+
 
 @asynccontextmanager
 async def open_backend(
@@ -196,10 +215,11 @@ async def open_backend(
     phase-isolation is unaffected.
 
     ``allow_public_traffic`` opens the sandbox's exposed ports to the internet
-    without the ``e2b-traffic-access-token`` header — required when another
-    sandbox (whose agent CLI can't send that header) must reach a service here,
-    as with the ephemeral credential-proxy sandbox.  Access is then gated by the
-    service's own auth (a budget-capped virtual key), not the E2B token.
+    without the ``e2b-traffic-access-token`` header.  The credential-proxy
+    sandbox keeps this ``False`` (private) when the agent CLI can send that
+    header (via :meth:`SandboxBackend.get_traffic_access_token`); it is only set
+    ``True`` as a fallback for CLIs that can't, where access is then gated by the
+    service's own auth (a budget-capped virtual key) instead of the E2B token.
     """
     from e2b_code_interpreter import AsyncSandbox
 

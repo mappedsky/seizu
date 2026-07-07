@@ -197,7 +197,9 @@ The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`)
 
 The agent's provider key is the one credential that must be present while the agent runs untrusted repo code (the GitHub token is kept out entirely). `REMEDIATION_AGENT_API_KEY_COMMAND` mitigates this with a short-lived per-run key, but for Anthropic/OpenAI the direct API has no short-lived token, so that needs an external LLM gateway. `REMEDIATION_CREDENTIAL_PROXY_ENABLED=true` runs that gateway self-contained: a **separate** sandbox boots a LiteLLM proxy seeded with the real key (the agent VM never sees it), mints a budget-capped virtual key, and the agent sandbox is pointed at the proxy with only that virtual key. Because the proxy sandbox is torn down with the run, the virtual key's effective lifetime equals the run — a leak is worthless afterward, and the `REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET` cap bounds real-time abuse while it's up. It applies to `claude`/`codex` (not `opencode`), and is mutually exclusive with `REMEDIATION_AGENT_BASE_URL`.
 
-This path stands up LiteLLM inside a sandbox and depends on the agent CLI talking to it over `*_BASE_URL`; **verify it against your CLI/LiteLLM versions with a real run before enabling in production** — the LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape) is the fragile part.
+The proxy sandbox stays **private** (`allow_public_traffic: false`): the agent CLI reaches it using E2B's traffic-access token sent as a custom request header (`ANTHROPIC_CUSTOM_HEADERS` for Claude Code; codex/opencode expose the same via their config), so the proxy port is never world-reachable. Providers whose CLI can't send a custom header fall back to a public port gated by the virtual key.
+
+This path stands up LiteLLM inside a sandbox and depends on the agent CLI talking to it over `*_BASE_URL` with a custom header; **verify it against your CLI/LiteLLM versions with a real run before enabling in production** — the LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape, header passthrough) is the fragile part.
 
 ## Local development
 

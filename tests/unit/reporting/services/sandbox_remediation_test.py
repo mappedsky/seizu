@@ -54,6 +54,9 @@ class _FakeBackend:
     async def get_host(self, port: int) -> str:
         return f"{port}-fakesandbox.e2b.app"
 
+    async def get_traffic_access_token(self) -> str:
+        return "e2b-traffic-tok"
+
     async def run_bash_streaming(
         self, cmd: str, *, timeout_seconds: int, on_output: Any, envs: dict[str, str] | None = None
     ) -> str:
@@ -212,10 +215,10 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
     ):
         result = await run_remediation(**_TARGET)
 
-    # Three sandboxes: proxy, agent, push. The proxy is publicly reachable and
-    # uses no coding-agent template.
+    # Three sandboxes: proxy, agent, push. claude can send a custom header, so
+    # the proxy stays PRIVATE (not publicly reachable) and uses no agent template.
     assert len(opens) == 3
-    assert opens[0]["allow_public_traffic"] is True
+    assert opens[0]["allow_public_traffic"] is False
     assert opens[0].get("template") is None
     assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start", "proxy_mint"]
 
@@ -223,10 +226,12 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
     proxy_start_env = dict(proxy.calls)["proxy_start"]
     assert proxy_start_env["PROXY_REAL_KEY"] == "real-anthropic-key"
 
-    # The agent gets the minted virtual key + the proxy base URL — never the real key.
+    # The agent gets the minted virtual key + the proxy base URL — never the real
+    # key — plus the E2B traffic token as a custom header to reach the private proxy.
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
     assert agent_env["ANTHROPIC_API_KEY"] == "sk-litellm-vkey"
     assert agent_env["ANTHROPIC_BASE_URL"] == "https://4000-fakesandbox.e2b.app"
+    assert agent_env["ANTHROPIC_CUSTOM_HEADERS"] == "e2b-traffic-access-token: e2b-traffic-tok"
     assert "real-anthropic-key" not in agent_env.values()
     assert result.status == "completed"
 
