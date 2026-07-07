@@ -24,11 +24,12 @@ Credential isolation notes carried over from the remediation flow:
 """
 
 import asyncio
+import json
 import logging
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -67,6 +68,24 @@ general_settings:
 _PROXY_INSTALL = "set -euo pipefail\ncommand -v litellm >/dev/null 2>&1 || pip install --quiet 'litellm[proxy]'\n"
 # Header E2B requires to reach a non-public sandbox's exposed ports.
 _E2B_TRAFFIC_HEADER = "e2b-traffic-access-token"
+# Env var the config-transport CLIs read the traffic-access token from (their
+# config references it rather than baking the token into the file).
+_PROXY_ACCESS_TOKEN_ENV = "SEIZU_PROXY_ACCESS_TOKEN"
+# CLIs that reach a private proxy via a written config file (base URL + the
+# traffic-access header), not an env var. Their config paths in the sandbox:
+_CODEX_CONFIG_PATH = "/home/user/.codex/config.toml"
+_OPENCODE_CONFIG_PATH = "/home/user/.config/opencode/opencode.json"
+# The custom provider id the config transports register the proxy under.
+_PROXY_PROVIDER_ID = "seizu_proxy"
+
+
+@dataclass(frozen=True)
+class ProxyAgentSetup:
+    """How the agent phase reaches a running credential proxy: the extra env to
+    set, and any config files to write into the agent sandbox before the run."""
+
+    env: dict[str, str]
+    files: dict[str, str] = field(default_factory=dict)
 
 
 class PhaseRunner(Protocol):
@@ -112,11 +131,16 @@ class SubagentProvider:
     # Anthropic (Claude Code) shape.
     proxy_llm_namespace: str | None = None
     proxy_base_suffix: str = ""
-    # Env var the CLI reads a literal "Name: value" request header from. When set,
-    # the credential-proxy sandbox can stay non-public: the CLI sends E2B's
-    # traffic-access token as a header instead of the proxy being world-reachable.
-    # None → the proxy falls back to public traffic gated by the virtual key.
+    # Env var the CLI reads a literal "Name: value" request header from (used by
+    # the "header" proxy transport to send E2B's traffic-access token).
     proxy_header_env: str | None = None
+    # How the CLI reaches a private credential proxy (see proxy_agent_setup):
+    #   "header"  — env var (proxy_header_env) carries the traffic-access header
+    #   "codex"   — a ~/.codex/config.toml model_provider with env_http_headers
+    #   "opencode"— an openai-compatible provider block with an options.headers
+    #   "public"  — no header support; the proxy must be world-reachable (gated by
+    #               the virtual key only). All built-in providers avoid this.
+    proxy_transport: str = "public"
     # Multi-provider CLI (opencode): the configured model's provider prefix
     # (e.g. "deepseek" in "deepseek/deepseek-chat") selects both which standard
     # API key env var the CLI reads and which global *_API_KEY setting we fall
@@ -163,6 +187,7 @@ PROVIDERS: dict[str, SubagentProvider] = {
         base_url_env="ANTHROPIC_BASE_URL",
         proxy_llm_namespace="anthropic",  # LiteLLM serves the Anthropic /v1/messages shape
         proxy_header_env="ANTHROPIC_CUSTOM_HEADERS",  # lets the proxy stay non-public
+        proxy_transport="header",
     ),
     "codex": SubagentProvider(
         name="codex",
@@ -177,6 +202,7 @@ PROVIDERS: dict[str, SubagentProvider] = {
         base_url_env="OPENAI_BASE_URL",
         proxy_llm_namespace="openai",  # OpenAI clients expect a /v1 base
         proxy_base_suffix="/v1",
+        proxy_transport="codex",
     ),
     "opencode": SubagentProvider(
         name="opencode",
@@ -200,6 +226,11 @@ PROVIDERS: dict[str, SubagentProvider] = {
         api_key_envs=(),
         default_template="opencode",
         model_selects_key=True,
+        # Proxy support is via a written openai-compatible provider config; the
+        # LiteLLM namespace is derived from the model prefix at runtime (see
+        # proxy_namespace), so no static proxy_llm_namespace here.
+        proxy_base_suffix="/v1",
+        proxy_transport="opencode",
     ),
 }
 
@@ -364,8 +395,8 @@ def agent_config_error() -> str | None:
     if settings.SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED:
         # Proxy mode seeds a LiteLLM sandbox with the REAL key and hands the agent
         # a virtual key — so it needs a real static/global key (not the key
-        # command), a provider with a base URL, and no external base URL.
-        if provider.base_url_env is None or provider.proxy_llm_namespace is None:
+        # command), a routable LiteLLM namespace, and no external base URL.
+        if proxy_namespace(provider) is None:
             return f"credential proxy is not supported for provider {provider.name!r}"
         if settings.SANDBOX_AGENT_BASE_URL:
             return "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED is mutually exclusive with SANDBOX_AGENT_BASE_URL"
@@ -376,11 +407,23 @@ def agent_config_error() -> str | None:
     return None
 
 
+def proxy_namespace(provider: SubagentProvider) -> str | None:
+    """The LiteLLM provider namespace the proxy routes its wildcard model to, or
+    None when the proxy doesn't apply. Static for claude/codex; for opencode it is
+    the configured model's provider prefix (e.g. ``deepseek``)."""
+    from reporting import settings
+
+    if not provider.model_selects_key:
+        return provider.proxy_llm_namespace
+    prefix = settings.SANDBOX_AGENT_MODEL.strip().split("/", 1)[0].lower()
+    return prefix or None
+
+
 def use_credential_proxy(provider: SubagentProvider) -> bool:
     """Whether the credential proxy applies for this provider under the settings."""
     from reporting import settings
 
-    return settings.SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED and provider.base_url_env is not None
+    return settings.SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED and proxy_namespace(provider) is not None
 
 
 def tail_bytes(text: str, max_bytes: int) -> str:
@@ -389,6 +432,71 @@ def tail_bytes(text: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     return "[truncated]\n" + encoded[-max_bytes:].decode(errors="replace")
+
+
+def _codex_proxy_config(base_url: str) -> str:
+    """A ~/.codex/config.toml selecting a model_provider that points at the proxy
+    and reads the E2B traffic token as a header from the env (never on disk)."""
+    return (
+        f'model_provider = "{_PROXY_PROVIDER_ID}"\n\n'
+        f"[model_providers.{_PROXY_PROVIDER_ID}]\n"
+        f'name = "{_PROXY_PROVIDER_ID}"\n'
+        f'base_url = "{base_url}"\n'
+        'env_key = "OPENAI_API_KEY"\n'
+        f'env_http_headers = {{ "{_E2B_TRAFFIC_HEADER}" = "{_PROXY_ACCESS_TOKEN_ENV}" }}\n'
+    )
+
+
+def _opencode_proxy_config(base_url: str, vkey: str, access_token: str, model: str) -> str:
+    """An opencode config registering an openai-compatible provider that points at
+    the proxy, carries the traffic token as a header, and keeps blanket approval."""
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "permission": "allow",
+            "provider": {
+                _PROXY_PROVIDER_ID: {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": _PROXY_PROVIDER_ID,
+                    "options": {
+                        "baseURL": base_url,
+                        "apiKey": vkey,
+                        "headers": {_E2B_TRAFFIC_HEADER: access_token},
+                    },
+                    "models": {model: {}},
+                }
+            },
+        }
+    )
+
+
+def proxy_agent_setup(
+    provider: SubagentProvider, key_envs: tuple[str, ...], base_url: str, vkey: str, access_token: str
+) -> ProxyAgentSetup:
+    """Translate a running proxy into the agent phase's env + config files, per the
+    provider's ``proxy_transport``. The traffic-access token authenticates to the
+    private proxy — via a request header the CLI sends (env var or config)."""
+    from reporting import settings
+
+    if provider.proxy_transport == "header":
+        env = build_agent_env(provider, key_envs, vkey, base_url)
+        if provider.proxy_header_env:
+            env[provider.proxy_header_env] = f"{_E2B_TRAFFIC_HEADER}: {access_token}"
+        return ProxyAgentSetup(env=env)
+    if provider.proxy_transport == "codex":
+        env = {e: vkey for e in key_envs} | {_PROXY_ACCESS_TOKEN_ENV: access_token}
+        return ProxyAgentSetup(env=env, files={_CODEX_CONFIG_PATH: _codex_proxy_config(base_url)})
+    if provider.proxy_transport == "opencode":
+        model = settings.SANDBOX_AGENT_MODEL.strip()
+        config = _opencode_proxy_config(base_url, vkey, access_token, model)
+        # Route opencode at the custom provider ("<provider>/<model>"); the CLI
+        # reads the key/header from the config above, so no key env is needed.
+        return ProxyAgentSetup(
+            env={"SEIZU_AGENT_MODEL": f"{_PROXY_PROVIDER_ID}/{model}"},
+            files={_OPENCODE_CONFIG_PATH: config},
+        )
+    # "public" — no header support; the proxy is world-reachable, gated by the vkey.
+    return ProxyAgentSetup(env=build_agent_env(provider, key_envs, vkey, base_url))
 
 
 @asynccontextmanager
@@ -400,14 +508,14 @@ async def credential_proxy(
     sandbox_timeout_seconds: int,
     run_phase: PhaseRunner,
     mask_secrets: list[str],
-) -> AsyncIterator[tuple[str, str, dict[str, str]]]:
+) -> AsyncIterator[tuple[str, str, str]]:
     """Open a *separate* sandbox running a LiteLLM proxy seeded with the real
     provider key, mint a budget-capped per-run virtual key, and yield
-    ``(base_url, virtual_key, header_env)`` for the agent. The real key never
-    enters the agent sandbox; the virtual key dies when this sandbox is torn down.
-    ``header_env`` carries any extra env the agent needs to authenticate to a
-    non-public proxy (the E2B traffic-access token as a custom header). Secrets it
-    creates (master key, virtual key, traffic token) are appended to
+    ``(base_url, virtual_key, access_token)`` for the agent (pass these to
+    :func:`proxy_agent_setup`). The real key never enters the agent sandbox; the
+    virtual key dies when this sandbox is torn down. ``access_token`` is E2B's
+    traffic-access token for a private proxy (``""`` for the public fallback).
+    Secrets it creates (master key, virtual key, traffic token) are appended to
     ``mask_secrets`` so the caller redacts them from its transcript."""
     from reporting import settings
 
@@ -427,10 +535,9 @@ async def credential_proxy(
         f"curl -sf http://localhost:{_PROXY_PORT}/health/liveliness >/dev/null 2>&1 "
         "|| { echo SEIZU_PROXY_UNHEALTHY; cat /home/user/litellm.log; exit 1; }\n"
     )
-    # If the CLI can send a custom header (proxy_header_env), keep the proxy
-    # private and gate it with E2B's traffic-access token; otherwise fall back
-    # to a public port gated only by the virtual key.
-    private = provider.proxy_header_env is not None
+    # All built-in providers have a header/config transport, so the proxy stays
+    # private (gated by E2B's traffic-access token); "public" is a fallback only.
+    private = provider.proxy_transport != "public"
     async with open_backend(
         api_key=settings.SANDBOX_API_KEY,
         domain=settings.SANDBOX_DOMAIN,
@@ -438,7 +545,7 @@ async def credential_proxy(
         timeout_seconds=sandbox_timeout_seconds,
         allow_public_traffic=not private,
     ) as proxy:
-        await proxy.write_file(LITELLM_CONFIG_PATH, _LITELLM_CONFIG.format(namespace=provider.proxy_llm_namespace))
+        await proxy.write_file(LITELLM_CONFIG_PATH, _LITELLM_CONFIG.format(namespace=proxy_namespace(provider)))
         proxy_env = {"PROXY_REAL_KEY": real_key, "PROXY_MASTER_KEY": master_key}
         await run_phase(proxy, "proxy_install", _PROXY_INSTALL, {}, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
         await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
@@ -447,12 +554,10 @@ async def credential_proxy(
         mask_secrets.append(vkey)
         host = await proxy.get_host(_PROXY_PORT)
 
-        header_env: dict[str, str] = {}
+        access_token = ""
         if private:
             access_token = await proxy.get_traffic_access_token()
             if not access_token:
                 raise RuntimeError("proxy sandbox exposed no traffic-access token for the private proxy")
             mask_secrets.append(access_token)
-            assert provider.proxy_header_env is not None  # narrowed by `private`
-            header_env[provider.proxy_header_env] = f"{_E2B_TRAFFIC_HEADER}: {access_token}"
-        yield f"https://{host}{provider.proxy_base_suffix}", vkey, header_env
+        yield f"https://{host}{provider.proxy_base_suffix}", vkey, access_token

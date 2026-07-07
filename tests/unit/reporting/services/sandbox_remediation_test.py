@@ -246,13 +246,60 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
     assert result.status == "completed"
 
 
-async def test_credential_proxy_unsupported_for_opencode() -> None:
-    with _settings(
-        SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
-        SANDBOX_AGENT_PROVIDER="opencode",
-        SANDBOX_AGENT_MODEL="deepseek/deepseek-chat",
+async def test_credential_proxy_codex_writes_a_private_config() -> None:
+    # codex reaches the private proxy via a written ~/.codex/config.toml with an
+    # env-referenced traffic-token header — no public fallback.
+    proxy = _FakeBackend()
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    opens: list[dict[str, Any]] = []
+    with (
+        _settings(
+            SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+            SANDBOX_AGENT_PROVIDER="codex",
+            SANDBOX_AGENT_API_KEY="real-openai-key",
+        ),
+        _patched_open([proxy, agent, push], opens),
     ):
-        assert "credential proxy is not supported" in (config_error() or "")
+        result = await run_remediation(**_TARGET)
+
+    assert opens[0]["allow_public_traffic"] is False  # private, not the public fallback
+    agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
+    assert agent_env["OPENAI_API_KEY"] == "sk-litellm-vkey"
+    assert agent_env["SEIZU_PROXY_ACCESS_TOKEN"] == "e2b-traffic-tok"
+    # The codex config selects the proxy provider and reads the header from env.
+    config = agent.files[sandbox_agent._CODEX_CONFIG_PATH]
+    assert 'model_provider = "seizu_proxy"' in config
+    assert "e2b-traffic-access-token" in config and "real-openai-key" not in config
+    assert result.status == "completed"
+
+
+async def test_credential_proxy_opencode_writes_a_private_config() -> None:
+    # opencode reaches the private proxy via an openai-compatible provider config.
+    proxy = _FakeBackend()
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    opens: list[dict[str, Any]] = []
+    with (
+        _settings(
+            SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+            SANDBOX_AGENT_PROVIDER="opencode",
+            SANDBOX_AGENT_MODEL="deepseek/deepseek-chat",
+            SANDBOX_AGENT_API_KEY="real-deepseek-key",
+        ),
+        _patched_open([proxy, agent, push], opens),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    assert opens[0]["allow_public_traffic"] is False
+    # LiteLLM routes the wildcard model to the deepseek namespace (from the model).
+    assert 'model: "deepseek/*"' in proxy.files[sandbox_agent.LITELLM_CONFIG_PATH]
+    agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
+    assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek/deepseek-chat"
+    config = agent.files[sandbox_agent._OPENCODE_CONFIG_PATH]
+    assert "e2b-traffic-access-token" in config and "sk-litellm-vkey" in config
+    assert "real-deepseek-key" not in config
+    assert result.status == "completed"
 
 
 async def test_credential_proxy_conflicts_with_base_url() -> None:

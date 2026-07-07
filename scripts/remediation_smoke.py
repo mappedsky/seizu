@@ -190,8 +190,81 @@ async def _run() -> int:
     return _fail("push did not succeed — see output above")
 
 
+async def _run_proxy() -> int:
+    """Probe the credential-proxy path: boot a private LiteLLM proxy in its own
+    sandbox, mint a virtual key, and confirm a *second* sandbox can reach it via
+    the E2B traffic-access header — the fragile, otherwise-unverified plumbing.
+    Does not run a real coding agent. Needs SANDBOX_AGENT_* configured with a real
+    provider key (and SANDBOX_AGENT_MODEL for opencode)."""
+    if not settings.SANDBOX_API_KEY:
+        return _fail("SANDBOX_API_KEY is not configured")
+    provider = sandbox_agent.resolve_provider()
+    if provider is None:
+        return _fail(f"unknown SANDBOX_AGENT_PROVIDER {settings.SANDBOX_AGENT_PROVIDER!r}")
+    if sandbox_agent.proxy_namespace(provider) is None:
+        return _fail("no proxy namespace — set SANDBOX_AGENT_MODEL (required for opencode)")
+    _key_envs, fallback, err = sandbox_agent.resolve_key_envs_and_fallback(provider)
+    if err is not None:
+        return _fail(err)
+    real_key = settings.SANDBOX_AGENT_API_KEY or fallback
+    if not real_key:
+        return _fail("no real provider key (SANDBOX_AGENT_API_KEY or the global provider key)")
+
+    mask_secrets: list[str] = [real_key]
+
+    def mask(text: str) -> str:
+        for secret in mask_secrets:
+            text = text.replace(secret, "***") if secret else text
+        return text
+
+    def on_output(chunk: str) -> None:
+        sys.stdout.write(mask(chunk))
+        sys.stdout.flush()
+
+    async def run_phase(
+        backend: SandboxBackend, name: str, script: str, envs: dict[str, str], timeout_seconds: int | None = None
+    ) -> str:
+        print(f"\n===== {name} =====")
+        return await backend.run_bash_streaming(
+            script, timeout_seconds=timeout_seconds or 300, on_output=on_output, envs=envs
+        )
+
+    print(f"Proxy smoke: provider={provider.name} namespace={sandbox_agent.proxy_namespace(provider)}")
+    print("\n########## PROXY SANDBOX (private LiteLLM) ##########")
+    reachable = False
+    async with sandbox_agent.credential_proxy(
+        provider=provider,
+        real_key=real_key,
+        budget="1",
+        sandbox_timeout_seconds=480,
+        run_phase=run_phase,
+        mask_secrets=mask_secrets,
+    ) as (base_url, _vkey, access_token):
+        suffix = provider.proxy_base_suffix
+        root = base_url[: -len(suffix)] if suffix and base_url.endswith(suffix) else base_url
+        print(f"\nproxy up: base_url={base_url} private={bool(access_token)}")
+        print("\n########## SECOND SANDBOX (reaches the private proxy) ##########")
+        async with open_backend(
+            api_key=settings.SANDBOX_API_KEY,
+            domain=settings.SANDBOX_DOMAIN,
+            allow_internet=True,
+            timeout_seconds=180,
+        ) as agent:
+            hdr = f'-H "e2b-traffic-access-token: {access_token}"' if access_token else ""
+            check = f'curl -fsS {hdr} "{root}/health/liveliness" && printf "\\nSEIZU_PROXY_REACHABLE\\n"'
+            out = await run_phase(agent, "reachability", check, {}, timeout_seconds=120)
+            reachable = "SEIZU_PROXY_REACHABLE" in out
+
+    if reachable:
+        print("\nSMOKE PASS — private proxy booted, minted a key, and is reachable from a second sandbox")
+        return 0
+    return _fail("the second sandbox could not reach the private proxy — see output above")
+
+
 def main() -> None:
-    raise SystemExit(asyncio.run(_run()))
+    # SMOKE_PROXY=1 probes the credential proxy; otherwise the two-sandbox git flow.
+    runner = _run_proxy if os.environ.get("SMOKE_PROXY") else _run
+    raise SystemExit(asyncio.run(runner()))
 
 
 if __name__ == "__main__":

@@ -32,13 +32,18 @@ test_query_validator_live: config_setup
 	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
 
 .PHONY: remediation_smoke
-# Manual, real-network smoke test of the CVE remediation sandbox auth path
-# (install gh, gh auth setup-git, clone, push a throwaway branch, delete it).
-# Runs in the temporal worker service so it inherits the SANDBOX_*/REMEDIATION_*
-# config. Requires SANDBOX_API_KEY + REMEDIATION_GITHUB_TOKEN configured.
-# Usage: make remediation_smoke SMOKE_REPO=org/repo
+# Manual, real-network smoke test of the CVE remediation sandbox path. Runs in
+# the temporal worker service so it inherits the SANDBOX_*/REMEDIATION_* config.
+# Default: the two-sandbox git auth+handoff path (install gh, clone, extract a
+#   patch, push it from a fresh sandbox, delete the branch).
+#   Requires SANDBOX_API_KEY + REMEDIATION_GITHUB_TOKEN. Usage:
+#     make remediation_smoke SMOKE_REPO=org/repo
+# SMOKE_PROXY=1: instead probe the credential proxy (boot a private LiteLLM proxy,
+#   mint a key, reach it from a second sandbox). Requires SANDBOX_AGENT_* with a
+#   real provider key (+ SANDBOX_AGENT_MODEL for opencode). Usage:
+#     make remediation_smoke SMOKE_PROXY=1
 remediation_smoke:
-	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) \
+	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) -e SMOKE_PROXY=$(SMOKE_PROXY) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
 .PHONY: test_frontend

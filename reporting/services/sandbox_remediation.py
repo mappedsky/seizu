@@ -385,7 +385,7 @@ async def run_remediation(
     # Handoff from the agent sandbox to the push sandbox (base64 diff + PR text).
     handoff: dict[str, str] = {}
 
-    async def _agent_sandbox(agent_env: dict[str, str]) -> str | None:
+    async def _agent_sandbox(agent_env: dict[str, str], extra_files: dict[str, str] | None = None) -> str | None:
         async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
@@ -395,6 +395,9 @@ async def run_remediation(
         ) as backend:
             await backend.write_file(sandbox_agent.PROMPT_PATH, full_prompt)  # no secrets
             await backend.write_file(PR_BODY_PATH, pr_body_fallback)
+            # Proxy config files (e.g. codex/opencode) written before the agent runs.
+            for path, content in (extra_files or {}).items():
+                await backend.write_file(path, content)
             await _phase(backend, "install", _agent_install_script(provider.install_cmd), gh_install_env)
             # setup runs before any untrusted code, so the token here is safe.
             await _phase(backend, "setup", _SETUP_SCRIPT, {**gh_env, **git_id_env, **target_env})
@@ -421,10 +424,9 @@ async def run_remediation(
                 sandbox_timeout_seconds=sandbox_timeout,
                 run_phase=_phase,
                 mask_secrets=mask_secrets,
-            ) as (base_url, vkey, header_env):
-                return await _agent_sandbox(
-                    {**sandbox_agent.build_agent_env(provider, key_envs, vkey, base_url), **header_env}
-                )
+            ) as (base_url, vkey, access_token):
+                setup = sandbox_agent.proxy_agent_setup(provider, key_envs, base_url, vkey, access_token)
+                return await _agent_sandbox(setup.env, extra_files=setup.files)
         return await _agent_sandbox(
             sandbox_agent.build_agent_env(provider, key_envs, api_key, settings.SANDBOX_AGENT_BASE_URL or None)
         )
