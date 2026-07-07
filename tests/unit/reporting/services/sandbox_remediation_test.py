@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from reporting.services import sandbox_remediation
+from reporting.services import sandbox_agent, sandbox_remediation
 from reporting.services.sandbox_remediation import (
     RemediationRunResult,
     config_error,
@@ -47,7 +47,7 @@ class _FakeBackend:
             sandbox_remediation.CHANGES_B64_PATH: "cGF0Y2g=",  # base64("patch")
             sandbox_remediation.PR_TITLE_PATH: "Bump requests",
             sandbox_remediation.PR_BODY_PATH: "Bumps requests.",
-            sandbox_remediation.VKEY_PATH: "sk-litellm-vkey",
+            sandbox_agent.VKEY_PATH: "sk-litellm-vkey",
         }
         return self.files.get(path, defaults.get(path, ""))
 
@@ -106,12 +106,12 @@ def _patched_backend(backend: _FakeBackend, captured: dict[str, Any] | None = No
             captured.update(kwargs)
         yield backend
 
-    return patch("reporting.services.sandbox_remediation.open_backend", new=_ctx)
+    return _patch_open_backend(_ctx)
 
 
 def _patched_open(backends: list[_FakeBackend], opens: list[dict[str, Any]]) -> Any:
     """Yield a distinct backend per open_backend() call and record each open's
-    kwargs — for tests that assert the two-sandbox split (agent vs push)."""
+    kwargs — for tests that assert the sandbox split (proxy/agent/push)."""
     state = {"n": 0}
 
     @asynccontextmanager
@@ -121,21 +121,31 @@ def _patched_open(backends: list[_FakeBackend], opens: list[dict[str, Any]]) -> 
         state["n"] += 1
         yield backends[idx] if idx < len(backends) else _FakeBackend()
 
-    return patch("reporting.services.sandbox_remediation.open_backend", new=_ctx)
+    return _patch_open_backend(_ctx)
+
+
+def _patch_open_backend(ctx: Any) -> ExitStack:
+    """Patch open_backend in BOTH namespaces that call it (the agent/push
+    sandboxes via sandbox_remediation, the credential proxy via sandbox_agent)
+    with one shared context factory, so opens stay in a single ordered sequence."""
+    stack = ExitStack()
+    stack.enter_context(patch("reporting.services.sandbox_remediation.open_backend", new=ctx))
+    stack.enter_context(patch("reporting.services.sandbox_agent.open_backend", new=ctx))
+    return stack
 
 
 def _settings(**overrides: Any) -> ExitStack:
     values: dict[str, Any] = {
-        "REMEDIATION_AGENT_PROVIDER": "claude",
-        "REMEDIATION_AGENT_API_KEY": _AGENT_KEY,
-        "REMEDIATION_AGENT_API_KEY_COMMAND": "",
-        "REMEDIATION_AGENT_BASE_URL": "",
-        "REMEDIATION_AGENT_MODEL": "",
+        "SANDBOX_AGENT_PROVIDER": "claude",
+        "SANDBOX_AGENT_API_KEY": _AGENT_KEY,
+        "SANDBOX_AGENT_API_KEY_COMMAND": "",
+        "SANDBOX_AGENT_BASE_URL": "",
+        "SANDBOX_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
         "REMEDIATION_GH_SHA256": "",
-        "REMEDIATION_CREDENTIAL_PROXY_ENABLED": False,
-        "REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET": "5",
-        "REMEDIATION_SANDBOX_TEMPLATE": "",
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED": False,
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET": "5",
+        "SANDBOX_AGENT_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
         "REMEDIATION_GIT_USER": "bot",
@@ -210,7 +220,7 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
     push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
     opens: list[dict[str, Any]] = []
     with (
-        _settings(REMEDIATION_CREDENTIAL_PROXY_ENABLED=True, REMEDIATION_AGENT_API_KEY="real-anthropic-key"),
+        _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True, SANDBOX_AGENT_API_KEY="real-anthropic-key"),
         _patched_open([proxy, agent, push], opens),
     ):
         result = await run_remediation(**_TARGET)
@@ -238,15 +248,15 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
 
 async def test_credential_proxy_unsupported_for_opencode() -> None:
     with _settings(
-        REMEDIATION_CREDENTIAL_PROXY_ENABLED=True,
-        REMEDIATION_AGENT_PROVIDER="opencode",
-        REMEDIATION_AGENT_MODEL="deepseek/deepseek-chat",
+        SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+        SANDBOX_AGENT_PROVIDER="opencode",
+        SANDBOX_AGENT_MODEL="deepseek/deepseek-chat",
     ):
         assert "credential proxy is not supported" in (config_error() or "")
 
 
 async def test_credential_proxy_conflicts_with_base_url() -> None:
-    with _settings(REMEDIATION_CREDENTIAL_PROXY_ENABLED=True, REMEDIATION_AGENT_BASE_URL="https://gw"):
+    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True, SANDBOX_AGENT_BASE_URL="https://gw"):
         assert "mutually exclusive" in (config_error() or "")
 
 
@@ -276,7 +286,7 @@ async def test_no_secrets_written_to_sandbox_files() -> None:
     with _settings(), _patched_backend(backend):
         await run_remediation(**_TARGET)
 
-    prompt = backend.files[sandbox_remediation.PROMPT_PATH]
+    prompt = backend.files[sandbox_agent.PROMPT_PATH]
     assert "Security boundary" in prompt
     assert "Update requests to 2.32.4" in prompt
     assert "do NOT push" in prompt
@@ -311,7 +321,7 @@ async def test_tokens_masked_in_output_tail() -> None:
 
 async def test_model_env_only_in_agent_phase_when_configured() -> None:
     backend = _FakeBackend()
-    with _settings(REMEDIATION_AGENT_MODEL="claude-sonnet-4-6"), _patched_backend(backend):
+    with _settings(SANDBOX_AGENT_MODEL="claude-sonnet-4-6"), _patched_backend(backend):
         await run_remediation(**_TARGET)
 
     agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
@@ -321,7 +331,7 @@ async def test_model_env_only_in_agent_phase_when_configured() -> None:
 async def test_agent_key_falls_back_to_anthropic_key_for_claude() -> None:
     backend = _FakeBackend()
     with (
-        _settings(REMEDIATION_AGENT_API_KEY=""),
+        _settings(SANDBOX_AGENT_API_KEY=""),
         patch("reporting.settings.ANTHROPIC_API_KEY", "anthropic-fallback"),
         _patched_backend(backend),
     ):
@@ -333,11 +343,11 @@ async def test_agent_key_falls_back_to_anthropic_key_for_claude() -> None:
 
 
 async def test_agent_key_command_mints_per_run_key() -> None:
-    """REMEDIATION_AGENT_API_KEY_COMMAND stdout becomes the run's key — the
+    """SANDBOX_AGENT_API_KEY_COMMAND stdout becomes the run's key — the
     short-lived-credential path; it takes precedence over the static key."""
     backend = _FakeBackend()
     with (
-        _settings(REMEDIATION_AGENT_API_KEY_COMMAND="printf per-run-key"),
+        _settings(SANDBOX_AGENT_API_KEY_COMMAND="printf per-run-key"),
         _patched_backend(backend),
     ):
         result = await run_remediation(**_TARGET)
@@ -349,7 +359,7 @@ async def test_agent_key_command_mints_per_run_key() -> None:
 
 async def test_agent_key_command_failure_fails_the_run() -> None:
     backend = _FakeBackend()
-    with _settings(REMEDIATION_AGENT_API_KEY_COMMAND="exit 1"), _patched_backend(backend):
+    with _settings(SANDBOX_AGENT_API_KEY_COMMAND="exit 1"), _patched_backend(backend):
         result = await run_remediation(**_TARGET)
 
     assert result.status == "failed"
@@ -360,7 +370,7 @@ async def test_agent_key_command_failure_fails_the_run() -> None:
 async def test_agent_base_url_exported_to_agent_phase() -> None:
     backend = _FakeBackend()
     with (
-        _settings(REMEDIATION_AGENT_BASE_URL="https://llm-gateway.internal"),
+        _settings(SANDBOX_AGENT_BASE_URL="https://llm-gateway.internal"),
         _patched_backend(backend),
     ):
         await run_remediation(**_TARGET)
@@ -371,7 +381,7 @@ async def test_agent_base_url_exported_to_agent_phase() -> None:
 
 async def test_template_none_uses_base_image() -> None:
     opens: list[dict[str, Any]] = []
-    with _settings(REMEDIATION_SANDBOX_TEMPLATE="none"), _patched_open([], opens):
+    with _settings(SANDBOX_AGENT_TEMPLATE="none"), _patched_open([], opens):
         await run_remediation(**_TARGET)
     # "none" → base image for the agent sandbox; install installs the CLI itself.
     assert opens[0]["template"] is None
@@ -379,7 +389,7 @@ async def test_template_none_uses_base_image() -> None:
 
 async def test_template_explicit_override() -> None:
     opens: list[dict[str, Any]] = []
-    with _settings(REMEDIATION_SANDBOX_TEMPLATE="my-pinned-claude"), _patched_open([], opens):
+    with _settings(SANDBOX_AGENT_TEMPLATE="my-pinned-claude"), _patched_open([], opens):
         await run_remediation(**_TARGET)
     # The agent sandbox uses the operator's template; the push sandbox stays base.
     assert opens[0]["template"] == "my-pinned-claude"
@@ -388,7 +398,7 @@ async def test_template_explicit_override() -> None:
 
 async def test_codex_provider_sets_both_api_key_envs() -> None:
     backend = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/9\n"})
-    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_backend(backend):
+    with _settings(SANDBOX_AGENT_PROVIDER="codex"), _patched_backend(backend):
         result = await run_remediation(**_TARGET)
 
     agent_env = next(envs for phase, envs in backend.calls if phase == "agent")
@@ -405,7 +415,7 @@ async def test_codex_falls_back_to_global_openai_key() -> None:
     # the provider-global fallback the docs promise.
     backend = _FakeBackend()
     with (
-        _settings(REMEDIATION_AGENT_PROVIDER="codex", REMEDIATION_AGENT_API_KEY=""),
+        _settings(SANDBOX_AGENT_PROVIDER="codex", SANDBOX_AGENT_API_KEY=""),
         patch("reporting.settings.OPENAI_API_KEY", "global-openai-key"),
         _patched_backend(backend),
     ):
@@ -418,14 +428,14 @@ async def test_codex_falls_back_to_global_openai_key() -> None:
 
 async def test_codex_provider_uses_codex_template() -> None:
     opens: list[dict[str, Any]] = []
-    with _settings(REMEDIATION_AGENT_PROVIDER="codex"), _patched_open([], opens):
+    with _settings(SANDBOX_AGENT_PROVIDER="codex"), _patched_open([], opens):
         await run_remediation(**_TARGET)
     assert opens[0]["template"] == "codex"
 
 
 async def test_install_command_is_idempotent() -> None:
     # Guarded with `command -v` so a prebuilt-template CLI is not reinstalled.
-    for provider in sandbox_remediation.PROVIDERS.values():
+    for provider in sandbox_agent.PROVIDERS.values():
         assert provider.install_cmd.startswith("command -v ")
 
 
@@ -439,7 +449,7 @@ async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
     push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/5\n"})
     opens: list[dict[str, Any]] = []
     with (
-        _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL="deepseek/deepseek-chat"),
+        _settings(SANDBOX_AGENT_PROVIDER="opencode", SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"),
         _patched_open([agent, push], opens),
     ):
         result = await run_remediation(**_TARGET)
@@ -462,9 +472,9 @@ async def test_opencode_falls_back_to_global_provider_key() -> None:
     backend = _FakeBackend()
     with (
         _settings(
-            REMEDIATION_AGENT_PROVIDER="opencode",
-            REMEDIATION_AGENT_MODEL="deepseek/deepseek-reasoner",
-            REMEDIATION_AGENT_API_KEY="",
+            SANDBOX_AGENT_PROVIDER="opencode",
+            SANDBOX_AGENT_MODEL="deepseek/deepseek-reasoner",
+            SANDBOX_AGENT_API_KEY="",
         ),
         patch("reporting.settings.DEEPSEEK_API_KEY", "global-deepseek-key"),
         _patched_backend(backend),
@@ -477,20 +487,20 @@ async def test_opencode_falls_back_to_global_provider_key() -> None:
 
 
 def test_opencode_requires_a_model() -> None:
-    with _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL=""):
-        assert "requires REMEDIATION_AGENT_MODEL" in (config_error() or "")
+    with _settings(SANDBOX_AGENT_PROVIDER="opencode", SANDBOX_AGENT_MODEL=""):
+        assert "requires SANDBOX_AGENT_MODEL" in (config_error() or "")
 
 
 def test_opencode_rejects_unsupported_model_provider() -> None:
-    with _settings(REMEDIATION_AGENT_PROVIDER="opencode", REMEDIATION_AGENT_MODEL="frobnicator/x"):
+    with _settings(SANDBOX_AGENT_PROVIDER="opencode", SANDBOX_AGENT_MODEL="frobnicator/x"):
         assert "not supported" in (config_error() or "")
 
 
 async def test_opencode_run_command_is_headless() -> None:
-    provider = sandbox_remediation.PROVIDERS["opencode"]
+    provider = sandbox_agent.PROVIDERS["opencode"]
     run_cmd = provider.run_cmd
     assert 'opencode run --model "$SEIZU_AGENT_MODEL"' in run_cmd
-    assert sandbox_remediation.PROMPT_PATH in run_cmd
+    assert sandbox_agent.PROMPT_PATH in run_cmd
     # Blanket-approval config so the headless run never stalls on a prompt...
     assert '"permission":"allow"' in run_cmd
     assert "opencode.json" in run_cmd
@@ -524,13 +534,13 @@ def test_config_error_cases() -> None:
     # There is no enable flag: fully configured means enabled.
     with _settings():
         assert config_error() is None
-    with _settings(REMEDIATION_AGENT_PROVIDER="gemini-cli"):
-        assert "unknown remediation provider" in (config_error() or "")
-    with _settings(REMEDIATION_AGENT_API_KEY=""), patch("reporting.settings.ANTHROPIC_API_KEY", ""):
+    with _settings(SANDBOX_AGENT_PROVIDER="gemini-cli"):
+        assert "unknown sandbox agent provider" in (config_error() or "")
+    with _settings(SANDBOX_AGENT_API_KEY=""), patch("reporting.settings.ANTHROPIC_API_KEY", ""):
         assert "no API key" in (config_error() or "")
     # A key-mint command satisfies the API key requirement on its own.
     with (
-        _settings(REMEDIATION_AGENT_API_KEY="", REMEDIATION_AGENT_API_KEY_COMMAND="printf k"),
+        _settings(SANDBOX_AGENT_API_KEY="", SANDBOX_AGENT_API_KEY_COMMAND="printf k"),
         patch("reporting.settings.ANTHROPIC_API_KEY", ""),
     ):
         assert config_error() is None
@@ -710,24 +720,24 @@ async def test_gh_sha256_absent_by_default() -> None:
 
 async def test_warns_when_using_a_long_lived_agent_key(caplog: pytest.LogCaptureFixture) -> None:
     # A static key (no key-mint command) is exposed to untrusted repo code — warn.
-    sandbox_remediation._warned_static_key = False
+    sandbox_agent._warned_static_key = False
     try:
         agent = _FakeBackend()
         push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
         with (
-            _settings(REMEDIATION_AGENT_API_KEY_COMMAND=""),
+            _settings(SANDBOX_AGENT_API_KEY_COMMAND=""),
             _patched_open([agent, push], []),
             caplog.at_level(logging.WARNING),
         ):
             await run_remediation(**_TARGET)
         assert any("long-lived API key" in r.message for r in caplog.records)
     finally:
-        sandbox_remediation._warned_static_key = False
+        sandbox_agent._warned_static_key = False
 
 
 def test_agent_scripts_read_prompt_from_file() -> None:
-    for provider in sandbox_remediation.PROVIDERS.values():
-        assert sandbox_remediation.PROMPT_PATH in provider.run_cmd
+    for provider in sandbox_agent.PROVIDERS.values():
+        assert sandbox_agent.PROMPT_PATH in provider.run_cmd
 
 
 def test_result_dataclass_defaults() -> None:

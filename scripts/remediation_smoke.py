@@ -33,6 +33,7 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reporting import settings  # noqa: E402
+from reporting.services import sandbox_agent  # noqa: E402
 from reporting.services import sandbox_remediation as sr  # noqa: E402
 from reporting.services.sandbox_backend import SandboxBackend, open_backend  # noqa: E402
 
@@ -115,8 +116,8 @@ async def _run() -> int:
     token = settings.REMEDIATION_GITHUB_TOKEN
     host = settings.REMEDIATION_GITHUB_HOST
     branch = f"seizu/dependency-update/smoke-{uuid.uuid4().hex[:8]}"
-    provider = sr.PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
-    template = sr._resolve_template(provider) if provider is not None else None
+    provider = sandbox_agent.resolve_provider()
+    template = sandbox_agent.resolve_template(provider) if provider is not None else None
 
     def mask(text: str) -> str:
         return text.replace(token, "***") if token else text

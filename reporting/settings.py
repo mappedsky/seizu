@@ -288,53 +288,53 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 # module (SCHEDULED_QUERY_MODULES) via admin-managed scheduled queries —
 # disable the scheduled query or remove this configuration to turn it off.
 
-# Which coding-agent CLI the remediation workflow runs: "claude" (Claude Code),
-# "codex", or "opencode". opencode is multi-provider — set REMEDIATION_AGENT_MODEL
-# to a "provider/model" id (e.g. "deepseek/deepseek-chat") and the matching
-# provider key is used, falling back to the same global *_API_KEY the chat
-# assistant uses (e.g. DEEPSEEK_API_KEY).
-REMEDIATION_AGENT_PROVIDER = str_env("REMEDIATION_AGENT_PROVIDER", "claude")
+# --- Sandbox coding-agent (shared by any sandbox-agent workflow/tool) --------
+# The provider/credential settings for a headless coding-agent CLI run inside a
+# sandbox (reporting/services/sandbox_agent.py). Generic on purpose: the
+# remediation workflow is one consumer, but the machinery is reusable.
 
-# E2B sandbox template for the remediation run. Empty → the provider's official
+# Which coding-agent CLI to run: "claude" (Claude Code), "codex", or "opencode".
+# opencode is multi-provider — set SANDBOX_AGENT_MODEL to a "provider/model" id
+# (e.g. "deepseek/deepseek-chat") and the matching provider key is used, falling
+# back to the same global *_API_KEY the chat assistant uses (e.g. DEEPSEEK_API_KEY).
+SANDBOX_AGENT_PROVIDER = str_env("SANDBOX_AGENT_PROVIDER", "claude")
+
+# E2B sandbox template for the agent run. Empty → the provider's official
 # prebuilt template (E2B ships "claude"/"codex" images with the CLI installed),
 # which avoids a per-run npm install and its postinstall scripts. A template
 # name → that template. The literal "none" → the plain base image (the run
 # installs the CLI itself). Ignored on self-hosted backends (SANDBOX_DOMAIN set)
 # since templates are an E2B-cloud feature; the install step covers those.
 # The template provides tools only, not credentials — phase isolation is intact.
-REMEDIATION_SANDBOX_TEMPLATE = str_env("REMEDIATION_SANDBOX_TEMPLATE", "")
+SANDBOX_AGENT_TEMPLATE = str_env("SANDBOX_AGENT_TEMPLATE", "")
 
 # API key for the coding-agent CLI (exported only to the agent phase, e.g. as
 # ANTHROPIC_API_KEY). Empty → falls back to the model provider's global
 # *_API_KEY (ANTHROPIC_API_KEY for claude/codex; for opencode, the one matching
-# the model prefix, e.g. DEEPSEEK_API_KEY). Prefer REMEDIATION_AGENT_API_KEY_COMMAND
+# the model prefix, e.g. DEEPSEEK_API_KEY). Prefer SANDBOX_AGENT_API_KEY_COMMAND
 # for short-lived per-run keys. NOTE for opencode: this key must belong to the
-# provider named in REMEDIATION_AGENT_MODEL — an Anthropic key with a
+# provider named in SANDBOX_AGENT_MODEL — an Anthropic key with a
 # "deepseek/…" model is exported as DEEPSEEK_API_KEY and will fail auth.
-REMEDIATION_AGENT_API_KEY = str_env("REMEDIATION_AGENT_API_KEY", "")
+SANDBOX_AGENT_API_KEY = str_env("SANDBOX_AGENT_API_KEY", "")
 
-# Optional command run in the worker before each remediation; its stdout
+# Optional command run in the worker before each agent run; its stdout
 # (stripped) becomes the agent API key for that run. Use this to mint
 # short-lived credentials from a broker (e.g. Vault, an LLM-gateway virtual
 # key issuer) instead of handing the sandbox the long-lived key attached to
-# the Seizu process. Takes precedence over REMEDIATION_AGENT_API_KEY.
-REMEDIATION_AGENT_API_KEY_COMMAND = str_env("REMEDIATION_AGENT_API_KEY_COMMAND", "")
+# the Seizu process. Takes precedence over SANDBOX_AGENT_API_KEY.
+SANDBOX_AGENT_API_KEY_COMMAND = str_env("SANDBOX_AGENT_API_KEY_COMMAND", "")
 
 # Optional base URL exported to the agent phase as the provider's base-url env
 # var (ANTHROPIC_BASE_URL / OPENAI_BASE_URL), so the coding agent talks to an
-# LLM gateway/proxy — typically paired with REMEDIATION_AGENT_API_KEY_COMMAND
+# LLM gateway/proxy — typically paired with SANDBOX_AGENT_API_KEY_COMMAND
 # so the sandbox only ever holds a short-lived gateway key.
-REMEDIATION_AGENT_BASE_URL = str_env("REMEDIATION_AGENT_BASE_URL", "")
+SANDBOX_AGENT_BASE_URL = str_env("SANDBOX_AGENT_BASE_URL", "")
 
 # Model for the coding-agent CLI. For claude/codex a bare model override
 # (e.g. "claude-sonnet-4-6" for Claude Code's ANTHROPIC_MODEL); empty → the
 # CLI's default. For opencode this is required and takes the form
 # "provider/model" (e.g. "deepseek/deepseek-chat"), passed as --model.
-REMEDIATION_AGENT_MODEL = str_env("REMEDIATION_AGENT_MODEL", "")
-
-# Hard timeout for one remediation run (all sandbox phases). A full clone →
-# upgrade → test → PR cycle on a large repo can take tens of minutes.
-REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
+SANDBOX_AGENT_MODEL = str_env("SANDBOX_AGENT_MODEL", "")
 
 # Ephemeral credential-proxy sandbox. When true (and the provider uses a base
 # URL — claude/codex, not opencode), a *second, separate* sandbox runs a
@@ -342,13 +342,17 @@ REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 # gets only a budget-capped virtual key pointed at that proxy. The real key never
 # enters the untrusted agent VM, and the virtual key dies when the proxy sandbox
 # is torn down (its lifetime == the run), so a leak is worthless after the run.
-# Off by default. Mutually exclusive with REMEDIATION_AGENT_BASE_URL. Requires a
-# real key (REMEDIATION_AGENT_API_KEY or the global provider key) to seed the
+# Off by default. Mutually exclusive with SANDBOX_AGENT_BASE_URL. Requires a
+# real key (SANDBOX_AGENT_API_KEY or the global provider key) to seed the
 # proxy — the key command is not used in this mode.
-REMEDIATION_CREDENTIAL_PROXY_ENABLED = bool_env("REMEDIATION_CREDENTIAL_PROXY_ENABLED", False)
+SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED = bool_env("SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED", False)
 # Max spend (USD) allowed on the per-run virtual key — bounds real-time abuse of
 # a key stolen while the proxy is up.
-REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET = str_env("REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET", "5")
+SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET = str_env("SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET", "5")
+
+# Hard timeout for one remediation run (all sandbox phases). A full clone →
+# upgrade → test → PR cycle on a large repo can take tens of minutes.
+REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 
 # Optional expected SHA-256 of the pinned gh linux_amd64 release tarball. When
 # set, the install verifies gh against this out-of-band digest (an independent

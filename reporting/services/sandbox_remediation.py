@@ -2,10 +2,13 @@
 
 Used by the ``cve_dependency_remediation`` Temporal workflow (via
 ``reporting/temporal_workflows/activities.py``) to run a headless coding-agent
-CLI (Claude Code by default; see :data:`PROVIDERS`) against a cloned GitHub
-repository inside an ephemeral sandbox: upgrade a vulnerable dependency, make
-any code changes needed for compatibility, run the tests, and open a pull
-request.
+CLI (Claude Code by default) against a cloned GitHub repository inside an
+ephemeral sandbox: upgrade a vulnerable dependency, make any code changes needed
+for compatibility, run the tests, and open a pull request.
+
+The provider registry, credential resolution, and the credential-proxy sandbox
+are the reusable :mod:`reporting.services.sandbox_agent` machinery; this module
+composes it with the git/GitHub-specific flow (clone, branch, diff, push, PR).
 
 Credential isolation is the core design, across **two sandboxes** so the GitHub
 token never shares a VM with untrusted execution. Secrets are never injected at
@@ -50,46 +53,20 @@ off by disabling the scheduled query (or the ``temporal`` action module via
 import asyncio
 import logging
 import re
-import secrets
 import time
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from reporting.services import sandbox_agent
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
 
 REPO_PATH = "/home/user/repo"
-PROMPT_PATH = "/home/user/prompt.md"
 PR_BODY_PATH = "/home/user/pr_body.md"
 PR_TITLE_PATH = "/home/user/pr_title.txt"
 # base64 git diff handed from the agent sandbox to the fresh push sandbox.
 CHANGES_B64_PATH = "/home/user/changes.b64"
-
-# Ephemeral credential-proxy sandbox (REMEDIATION_CREDENTIAL_PROXY_ENABLED).
-LITELLM_CONFIG_PATH = "/home/user/litellm.yaml"
-VKEY_PATH = "/home/user/vkey"
-_PROXY_PORT = 4000
-_PROXY_TIMEOUT_SECONDS = 240
-_PROXY_KEY_TTL = "120m"
-# LiteLLM config: wildcard model routing to the provider, keys from env so no
-# secret lands in the file. NOTE: the provider namespace and the base-URL suffix
-# (see RemediationProvider) are the fragile wire details — this whole path is
-# unverified against a live LiteLLM + agent CLI; confirm with the proxy-mode
-# smoke test before relying on it.
-_LITELLM_CONFIG = """\
-model_list:
-  - model_name: "*"
-    litellm_params:
-      model: "{namespace}/*"
-      api_key: os.environ/PROXY_REAL_KEY
-general_settings:
-  master_key: os.environ/PROXY_MASTER_KEY
-"""
-_PROXY_INSTALL = "set -euo pipefail\ncommand -v litellm >/dev/null 2>&1 || pip install --quiet 'litellm[proxy]'\n"
-# Header E2B requires to reach a non-public sandbox's exposed ports.
-_E2B_TRAFFIC_HEADER = "e2b-traffic-access-token"
 
 _REPO_FULLNAME_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -101,137 +78,8 @@ _PR_URL_FALLBACK_RE = re.compile(r"https?://[^\s\"']+/pull/\d+")
 # so the run skips the coding agent and push entirely.
 _PR_EXISTS_MARKER_RE = re.compile(r"SEIZU_PR_EXISTS=(https?://\S+)")
 
-# Call on_progress at least this often even when a phase produces no output
-# (e.g. the agent quietly running a long test suite), so Temporal heartbeats
-# never starve.
-_PROGRESS_TICK_SECONDS = 30.0
-# Extra sandbox lifetime beyond the run deadline so E2B never reaps it mid-run.
-_SANDBOX_LIFETIME_SLACK_SECONDS = 120
 # Bound for the (quick) push sandbox: fresh clone → apply patch → push → PR.
 _PUSH_TIMEOUT_SECONDS = 300
-
-
-@dataclass(frozen=True)
-class RemediationProvider:
-    """A headless coding-agent CLI runnable inside the sandbox.
-
-    ``install_cmd``/``run_cmd`` are trusted constants from :data:`PROVIDERS` —
-    never derived from workflow input. Workflow-supplied values (repo, branch
-    names) reach the phase scripts only through per-command environment
-    variables.
-    """
-
-    name: str
-    # Self-guarding install command (``command -v <cli> || …``) so it is a no-op
-    # when the CLI is already present (prebuilt template) and installs otherwise
-    # (base image / self-hosted). Trusted constant; never workflow-derived.
-    install_cmd: str
-    run_cmd: str
-    # Env vars the CLI reads its API key from, scoped to the agent phase only.
-    # A tuple because some CLIs (codex) accept more than one name.
-    api_key_envs: tuple[str, ...]
-    # E2B prebuilt template with this CLI preinstalled (E2B cloud only; ignored
-    # on self-hosted backends, where the install command runs instead).
-    default_template: str
-    # Env var the CLI reads a model override from; None if unsupported.
-    model_env: str | None = None
-    # Env var pointing the CLI at an LLM gateway/proxy; None if unsupported.
-    base_url_env: str | None = None
-    # LiteLLM provider namespace + base-URL path suffix for the credential-proxy
-    # mode (e.g. codex/OpenAI clients expect a "/v1" base). Empty suffix for the
-    # Anthropic (Claude Code) shape.
-    proxy_llm_namespace: str | None = None
-    proxy_base_suffix: str = ""
-    # Env var the CLI reads a literal "Name: value" request header from. When set,
-    # the credential-proxy sandbox can stay non-public: the CLI sends E2B's
-    # traffic-access token as a header instead of the proxy being world-reachable.
-    # None → the proxy falls back to public traffic gated by the virtual key.
-    proxy_header_env: str | None = None
-    # Multi-provider CLI (opencode): the configured model's provider prefix
-    # (e.g. "deepseek" in "deepseek/deepseek-chat") selects both which standard
-    # API key env var the CLI reads and which global *_API_KEY setting we fall
-    # back to. The model is passed as a --model flag (via SEIZU_AGENT_MODEL)
-    # rather than a provider-specific model env var.
-    model_selects_key: bool = False
-
-
-# opencode prompts for edit/bash approval by default, which would stall a
-# headless run. This project config grants blanket approval (the sandbox
-# isolation is the safety boundary, as with claude's --dangerously-skip-
-# permissions). Kept out of the PR via .git/info/exclude below. Defined as a
-# plain (non-f) string so its braces don't collide with f-string/.format().
-_OPENCODE_CONFIG_JSON = '{"$schema":"https://opencode.ai/config.json","permission":"allow"}'
-
-
-# For opencode, map a model's provider prefix to (env var the CLI reads, the
-# global settings attribute we fall back to — shared with the chat assistant,
-# so an operator who already configured DeepSeek/etc. for chat needs no new key).
-_OPENCODE_MODEL_PROVIDERS: dict[str, tuple[str, str]] = {
-    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
-    "openai": ("OPENAI_API_KEY", "OPENAI_API_KEY"),
-    "gemini": ("GEMINI_API_KEY", "GEMINI_API_KEY"),
-    "google": ("GEMINI_API_KEY", "GEMINI_API_KEY"),
-    "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
-}
-
-
-PROVIDERS: dict[str, RemediationProvider] = {
-    "claude": RemediationProvider(
-        name="claude",
-        install_cmd=(
-            "command -v claude >/dev/null 2>&1 || "
-            "npm install -g @anthropic-ai/claude-code || sudo npm install -g @anthropic-ai/claude-code"
-        ),
-        # stream-json keeps output flowing while the agent works (heartbeats);
-        # plain text would stay silent until the very end of the run.
-        run_cmd=(
-            f'claude -p "$(cat {PROMPT_PATH})" --dangerously-skip-permissions --output-format stream-json --verbose'
-        ),
-        api_key_envs=("ANTHROPIC_API_KEY",),
-        default_template="claude",
-        model_env="ANTHROPIC_MODEL",
-        base_url_env="ANTHROPIC_BASE_URL",
-        proxy_llm_namespace="anthropic",  # LiteLLM serves the Anthropic /v1/messages shape
-        proxy_header_env="ANTHROPIC_CUSTOM_HEADERS",  # lets the proxy stay non-public
-    ),
-    "codex": RemediationProvider(
-        name="codex",
-        install_cmd=(
-            "command -v codex >/dev/null 2>&1 || npm install -g @openai/codex || sudo npm install -g @openai/codex"
-        ),
-        run_cmd=f'codex exec --full-auto "$(cat {PROMPT_PATH})"',
-        # The codex CLI reads OPENAI_API_KEY; E2B's prebuilt template documents
-        # CODEX_API_KEY. Set both so either resolution path works.
-        api_key_envs=("OPENAI_API_KEY", "CODEX_API_KEY"),
-        default_template="codex",
-        base_url_env="OPENAI_BASE_URL",
-        proxy_llm_namespace="openai",  # OpenAI clients expect a /v1 base
-        proxy_base_suffix="/v1",
-    ),
-    "opencode": RemediationProvider(
-        name="opencode",
-        install_cmd=(
-            "command -v opencode >/dev/null 2>&1 || npm install -g opencode-ai || sudo npm install -g opencode-ai"
-        ),
-        # Write the blanket-approval config (project opencode.json, read from the
-        # repo root), exclude it from the PR via .git/info/exclude, then run.
-        # `opencode run` is the non-interactive/headless mode; --model picks the
-        # provider/model (e.g. deepseek/deepseek-chat), read from an env var so
-        # the operator-configured model never lands in the .format() call.
-        run_cmd=(
-            "cat > opencode.json <<'OPENCODE_EOF'\n"
-            f"{_OPENCODE_CONFIG_JSON}\n"
-            "OPENCODE_EOF\n"
-            "printf '%s\\n' 'opencode.json' '.opencode/' >> .git/info/exclude\n"
-            f'opencode run --model "$SEIZU_AGENT_MODEL" "$(cat {PROMPT_PATH})"'
-        ),
-        # Key env is derived from the model provider prefix (see model_selects_key),
-        # so no static list applies here.
-        api_key_envs=(),
-        default_template="opencode",
-        model_selects_key=True,
-    ),
-}
 
 # --- Phase scripts --------------------------------------------------------
 #
@@ -294,13 +142,6 @@ gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
 git clone --depth 50 --branch "$SEIZU_BASE_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
 cd {REPO_PATH}
 git checkout -b "$SEIZU_BRANCH"
-"""
-
-_AGENT_SCRIPT_TEMPLATE = f"""\
-set -euo pipefail
-export PATH="$PATH:/usr/local/bin:$HOME/.local/bin:$(npm prefix -g 2>/dev/null)/bin"
-cd {REPO_PATH}
-{{run_cmd}}
 """
 
 # Guard: if an open PR already exists for this branch, there is nothing to do —
@@ -404,27 +245,8 @@ def config_error() -> str | None:
     """
     from reporting import settings
 
-    provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
-    if provider is None:
-        return f"unknown remediation provider {settings.REMEDIATION_AGENT_PROVIDER!r}"
-    _key_envs, fallback, err = _resolve_key_envs_and_fallback(provider)
-    if err is not None:
+    if (err := sandbox_agent.agent_config_error()) is not None:
         return err
-    if settings.REMEDIATION_CREDENTIAL_PROXY_ENABLED:
-        # Proxy mode seeds a LiteLLM sandbox with the REAL key and hands the agent
-        # a virtual key — so it needs a real static/global key (not the key
-        # command), a provider with a base URL, and no external base URL.
-        if provider.base_url_env is None or provider.proxy_llm_namespace is None:
-            return f"credential proxy is not supported for provider {provider.name!r}"
-        if settings.REMEDIATION_AGENT_BASE_URL:
-            return "REMEDIATION_CREDENTIAL_PROXY_ENABLED is mutually exclusive with REMEDIATION_AGENT_BASE_URL"
-        if not (settings.REMEDIATION_AGENT_API_KEY or fallback):
-            return "credential proxy needs a real key (REMEDIATION_AGENT_API_KEY or the global provider key)"
-    elif not (settings.REMEDIATION_AGENT_API_KEY or settings.REMEDIATION_AGENT_API_KEY_COMMAND or fallback):
-        return (
-            "no API key configured for the remediation agent "
-            "(REMEDIATION_AGENT_API_KEY or REMEDIATION_AGENT_API_KEY_COMMAND)"
-        )
     if not settings.REMEDIATION_GITHUB_TOKEN:
         return "REMEDIATION_GITHUB_TOKEN is not configured"
     return None
@@ -445,120 +267,6 @@ def validate_target(repo: str, base_branch: str, branch_name: str) -> str | None
     return None
 
 
-def _resolve_key_envs_and_fallback(provider: RemediationProvider) -> tuple[tuple[str, ...], str, str | None]:
-    """Return ``(env var names to set, global fallback key, error)``.
-
-    For single-provider CLIs (claude/codex) the env vars are static and the
-    fallback is the global setting matching one of them (``ANTHROPIC_API_KEY`` for
-    claude, ``OPENAI_API_KEY`` for codex). For opencode the configured model's
-    provider prefix selects the env var and the matching global ``*_API_KEY``
-    fallback; a missing or unsupported model is an error.
-    """
-    from reporting import settings
-
-    if not provider.model_selects_key:
-        # Fall back to the global provider key matching one of the CLI's key env
-        # vars (e.g. codex → OPENAI_API_KEY), not just ANTHROPIC_API_KEY.
-        fallback = next((v for env in provider.api_key_envs if (v := getattr(settings, env, ""))), "")
-        return provider.api_key_envs, fallback, None
-
-    model = settings.REMEDIATION_AGENT_MODEL.strip()
-    if not model:
-        return (), "", f"{provider.name} requires REMEDIATION_AGENT_MODEL (e.g. deepseek/deepseek-chat)"
-    prefix = model.split("/", 1)[0].lower()
-    mapping = _OPENCODE_MODEL_PROVIDERS.get(prefix)
-    if mapping is None:
-        return (), "", f"model provider {prefix!r} is not supported for {provider.name}"
-    key_env, fallback_attr = mapping
-    return (key_env,), getattr(settings, fallback_attr, ""), None
-
-
-def _resolve_template(provider: RemediationProvider) -> str | None:
-    """Return the E2B template for this provider, or None to use the base image.
-
-    ``REMEDIATION_SANDBOX_TEMPLATE`` empty → the provider's official prebuilt
-    template (recommended: CLI preinstalled, no per-run npm postinstall). A
-    template name → that template. The literal ``none`` → the base image (the
-    install command installs the CLI). Self-hosted backends ignore templates
-    regardless (see :func:`open_backend`).
-    """
-    from reporting import settings
-
-    configured = settings.REMEDIATION_SANDBOX_TEMPLATE.strip()
-    if configured.lower() == "none":
-        return None
-    return configured or provider.default_template
-
-
-async def _mint_agent_api_key(fallback: str) -> str:
-    """Return the agent API key for one run.
-
-    When ``REMEDIATION_AGENT_API_KEY_COMMAND`` is set, run it and use its stdout
-    — this is how operators hand the sandbox a *short-lived* per-run credential
-    from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of the
-    long-lived key attached to the Seizu process. Otherwise use the static
-    ``REMEDIATION_AGENT_API_KEY``, or the provider/model ``fallback`` global key.
-    """
-    from reporting import settings
-
-    command = settings.REMEDIATION_AGENT_API_KEY_COMMAND
-    if command:
-        # Shell is intentional: the command is operator-configured and often a
-        # pipeline (e.g. `vault read … | jq -r .token`).
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode != 0:
-            # Broker stderr can carry sensitive context — log it server-side only
-            # and surface a generic error (it flows into the workflow result).
-            logger.warning(
-                "REMEDIATION_AGENT_API_KEY_COMMAND failed (exit %s): %s",
-                proc.returncode,
-                stderr.decode(errors="replace").strip()[:200],
-            )
-            raise RuntimeError(f"REMEDIATION_AGENT_API_KEY_COMMAND failed with exit code {proc.returncode}")
-        key = stdout.decode(errors="replace").strip()
-        if not key:
-            raise RuntimeError("REMEDIATION_AGENT_API_KEY_COMMAND produced no output")
-        return key
-    return settings.REMEDIATION_AGENT_API_KEY or fallback
-
-
-_warned_static_key = False
-
-
-def _warn_long_lived_agent_key() -> None:
-    """Warn once that the coding agent runs with a long-lived API key.
-
-    Unlike the GitHub token (kept out of the agent sandbox entirely), the agent
-    needs its provider key while it runs untrusted repo code/tests with internet
-    on, so that key is stealable. The production path is a short-lived per-run
-    key via REMEDIATION_AGENT_API_KEY_COMMAND (optionally through a gateway with
-    REMEDIATION_AGENT_BASE_URL); warn when a static key is used instead.
-    """
-    global _warned_static_key
-    if _warned_static_key:
-        return
-    _warned_static_key = True
-    logger.warning(
-        "Remediation runs the coding agent with a long-lived API key exposed to "
-        "untrusted repo code. Prefer REMEDIATION_AGENT_API_KEY_COMMAND for a "
-        "short-lived per-run key.",
-        extra={"type": "AUDIT"},
-    )
-
-
-def _tail_bytes(text: str, max_bytes: int) -> str:
-    """Cap text to its *last* ``max_bytes`` UTF-8 bytes (the summary/PR URL end)."""
-    encoded = text.encode()
-    if len(encoded) <= max_bytes:
-        return text
-    return "[truncated]\n" + encoded[-max_bytes:].decode(errors="replace")
-
-
 async def run_remediation(
     *,
     repo: str,
@@ -569,7 +277,7 @@ async def run_remediation(
     pr_body_fallback: str,
     on_progress: Callable[[], None] | None = None,
 ) -> RemediationRunResult:
-    """Run the four-phase remediation flow in a fresh sandbox.
+    """Run the two-sandbox remediation flow.
 
     ``prompt`` is the remediation task for the coding agent (the caller wraps
     untrusted CVE data); a fixed security preamble and operational footer are
@@ -583,14 +291,15 @@ async def run_remediation(
         return RemediationRunResult(status="failed", error=error)
     if (error := validate_target(repo, base_branch, branch_name)) is not None:
         return RemediationRunResult(status="failed", error=error)
-    maybe_provider = PROVIDERS.get(settings.REMEDIATION_AGENT_PROVIDER)
+    maybe_provider = sandbox_agent.resolve_provider()
     if maybe_provider is None:  # unreachable: config_error() already checked
-        return RemediationRunResult(status="failed", error="unknown remediation provider")
-    provider: RemediationProvider = maybe_provider
+        return RemediationRunResult(status="failed", error="unknown sandbox agent provider")
+    # Bind the non-optional type so the nested closures see it (not the union).
+    provider: sandbox_agent.SubagentProvider = maybe_provider
     # config_error() already validated the model/prefix, so err is None here.
-    key_envs, key_fallback, _err = _resolve_key_envs_and_fallback(provider)
+    key_envs, key_fallback, _err = sandbox_agent.resolve_key_envs_and_fallback(provider)
 
-    use_proxy = settings.REMEDIATION_CREDENTIAL_PROXY_ENABLED and provider.base_url_env is not None
+    use_proxy = sandbox_agent.use_credential_proxy(provider)
 
     github_token = settings.REMEDIATION_GITHUB_TOKEN
     github_host = settings.REMEDIATION_GITHUB_HOST
@@ -607,14 +316,14 @@ async def run_remediation(
     proxy_real_key = ""
     api_key = ""
     if use_proxy:
-        proxy_real_key = settings.REMEDIATION_AGENT_API_KEY or key_fallback
+        proxy_real_key = settings.SANDBOX_AGENT_API_KEY or key_fallback
         if proxy_real_key:
             mask_secrets.append(proxy_real_key)
     else:
-        if not settings.REMEDIATION_AGENT_API_KEY_COMMAND:
-            _warn_long_lived_agent_key()
+        if not settings.SANDBOX_AGENT_API_KEY_COMMAND:
+            sandbox_agent.warn_long_lived_agent_key()
         try:
-            api_key = await _mint_agent_api_key(key_fallback)
+            api_key = await sandbox_agent.mint_agent_api_key(key_fallback)
         except Exception as exc:
             logger.exception("agent API key minting failed for %s", repo)
             return RemediationRunResult(status="failed", error=f"agent API key unavailable: {exc}")
@@ -629,7 +338,7 @@ async def run_remediation(
             on_progress()
 
     def _tail() -> str:
-        return _tail_bytes(_mask("".join(transcript)), settings.SANDBOX_MAX_OUTPUT_BYTES)
+        return sandbox_agent.tail_bytes(_mask("".join(transcript)), settings.SANDBOX_MAX_OUTPUT_BYTES)
 
     timeout = settings.REMEDIATION_TIMEOUT_SECONDS
     deadline = time.monotonic() + timeout
@@ -649,18 +358,8 @@ async def run_remediation(
     # gh install has no secrets; the (non-secret) digest pins gh independently.
     gh_install_env = {"SEIZU_GH_SHA256": settings.REMEDIATION_GH_SHA256} if settings.REMEDIATION_GH_SHA256 else {}
 
-    def _build_agent_env(key_value: str, base_url: str | None) -> dict[str, str]:
-        env = {e: key_value for e in key_envs}
-        if provider.model_selects_key:
-            # opencode reads the model from the --model flag (SEIZU_AGENT_MODEL in run_cmd).
-            env["SEIZU_AGENT_MODEL"] = settings.REMEDIATION_AGENT_MODEL.strip()
-        elif settings.REMEDIATION_AGENT_MODEL and provider.model_env:
-            env[provider.model_env] = settings.REMEDIATION_AGENT_MODEL
-        if base_url and provider.base_url_env:
-            env[provider.base_url_env] = base_url
-        return env
-
-    template = _resolve_template(provider)
+    template = sandbox_agent.resolve_template(provider)
+    sandbox_timeout = timeout + sandbox_agent.SANDBOX_LIFETIME_SLACK_SECONDS
 
     full_prompt = f"{_SECURITY_PREAMBLE}\n{prompt}\n\n" + _FOOTER_TEMPLATE.format(
         repo=repo,
@@ -686,70 +385,15 @@ async def run_remediation(
     # Handoff from the agent sandbox to the push sandbox (base64 diff + PR text).
     handoff: dict[str, str] = {}
 
-    @asynccontextmanager
-    async def _credential_proxy() -> AsyncIterator[tuple[str, str, dict[str, str]]]:
-        """Open a *separate* sandbox running a LiteLLM proxy seeded with the real
-        provider key, mint a budget-capped per-run virtual key, and yield
-        ``(base_url, virtual_key, header_env)`` for the agent. The real key never
-        enters the agent sandbox; the virtual key dies when this sandbox is torn
-        down. ``header_env`` carries any extra env the agent needs to authenticate
-        to a non-public proxy (the E2B traffic-access token as a custom header)."""
-        master_key = "sk-seizu-" + secrets.token_urlsafe(24)
-        mask_secrets.append(master_key)
-        budget = settings.REMEDIATION_CREDENTIAL_PROXY_MAX_BUDGET
-        mint = (
-            f'curl -sf "http://localhost:{_PROXY_PORT}/key/generate" '
-            f'-H "Authorization: Bearer $PROXY_MASTER_KEY" -H "Content-Type: application/json" '
-            f'-d \'{{"max_budget": {budget}, "duration": "{_PROXY_KEY_TTL}"}}\' | jq -r .key > {VKEY_PATH}\n'
-            f"test -s {VKEY_PATH}\n"
-        )
-        start = (
-            "set -euo pipefail\n"
-            f"nohup litellm --config {LITELLM_CONFIG_PATH} --port {_PROXY_PORT} > /home/user/litellm.log 2>&1 &\n"
-            f"for i in $(seq 1 60); do curl -sf http://localhost:{_PROXY_PORT}/health/liveliness "
-            ">/dev/null 2>&1 && break; sleep 2; done\n"
-            f"curl -sf http://localhost:{_PROXY_PORT}/health/liveliness >/dev/null 2>&1 "
-            "|| { echo SEIZU_PROXY_UNHEALTHY; cat /home/user/litellm.log; exit 1; }\n"
-        )
-        # If the CLI can send a custom header (proxy_header_env), keep the proxy
-        # private and gate it with E2B's traffic-access token; otherwise fall back
-        # to a public port gated only by the virtual key.
-        private = provider.proxy_header_env is not None
-        async with open_backend(
-            api_key=settings.SANDBOX_API_KEY,
-            domain=settings.SANDBOX_DOMAIN,
-            allow_internet=True,
-            timeout_seconds=timeout + _SANDBOX_LIFETIME_SLACK_SECONDS,
-            allow_public_traffic=not private,
-        ) as proxy:
-            await proxy.write_file(LITELLM_CONFIG_PATH, _LITELLM_CONFIG.format(namespace=provider.proxy_llm_namespace))
-            proxy_env = {"PROXY_REAL_KEY": proxy_real_key, "PROXY_MASTER_KEY": master_key}
-            await _phase(proxy, "proxy_install", _PROXY_INSTALL, {}, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
-            await _phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
-            await _phase(proxy, "proxy_mint", mint, {"PROXY_MASTER_KEY": master_key}, timeout_seconds=60)
-            vkey = (await proxy.read_file(VKEY_PATH)).strip()
-            mask_secrets.append(vkey)
-            host = await proxy.get_host(_PROXY_PORT)
-
-            header_env: dict[str, str] = {}
-            if private:
-                access_token = await proxy.get_traffic_access_token()
-                if not access_token:
-                    raise RuntimeError("proxy sandbox exposed no traffic-access token for the private proxy")
-                mask_secrets.append(access_token)
-                assert provider.proxy_header_env is not None  # narrowed by `private`
-                header_env[provider.proxy_header_env] = f"{_E2B_TRAFFIC_HEADER}: {access_token}"
-            yield f"https://{host}{provider.proxy_base_suffix}", vkey, header_env
-
     async def _agent_sandbox(agent_env: dict[str, str]) -> str | None:
         async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
             allow_internet=True,
-            timeout_seconds=timeout + _SANDBOX_LIFETIME_SLACK_SECONDS,
+            timeout_seconds=sandbox_timeout,
             template=template,
         ) as backend:
-            await backend.write_file(PROMPT_PATH, full_prompt)  # no secrets
+            await backend.write_file(sandbox_agent.PROMPT_PATH, full_prompt)  # no secrets
             await backend.write_file(PR_BODY_PATH, pr_body_fallback)
             await _phase(backend, "install", _agent_install_script(provider.install_cmd), gh_install_env)
             # setup runs before any untrusted code, so the token here is safe.
@@ -758,7 +402,7 @@ async def run_remediation(
             if _PR_EXISTS_MARKER_RE.search(guard_output):
                 return guard_output
             # The agent runs with no GitHub token anywhere in this sandbox.
-            await _phase(backend, "agent", _AGENT_SCRIPT_TEMPLATE.format(run_cmd=provider.run_cmd), agent_env)
+            await _phase(backend, "agent", sandbox_agent.agent_run_script(provider, REPO_PATH), agent_env)
             # Extract the change as a patch — still no token.
             await _phase(backend, "extract", _EXTRACT_SCRIPT, {**target_env, "SEIZU_PR_TITLE": pr_title})
             handoff["patch"] = await backend.read_file(CHANGES_B64_PATH)
@@ -770,9 +414,20 @@ async def run_remediation(
         """Run the untrusted agent sandbox, optionally alongside an ephemeral
         credential-proxy sandbox that keeps the real provider key out of it."""
         if use_proxy:
-            async with _credential_proxy() as (base_url, vkey, header_env):
-                return await _agent_sandbox({**_build_agent_env(vkey, base_url), **header_env})
-        return await _agent_sandbox(_build_agent_env(api_key, settings.REMEDIATION_AGENT_BASE_URL or None))
+            async with sandbox_agent.credential_proxy(
+                provider=provider,
+                real_key=proxy_real_key,
+                budget=settings.SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET,
+                sandbox_timeout_seconds=sandbox_timeout,
+                run_phase=_phase,
+                mask_secrets=mask_secrets,
+            ) as (base_url, vkey, header_env):
+                return await _agent_sandbox(
+                    {**sandbox_agent.build_agent_env(provider, key_envs, vkey, base_url), **header_env}
+                )
+        return await _agent_sandbox(
+            sandbox_agent.build_agent_env(provider, key_envs, api_key, settings.SANDBOX_AGENT_BASE_URL or None)
+        )
 
     async def _run_push() -> str:
         """Push from a FRESH sandbox that never ran the agent — so a persistence
@@ -781,7 +436,7 @@ async def run_remediation(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
             allow_internet=True,
-            timeout_seconds=_PUSH_TIMEOUT_SECONDS + _SANDBOX_LIFETIME_SLACK_SECONDS,
+            timeout_seconds=_PUSH_TIMEOUT_SECONDS + sandbox_agent.SANDBOX_LIFETIME_SLACK_SECONDS,
             template=None,  # base image + pinned gh only; no agent CLI, no npm
         ) as backend:
             await backend.write_file(CHANGES_B64_PATH, handoff["patch"])
@@ -798,7 +453,7 @@ async def run_remediation(
 
     async def _ticker() -> None:
         while True:
-            await asyncio.sleep(_PROGRESS_TICK_SECONDS)
+            await asyncio.sleep(sandbox_agent.PROGRESS_TICK_SECONDS)
             if on_progress is not None:
                 on_progress()
 
