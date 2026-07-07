@@ -214,7 +214,7 @@ To add a workflow: define the workflow + activities under `reporting/temporal_wo
 
 ## Verifying the remediation flow
 
-Unit tests mock the sandbox, so they confirm the phase/credential logic but **not** that a coding-agent CLI, `gh`, and git actually authenticate and push inside a real sandbox. Two things that bit us and are easy to miss:
+Unit tests mock the sandbox, so they confirm the phase/credential logic but **not** that a coding-agent CLI, `gh`, and git actually authenticate and push inside a real sandbox. A couple things that are easy to miss:
 
 - **The temporal worker does not hot-reload.** `seizu-temporal-worker` runs `python -m reporting.temporal_worker` with no `--reload`, so it imports the remediation code once at startup. After changing `sandbox_remediation.py` (or any workflow code), restart it or the next run silently uses the old code: `docker compose restart seizu-temporal-worker` (dev, bind-mounted) or rebuild the image (if not bind-mounted).
 - **A public target repo hides auth failures until push.** Cloning a public repo is anonymous, so the GitHub token is first exercised on `git push`. When testing, always push a branch — a successful clone proves nothing about the token.
