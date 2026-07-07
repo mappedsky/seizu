@@ -200,13 +200,13 @@ async def _run_proxy() -> int:
         return _fail("SANDBOX_API_KEY is not configured")
     provider = sandbox_agent.resolve_provider()
     if provider is None:
-        return _fail(f"unknown SANDBOX_AGENT_PROVIDER {settings.SANDBOX_AGENT_PROVIDER!r}")
+        return _fail("SANDBOX_AGENT_PROVIDER is unknown (expected claude, codex, or opencode)")
     if sandbox_agent.proxy_namespace(provider) is None:
         return _fail("no proxy namespace — set SANDBOX_AGENT_MODEL (required for opencode)")
-    # agent_config_error() returns a secret-free message; don't surface the
-    # resolve_*() tuple (it also carries the fallback API key) to a log/print.
-    if (cfg := sandbox_agent.agent_config_error()) is not None:
-        return _fail(cfg)
+    # Pass ONLY literal strings to _fail(): resolve_*() returns the fallback API
+    # key in the same tuple as its error, so surfacing that error to a print/log
+    # trips CodeQL's clear-text-logging (and risks leaking on real imprecision).
+    # ``fallback``/``real_key`` are secrets — used for masking + the proxy, never printed.
     _key_envs, fallback, _err = sandbox_agent.resolve_key_envs_and_fallback(provider)
     real_key = settings.SANDBOX_AGENT_API_KEY or fallback
     if not real_key:
