@@ -55,7 +55,7 @@ def test_agent_config_error_proxy_constraints() -> None:
     # a model to derive the namespace and a real key to seed the proxy.
     with _settings(
         SANDBOX_AGENT_PROVIDER="opencode",
-        SANDBOX_AGENT_MODEL="deepseek/deepseek-chat",
+        SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro",
         SANDBOX_AGENT_API_KEY="sk-d",
         SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
     ):
@@ -76,7 +76,7 @@ def test_resolve_key_envs_fallback_matches_the_provider() -> None:
 
 def test_resolve_key_envs_opencode_selects_by_model_prefix() -> None:
     opencode = sandbox_agent.PROVIDERS["opencode"]
-    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-chat", DEEPSEEK_API_KEY="sk-d"):
+    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro", DEEPSEEK_API_KEY="sk-d"):
         key_envs, fallback, err = sandbox_agent.resolve_key_envs_and_fallback(opencode)
     assert err is None and key_envs == ("DEEPSEEK_API_KEY",) and fallback == "sk-d"
     with _settings(SANDBOX_AGENT_MODEL=""):
@@ -95,10 +95,10 @@ def test_build_agent_env_claude_and_opencode() -> None:
         "ANTHROPIC_BASE_URL": "https://proxy",
     }
     opencode = sandbox_agent.PROVIDERS["opencode"]
-    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"):
+    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro"):
         env = sandbox_agent.build_agent_env(opencode, ("DEEPSEEK_API_KEY",), "sk-d", None)
     # opencode passes the model via a --model flag env, not a provider model env.
-    assert env == {"DEEPSEEK_API_KEY": "sk-d", "SEIZU_AGENT_MODEL": "deepseek/deepseek-chat"}
+    assert env == {"DEEPSEEK_API_KEY": "sk-d", "SEIZU_AGENT_MODEL": "deepseek/deepseek-v4-pro"}
 
 
 def test_resolve_template() -> None:
@@ -116,7 +116,7 @@ def test_use_credential_proxy_depends_on_a_routable_namespace() -> None:
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["claude"]) is True
         # opencode needs a model to derive its LiteLLM namespace.
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["opencode"]) is False
-    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True, SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"):
+    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True, SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro"):
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["opencode"]) is True
     with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=False):
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["claude"]) is False
@@ -126,7 +126,7 @@ def test_proxy_namespace() -> None:
     with _settings():
         assert sandbox_agent.proxy_namespace(sandbox_agent.PROVIDERS["claude"]) == "anthropic"
         assert sandbox_agent.proxy_namespace(sandbox_agent.PROVIDERS["codex"]) == "openai"
-    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"):
+    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro"):
         assert sandbox_agent.proxy_namespace(sandbox_agent.PROVIDERS["opencode"]) == "deepseek"
     with _settings(SANDBOX_AGENT_MODEL=""):  # opencode with no model → no namespace
         assert sandbox_agent.proxy_namespace(sandbox_agent.PROVIDERS["opencode"]) is None
@@ -151,14 +151,14 @@ def test_proxy_agent_setup_per_transport() -> None:
     assert "vk" not in setup.files[sandbox_agent._CODEX_CONFIG_PATH]  # key stays in env
 
     # opencode: an openai-compatible provider config + a namespaced model.
-    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"):
+    with _settings(SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro"):
         setup = sandbox_agent.proxy_agent_setup(
             sandbox_agent.PROVIDERS["opencode"], ("DEEPSEEK_API_KEY",), "https://p/v1", "vk", "tok"
         )
     # The provider prefix is stripped so LiteLLM's wildcard doesn't double it.
-    assert setup.env == {"SEIZU_AGENT_MODEL": "seizu_proxy/deepseek-chat"}
+    assert setup.env == {"SEIZU_AGENT_MODEL": "seizu_proxy/deepseek-v4-pro"}
     config = setup.files[sandbox_agent._OPENCODE_CONFIG_PATH]
-    assert '"deepseek-chat"' in config and "deepseek/deepseek-chat" not in config
+    assert '"deepseek-v4-pro"' in config and "deepseek/deepseek-v4-pro" not in config
 
 
 def test_agent_run_script_cds_into_the_workdir() -> None:

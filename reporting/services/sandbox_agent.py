@@ -145,7 +145,7 @@ class SubagentProvider:
     #               the virtual key only). All built-in providers avoid this.
     proxy_transport: str = "public"
     # Multi-provider CLI (opencode): the configured model's provider prefix
-    # (e.g. "deepseek" in "deepseek/deepseek-chat") selects both which standard
+    # (e.g. "deepseek" in "deepseek/deepseek-v4-pro") selects both which standard
     # API key env var the CLI reads and which global *_API_KEY setting we fall
     # back to. The model is passed as a --model flag (via SEIZU_AGENT_MODEL)
     # rather than a provider-specific model env var.
@@ -215,7 +215,7 @@ PROVIDERS: dict[str, SubagentProvider] = {
         # Write the blanket-approval config (project opencode.json, read from the
         # working directory), exclude it from any PR via .git/info/exclude, then
         # run. `opencode run` is the non-interactive/headless mode; --model picks
-        # the provider/model (e.g. deepseek/deepseek-chat), read from an env var
+        # the provider/model (e.g. deepseek/deepseek-v4-pro), read from an env var
         # so the operator-configured model never lands in the .format() call.
         run_cmd=(
             "cat > opencode.json <<'OPENCODE_EOF'\n"
@@ -277,7 +277,7 @@ def resolve_key_envs_and_fallback(provider: SubagentProvider) -> tuple[tuple[str
 
     model = settings.SANDBOX_AGENT_MODEL.strip()
     if not model:
-        return (), "", f"{provider.name} requires SANDBOX_AGENT_MODEL (e.g. deepseek/deepseek-chat)"
+        return (), "", f"{provider.name} requires SANDBOX_AGENT_MODEL (e.g. deepseek/deepseek-v4-pro)"
     prefix = model.split("/", 1)[0].lower()
     mapping = _OPENCODE_MODEL_PROVIDERS.get(prefix)
     if mapping is None:
@@ -491,9 +491,9 @@ def proxy_agent_setup(
         env = {e: agent_key for e in key_envs} | {_PROXY_ACCESS_TOKEN_ENV: access_token}
         return ProxyAgentSetup(env=env, files={_CODEX_CONFIG_PATH: _codex_proxy_config(base_url)})
     if provider.proxy_transport == "opencode":
-        # Send the BARE model ("deepseek/deepseek-chat" → "deepseek-chat"): the
+        # Send the BARE model ("deepseek/deepseek-v4-pro" → "deepseek-v4-pro"): the
         # LiteLLM wildcard route ("deepseek/*") re-adds the namespace, so passing
-        # the full id would reach the provider API as "deepseek/deepseek-chat".
+        # the full id would reach the provider API as "deepseek/deepseek-v4-pro".
         model = settings.SANDBOX_AGENT_MODEL.strip()
         bare_model = model.split("/", 1)[1] if "/" in model else model
         config = _opencode_proxy_config(base_url, agent_key, access_token, bare_model)

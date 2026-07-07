@@ -282,7 +282,7 @@ async def test_credential_proxy_opencode_writes_a_private_config() -> None:
         _settings(
             SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
             SANDBOX_AGENT_PROVIDER="opencode",
-            SANDBOX_AGENT_MODEL="deepseek/deepseek-chat",
+            SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro",
             SANDBOX_AGENT_API_KEY="real-deepseek-key",
         ),
         _patched_open([proxy, agent, push], opens),
@@ -294,9 +294,9 @@ async def test_credential_proxy_opencode_writes_a_private_config() -> None:
     assert 'model: "deepseek/*"' in proxy.files[sandbox_agent.LITELLM_CONFIG_PATH]
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
     # The bare model is routed at the custom provider (no doubled namespace).
-    assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek-chat"
+    assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek-v4-pro"
     config = agent.files[sandbox_agent._OPENCODE_CONFIG_PATH]
-    assert '"deepseek-chat"' in config and "deepseek/deepseek-chat" not in config
+    assert '"deepseek-v4-pro"' in config and "deepseek/deepseek-v4-pro" not in config
     assert "e2b-traffic-access-token" in config and "sk-seizu-" in config  # the ephemeral key
     assert "real-deepseek-key" not in config
     assert result.status == "completed"
@@ -496,7 +496,7 @@ async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
     push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/5\n"})
     opens: list[dict[str, Any]] = []
     with (
-        _settings(SANDBOX_AGENT_PROVIDER="opencode", SANDBOX_AGENT_MODEL="deepseek/deepseek-chat"),
+        _settings(SANDBOX_AGENT_PROVIDER="opencode", SANDBOX_AGENT_MODEL="deepseek/deepseek-v4-pro"),
         _patched_open([agent, push], opens),
     ):
         result = await run_remediation(**_TARGET)
@@ -505,7 +505,7 @@ async def test_opencode_deepseek_sets_provider_key_env_and_model() -> None:
     # The model provider prefix selects the key env opencode reads.
     assert agent_env["DEEPSEEK_API_KEY"] == _AGENT_KEY
     # opencode takes the model as a --model flag, passed via env.
-    assert agent_env["SEIZU_AGENT_MODEL"] == "deepseek/deepseek-chat"
+    assert agent_env["SEIZU_AGENT_MODEL"] == "deepseek/deepseek-v4-pro"
     # Still no GitHub token in the agent phase, and no unrelated provider keys.
     assert "GH_TOKEN" not in agent_env
     assert "ANTHROPIC_API_KEY" not in agent_env

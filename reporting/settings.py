@@ -295,7 +295,7 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 
 # Which coding-agent CLI to run: "claude" (Claude Code), "codex", or "opencode".
 # opencode is multi-provider — set SANDBOX_AGENT_MODEL to a "provider/model" id
-# (e.g. "deepseek/deepseek-chat") and the matching provider key is used, falling
+# (e.g. "deepseek/deepseek-v4-pro") and the matching provider key is used, falling
 # back to the same global *_API_KEY the chat assistant uses (e.g. DEEPSEEK_API_KEY).
 SANDBOX_AGENT_PROVIDER = str_env("SANDBOX_AGENT_PROVIDER", "claude")
 
@@ -333,7 +333,7 @@ SANDBOX_AGENT_BASE_URL = str_env("SANDBOX_AGENT_BASE_URL", "")
 # Model for the coding-agent CLI. For claude/codex a bare model override
 # (e.g. "claude-sonnet-4-6" for Claude Code's ANTHROPIC_MODEL); empty → the
 # CLI's default. For opencode this is required and takes the form
-# "provider/model" (e.g. "deepseek/deepseek-chat"), passed as --model.
+# "provider/model" (e.g. "deepseek/deepseek-v4-pro"), passed as --model.
 SANDBOX_AGENT_MODEL = str_env("SANDBOX_AGENT_MODEL", "")
 
 # Ephemeral credential-proxy sandbox. When true (and the provider uses a base
