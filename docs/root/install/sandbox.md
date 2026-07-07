@@ -73,6 +73,16 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |
 
+## Other sandbox consumers
+
+The `SandboxBackend` protocol is also used outside the chat tool: the
+`cve_dependency_remediation` Temporal workflow drives the sandbox directly
+(no chat session, no tool call) to run a coding-agent CLI against a cloned
+repository with phase-isolated credentials. See
+[Temporal workflows](temporal-workflows.md) for its design and configuration
+(`REMEDIATION_*`); it shares `SANDBOX_API_KEY`/`SANDBOX_DOMAIN` for the
+sandbox provider itself.
+
 ## Providers
 
 ### E2B (default)

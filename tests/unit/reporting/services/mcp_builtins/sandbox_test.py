@@ -16,12 +16,12 @@ from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
     _build_sandbox_tools,
     _build_seizu_tools,
-    _E2BSandboxBackend,
     _get_sandbox_model,
     _handle_delegate,
     _ToolMessageNormalizingModel,
     _wrap_with_detail_events,
 )
+from reporting.services.sandbox_backend import _E2BSandboxBackend, open_backend
 
 _NOW = "2024-01-01T00:00:00+00:00"
 
@@ -50,6 +50,9 @@ def _make_fake_backend() -> MagicMock:
     backend.read_file = AsyncMock(return_value="file content")
     backend.write_file = AsyncMock(return_value="Wrote 12 bytes to /tmp/test.txt")
     backend.list_files = AsyncMock(return_value="")
+    backend.run_bash_streaming = AsyncMock(return_value="")
+    backend.get_host = AsyncMock(return_value="host")
+    backend.get_traffic_access_token = AsyncMock(return_value="")
     return backend
 
 
@@ -246,7 +249,7 @@ async def test_handler_returns_agent_result() -> None:
         patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
         patch(
-            "reporting.services.mcp_builtins.sandbox._open_backend",
+            "reporting.services.mcp_builtins.sandbox.open_backend",
             new=_open_backend_ctx(fake_backend),
         ),
         patch(
@@ -274,7 +277,7 @@ async def test_handler_truncates_long_output() -> None:
         patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000),
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
         patch(
-            "reporting.services.mcp_builtins.sandbox._open_backend",
+            "reporting.services.mcp_builtins.sandbox.open_backend",
             new=_open_backend_ctx(fake_backend),
         ),
         patch(
@@ -308,7 +311,7 @@ async def test_handler_passes_context_in_prompt() -> None:
         patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
         patch(
-            "reporting.services.mcp_builtins.sandbox._open_backend",
+            "reporting.services.mcp_builtins.sandbox.open_backend",
             new=_open_backend_ctx(fake_backend),
         ),
         patch(
@@ -339,7 +342,7 @@ async def test_handler_returns_error_on_timeout() -> None:
         patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 0),
         patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
-        patch("reporting.services.mcp_builtins.sandbox._open_backend", new=slow_backend),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=slow_backend),
         patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
     ):
         result = await _handle_delegate({"task": "slow task"}, _current_user())
@@ -407,7 +410,7 @@ async def test_handler_persists_inner_tool_events_through_real_agent() -> None:
             patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
             patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
             patch(
-                "reporting.services.mcp_builtins.sandbox._open_backend",
+                "reporting.services.mcp_builtins.sandbox.open_backend",
                 new=_open_backend_ctx(fake_backend),
             ),
             patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=_FakeToolCaller()),
@@ -569,7 +572,7 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
         patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
         patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
-        patch("reporting.services.mcp_builtins.sandbox._open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
         patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_create_react_agent),
         patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
         patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[seizu_tool])),
@@ -774,3 +777,103 @@ def test_get_sandbox_model_returns_normalizing_model() -> None:
         model = _get_sandbox_model()
 
     assert isinstance(model, _ToolMessageNormalizingModel)
+
+
+async def test_e2b_run_bash_streaming_passes_per_command_envs() -> None:
+    """Per-command envs go to commands.run for that one command only — this is
+    the primitive the remediation service's credential phase-isolation rests on."""
+    chunks: list[str] = []
+    sdk = MagicMock()
+
+    async def _run(cmd: str, **kwargs: Any) -> Any:
+        assert kwargs["envs"] == {"GH_TOKEN": "tok"}
+        kwargs["on_stdout"]("line\n")
+        return MagicMock()
+
+    sdk.commands.run = AsyncMock(side_effect=_run)
+    out = await _E2BSandboxBackend(sdk).run_bash_streaming(
+        "echo line", timeout_seconds=5, on_output=chunks.append, envs={"GH_TOKEN": "tok"}
+    )
+    assert out == "line\n"
+    assert chunks == ["line\n"]
+
+
+def _capture_open_backend(fake_backend: MagicMock, captured: dict[str, Any]) -> Any:
+    """Return a patched _open_backend that yields fake_backend and records kwargs."""
+
+    @asynccontextmanager
+    async def _ctx(**kwargs: Any):  # type: ignore[misc]
+        captured.update(kwargs)
+        yield fake_backend
+
+    return _ctx
+
+
+def _patch_async_sandbox(created: dict[str, Any]) -> Any:
+    """Patch the lazily-imported e2b AsyncSandbox and record create() kwargs."""
+
+    class _FakeSandbox:
+        async def __aenter__(self) -> "_FakeSandbox":
+            return self
+
+        async def __aexit__(self, *_a: Any) -> bool:
+            return False
+
+    async def _create(**kwargs: Any) -> "_FakeSandbox":
+        created.update(kwargs)
+        return _FakeSandbox()
+
+    module = MagicMock()
+    module.AsyncSandbox.create = AsyncMock(side_effect=_create)
+    return patch.dict("sys.modules", {"e2b_code_interpreter": module})
+
+
+async def test_open_backend_passes_template_on_e2b_cloud() -> None:
+    """On E2B cloud (no domain), the template reaches AsyncSandbox.create."""
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created), patch("reporting.settings.SANDBOX_ALLOW_INTERNET", False):
+        async with open_backend(api_key="k", domain="", template="claude"):
+            pass
+    assert created["template"] == "claude"
+
+
+async def test_open_backend_ignores_template_when_self_hosted() -> None:
+    """Templates are an E2B-cloud feature; a self-hosted domain must not get one,
+    so the base-image install path still works on OpenKruise Agents."""
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created), patch("reporting.settings.SANDBOX_ALLOW_INTERNET", False):
+        async with open_backend(api_key="k", domain="sandbox.internal", template="claude"):
+            pass
+    assert "template" not in created
+    assert created["domain"] == "sandbox.internal"
+
+
+async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:
+    """The plain delegate path must keep passing no allow_internet/timeout
+    override, so the pre-existing security defaults still apply."""
+    fake_backend = _make_fake_backend()
+    captured: dict[str, Any] = {}
+    fake_result = _make_fake_agent_result("ok")
+    with (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch(
+            "reporting.services.mcp_builtins.sandbox.open_backend",
+            new=_capture_open_backend(fake_backend, captured),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.sandbox.create_react_agent",
+            return_value=MagicMock(ainvoke=AsyncMock(return_value=fake_result)),
+        ),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ):
+        await _handle_delegate({"task": "compute"}, _current_user())
+
+    assert "envs" not in captured
+    assert "allow_internet" not in captured
+    assert "timeout_seconds" not in captured

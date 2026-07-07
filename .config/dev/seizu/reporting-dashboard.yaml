@@ -2406,3 +2406,45 @@ scheduled_queries:
       - action_type: temporal
         action_config:
           workflow: cve_repo_report
+
+  - name: New CVE dependencies requiring remediation
+    cypher: |-
+      MATCH (sm:SyncMetadata)
+      WHERE sm.grouptype = "GitHubOrganization"
+        AND sm.syncedtype = "GitHubOrganization"
+      WITH toString(sm.groupid) AS org_id,
+           datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+      MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
+      WHERE o.id = org_id
+      MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
+      WHERE s.created_at IS NOT NULL
+        AND datetime(s.created_at) > window_start
+        AND coalesce(r.archived, false) = false
+        AND coalesce(r.disabled, false) = false
+        AND s.dependency_package_name IS NOT NULL
+      MATCH (c:CVEMetadata {id: s.cve_id})
+      RETURN DISTINCT {
+        repo: r.fullname,
+        default_branch: r.defaultbranch,
+        package: s.dependency_package_name,
+        ecosystem: s.dependency_package_ecosystem,
+        manifest_path: s.dependency_manifest_path,
+        vulnerable_version_range: s.vulnerable_version_range,
+        patched_version: s.first_patched_version,
+        cve_id: c.id,
+        severity: c.base_severity,
+        score: c.base_score,
+        summary: s.advisory_summary,
+        url: s.html_url,
+        created_at: s.created_at
+      } AS details
+    # Any GitHub organization sync (no groupid → matches all orgs); each org's
+    # own SyncMetadata window is applied to its repositories in the query.
+    watch_scans:
+      - grouptype: GitHubOrganization
+        syncedtype: GitHubOrganization
+    enabled: true
+    actions:
+      - action_type: temporal
+        action_config:
+          workflow: cve_dependency_remediation

@@ -261,8 +261,126 @@ TEMPORAL_WORKER_ENABLED = bool_env("TEMPORAL_WORKER_ENABLED", True)
 # Maximum number of scheduled query result rows forwarded into a workflow
 # (Temporal payloads are capped at ~2MB; excess rows are dropped with a warning).
 TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS", 200)
+# Which registered Temporal workflows the temporal scheduled-query action may
+# start. Enabling the temporal module (SCHEDULED_QUERY_MODULES) otherwise makes
+# every registered workflow dispatchable; this narrows that to an allowlist.
+# Empty or unset → all registered workflows. Comma-separated names (e.g.
+# "cve_repo_report") → only those. Unknown names are ignored. The schema's
+# workflow picker only offers enabled workflows, and dispatch refuses disabled
+# ones. Set this on both the web service (for the picker) and the scheduled
+# query worker (for enforcement).
+TEMPORAL_ENABLED_WORKFLOWS = list_env("TEMPORAL_ENABLED_WORKFLOWS", [])
 # Per-activity timeout in seconds for AI chat sessions run by workflows.
 TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
+
+# ---------------------------------------------------------------------------
+# CVE dependency remediation (cve_dependency_remediation workflow)
+# ---------------------------------------------------------------------------
+
+# The cve_dependency_remediation Temporal workflow runs a headless coding-agent
+# CLI (Claude Code by default) in an ephemeral sandbox: it clones the affected
+# repo, upgrades the vulnerable dependency (with any code changes needed for
+# compatibility), and opens a PR. The agent does not run the test suite (the
+# sandbox usually lacks its dependencies); CI runs the tests on the PR.
+# Credentials are phase-isolated: the coding agent never runs with the GitHub token in its
+# environment. There is no dedicated enable flag and no per-user permission:
+# the workflow runs only when configured (REMEDIATION_GITHUB_TOKEN + an agent
+# API key) and is reachable only through the temporal scheduled-query action
+# module (SCHEDULED_QUERY_MODULES) via admin-managed scheduled queries —
+# disable the scheduled query or remove this configuration to turn it off.
+
+# --- Sandbox coding-agent (shared by any sandbox-agent workflow/tool) --------
+# The provider/credential settings for a headless coding-agent CLI run inside a
+# sandbox (reporting/services/sandbox_agent.py). Generic on purpose: the
+# remediation workflow is one consumer, but the machinery is reusable.
+
+# Which coding-agent CLI to run: "claude" (Claude Code), "codex", or "opencode".
+# opencode is multi-provider — set SANDBOX_AGENT_MODEL to a "provider/model" id
+# (e.g. "deepseek/deepseek-v4-pro") and the matching provider key is used, falling
+# back to the same global *_API_KEY the chat assistant uses (e.g. DEEPSEEK_API_KEY).
+SANDBOX_AGENT_PROVIDER = str_env("SANDBOX_AGENT_PROVIDER", "claude")
+
+# E2B sandbox template for the agent run. Empty → the provider's official
+# prebuilt template (E2B ships "claude"/"codex" images with the CLI installed),
+# which avoids a per-run npm install and its postinstall scripts. A template
+# name → that template. The literal "none" → the plain base image (the run
+# installs the CLI itself). Ignored on self-hosted backends (SANDBOX_DOMAIN set)
+# since templates are an E2B-cloud feature; the install step covers those.
+# The template provides tools only, not credentials — phase isolation is intact.
+SANDBOX_AGENT_TEMPLATE = str_env("SANDBOX_AGENT_TEMPLATE", "")
+
+# API key for the coding-agent CLI (exported only to the agent phase, e.g. as
+# ANTHROPIC_API_KEY). Empty → falls back to the model provider's global
+# *_API_KEY (ANTHROPIC_API_KEY for claude/codex; for opencode, the one matching
+# the model prefix, e.g. DEEPSEEK_API_KEY). Prefer SANDBOX_AGENT_API_KEY_COMMAND
+# for short-lived per-run keys. NOTE for opencode: this key must belong to the
+# provider named in SANDBOX_AGENT_MODEL — an Anthropic key with a
+# "deepseek/…" model is exported as DEEPSEEK_API_KEY and will fail auth.
+SANDBOX_AGENT_API_KEY = str_env("SANDBOX_AGENT_API_KEY", "")
+
+# Optional command run in the worker before each agent run; its stdout
+# (stripped) becomes the agent API key for that run. Use this to mint
+# short-lived credentials from a broker (e.g. Vault, an LLM-gateway virtual
+# key issuer) instead of handing the sandbox the long-lived key attached to
+# the Seizu process. Takes precedence over SANDBOX_AGENT_API_KEY.
+SANDBOX_AGENT_API_KEY_COMMAND = str_env("SANDBOX_AGENT_API_KEY_COMMAND", "")
+
+# Optional base URL exported to the agent phase as the provider's base-url env
+# var (ANTHROPIC_BASE_URL / OPENAI_BASE_URL), so the coding agent talks to an
+# LLM gateway/proxy — typically paired with SANDBOX_AGENT_API_KEY_COMMAND
+# so the sandbox only ever holds a short-lived gateway key.
+SANDBOX_AGENT_BASE_URL = str_env("SANDBOX_AGENT_BASE_URL", "")
+
+# Model for the coding-agent CLI. For claude/codex a bare model override
+# (e.g. "claude-sonnet-4-6" for Claude Code's ANTHROPIC_MODEL); empty → the
+# CLI's default. For opencode this is required and takes the form
+# "provider/model" (e.g. "deepseek/deepseek-v4-pro"), passed as --model.
+SANDBOX_AGENT_MODEL = str_env("SANDBOX_AGENT_MODEL", "")
+
+# Ephemeral credential-proxy sandbox. When true (and the provider uses a base
+# URL — claude/codex, not opencode), a *second, separate* sandbox runs a
+# short-lived LiteLLM proxy holding the real provider key, and the agent sandbox
+# gets only a budget-capped virtual key pointed at that proxy. The real key never
+# enters the untrusted agent VM, and the virtual key dies when the proxy sandbox
+# is torn down (its lifetime == the run), so a leak is worthless after the run.
+# Off by default. Mutually exclusive with SANDBOX_AGENT_BASE_URL. Requires a
+# real key (SANDBOX_AGENT_API_KEY or the global provider key) to seed the
+# proxy — the key command is not used in this mode.
+SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED = bool_env("SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED", False)
+# Max spend (USD) allowed on the per-run virtual key — bounds real-time abuse of
+# a key stolen while the proxy is up.
+SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET = str_env("SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET", "5")
+
+# Hard timeout for one remediation run (all sandbox phases). A full clone →
+# upgrade → test → PR cycle on a large repo can take tens of minutes.
+REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
+
+# Optional expected SHA-256 of the pinned gh linux_amd64 release tarball. When
+# set, the install verifies gh against this out-of-band digest (an independent
+# pin) instead of the release's own checksums file. Since the installed gh later
+# handles the GitHub token, set this (or bake gh into a pinned sandbox image) for
+# a supply-chain guarantee. Empty → verify against the release checksums only.
+REMEDIATION_GH_SHA256 = str_env("REMEDIATION_GH_SHA256", "")
+
+# GitHub CLI (gh) version the sandbox installs when it isn't already present
+# (base image / self-hosted backends). Pinned rather than "latest" to avoid
+# version drift; bump deliberately. Pair with REMEDIATION_GH_SHA256 for an
+# independent supply-chain pin of that version's tarball.
+REMEDIATION_GH_VERSION = str_env("REMEDIATION_GH_VERSION", "2.62.0")
+
+# GitHub host the target repositories live on. "github.com" or a GitHub
+# Enterprise Server hostname (e.g. "github.example.com").
+REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")
+
+# GitHub token used to clone the repo (setup phase) and push/open the PR (push
+# phase) — never present while the coding agent runs. Use a fine-grained PAT
+# restricted to the target org/repos with contents:write + pull_requests:write,
+# and keep branch protection on: PR review is the gate.
+REMEDIATION_GITHUB_TOKEN = str_env("REMEDIATION_GITHUB_TOKEN", "")
+
+# git author identity for the remediation commits.
+REMEDIATION_GIT_USER = str_env("REMEDIATION_GIT_USER", "seizu-remediation-bot")
+REMEDIATION_GIT_EMAIL = str_env("REMEDIATION_GIT_EMAIL", "seizu-remediation@localhost")
 
 # Timeout in seconds for the overall FastAPI request handling. Requests that
 # exceed this limit receive a 504 response.

@@ -73,6 +73,97 @@ their existing `CVEMetadata` records to produce per-repository rows. This
 detects a newly observed repository exposure even when the CVE itself was
 published earlier.
 
+## The cve_dependency_remediation workflow
+
+Where `cve_repo_report` *assesses*, `cve_dependency_remediation` *fixes*: per
+(repository, vulnerable dependency package) group, the workflow activity drives
+an ephemeral sandbox directly (no chat session, no MCP tool) and runs a
+headless coding-agent CLI (`SANDBOX_AGENT_PROVIDER`: Claude Code by default,
+`codex`, or `opencode` — the last is multi-provider, so it can drive DeepSeek and
+others). The agent works on a bot-owned branch keyed on
+the target version (`seizu/dependency-update/{ecosystem}-{package}-{version}`,
+Dependabot-style; a short CVE-set hash replaces the version when no fixed
+version is known): it upgrades the dependency in every affected manifest —
+including any code changes needed for compatibility, not just a version bump —
+and writes the PR title and body. The agent does **not** run the test suite (the
+sandbox usually lacks its dependencies); CI runs the tests on the pull request.
+The workflow then pushes the branch and opens (or updates) the pull request.
+
+Before the agent runs, a guard checks whether an open PR already exists for the
+branch and, if so, skips the run entirely (status `skipped`) — so repeated
+syncs that re-select the same pending fix don't re-run the expensive agent or
+force-push over a PR under review. Because the branch is version-keyed, a
+*later* fix that needs a higher version gets its own branch and PR instead of
+colliding with (or clobbering) the earlier one.
+
+Two deliberate policies shape the result:
+
+- **Least-change upgrades.** The agent targets the smallest released version
+  that clears every vulnerable range, preferring the current version family
+  (same major, then same minor); it crosses a major version only when no fixed
+  release exists in the current family.
+- **Routine-looking PRs.** The agent is prompted to present the change as an
+  ordinary dependency bump (`Bump requests from 2.31.0 to 2.32.4`) without CVE
+  identifiers — a Dependabot-style convention. This is prompt guidance only,
+  not enforced: CVE ids are public and discoverable from the repo's dependency
+  manifest anyway, so it is a nicety rather than a security control.
+
+### Phase-isolated credentials
+
+The run is split into four sandbox commands, each receiving only the
+environment it needs (per-command env injection — secrets are never set on the
+sandbox itself):
+
+1. **install** — install `gh` and the coding-agent CLI. *No secrets*: npm
+   packages execute third-party postinstall scripts. The step is idempotent
+   (`command -v … ||`), so with a prebuilt template (see below) it is a near
+   no-op, and on a plain base image it installs the tools.
+2. **setup** — clone the repository and create the work branch. *GitHub token
+   only*, supplied to `gh auth setup-git`, which configures git to authenticate
+   through `gh`'s credential helper reading the token from this command's
+   environment. No token is written to disk and none is embedded in the clone
+   URL, so nothing token-derived persists into the agent phase.
+3. **agent** — run the coding-agent CLI with permission prompts disabled.
+   *Provider API key only* — **no GitHub token exists anywhere in the sandbox
+   during this phase**, so a prompt-injected agent (repository contents and
+   advisory text are untrusted input) has no token to exfiltrate and no
+   ability to push.
+4. **push** — verify the agent committed changes, force-push the bot-owned
+   branch, and create or find the PR. *GitHub token only.*
+
+Still keep branch protection on and scope `REMEDIATION_GITHUB_TOKEN` to the
+target org/repos with only `contents:write` + `pull_requests:write` — nothing
+lands without human PR review. Workflow-supplied values (repo, branch names)
+are strictly validated and reach the phase scripts only via environment
+variables; tokens are masked in all captured output.
+
+### Behavior and access control
+
+Input rows must carry `repo` and `package` keys; multiple CVEs (or manifests)
+for the same package in one repository collapse into one run and one PR.
+Groups run sequentially to bound concurrent coding-agent spend, and the
+per-group activity uses `maximum_attempts=1`: a retry would repeat a very
+expensive run and risk duplicate PRs. Manual re-runs are safe — the
+deterministic branch name means the run updates the existing PR instead of
+opening another. A failing group records an error without aborting the rest.
+
+There is no per-user permission and no dedicated enable flag for this
+workflow: it has direct, fixed targets and is reachable only through scheduled
+queries, which are admin-managed (`scheduled_queries:write`). It runs only
+when configured (`REMEDIATION_GITHUB_TOKEN` plus an agent API key); operators
+turn it off by disabling the scheduled query, removing the configuration,
+dropping `cve_dependency_remediation` from `TEMPORAL_ENABLED_WORKFLOWS` (while
+keeping other workflows), or removing the `temporal` module from
+`SCHEDULED_QUERY_MODULES` entirely. The scheduled
+query's creator is still resolved before each run, so archived users hard-stop
+their automations, and each run is audit-logged against them.
+
+The seeded scheduled query **New CVE dependencies requiring remediation** uses
+the same watch-scan trigger and `SecurityIssue.created_at` window as the
+assessment query, additionally requires `dependency_package_name`, and returns
+per-dependency rows (ecosystem, manifest path, vulnerable range, patched
+version) that the remediation prompt is built from.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -82,9 +173,35 @@ published earlier.
 | `TEMPORAL_TASK_QUEUE` | `seizu-workflows` | Task queue shared by the action module and the worker. |
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
+| `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of workflows the temporal action may start. Enabling the temporal module otherwise makes every registered workflow dispatchable; this narrows it (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow picker only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (picker) and the scheduled query worker (enforcement). |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
+| `SANDBOX_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code), `codex`, or `opencode`. `opencode` is multi-provider — set `SANDBOX_AGENT_MODEL` to a `provider/model` id (e.g. `deepseek/deepseek-v4-pro`) and it uses that provider's key, reusing the same global `*_API_KEY` (e.g. `DEEPSEEK_API_KEY`) the chat assistant uses. For opencode, an explicit `SANDBOX_AGENT_API_KEY` must belong to the model's provider — an Anthropic key with a `deepseek/…` model is exported as `DEEPSEEK_API_KEY` and fails auth. |
+| `SANDBOX_AGENT_TEMPLATE` | `""` (official) | E2B sandbox template. Empty → the provider's official prebuilt template (E2B ships first-party `claude`/`codex`/`opencode` images with the CLI installed), which removes the per-run `npm install` and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). `none` → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (`SANDBOX_DOMAIN` set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged. |
+| `SANDBOX_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |
+| `SANDBOX_AGENT_API_KEY_COMMAND` | `""` | Command run in the worker before each remediation; its stdout becomes that run's agent API key. Use it to mint **short-lived** credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. **Recommended for production:** unlike the GitHub token (kept out of the agent sandbox), the agent's provider key is present while it runs untrusted repo code with internet on, so a long-lived key is stealable — the worker logs a warning when a static key is used. |
+| `SANDBOX_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. Mutually exclusive with the credential proxy below. |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` | `false` | Run a short-lived LiteLLM proxy in its **own** sandbox holding the real provider key, and hand the agent sandbox only the proxy's ephemeral per-run key with an in-memory spend cap (see below). All providers (`opencode` needs `SANDBOX_AGENT_MODEL` set). |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET` | `5` | USD spend cap (LiteLLM's in-memory global `max_budget`) — bounds real-time abuse of the ephemeral key while the proxy is up. |
+| `SANDBOX_AGENT_MODEL` | `""` | Model for the CLI. For `claude`/`codex` a bare model override (empty → the CLI's default). For `opencode` it is **required** and takes the `provider/model` form (e.g. `deepseek/deepseek-v4-pro`), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace. |
+| `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). |
+| `REMEDIATION_GH_SHA256` | `""` | Expected SHA-256 of the pinned `gh` linux_amd64 tarball. Set it (out of band) for an independent supply-chain pin, or bake `gh` into a pinned sandbox image — since the installed `gh` later handles the token. Empty → verify against the release's own checksums (integrity only). |
+| `REMEDIATION_GITHUB_HOST` | `github.com` | GitHub host the target repositories live on — `github.com` or a GitHub Enterprise Server hostname. Used for the clone URL and `gh` (`GH_HOST`/`GH_ENTERPRISE_TOKEN`). |
+| `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required (configured = enabled). |
+| `REMEDIATION_GIT_USER` / `REMEDIATION_GIT_EMAIL` | `seizu-remediation-bot` / `seizu-remediation@localhost` | git author identity for the remediation commits. |
 
-The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) because it drives headless chat sessions. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools — exercising the CVE workflow end-to-end requires a real LLM provider.
+The remediation workflow also uses the sandbox provider configuration
+(`SANDBOX_API_KEY`, `SANDBOX_DOMAIN`; see [Sandbox delegation](sandbox.md)) —
+`SANDBOX_ENABLED` and the chat tool are not required.
+
+The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) for workflows that drive headless chat sessions (`cve_repo_report`); for that workflow, `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so exercising it end-to-end requires a real LLM provider. The `cve_dependency_remediation` workflow does not use the chat LLM at all — it needs the sandbox provider (`SANDBOX_API_KEY`/`SANDBOX_DOMAIN`) and `REMEDIATION_*` configuration instead.
+
+### Ephemeral credential-proxy sandbox
+
+The agent's provider key is the one credential that must be present while the agent runs untrusted repo code (the GitHub token is kept out entirely). `SANDBOX_AGENT_API_KEY_COMMAND` mitigates this with a short-lived per-run key, but for Anthropic/OpenAI the direct API has no short-lived token, so that needs an external LLM gateway. `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=true` runs that gateway self-contained: a **separate** sandbox boots a LiteLLM proxy seeded with the real key (the agent VM never sees it), and the agent sandbox is pointed at the proxy with only the proxy's **ephemeral master key** — a random per-run key that exists only inside that sandbox. (Per-key minting via LiteLLM's `/key/generate` needs a Postgres database we don't provision, and a run uses a single key anyway; instead the proxy config sets an in-memory global spend cap from `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET`.) Because the proxy sandbox is torn down with the run, that key's effective lifetime equals the run — a leak is worthless afterward, and the budget cap bounds real-time abuse while it's up. All three providers support it (for `opencode`, set `SANDBOX_AGENT_MODEL` so the LiteLLM namespace can be derived from the model's provider prefix), and it is mutually exclusive with `SANDBOX_AGENT_BASE_URL`.
+
+The proxy sandbox stays **private** (`allow_public_traffic: false`): the agent CLI reaches it using E2B's traffic-access token sent as a custom request header, so the proxy port is never world-reachable. Each provider carries that header differently — Claude Code via `ANTHROPIC_CUSTOM_HEADERS`; codex via a written `~/.codex/config.toml` `model_provider` with `env_http_headers`; opencode via a written `@ai-sdk/openai-compatible` provider block with `options.headers`. (A hypothetical provider with no header support would fall back to a public port gated only by the ephemeral key.)
+
+This path stands up LiteLLM inside a sandbox and depends on each CLI talking to it with a custom header and correct model routing; **verify it against your CLI/LiteLLM versions with a real run before enabling in production** (`make remediation_smoke SMOKE_PROXY=1` probes exactly this — it boots the private proxy, mints a key, and confirms a second sandbox can reach it via the traffic-access header). The LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape, header passthrough) is the fragile part.
 
 ## Local development
 
@@ -94,3 +211,12 @@ The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`)
 - The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.
 
 To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description, input factory) to `WORKFLOW_REGISTRY`. The factory converts the common scheduled-query context into that workflow's typed input; the description is surfaced in the action form's workflow picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.
+
+## Verifying the remediation flow
+
+Unit tests mock the sandbox, so they confirm the phase/credential logic but **not** that a coding-agent CLI, `gh`, and git actually authenticate and push inside a real sandbox. A couple things that are easy to miss:
+
+- **The temporal worker does not hot-reload.** `seizu-temporal-worker` runs `python -m reporting.temporal_worker` with no `--reload`, so it imports the remediation code once at startup. After changing `sandbox_remediation.py` (or any workflow code), restart it or the next run silently uses the old code: `docker compose restart seizu-temporal-worker` (dev, bind-mounted) or rebuild the image (if not bind-mounted).
+- **A public target repo hides auth failures until push.** Cloning a public repo is anonymous, so the GitHub token is first exercised on `git push`. When testing, always push a branch — a successful clone proves nothing about the token.
+
+To smoke-test the sandbox side directly (auth, gh, git, and the two-sandbox patch handoff) without running the full workflow, use the bundled `make remediation_smoke SMOKE_REPO=org/repo` (`scripts/remediation_smoke.py`). It opens two real E2B sandboxes with the configured `SANDBOX_*`/`REMEDIATION_*` settings and reproduces the credential-sensitive mechanics: an *agent sandbox* installs `gh`, clones (token), makes a throwaway commit **with no token in the environment** (standing in for the coding agent), and extracts the change as a base64 git diff; a fresh *push sandbox* (which never ran the "agent") applies the patch and pushes the branch with the token. It then deletes the branch. It does not run a real coding agent or open a PR; a `SMOKE PASS` line confirms the handoff and auth end-to-end. Check the token's write access first with `gh api repos/<org>/<repo> --jq .permissions` — `push` must be `true`, and a fine-grained PAT needs Contents + Pull requests read/write, org approval, and an owner who has write access to the repo.
