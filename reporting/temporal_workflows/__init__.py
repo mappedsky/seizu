@@ -77,9 +77,9 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
             "Per (repository, vulnerable dependency), remediates newly"
             " discovered CVEs: a coding-agent CLI in an isolated sandbox"
             " updates the dependency (with any code changes needed for"
-            " compatibility), runs the tests, and opens a pull request."
-            " Credentials are phase-isolated — the coding agent never sees the"
-            " GitHub token. Runs only when configured"
+            " compatibility) and opens a pull request (CI runs the tests, not"
+            " the agent). Credentials are phase-isolated — the coding agent never"
+            " sees the GitHub token. Runs only when configured"
             " (REMEDIATION_GITHUB_TOKEN plus an agent API key)."
         ),
         input_factory=_cve_dependency_remediation_input,

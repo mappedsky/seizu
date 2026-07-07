@@ -280,8 +280,9 @@ TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT
 # The cve_dependency_remediation Temporal workflow runs a headless coding-agent
 # CLI (Claude Code by default) in an ephemeral sandbox: it clones the affected
 # repo, upgrades the vulnerable dependency (with any code changes needed for
-# compatibility), runs the tests, and opens a PR. Credentials are
-# phase-isolated: the coding agent never runs with the GitHub token in its
+# compatibility), and opens a PR. The agent does not run the test suite (the
+# sandbox usually lacks its dependencies); CI runs the tests on the PR.
+# Credentials are phase-isolated: the coding agent never runs with the GitHub token in its
 # environment. There is no dedicated enable flag and no per-user permission:
 # the workflow runs only when configured (REMEDIATION_GITHUB_TOKEN + an agent
 # API key) and is reachable only through the temporal scheduled-query action

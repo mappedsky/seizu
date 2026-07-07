@@ -18,9 +18,9 @@ Credential isolation notes carried over from the remediation flow:
   :meth:`SandboxBackend.run_bash_streaming`).
 - The credential proxy (:func:`credential_proxy`) runs a short-lived LiteLLM
   proxy in a *separate* sandbox holding the real provider key and hands the agent
-  only a budget-capped virtual key that dies when the proxy sandbox is torn down.
-  The LiteLLM-in-sandbox specifics are unverified against a live CLI — confirm
-  with a real run before relying on the proxy path.
+  only the proxy's ephemeral master key (spend-capped in memory) that dies when
+  the proxy sandbox is torn down. The LiteLLM-in-sandbox specifics are unverified
+  against a live CLI — confirm with a real run before relying on the proxy path.
 """
 
 import asyncio
@@ -142,7 +142,7 @@ class SubagentProvider:
     #   "codex"   — a ~/.codex/config.toml model_provider with env_http_headers
     #   "opencode"— an openai-compatible provider block with an options.headers
     #   "public"  — no header support; the proxy must be world-reachable (gated by
-    #               the virtual key only). All built-in providers avoid this.
+    #               the ephemeral key only). All built-in providers avoid this.
     proxy_transport: str = "public"
     # Multi-provider CLI (opencode): the configured model's provider prefix
     # (e.g. "deepseek" in "deepseek/deepseek-v4-pro") selects both which standard
@@ -336,20 +336,18 @@ async def mint_agent_api_key(fallback: str) -> str:
     if command:
         # Shell is intentional: the command is operator-configured and often a
         # pipeline (e.g. `vault read … | jq -r .token`).
+        # stderr is discarded, not captured: broker diagnostics commonly include
+        # sensitive context (tokens, request URLs), and we log only the exit code.
+        # A broker that needs to surface diagnostics should write them to its own
+        # non-secret channel, not this command's stderr.
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         if proc.returncode != 0:
-            # Broker stderr can carry sensitive context — log it server-side only
-            # and surface a generic error (it flows into the workflow result).
-            logger.warning(
-                "SANDBOX_AGENT_API_KEY_COMMAND failed (exit %s): %s",
-                proc.returncode,
-                stderr.decode(errors="replace").strip()[:200],
-            )
+            logger.warning("SANDBOX_AGENT_API_KEY_COMMAND failed (exit %s)", proc.returncode)
             raise RuntimeError(f"SANDBOX_AGENT_API_KEY_COMMAND failed with exit code {proc.returncode}")
         key = stdout.decode(errors="replace").strip()
         if not key:
