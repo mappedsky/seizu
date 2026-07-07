@@ -94,18 +94,19 @@ _PUSH_TIMEOUT_SECONDS = 300
 # expected linux_amd64 tarball digest (an independent, out-of-band pin verified
 # via SEIZU_GH_SHA256) or bake gh into a pinned sandbox image. When no digest is
 # given we fall back to the release's own checksums (integrity, not provenance).
-# Bump the version deliberately.
-_GH_VERSION = "2.62.0"
-_GH_INSTALL = f"""\
+# The version comes from REMEDIATION_GH_VERSION via SEIZU_GH_VERSION (required;
+# `set -u` in the wrappers fails the install loudly if a caller forgets to pass
+# it). Plain (non-f) string so its literal shell ${...} needs no escaping.
+_GH_INSTALL = """\
 if ! command -v gh >/dev/null 2>&1; then
-  GH_VER="{_GH_VERSION}"
-  GH_TAR="gh_${{GH_VER}}_linux_amd64.tar.gz"
-  GH_BASE="https://github.com/cli/cli/releases/download/v${{GH_VER}}"
+  GH_VER="${SEIZU_GH_VERSION}"
+  GH_TAR="gh_${GH_VER}_linux_amd64.tar.gz"
+  GH_BASE="https://github.com/cli/cli/releases/download/v${GH_VER}"
   curl -fsSL "$GH_BASE/$GH_TAR" -o "/tmp/$GH_TAR"
-  if [ -n "${{SEIZU_GH_SHA256:-}}" ]; then
-    echo "${{SEIZU_GH_SHA256}}  /tmp/$GH_TAR" | sha256sum -c -
+  if [ -n "${SEIZU_GH_SHA256:-}" ]; then
+    echo "${SEIZU_GH_SHA256}  /tmp/$GH_TAR" | sha256sum -c -
   else
-    curl -fsSL "$GH_BASE/gh_${{GH_VER}}_checksums.txt" -o /tmp/gh_checksums.txt
+    curl -fsSL "$GH_BASE/gh_${GH_VER}_checksums.txt" -o /tmp/gh_checksums.txt
     (cd /tmp && grep -F "  $GH_TAR" gh_checksums.txt | sha256sum -c -)
   fi
   sudo tar -xzf "/tmp/$GH_TAR" -C /usr/local --strip-components=1
@@ -357,7 +358,9 @@ async def run_remediation(
         "SEIZU_GITHUB_HOST": github_host,
     }
     # gh install has no secrets; the (non-secret) digest pins gh independently.
-    gh_install_env = {"SEIZU_GH_SHA256": settings.REMEDIATION_GH_SHA256} if settings.REMEDIATION_GH_SHA256 else {}
+    gh_install_env = {"SEIZU_GH_VERSION": settings.REMEDIATION_GH_VERSION}
+    if settings.REMEDIATION_GH_SHA256:
+        gh_install_env["SEIZU_GH_SHA256"] = settings.REMEDIATION_GH_SHA256
 
     template = sandbox_agent.resolve_template(provider)
     sandbox_timeout = timeout + sandbox_agent.SANDBOX_LIFETIME_SLACK_SECONDS

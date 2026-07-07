@@ -139,6 +139,7 @@ def _settings(**overrides: Any) -> ExitStack:
         "SANDBOX_AGENT_BASE_URL": "",
         "SANDBOX_AGENT_MODEL": "",
         "REMEDIATION_TIMEOUT_SECONDS": 100,
+        "REMEDIATION_GH_VERSION": "2.62.0",
         "REMEDIATION_GH_SHA256": "",
         "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED": False,
         "SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET": "5",
@@ -180,8 +181,9 @@ async def test_two_sandboxes_isolate_the_token_from_the_agent() -> None:
     assert [p for p, _ in push.calls] == ["push_install", "push"]
 
     envs = dict(agent.calls)
-    # Install runs with no secrets; setup/guard have the token (pre-agent, trusted).
-    assert envs["install"] == {}
+    # Install runs with no secrets (only the non-secret pinned gh version); the
+    # setup/guard phases have the token (pre-agent, trusted).
+    assert envs["install"] == {"SEIZU_GH_VERSION": "2.62.0"}
     assert envs["setup"]["GH_TOKEN"] == _GH_TOKEN
     assert envs["guard"]["GH_TOKEN"] == _GH_TOKEN
     # THE invariant — the agent never sees the GitHub token, and neither does
@@ -743,6 +745,17 @@ def test_gh_install_supports_independent_sha256_pin() -> None:
     # digest; otherwise against the release's own checksums.
     assert "SEIZU_GH_SHA256" in sandbox_remediation._GH_INSTALL
     assert "gh_checksums.txt" in sandbox_remediation._GH_INSTALL  # fallback path
+
+
+async def test_gh_version_is_a_setting_that_reaches_the_install_phases() -> None:
+    # The version is env-driven (REMEDIATION_GH_VERSION), not hardcoded in the script.
+    assert "${SEIZU_GH_VERSION}" in sandbox_remediation._GH_INSTALL
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    with _settings(REMEDIATION_GH_VERSION="2.99.9"), _patched_open([agent, push], []):
+        await run_remediation(**_TARGET)
+    assert dict(agent.calls)["install"]["SEIZU_GH_VERSION"] == "2.99.9"
+    assert dict(push.calls)["push_install"]["SEIZU_GH_VERSION"] == "2.99.9"
 
 
 async def test_gh_sha256_digest_reaches_the_install_phases() -> None:

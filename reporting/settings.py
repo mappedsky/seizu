@@ -362,6 +362,12 @@ REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 # a supply-chain guarantee. Empty → verify against the release checksums only.
 REMEDIATION_GH_SHA256 = str_env("REMEDIATION_GH_SHA256", "")
 
+# GitHub CLI (gh) version the sandbox installs when it isn't already present
+# (base image / self-hosted backends). Pinned rather than "latest" to avoid
+# version drift; bump deliberately. Pair with REMEDIATION_GH_SHA256 for an
+# independent supply-chain pin of that version's tarball.
+REMEDIATION_GH_VERSION = str_env("REMEDIATION_GH_VERSION", "2.62.0")
+
 # GitHub host the target repositories live on. "github.com" or a GitHub
 # Enterprise Server hostname (e.g. "github.example.com").
 REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")

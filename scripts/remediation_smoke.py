@@ -130,6 +130,8 @@ async def _run() -> int:
     target_env = {"SEIZU_GITHUB_HOST": host, "SEIZU_REPO": repo, "SEIZU_BRANCH": branch}
     git_id_env = {"SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER, "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL}
     token_env = {**gh_env, **git_id_env, **target_env}
+    # gh install reads the pinned version from env (no secret); required by set -u.
+    gh_install_env = {"SEIZU_GH_VERSION": settings.REMEDIATION_GH_VERSION}
 
     async def run(backend: SandboxBackend, name: str, script: str, envs: dict[str, str]) -> str:
         print(f"\n===== {name} =====")
@@ -147,7 +149,7 @@ async def _run() -> int:
         template=template,
     ) as agent:
         try:
-            await run(agent, "install", _INSTALL, {})
+            await run(agent, "install", _INSTALL, gh_install_env)
             await run(agent, "setup", _SETUP, token_env)
             # No token here — mirrors the real agent phase.
             await run(agent, "agent (no token)", _AGENT, {"SEIZU_BRANCH": branch})
@@ -172,7 +174,7 @@ async def _run() -> int:
     ) as push:
         try:
             await push.write_file(sr.CHANGES_B64_PATH, patch_b64)
-            await run(push, "push_install", sr._PUSH_INSTALL, {})
+            await run(push, "push_install", sr._PUSH_INSTALL, gh_install_env)
             out = await run(push, "push", _PUSH, token_env)
             pushed = "SEIZU_SMOKE_PUSH_OK" in out
         except Exception as exc:  # noqa: BLE001
