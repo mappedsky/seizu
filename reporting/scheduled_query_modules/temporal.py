@@ -15,21 +15,23 @@ from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
 from reporting.schema.reporting_config import ScheduledQueryAction
 from reporting.temporal_workflows import (
-    WORKFLOW_REGISTRY,
     WorkflowInputContext,
     WorkflowSpec,
+    enabled_workflow_names,
+    get_enabled_workflow_spec,
     get_workflow_spec,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def _workflow_descriptions() -> str:
+    specs = [(name, get_workflow_spec(name)) for name in enabled_workflow_names()]
+    return " ".join(f"{name}: {spec.description}" for name, spec in specs if spec is not None)
+
+
 def action_name() -> str:
     return "temporal"
-
-
-def _workflow_descriptions() -> str:
-    return " ".join(f"{name}: {spec.description}" for name, spec in sorted(WORKFLOW_REGISTRY.items()))
 
 
 def action_config_schema() -> list[ActionConfigFieldDef]:
@@ -39,7 +41,7 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
             label="Workflow",
             type="select",
             required=True,
-            options=sorted(WORKFLOW_REGISTRY),
+            options=enabled_workflow_names(),
             description=f"Temporal workflow to start with the query results. {_workflow_descriptions()}",
         ),
         ActionConfigFieldDef(
@@ -98,10 +100,17 @@ def _project_rows(
 
 def _validated_spec(scheduled_query_id: str, action: ScheduledQueryAction) -> WorkflowSpec | None:
     workflow_name = action.action_config.get("workflow")
-    spec = get_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
-    if spec is None:
+    if not isinstance(workflow_name, str) or get_workflow_spec(workflow_name) is None:
         logger.error(
             "Refusing to start unknown workflow",
+            extra={"scheduled_query_id": scheduled_query_id, "workflow": workflow_name},
+        )
+        return None
+    spec = get_enabled_workflow_spec(workflow_name)
+    if spec is None:
+        # Registered but not in the operator's TEMPORAL_ENABLED_WORKFLOWS allowlist.
+        logger.error(
+            "Refusing to start workflow disabled by TEMPORAL_ENABLED_WORKFLOWS",
             extra={"scheduled_query_id": scheduled_query_id, "workflow": workflow_name},
         )
     return spec

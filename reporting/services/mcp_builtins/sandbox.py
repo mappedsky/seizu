@@ -9,8 +9,13 @@ listing and cannot be called by external MCP clients.  Isolation is the safety
 mechanism — no confirmation gate is needed because the sandbox has no access to
 Seizu's internal services or credentials.
 
+The :class:`SandboxBackend` protocol and :func:`open_backend` are also consumed
+by :mod:`reporting.services.sandbox_remediation` (the CVE dependency remediation
+Temporal workflow), which drives the sandbox directly rather than through this
+chat tool.
+
 **Adding a new sandbox provider** — implement :class:`SandboxBackend` and open it
-inside :func:`_open_backend`.  No other code needs to change: the skill interface,
+inside :func:`open_backend`.  No other code needs to change: the skill interface,
 the inner agent, and all tests are backend-agnostic.
 
 Enabled via ``SANDBOX_ENABLED=true``.  Requires a valid ``SANDBOX_API_KEY`` when
@@ -22,9 +27,7 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
@@ -35,130 +38,11 @@ from langgraph.prebuilt import create_react_agent
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
+from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
 
 GROUP = "sandbox"
-
-
-@runtime_checkable
-class SandboxBackend(Protocol):
-    """Standard interface for a sandbox execution environment.
-
-    Implement this protocol to add a new sandbox provider (E2B, Docker, Daytona,
-    etc.) without changing any skill-facing or agent-facing code.  Each method
-    returns a plain string so the inner agent always gets consistent output
-    regardless of which backend is active.
-    """
-
-    async def run_python(self, code: str) -> str:
-        """Run Python code and return stdout/stderr/result as text."""
-        ...
-
-    async def run_bash(self, cmd: str) -> str:
-        """Run a shell command and return stdout/stderr as text."""
-        ...
-
-    async def read_file(self, path: str) -> str:
-        """Return the contents of a file as text."""
-        ...
-
-    async def write_file(self, path: str, content: str) -> str:
-        """Write content to a file; return a confirmation string."""
-        ...
-
-    async def list_files(self, path: str) -> str:
-        """List files/directories at path; return a human-readable string."""
-        ...
-
-
-class _E2BSandboxBackend:
-    """SandboxBackend backed by an ``e2b_code_interpreter.AsyncSandbox``."""
-
-    def __init__(self, sandbox: Any) -> None:
-        self._sandbox = sandbox
-
-    async def run_python(self, code: str) -> str:
-        execution = await self._sandbox.run_code(code)
-        parts: list[str] = []
-        # logs.stdout captures print() output; execution.text is the return-value
-        # text of the last expression (display output, not stdout).  We need both.
-        if execution.logs.stdout:
-            parts.append("".join(execution.logs.stdout))
-        if execution.logs.stderr:
-            parts.append("stderr:\n" + "".join(execution.logs.stderr))
-        if execution.text:
-            parts.append(execution.text)
-        if execution.error:
-            parts.append(f"Error: {execution.error.name}: {execution.error.value}")
-            if execution.error.traceback:
-                parts.append(execution.error.traceback)
-        return "\n".join(parts) if parts else "(no output)"
-
-    async def run_bash(self, cmd: str) -> str:
-        result = await self._sandbox.commands.run(cmd)
-        parts: list[str] = []
-        if result.stdout:
-            parts.append(result.stdout)
-        if result.stderr:
-            parts.append(f"stderr: {result.stderr}")
-        return "\n".join(parts) if parts else "(no output)"
-
-    async def read_file(self, path: str) -> str:
-        content = await self._sandbox.files.read(path)
-        return content if isinstance(content, str) else content.decode(errors="replace")
-
-    async def write_file(self, path: str, content: str) -> str:
-        await self._sandbox.files.write(path, content)
-        return f"Wrote {len(content)} bytes to {path}"
-
-    async def list_files(self, path: str = "/") -> str:
-        entries = await self._sandbox.files.list(path)
-        lines = [f"{'d' if e.type == 'dir' else 'f'}  {e.name}" for e in entries]
-        return "\n".join(lines) if lines else "(empty)"
-
-
-@asynccontextmanager
-async def _open_backend(*, api_key: str, domain: str) -> AsyncIterator[SandboxBackend]:
-    """Open a sandbox and yield a :class:`SandboxBackend` for it.
-
-    This is the extension point for swapping providers.  To add a new backend:
-    1. Implement :class:`SandboxBackend`.
-    2. Add a ``SANDBOX_BACKEND`` setting (or branch on an existing one).
-    3. Open the new backend here and ``yield`` it.
-
-    Tests patch this function to inject any :class:`SandboxBackend` without
-    touching provider SDKs.  The ``e2b_code_interpreter`` import stays lazy so
-    importing this module never fails when the package is absent.
-
-    Security defaults applied to every sandbox:
-    - ``allow_internet_access``: off by default (``SANDBOX_ALLOW_INTERNET``).
-      Enable only when the task explicitly requires outbound network access.
-    - ``network={"allow_public_traffic": False}``: any HTTP server the sandbox
-      exposes requires the auto-generated ``sandbox.traffic_access_token`` in
-      the ``e2b-traffic-access-token`` header.  Our SDK calls (run_code,
-      files.read/write, etc.) use a separate transport and are unaffected.
-    """
-    from e2b_code_interpreter import AsyncSandbox
-
-    from reporting import settings as _settings
-
-    create_kwargs: dict[str, Any] = {}
-    if api_key:
-        create_kwargs["api_key"] = api_key
-    if domain:
-        # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
-        # to https://api.<domain>; disable client-side key-format validation
-        # because non-E2B deployments issue tokens that don't match "e2b_*".
-        create_kwargs["domain"] = domain
-        create_kwargs["validate_api_key"] = False
-    # Security hardening — applied unconditionally so the defaults are safe
-    # regardless of how the sandbox was provisioned.
-    create_kwargs["allow_internet_access"] = _settings.SANDBOX_ALLOW_INTERNET
-    create_kwargs["network"] = {"allow_public_traffic": False}
-    sandbox = await AsyncSandbox.create(**create_kwargs)
-    async with sandbox:
-        yield _E2BSandboxBackend(sandbox)
 
 
 _INPUT_SCHEMA: dict[str, Any] = {
@@ -546,7 +430,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         prompt = f"Context:\n{context}\n\nTask:\n{task}"
 
     async def _run() -> str:
-        async with _open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
+        async with open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
             tools = _build_sandbox_tools(backend)
             if current_user is not None:
                 tools = [*tools, *await _build_seizu_tools(current_user)]
@@ -613,6 +497,6 @@ GROUP_DEF = BuiltinGroup(
             # skill having to explicitly unlock it — mirrors how general-purpose
             # execution tools (bash, text_editor) work in other agent harnesses.
             always_disclosed=True,
-        )
+        ),
     ],
 )

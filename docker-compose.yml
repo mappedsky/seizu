@@ -313,6 +313,11 @@ services:
       - STATSD_HOST=telegraf
       - STATSD_CONSTANT_TAGS
       - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      # Allowlist of workflows the temporal action may dispatch (empty → all).
+      - TEMPORAL_ENABLED_WORKFLOWS
+      # The cve_dependency_remediation input factory reads the run timeout here.
+      - REMEDIATION_TIMEOUT_SECONDS
       - REPORT_STORE_BACKEND
       - DYNAMODB_TABLE_NAME=seizu-reports
       - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
@@ -414,6 +419,15 @@ services:
       - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
       - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+      # Sandbox delegation — scheduled headless chat sessions run here and may
+      # call the sandbox__delegate tool.
+      - SANDBOX_ENABLED
+      - SANDBOX_API_KEY
+      - SANDBOX_DOMAIN
+      - SANDBOX_ALLOW_INTERNET
+      - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_LLM_MODEL
     command: python -m reporting.scheduled_chats
     volumes:
       - .:/home/seizu/seizu
@@ -509,6 +523,33 @@ services:
       - CHAT_CHECKPOINT_S3_BUCKET=seizu-chat-checkpoints
       - CHAT_CHECKPOINT_S3_ENDPOINT_URL=http://minio:9000
       - CHAT_CHECKPOINT_S3_KEY_PREFIX=seizu/langgraph
+      # Sandbox delegation — workflow chat sessions run here and may call the
+      # sandbox__delegate tool.
+      - SANDBOX_ENABLED
+      - SANDBOX_API_KEY
+      - SANDBOX_DOMAIN
+      - SANDBOX_ALLOW_INTERNET
+      - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_LLM_MODEL
+      # CVE dependency remediation — the cve_dependency_remediation activity
+      # drives the sandbox directly from this worker; the coding agent phase
+      # never sees REMEDIATION_GITHUB_TOKEN. Configured = enabled.
+      - SANDBOX_AGENT_PROVIDER
+      - SANDBOX_AGENT_TEMPLATE
+      - SANDBOX_AGENT_API_KEY
+      - SANDBOX_AGENT_API_KEY_COMMAND
+      - SANDBOX_AGENT_BASE_URL
+      - SANDBOX_AGENT_MODEL
+      - SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED
+      - SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET
+      - REMEDIATION_TIMEOUT_SECONDS
+      - REMEDIATION_GH_VERSION
+      - REMEDIATION_GH_SHA256
+      - REMEDIATION_GITHUB_HOST
+      - REMEDIATION_GITHUB_TOKEN
+      - REMEDIATION_GIT_USER
+      - REMEDIATION_GIT_EMAIL
     command: python -m reporting.temporal_worker
     volumes:
       - .:/home/seizu/seizu

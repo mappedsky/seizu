@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from reporting.temporal_workflows.shared import CveRepoReportInput
+from reporting.temporal_workflows.shared import CveDependencyRemediationInput, CveRepoReportInput
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,20 @@ def _cve_repo_report_input(context: WorkflowInputContext) -> CveRepoReportInput:
         creator_user_id=context.creator_user_id,
         rows=context.rows,
         chat_timeout_seconds=context.chat_timeout_seconds,
+    )
+
+
+def _cve_dependency_remediation_input(context: WorkflowInputContext) -> CveDependencyRemediationInput:
+    # Remediation runs a full clone → upgrade → test → PR cycle, so it gets its
+    # own (much larger) timeout instead of the context's generic chat activity
+    # timeout. Lazy import keeps this module light for the web process.
+    from reporting import settings
+
+    return CveDependencyRemediationInput(
+        scheduled_query_id=context.scheduled_query_id,
+        creator_user_id=context.creator_user_id,
+        rows=context.rows,
+        timeout_seconds=settings.REMEDIATION_TIMEOUT_SECONDS,
     )
 
 
@@ -57,8 +71,46 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
         ),
         input_factory=_cve_repo_report_input,
     ),
+    "cve_dependency_remediation": WorkflowSpec(
+        name="cve_dependency_remediation",
+        description=(
+            "Per (repository, vulnerable dependency), remediates newly"
+            " discovered CVEs: a coding-agent CLI in an isolated sandbox"
+            " updates the dependency (with any code changes needed for"
+            " compatibility) and opens a pull request (CI runs the tests, not"
+            " the agent). Credentials are phase-isolated — the coding agent never"
+            " sees the GitHub token. Runs only when configured"
+            " (REMEDIATION_GITHUB_TOKEN plus an agent API key)."
+        ),
+        input_factory=_cve_dependency_remediation_input,
+    ),
 }
 
 
 def get_workflow_spec(name: str) -> WorkflowSpec | None:
+    return WORKFLOW_REGISTRY.get(name)
+
+
+def enabled_workflow_names() -> list[str]:
+    """Registered workflow names an operator has enabled for dispatch (sorted).
+
+    ``TEMPORAL_ENABLED_WORKFLOWS`` empty → every registered workflow. Otherwise
+    only the configured names that actually exist in the registry (unknown
+    names are ignored). Lets an operator run the temporal action module while
+    allowing only a subset of workflows — e.g. enable ``cve_repo_report`` but
+    not ``cve_dependency_remediation``. Lazy settings import keeps this module
+    importable by the web process without heavy deps.
+    """
+    from reporting import settings
+
+    configured = settings.TEMPORAL_ENABLED_WORKFLOWS
+    if not configured:
+        return sorted(WORKFLOW_REGISTRY)
+    return sorted(name for name in configured if name in WORKFLOW_REGISTRY)
+
+
+def get_enabled_workflow_spec(name: str) -> WorkflowSpec | None:
+    """Return the spec only when it is both registered and operator-enabled."""
+    if name not in enabled_workflow_names():
+        return None
     return WORKFLOW_REGISTRY.get(name)
