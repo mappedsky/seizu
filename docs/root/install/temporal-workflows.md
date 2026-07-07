@@ -84,8 +84,9 @@ the target version (`seizu/dependency-update/{ecosystem}-{package}-{version}`,
 Dependabot-style; a short CVE-set hash replaces the version when no fixed
 version is known): it upgrades the dependency in every affected manifest —
 including any code changes needed for compatibility, not just a version bump —
-runs the repository's test suite, and writes the PR title and body. The
-workflow then pushes the branch and opens (or updates) the pull request.
+and writes the PR title and body. The agent does **not** run the test suite (the
+sandbox usually lacks its dependencies); CI runs the tests on the pull request.
+The workflow then pushes the branch and opens (or updates) the pull request.
 
 Before the agent runs, a guard checks whether an open PR already exists for the
 branch and, if so, skips the run entirely (status `skipped`) — so repeated

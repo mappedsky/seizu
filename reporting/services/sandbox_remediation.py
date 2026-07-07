@@ -4,7 +4,7 @@ Used by the ``cve_dependency_remediation`` Temporal workflow (via
 ``reporting/temporal_workflows/activities.py``) to run a headless coding-agent
 CLI (Claude Code by default) against a cloned GitHub repository inside an
 ephemeral sandbox: upgrade a vulnerable dependency, make any code changes needed
-for compatibility, run the tests, and open a pull request.
+for compatibility, and open a pull request (CI runs the tests, not the agent).
 
 The provider registry, credential resolution, and the credential-proxy sandbox
 are the reusable :mod:`reporting.services.sandbox_agent` machinery; this module
@@ -221,9 +221,10 @@ Operational facts:
   request — that happens automatically after you finish.
 - Write the pull request title to {pr_title_path}: a single line such as
   "Bump <package> from <old version> to <new version>".
+- Do NOT run the test suite (the sandbox may lack its dependencies); CI runs the
+  tests on the pull request.
 - Write the pull request body to {pr_body_path} (overwrite it): describe the
-  version change, every code change made for compatibility, and the test
-  results.
+  version change and every code change made for compatibility.
 """
 
 

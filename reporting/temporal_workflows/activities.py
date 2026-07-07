@@ -122,17 +122,18 @@ Task:
    strings: review the upgrade's changelog and breaking changes, search the
    codebase for usages of the package, and make any code changes required for
    compatibility with the new version.
-3. Run the repository's test suite (detect the runner from the repo: pytest,
-   npm/bun test, go test, etc.) and fix failures caused by the upgrade. If
-   tests cannot pass, say so in the pull request body rather than weakening or
-   skipping tests.
+3. Do NOT run the test suite. The sandbox usually lacks the dependencies or
+   services needed to run it, and CI runs the tests on the pull request. Base
+   the compatibility changes on the package's changelog/migration notes and your
+   review of the code; call out anything you could not verify in the pull
+   request body.
 4. Commit your work and write the pull request title and body files as
    described in the operational facts below.
 5. Present this publicly as a routine dependency update (as Dependabot does):
    do not reference CVE identifiers, advisories, or the vulnerability in the
    commit messages, pull request title, or body, so the fix is not advertised
-   before it merges. Describe only the version change, the compatibility
-   changes, and the test results."""
+   before it merges. Describe only the version change and the compatibility
+   changes."""
 
 # Cap the transcript tail stored in the workflow result: full output stays in
 # worker logs; Temporal history payloads should stay small.
