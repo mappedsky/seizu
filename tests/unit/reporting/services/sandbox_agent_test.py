@@ -155,8 +155,10 @@ def test_proxy_agent_setup_per_transport() -> None:
         setup = sandbox_agent.proxy_agent_setup(
             sandbox_agent.PROVIDERS["opencode"], ("DEEPSEEK_API_KEY",), "https://p/v1", "vk", "tok"
         )
-    assert setup.env == {"SEIZU_AGENT_MODEL": "seizu_proxy/deepseek/deepseek-chat"}
-    assert "deepseek/deepseek-chat" in setup.files[sandbox_agent._OPENCODE_CONFIG_PATH]
+    # The provider prefix is stripped so LiteLLM's wildcard doesn't double it.
+    assert setup.env == {"SEIZU_AGENT_MODEL": "seizu_proxy/deepseek-chat"}
+    config = setup.files[sandbox_agent._OPENCODE_CONFIG_PATH]
+    assert '"deepseek-chat"' in config and "deepseek/deepseek-chat" not in config
 
 
 def test_agent_run_script_cds_into_the_workdir() -> None:

@@ -491,12 +491,16 @@ def proxy_agent_setup(
         env = {e: agent_key for e in key_envs} | {_PROXY_ACCESS_TOKEN_ENV: access_token}
         return ProxyAgentSetup(env=env, files={_CODEX_CONFIG_PATH: _codex_proxy_config(base_url)})
     if provider.proxy_transport == "opencode":
+        # Send the BARE model ("deepseek/deepseek-chat" → "deepseek-chat"): the
+        # LiteLLM wildcard route ("deepseek/*") re-adds the namespace, so passing
+        # the full id would reach the provider API as "deepseek/deepseek-chat".
         model = settings.SANDBOX_AGENT_MODEL.strip()
-        config = _opencode_proxy_config(base_url, agent_key, access_token, model)
-        # Route opencode at the custom provider ("<provider>/<model>"); the CLI
-        # reads the key/header from the config above, so no key env is needed.
+        bare_model = model.split("/", 1)[1] if "/" in model else model
+        config = _opencode_proxy_config(base_url, agent_key, access_token, bare_model)
+        # Route opencode at the custom provider ("<provider>/<bare model>"); the
+        # CLI reads the key/header from the config above, so no key env is needed.
         return ProxyAgentSetup(
-            env={"SEIZU_AGENT_MODEL": f"{_PROXY_PROVIDER_ID}/{model}"},
+            env={"SEIZU_AGENT_MODEL": f"{_PROXY_PROVIDER_ID}/{bare_model}"},
             files={_OPENCODE_CONFIG_PATH: config},
         )
     # "public" — no header support; the proxy is world-reachable, gated by the key.

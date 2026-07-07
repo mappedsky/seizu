@@ -293,8 +293,10 @@ async def test_credential_proxy_opencode_writes_a_private_config() -> None:
     # LiteLLM routes the wildcard model to the deepseek namespace (from the model).
     assert 'model: "deepseek/*"' in proxy.files[sandbox_agent.LITELLM_CONFIG_PATH]
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
-    assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek/deepseek-chat"
+    # The bare model is routed at the custom provider (no doubled namespace).
+    assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek-chat"
     config = agent.files[sandbox_agent._OPENCODE_CONFIG_PATH]
+    assert '"deepseek-chat"' in config and "deepseek/deepseek-chat" not in config
     assert "e2b-traffic-access-token" in config and "sk-seizu-" in config  # the ephemeral key
     assert "real-deepseek-key" not in config
     assert result.status == "completed"
