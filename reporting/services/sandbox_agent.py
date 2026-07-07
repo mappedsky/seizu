@@ -48,20 +48,23 @@ SANDBOX_LIFETIME_SLACK_SECONDS = 120
 
 # --- Ephemeral credential-proxy sandbox -----------------------------------
 LITELLM_CONFIG_PATH = "/home/user/litellm.yaml"
-VKEY_PATH = "/home/user/vkey"
 _PROXY_PORT = 4000
 _PROXY_TIMEOUT_SECONDS = 240
-_PROXY_KEY_TTL = "120m"
 # LiteLLM config: wildcard model routing to the provider, keys from env so no
-# secret lands in the file. NOTE: the provider namespace and the base-URL suffix
-# (see SubagentProvider) are the fragile wire details — this whole path is
-# unverified against a live LiteLLM + agent CLI; confirm with a real run first.
+# secret lands in the file, and a global in-memory spend cap (max_budget). The
+# agent authenticates with the ephemeral master key directly — LiteLLM's per-key
+# minting (/key/generate) needs a Postgres database we don't provision, and a
+# per-run credential is single-use anyway. NOTE: the provider namespace and the
+# base-URL suffix (see SubagentProvider) are the fragile wire details — this whole
+# path is unverified against a live LiteLLM + agent CLI; confirm with a real run.
 _LITELLM_CONFIG = """\
 model_list:
   - model_name: "*"
     litellm_params:
       model: "{namespace}/*"
       api_key: os.environ/PROXY_REAL_KEY
+litellm_settings:
+  max_budget: {budget}
 general_settings:
   master_key: os.environ/PROXY_MASTER_KEY
 """
@@ -471,32 +474,33 @@ def _opencode_proxy_config(base_url: str, vkey: str, access_token: str, model: s
 
 
 def proxy_agent_setup(
-    provider: SubagentProvider, key_envs: tuple[str, ...], base_url: str, vkey: str, access_token: str
+    provider: SubagentProvider, key_envs: tuple[str, ...], base_url: str, agent_key: str, access_token: str
 ) -> ProxyAgentSetup:
     """Translate a running proxy into the agent phase's env + config files, per the
-    provider's ``proxy_transport``. The traffic-access token authenticates to the
+    provider's ``proxy_transport``. ``agent_key`` is the (ephemeral) key the CLI
+    authenticates to the proxy with; the traffic-access token additionally gates a
     private proxy — via a request header the CLI sends (env var or config)."""
     from reporting import settings
 
     if provider.proxy_transport == "header":
-        env = build_agent_env(provider, key_envs, vkey, base_url)
+        env = build_agent_env(provider, key_envs, agent_key, base_url)
         if provider.proxy_header_env:
             env[provider.proxy_header_env] = f"{_E2B_TRAFFIC_HEADER}: {access_token}"
         return ProxyAgentSetup(env=env)
     if provider.proxy_transport == "codex":
-        env = {e: vkey for e in key_envs} | {_PROXY_ACCESS_TOKEN_ENV: access_token}
+        env = {e: agent_key for e in key_envs} | {_PROXY_ACCESS_TOKEN_ENV: access_token}
         return ProxyAgentSetup(env=env, files={_CODEX_CONFIG_PATH: _codex_proxy_config(base_url)})
     if provider.proxy_transport == "opencode":
         model = settings.SANDBOX_AGENT_MODEL.strip()
-        config = _opencode_proxy_config(base_url, vkey, access_token, model)
+        config = _opencode_proxy_config(base_url, agent_key, access_token, model)
         # Route opencode at the custom provider ("<provider>/<model>"); the CLI
         # reads the key/header from the config above, so no key env is needed.
         return ProxyAgentSetup(
             env={"SEIZU_AGENT_MODEL": f"{_PROXY_PROVIDER_ID}/{model}"},
             files={_OPENCODE_CONFIG_PATH: config},
         )
-    # "public" — no header support; the proxy is world-reachable, gated by the vkey.
-    return ProxyAgentSetup(env=build_agent_env(provider, key_envs, vkey, base_url))
+    # "public" — no header support; the proxy is world-reachable, gated by the key.
+    return ProxyAgentSetup(env=build_agent_env(provider, key_envs, agent_key, base_url))
 
 
 @asynccontextmanager
@@ -510,23 +514,17 @@ async def credential_proxy(
     mask_secrets: list[str],
 ) -> AsyncIterator[tuple[str, str, str]]:
     """Open a *separate* sandbox running a LiteLLM proxy seeded with the real
-    provider key, mint a budget-capped per-run virtual key, and yield
-    ``(base_url, virtual_key, access_token)`` for the agent (pass these to
-    :func:`proxy_agent_setup`). The real key never enters the agent sandbox; the
-    virtual key dies when this sandbox is torn down. ``access_token`` is E2B's
-    traffic-access token for a private proxy (``""`` for the public fallback).
-    Secrets it creates (master key, virtual key, traffic token) are appended to
-    ``mask_secrets`` so the caller redacts them from its transcript."""
+    provider key, and yield ``(base_url, agent_key, access_token)`` for the agent
+    (pass these to :func:`proxy_agent_setup`). The real key never enters the agent
+    sandbox; ``agent_key`` is the proxy's ephemeral master key, which dies when
+    this sandbox is torn down, and the proxy enforces an in-memory spend cap.
+    ``access_token`` is E2B's traffic-access token for a private proxy (``""`` for
+    the public fallback). Secrets it creates (master key, traffic token) are
+    appended to ``mask_secrets`` so the caller redacts them from its transcript."""
     from reporting import settings
 
     master_key = "sk-seizu-" + secrets.token_urlsafe(24)
     mask_secrets.append(master_key)
-    mint = (
-        f'curl -sf "http://localhost:{_PROXY_PORT}/key/generate" '
-        f'-H "Authorization: Bearer $PROXY_MASTER_KEY" -H "Content-Type: application/json" '
-        f'-d \'{{"max_budget": {budget}, "duration": "{_PROXY_KEY_TTL}"}}\' | jq -r .key > {VKEY_PATH}\n'
-        f"test -s {VKEY_PATH}\n"
-    )
     start = (
         "set -euo pipefail\n"
         f"nohup litellm --config {LITELLM_CONFIG_PATH} --port {_PROXY_PORT} > /home/user/litellm.log 2>&1 &\n"
@@ -545,13 +543,11 @@ async def credential_proxy(
         timeout_seconds=sandbox_timeout_seconds,
         allow_public_traffic=not private,
     ) as proxy:
-        await proxy.write_file(LITELLM_CONFIG_PATH, _LITELLM_CONFIG.format(namespace=proxy_namespace(provider)))
+        config = _LITELLM_CONFIG.format(namespace=proxy_namespace(provider), budget=budget)
+        await proxy.write_file(LITELLM_CONFIG_PATH, config)
         proxy_env = {"PROXY_REAL_KEY": real_key, "PROXY_MASTER_KEY": master_key}
         await run_phase(proxy, "proxy_install", _PROXY_INSTALL, {}, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
         await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
-        await run_phase(proxy, "proxy_mint", mint, {"PROXY_MASTER_KEY": master_key}, timeout_seconds=60)
-        vkey = (await proxy.read_file(VKEY_PATH)).strip()
-        mask_secrets.append(vkey)
         host = await proxy.get_host(_PROXY_PORT)
 
         access_token = ""
@@ -560,4 +556,4 @@ async def credential_proxy(
             if not access_token:
                 raise RuntimeError("proxy sandbox exposed no traffic-access token for the private proxy")
             mask_secrets.append(access_token)
-        yield f"https://{host}{provider.proxy_base_suffix}", vkey, access_token
+        yield f"https://{host}{provider.proxy_base_suffix}", master_key, access_token

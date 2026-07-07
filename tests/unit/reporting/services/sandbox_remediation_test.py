@@ -47,7 +47,6 @@ class _FakeBackend:
             sandbox_remediation.CHANGES_B64_PATH: "cGF0Y2g=",  # base64("patch")
             sandbox_remediation.PR_TITLE_PATH: "Bump requests",
             sandbox_remediation.PR_BODY_PATH: "Bumps requests.",
-            sandbox_agent.VKEY_PATH: "sk-litellm-vkey",
         }
         return self.files.get(path, defaults.get(path, ""))
 
@@ -72,8 +71,6 @@ class _FakeBackend:
 def _phase_of(cmd: str) -> str:
     # Order matters: both the setup and push scripts clone, so match the more
     # specific markers (agent CLI, gh pr create) before the generic clone check.
-    if "/key/generate" in cmd:
-        return "proxy_mint"
     if "litellm --config" in cmd:
         return "proxy_start"
     if "litellm[proxy]" in cmd:
@@ -230,16 +227,17 @@ async def test_credential_proxy_keeps_real_key_out_of_the_agent_sandbox() -> Non
     assert len(opens) == 3
     assert opens[0]["allow_public_traffic"] is False
     assert opens[0].get("template") is None
-    assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start", "proxy_mint"]
+    assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start"]
 
-    # The REAL key only ever seeds the proxy sandbox.
+    # The REAL key only ever seeds the proxy sandbox; the config caps spend.
     proxy_start_env = dict(proxy.calls)["proxy_start"]
     assert proxy_start_env["PROXY_REAL_KEY"] == "real-anthropic-key"
+    assert "max_budget" in proxy.files[sandbox_agent.LITELLM_CONFIG_PATH]
 
-    # The agent gets the minted virtual key + the proxy base URL — never the real
-    # key — plus the E2B traffic token as a custom header to reach the private proxy.
+    # The agent gets the proxy's ephemeral master key + the proxy base URL — never
+    # the real key — plus the E2B traffic token as a header to reach the private proxy.
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
-    assert agent_env["ANTHROPIC_API_KEY"] == "sk-litellm-vkey"
+    assert agent_env["ANTHROPIC_API_KEY"].startswith("sk-seizu-")
     assert agent_env["ANTHROPIC_BASE_URL"] == "https://4000-fakesandbox.e2b.app"
     assert agent_env["ANTHROPIC_CUSTOM_HEADERS"] == "e2b-traffic-access-token: e2b-traffic-tok"
     assert "real-anthropic-key" not in agent_env.values()
@@ -265,7 +263,7 @@ async def test_credential_proxy_codex_writes_a_private_config() -> None:
 
     assert opens[0]["allow_public_traffic"] is False  # private, not the public fallback
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
-    assert agent_env["OPENAI_API_KEY"] == "sk-litellm-vkey"
+    assert agent_env["OPENAI_API_KEY"].startswith("sk-seizu-")
     assert agent_env["SEIZU_PROXY_ACCESS_TOKEN"] == "e2b-traffic-tok"
     # The codex config selects the proxy provider and reads the header from env.
     config = agent.files[sandbox_agent._CODEX_CONFIG_PATH]
@@ -297,7 +295,7 @@ async def test_credential_proxy_opencode_writes_a_private_config() -> None:
     agent_env = next(envs for phase, envs in agent.calls if phase == "agent")
     assert agent_env["SEIZU_AGENT_MODEL"] == "seizu_proxy/deepseek/deepseek-chat"
     config = agent.files[sandbox_agent._OPENCODE_CONFIG_PATH]
-    assert "e2b-traffic-access-token" in config and "sk-litellm-vkey" in config
+    assert "e2b-traffic-access-token" in config and "sk-seizu-" in config  # the ephemeral key
     assert "real-deepseek-key" not in config
     assert result.status == "completed"
 

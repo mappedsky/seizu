@@ -203,9 +203,11 @@ async def _run_proxy() -> int:
         return _fail(f"unknown SANDBOX_AGENT_PROVIDER {settings.SANDBOX_AGENT_PROVIDER!r}")
     if sandbox_agent.proxy_namespace(provider) is None:
         return _fail("no proxy namespace — set SANDBOX_AGENT_MODEL (required for opencode)")
-    _key_envs, fallback, err = sandbox_agent.resolve_key_envs_and_fallback(provider)
-    if err is not None:
-        return _fail(err)
+    # agent_config_error() returns a secret-free message; don't surface the
+    # resolve_*() tuple (it also carries the fallback API key) to a log/print.
+    if (cfg := sandbox_agent.agent_config_error()) is not None:
+        return _fail(cfg)
+    _key_envs, fallback, _err = sandbox_agent.resolve_key_envs_and_fallback(provider)
     real_key = settings.SANDBOX_AGENT_API_KEY or fallback
     if not real_key:
         return _fail("no real provider key (SANDBOX_AGENT_API_KEY or the global provider key)")
@@ -239,7 +241,7 @@ async def _run_proxy() -> int:
         sandbox_timeout_seconds=480,
         run_phase=run_phase,
         mask_secrets=mask_secrets,
-    ) as (base_url, _vkey, access_token):
+    ) as (base_url, _agent_key, access_token):
         suffix = provider.proxy_base_suffix
         root = base_url[: -len(suffix)] if suffix and base_url.endswith(suffix) else base_url
         print(f"\nproxy up: base_url={base_url} private={bool(access_token)}")
@@ -256,7 +258,7 @@ async def _run_proxy() -> int:
             reachable = "SEIZU_PROXY_REACHABLE" in out
 
     if reachable:
-        print("\nSMOKE PASS — private proxy booted, minted a key, and is reachable from a second sandbox")
+        print("\nSMOKE PASS — private proxy booted and is reachable from a second sandbox via the traffic header")
         return 0
     return _fail("the second sandbox could not reach the private proxy — see output above")
 
