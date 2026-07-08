@@ -355,6 +355,30 @@ SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET = str_env("SANDBOX_AGENT_CREDENTIAL_PR
 # upgrade → test → PR cycle on a large repo can take tens of minutes.
 REMEDIATION_TIMEOUT_SECONDS = int_env("REMEDIATION_TIMEOUT_SECONDS", 1800)
 
+# --- Post-push CI watch --------------------------------------------------
+# After pushing a PR the workflow watches its check suite so a bump that
+# breaks CI is not silently left failing: relevant failures get a coding-agent
+# fix run (pushed to the same branch), irrelevant ones get an explanatory PR
+# comment. All watching is durable Temporal timers plus a short read-only
+# GitHub API activity in the worker — no sandbox is opened until a fix run is
+# actually needed.
+
+# Total time to wait for one PR's checks to settle (including re-runs after a
+# fix push). 0 disables the CI watch entirely.
+REMEDIATION_CI_MAX_WAIT_SECONDS = int_env("REMEDIATION_CI_MAX_WAIT_SECONDS", 3600)
+
+# How often to poll the PR's check status while waiting.
+REMEDIATION_CI_POLL_SECONDS = int_env("REMEDIATION_CI_POLL_SECONDS", 120)
+
+# A check still queued (never started) after this long is ignored by the watch
+# — CI that never schedules a runner (offline self-hosted runner, disabled
+# app) would otherwise stall every poll until the max wait.
+REMEDIATION_CI_QUEUED_STUCK_SECONDS = int_env("REMEDIATION_CI_QUEUED_STUCK_SECONDS", 1800)
+
+# Max coding-agent CI-fix runs per PR (each is a full sandbox agent session —
+# this bounds spend). 0 → watch and record the CI outcome but never fix.
+REMEDIATION_CI_FIX_MAX_ATTEMPTS = int_env("REMEDIATION_CI_FIX_MAX_ATTEMPTS", 1)
+
 # Optional expected SHA-256 of the pinned gh linux_amd64 release tarball. When
 # set, the install verifies gh against this out-of-band digest (an independent
 # pin) instead of the release's own checksums file. Since the installed gh later

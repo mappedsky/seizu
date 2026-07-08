@@ -50,6 +50,13 @@ class CveDependencyRemediationInput:
     rows: list[dict[str, Any]] = field(default_factory=list)
     # Bound for one remediation run (all sandbox phases).
     timeout_seconds: int = 1800
+    # Post-push CI watch: total wait for a PR's checks to settle (0 disables
+    # the watch), poll interval, queued-stuck threshold (see PrCiStatusInput),
+    # and how many coding-agent fix runs one PR may get.
+    ci_watch_max_seconds: int = 3600
+    ci_poll_seconds: int = 120
+    ci_queued_stuck_seconds: int = 1800
+    ci_fix_max_attempts: int = 1
 
 
 @dataclass
@@ -69,6 +76,72 @@ class DependencyRemediationResult:
     error: str | None = None
     status: str = "completed"
     # Short masked tail of the sandbox run output, for debugging failed runs.
+    output_tail: str = ""
+    # Branch targets echoed back by the activity so the workflow can drive
+    # follow-up activities (CI watch / fix) against the same PR branch.
+    base_branch: str = ""
+    branch_name: str = ""
+    # Outcome of the post-push CI watch ("" when the PR was not watched):
+    # passed | fixed | failures_commented | ci_failed | fix_failed | timed_out |
+    # no_checks | merged | pr_closed | error.
+    ci_status: str = ""
+    ci_detail: str = ""
+
+
+@dataclass
+class PrCiStatusInput:
+    repo: str
+    pr_url: str
+    # Checks still queued (never started) after this long are ignored — CI that
+    # never schedules a runner would otherwise stall the watch until max wait.
+    queued_stuck_seconds: int = 1800
+
+
+@dataclass
+class PrCiCheck:
+    """One failing check, with enough identity to fetch its logs later."""
+
+    name: str
+    # Check-run id when the check is a GitHub check run (log/annotation lookup);
+    # None for legacy commit statuses, which carry only a description/URL.
+    check_run_id: int | None = None
+    summary: str = ""
+    details_url: str = ""
+
+
+@dataclass
+class PrCiStatusResult:
+    # pending | success | failure | no_checks | merged | closed
+    state: str
+    head_sha: str = ""
+    failing: list[PrCiCheck] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    # Checks the watch will not wait on (queued past the stuck threshold, or
+    # cancelled/stale runs), with a "name (reason)" label each.
+    ignored: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CiFixInput:
+    repo: str
+    package: str
+    pr_url: str
+    base_branch: str
+    branch_name: str
+    failing: list[PrCiCheck]
+    creator_user_id: str
+    scheduled_query_id: str
+    ignored: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CiFixResult:
+    repo: str
+    package: str
+    # pushed | commented | pushed_and_commented | none
+    action: str
+    comment_url: str | None = None
+    error: str | None = None
     output_tail: str = ""
 
 

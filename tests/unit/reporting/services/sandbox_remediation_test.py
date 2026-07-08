@@ -11,6 +11,7 @@ from reporting.services import sandbox_agent, sandbox_remediation
 from reporting.services.sandbox_remediation import (
     RemediationRunResult,
     config_error,
+    run_ci_fix,
     run_remediation,
     validate_target,
 )
@@ -82,9 +83,11 @@ def _phase_of(cmd: str) -> str:
     if "claude -p" in cmd or "codex exec" in cmd or "opencode run" in cmd:
         return "agent"
     if "git diff --binary" in cmd:
-        return "extract"
+        return "extract"  # create- and fix-mode extract both emit a binary diff
     if "gh pr create" in cmd:
         return "push"  # push-sandbox script (clone + apply + commit + push + PR)
+    if "gh pr view" in cmd and "git push origin" in cmd:
+        return "push"  # fix-mode push (existing PR: fast-forward push, no create)
     if "git clone" in cmd or "git checkout -b" in cmd:
         return "setup"  # agent-sandbox clone + branch (no PR)
     if "cli/cli/releases" in cmd:
@@ -795,6 +798,28 @@ async def test_warns_when_using_a_long_lived_agent_key(caplog: pytest.LogCapture
         sandbox_agent._warned_static_key = False
 
 
+async def test_each_phase_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    with _settings(), _patched_open([agent, push], []), caplog.at_level(logging.INFO):
+        await run_remediation(**_TARGET)
+
+    records = [r for r in caplog.records if r.message == "Remediation phase starting"]
+    assert [r.phase for r in records] == ["install", "setup", "guard", "agent", "extract", "push_install", "push"]
+    assert all(r.mode == "create" and r.repo == "org/app" for r in records)
+
+
+async def test_fix_mode_phases_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    with _settings(), _patched_open([agent, push], []), caplog.at_level(logging.INFO):
+        await run_ci_fix(**_FIX_TARGET)
+
+    records = [r for r in caplog.records if r.message == "Remediation phase starting"]
+    assert [r.phase for r in records] == ["install", "setup", "agent", "extract", "push_install", "push"]
+    assert all(r.mode == "fix" for r in records)
+
+
 def test_agent_scripts_read_prompt_from_file() -> None:
     for provider in sandbox_agent.PROVIDERS.values():
         assert sandbox_agent.PROMPT_PATH in provider.run_cmd
@@ -804,3 +829,177 @@ def test_result_dataclass_defaults() -> None:
     result = RemediationRunResult(status="failed", error="x")
     assert result.pr_url is None
     assert result.output_tail == ""
+    assert result.pushed is False
+    assert result.comment_body == ""
+
+
+# ---------------------------------------------------------------------------
+# PR body prompt (create mode)
+# ---------------------------------------------------------------------------
+
+
+async def test_pr_body_instructions_require_verification_and_change_rationale() -> None:
+    # The PR body must say how compatibility was verified, state explicitly when
+    # no code changes were needed (and why), and justify each code change made.
+    backend = _FakeBackend()
+    with _settings(), _patched_backend(backend):
+        await run_remediation(**_TARGET)
+
+    prompt = " ".join(backend.files[sandbox_agent.PROMPT_PATH].split())
+    assert "How you verified compatibility" in prompt
+    assert "searched this codebase for usages" in prompt
+    assert "If NO code changes were needed, say so explicitly and why" in prompt
+    assert "If code changes WERE needed, explain each one" in prompt
+    assert "anything you could not verify" in prompt
+
+
+# ---------------------------------------------------------------------------
+# CI fix mode (run_ci_fix against an existing PR)
+# ---------------------------------------------------------------------------
+
+_FIX_TARGET: dict[str, Any] = {
+    "repo": "org/app",
+    "base_branch": "main",
+    "branch_name": "seizu/dependency-update/pip-requests-2.32.4",
+    "prompt": "Triage the failing CI checks",
+    "commit_title": "Fix CI failures for the requests update",
+}
+
+
+class _CommentingBackend(_FakeBackend):
+    """Simulates an agent that writes the PR-comment file during its phase."""
+
+    def __init__(self, comment: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._comment = comment
+
+    async def run_bash_streaming(
+        self, cmd: str, *, timeout_seconds: int, on_output: Any, envs: dict[str, str] | None = None
+    ) -> str:
+        output = await super().run_bash_streaming(cmd, timeout_seconds=timeout_seconds, on_output=on_output, envs=envs)
+        if _phase_of(cmd) == "agent":
+            self.files[sandbox_remediation.PR_COMMENT_PATH] = self._comment
+        return output
+
+
+async def test_ci_fix_pushes_new_commits_with_same_token_isolation() -> None:
+    # Fix mode keeps THE invariant: agent phase never sees the GitHub token;
+    # the push happens from a separate fresh sandbox. No guard phase (the PR
+    # is known to exist), and the push is a fast-forward with a commit title.
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    opens: list[dict[str, Any]] = []
+    with _settings(), _patched_open([agent, push], opens):
+        result = await run_ci_fix(**_FIX_TARGET)
+
+    assert len(opens) == 2
+    assert [p for p, _ in agent.calls] == ["install", "setup", "agent", "extract"]  # no guard
+    assert [p for p, _ in push.calls] == ["push_install", "push"]
+    envs = dict(agent.calls)
+    assert envs["setup"]["GH_TOKEN"] == _GH_TOKEN  # pre-agent clone, trusted
+    assert envs["agent"] == {"ANTHROPIC_API_KEY": _AGENT_KEY}
+    assert "GH_TOKEN" not in envs["extract"]
+    push_env = dict(push.calls)["push"]
+    assert push_env["GH_TOKEN"] == _GH_TOKEN
+    assert push_env["SEIZU_COMMIT_TITLE"] == _FIX_TARGET["commit_title"]
+    assert opens[1]["template"] is None  # fresh base-image push sandbox
+
+    assert result.status == "completed"
+    assert result.pushed is True
+    assert result.comment_body == ""
+    assert result.pr_url == "https://github.com/org/app/pull/42"
+
+
+async def test_ci_fix_comment_only_skips_the_push_sandbox() -> None:
+    # No new commits + a comment file → the failures were judged unrelated;
+    # nothing to push, the comment text is returned for the WORKER to post.
+    agent = _CommentingBackend(
+        "The failing check is flaky and also fails on main.",
+        outputs={"extract": "SEIZU_NO_NEW_COMMITS\n"},
+    )
+    opens: list[dict[str, Any]] = []
+    with _settings(), _patched_open([agent], opens):
+        result = await run_ci_fix(**_FIX_TARGET)
+
+    assert len(opens) == 1  # push sandbox never opened
+    assert result.status == "completed"
+    assert result.pushed is False
+    assert result.comment_body == "The failing check is flaky and also fails on main."
+    assert result.pr_url is None
+
+
+async def test_ci_fix_fails_when_agent_produces_nothing() -> None:
+    agent = _FakeBackend(outputs={"extract": "SEIZU_NO_NEW_COMMITS\n"})
+    with _settings(), _patched_backend(agent):
+        result = await run_ci_fix(**_FIX_TARGET)
+
+    assert result.status == "failed"
+    assert "neither committed fixes nor wrote a PR comment" in (result.error or "")
+
+
+async def test_ci_fix_comment_is_masked() -> None:
+    agent = _CommentingBackend(f"see {_GH_TOKEN}", outputs={"extract": "SEIZU_NO_NEW_COMMITS\n"})
+    with _settings(), _patched_backend(agent):
+        result = await run_ci_fix(**_FIX_TARGET)
+    assert _GH_TOKEN not in result.comment_body
+    assert "***" in result.comment_body
+
+
+async def test_ci_fix_prompt_has_fix_footer_and_no_pr_body_instructions() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    with _settings(), _patched_open([agent, push], []):
+        await run_ci_fix(**_FIX_TARGET)
+
+    prompt = " ".join(agent.files[sandbox_agent.PROMPT_PATH].split())
+    assert "Security boundary" in prompt
+    assert "Triage the failing CI checks" in prompt
+    assert "pull request branch" in prompt
+    assert sandbox_remediation.PR_COMMENT_PATH in prompt
+    assert "do NOT push" in prompt
+    assert "do not try to comment on the pull request yourself" in prompt
+    # Create-mode PR title/body instructions do not apply to a fix run.
+    assert sandbox_remediation.PR_TITLE_PATH not in prompt
+    assert sandbox_remediation.PR_BODY_PATH not in prompt
+    # The comment placeholder was written so reading it back never errors.
+    assert agent.files[sandbox_remediation.PR_COMMENT_PATH] == ""
+
+
+async def test_ci_fix_fails_closed_when_unconfigured_or_invalid() -> None:
+    backend = _FakeBackend()
+    with _settings(REMEDIATION_GITHUB_TOKEN=""), _patched_backend(backend):
+        result = await run_ci_fix(**_FIX_TARGET)
+    assert result.status == "failed"
+    assert backend.calls == []
+    with _settings(), _patched_backend(backend):
+        result = await run_ci_fix(**{**_FIX_TARGET, "branch_name": "a..b"})
+    assert result.status == "failed"
+    assert backend.calls == []
+
+
+def test_fix_setup_script_checks_out_the_existing_pr_branch() -> None:
+    setup = sandbox_remediation._FIX_SETUP_SCRIPT
+    # Clone the PR branch itself — never create a new branch, never touch base.
+    assert '--branch "$SEIZU_BRANCH"' in setup
+    assert "git checkout -b" not in setup
+    assert "$SEIZU_BASE_BRANCH" not in setup
+    assert "gh auth setup-git" in setup
+    assert "github.com" not in setup
+
+
+def test_fix_extract_script_diffs_only_new_commits() -> None:
+    extract = sandbox_remediation._FIX_EXTRACT_SCRIPT
+    # Diff against the remote PR-branch tip (only the agent's commits) — NOT
+    # against base, so a base branch that advanced can't leak reverted commits.
+    assert "origin/$SEIZU_BRANCH..HEAD" in extract
+    assert "SEIZU_NO_NEW_COMMITS" in extract
+    assert "$GH_TOKEN" not in extract
+
+
+def test_fix_push_script_fast_forwards_without_force_or_pr_create() -> None:
+    push = sandbox_remediation._FIX_PUSH_SCRIPT
+    assert "git clone" in push and "git apply" in push
+    assert "gh pr create" not in push  # the PR already exists
+    assert "--force" not in push  # fast-forward only; a race fails loudly
+    assert "gh pr view" in push and "SEIZU_PR_URL=" in push
+    assert "$GH_TOKEN" not in push

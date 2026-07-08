@@ -164,6 +164,40 @@ assessment query, additionally requires `dependency_package_name`, and returns
 per-dependency rows (ecosystem, manifest path, vulnerable range, patched
 version) that the remediation prompt is built from.
 
+### CI watch and fix
+
+Pushing a PR is not the end of the run: the upgrade can break the repository's
+CI. After each freshly pushed PR, the workflow watches the PR's check suite
+(check runs plus legacy commit statuses) with durable Temporal timers — a
+short read-only GitHub API activity polls every `REMEDIATION_CI_POLL_SECONDS`
+until the checks settle or `REMEDIATION_CI_MAX_WAIT_SECONDS` elapses (`0`
+disables the watch). Checks that sit in *queued* longer than
+`REMEDIATION_CI_QUEUED_STUCK_SECONDS` (no runner coming — offline self-hosted
+runner, disabled app) are ignored rather than waited on, as are cancelled and
+stale runs; a PR that gets merged or closed mid-watch ends it. A `skipped`
+remediation (the guard found an existing open PR) is not re-watched — the run
+that pushed it already was.
+
+When every non-ignored check has finished and at least one failed, the
+workflow runs a CI-fix activity (at most `REMEDIATION_CI_FIX_MAX_ATTEMPTS`
+coding-agent runs per PR; `0` → watch and record only). The fix run reuses the
+same phase-isolated two-sandbox flow against the existing PR branch, with the
+failing checks' output summaries, annotations, and log tails in the prompt as
+untrusted data. The agent triages each failure:
+
+- **Caused by the upgrade** → it fixes the code/tests and commits; only its
+  new commits are extracted and fast-forward pushed from a fresh push sandbox,
+  which re-triggers CI and resumes the watch.
+- **Unrelated to the upgrade** (flaky test, failure already on the base
+  branch, infrastructure error) → it writes a PR-comment file explaining why,
+  per check; the worker posts the comment through the GitHub API (the agent
+  still has no credentials), and the watch ends.
+
+The per-dependency workflow result records the outcome in `ci_status`
+(`passed`, `fixed`, `failures_commented`, `ci_failed`, `fix_failed`,
+`timed_out`, `no_checks`, `merged`, `pr_closed`, or `error`) with detail in
+`ci_detail`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -183,7 +217,11 @@ version) that the remediation prompt is built from.
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` | `false` | Run a short-lived LiteLLM proxy in its **own** sandbox holding the real provider key, and hand the agent sandbox only the proxy's ephemeral per-run key with an in-memory spend cap (see below). All providers (`opencode` needs `SANDBOX_AGENT_MODEL` set). |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET` | `5` | USD spend cap (LiteLLM's in-memory global `max_budget`) — bounds real-time abuse of the ephemeral key while the proxy is up. |
 | `SANDBOX_AGENT_MODEL` | `""` | Model for the CLI. For `claude`/`codex` a bare model override (empty → the CLI's default). For `opencode` it is **required** and takes the `provider/model` form (e.g. `deepseek/deepseek-v4-pro`), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace. |
-| `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). |
+| `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). Also caps each CI-fix run. |
+| `REMEDIATION_CI_MAX_WAIT_SECONDS` | `3600` | Total time the workflow watches one PR's checks (including re-runs after a fix push). `0` disables the CI watch. |
+| `REMEDIATION_CI_POLL_SECONDS` | `120` | Interval between check-status polls. |
+| `REMEDIATION_CI_QUEUED_STUCK_SECONDS` | `1800` | A check still queued (never started) after this long is ignored by the watch instead of waited on. |
+| `REMEDIATION_CI_FIX_MAX_ATTEMPTS` | `1` | Coding-agent CI-fix runs allowed per PR (each is a full sandbox agent session — this bounds spend). `0` → watch and record the outcome but never fix. |
 | `REMEDIATION_GH_SHA256` | `""` | Expected SHA-256 of the pinned `gh` linux_amd64 tarball. Set it (out of band) for an independent supply-chain pin, or bake `gh` into a pinned sandbox image — since the installed `gh` later handles the token. Empty → verify against the release's own checksums (integrity only). |
 | `REMEDIATION_GITHUB_HOST` | `github.com` | GitHub host the target repositories live on — `github.com` or a GitHub Enterprise Server hostname. Used for the clone URL and `gh` (`GH_HOST`/`GH_ENTERPRISE_TOKEN`). |
 | `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required (configured = enabled). |

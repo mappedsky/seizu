@@ -1,0 +1,269 @@
+"""Worker-side GitHub PR check-suite inspection and commenting.
+
+Used by the ``cve_dependency_remediation`` workflow's CI-watch stage (via
+``reporting/temporal_workflows/activities.py``) to poll a remediation PR's
+checks, gather failure context for the fix agent, and post PR comments.
+
+This runs in the Temporal worker with ``REMEDIATION_GITHUB_TOKEN`` — safe,
+unlike the sandboxes, because no untrusted code executes here: it is plain
+REST I/O against the GitHub API. Anything *derived from* CI output (log
+tails, annotations) is untrusted data and is wrapped/escaped by the caller
+before reaching an agent prompt.
+
+Classification is a pure function (:func:`classify_checks`) over the fetched
+payloads so the queued-stuck / failing / pending logic is unit-testable
+without HTTP mocking.
+"""
+
+import logging
+import re
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
+
+from reporting.services import sandbox_agent
+from reporting.temporal_workflows.shared import PrCiCheck, PrCiStatusResult
+
+logger = logging.getLogger(__name__)
+
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:$|[/?#])")
+
+# Check-run conclusions that should trigger the fix flow. "action_required"
+# (e.g. a workflow awaiting approval) is not failing — it needs a human, and
+# an agent can neither fix nor meaningfully triage it.
+_FAILING_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+# Conclusions that neither pass nor fail — a cancelled run is usually a
+# superseded push; waiting on or "fixing" it would be noise.
+_IGNORED_CONCLUSIONS = frozenset({"cancelled", "stale", "action_required"})
+
+_REQUEST_TIMEOUT_SECONDS = 30
+# Bounds for the failure context injected into the fix agent's prompt.
+_LOG_TAIL_BYTES_PER_CHECK = 8_000
+_MAX_FAILING_CHECKS_DETAILED = 5
+_MAX_ANNOTATIONS_PER_CHECK = 20
+
+
+def api_base_url() -> str:
+    """REST API base for the configured GitHub host (github.com or GHES)."""
+    from reporting import settings
+
+    host = settings.REMEDIATION_GITHUB_HOST
+    if host == "github.com":
+        return "https://api.github.com"
+    return f"https://{host}/api/v3"
+
+
+def parse_pr_number(pr_url: str) -> int | None:
+    match = _PR_NUMBER_RE.search(pr_url)
+    return int(match.group(1)) if match else None
+
+
+def _client() -> httpx.AsyncClient:
+    from reporting import settings
+
+    return httpx.AsyncClient(
+        base_url=api_base_url(),
+        headers={
+            "Authorization": f"Bearer {settings.REMEDIATION_GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+        follow_redirects=True,
+    )
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def classify_checks(
+    pull: dict[str, Any],
+    check_runs: list[dict[str, Any]],
+    statuses: list[dict[str, Any]],
+    *,
+    now: datetime,
+    queued_stuck_seconds: int,
+) -> PrCiStatusResult:
+    """Classify a PR head's check runs + legacy commit statuses.
+
+    ``state`` semantics for the workflow watch loop:
+    - ``merged`` / ``closed`` — the PR is done; stop watching.
+    - ``pending`` — at least one non-stuck check is queued or running; keep
+      polling (a failure verdict waits for the full picture, so one fix run
+      sees every failure).
+    - ``failure`` — every non-ignored check finished and at least one failed.
+    - ``success`` — every non-ignored check finished without failures (checks
+      ignored as stuck/cancelled are listed but do not block).
+    - ``no_checks`` — the head commit has no checks or statuses at all (the
+      caller allows a grace period for CI to register them).
+    """
+    if pull.get("merged"):
+        return PrCiStatusResult(state="merged", head_sha=str(pull.get("head", {}).get("sha", "")))
+    if pull.get("state") != "open":
+        return PrCiStatusResult(state="closed", head_sha=str(pull.get("head", {}).get("sha", "")))
+
+    head_sha = str(pull.get("head", {}).get("sha", ""))
+    stuck_cutoff = timedelta(seconds=queued_stuck_seconds)
+    failing: list[PrCiCheck] = []
+    pending: list[str] = []
+    ignored: list[str] = []
+    seen_any = False
+
+    for run in check_runs:
+        seen_any = True
+        name = str(run.get("name", "unknown"))
+        status = run.get("status")
+        if status == "completed":
+            conclusion = run.get("conclusion")
+            if conclusion in _FAILING_CONCLUSIONS:
+                output = run.get("output") or {}
+                failing.append(
+                    PrCiCheck(
+                        name=name,
+                        check_run_id=run.get("id"),
+                        summary=str(output.get("title") or "")[:200],
+                        details_url=str(run.get("details_url") or ""),
+                    )
+                )
+            elif conclusion in _IGNORED_CONCLUSIONS:
+                ignored.append(f"{name} ({conclusion})")
+            # success / neutral / skipped → passed.
+        elif status == "queued":
+            # A check queued past the threshold likely has no runner coming
+            # (offline self-hosted runner, disabled app) — don't wait on it.
+            queued_at = _parse_time(run.get("started_at"))
+            if queued_at is not None and now - queued_at > stuck_cutoff:
+                ignored.append(f"{name} (queued for over {queued_stuck_seconds}s)")
+            else:
+                pending.append(name)
+        else:  # in_progress and any future states: genuinely running, wait.
+            pending.append(name)
+
+    for status_ctx in statuses:
+        seen_any = True
+        name = str(status_ctx.get("context", "unknown"))
+        state = status_ctx.get("state")
+        if state in ("failure", "error"):
+            failing.append(
+                PrCiCheck(
+                    name=name,
+                    check_run_id=None,
+                    summary=str(status_ctx.get("description") or "")[:200],
+                    details_url=str(status_ctx.get("target_url") or ""),
+                )
+            )
+        elif state == "pending":
+            updated_at = _parse_time(status_ctx.get("updated_at"))
+            if updated_at is not None and now - updated_at > stuck_cutoff:
+                ignored.append(f"{name} (pending for over {queued_stuck_seconds}s)")
+            else:
+                pending.append(name)
+        # success → passed.
+
+    if not seen_any:
+        return PrCiStatusResult(state="no_checks", head_sha=head_sha)
+    if pending:
+        return PrCiStatusResult(state="pending", head_sha=head_sha, failing=failing, pending=pending, ignored=ignored)
+    if failing:
+        return PrCiStatusResult(state="failure", head_sha=head_sha, failing=failing, ignored=ignored)
+    return PrCiStatusResult(state="success", head_sha=head_sha, ignored=ignored)
+
+
+async def fetch_pr_ci_status(repo: str, pr_number: int, *, queued_stuck_seconds: int) -> PrCiStatusResult:
+    """Fetch and classify the current CI state of a PR's head commit."""
+    async with _client() as client:
+        pull_resp = await client.get(f"/repos/{repo}/pulls/{pr_number}")
+        pull_resp.raise_for_status()
+        pull = pull_resp.json()
+        if pull.get("merged") or pull.get("state") != "open":
+            return classify_checks(pull, [], [], now=datetime.now(UTC), queued_stuck_seconds=queued_stuck_seconds)
+
+        head_sha = pull["head"]["sha"]
+        runs_resp = await client.get(f"/repos/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100})
+        runs_resp.raise_for_status()
+        # Legacy commit statuses (Jenkins plugins, codecov, …) don't appear in
+        # the check-runs API; the combined status covers them.
+        status_resp = await client.get(f"/repos/{repo}/commits/{head_sha}/status", params={"per_page": 100})
+        status_resp.raise_for_status()
+
+    return classify_checks(
+        pull,
+        runs_resp.json().get("check_runs", []),
+        status_resp.json().get("statuses", []),
+        now=datetime.now(UTC),
+        queued_stuck_seconds=queued_stuck_seconds,
+    )
+
+
+async def fetch_failure_context(repo: str, failing: list[PrCiCheck]) -> str:
+    """Best-effort failure details for the fix agent's prompt (UNTRUSTED text).
+
+    Per failing check run: its output summary, annotations, and — when the
+    check is a GitHub Actions job (job id == check-run id) — a tail of the job
+    log. Every fetch is optional; a check with no retrievable detail still
+    contributes its name so the agent knows what failed.
+    """
+    sections: list[str] = []
+    async with _client() as client:
+        for check in failing[:_MAX_FAILING_CHECKS_DETAILED]:
+            lines = [f"### Check: {check.name}"]
+            if check.summary:
+                lines.append(f"Summary: {check.summary}")
+            if check.details_url:
+                lines.append(f"Details: {check.details_url}")
+            if check.check_run_id is not None:
+                lines.extend(await _check_run_details(client, repo, check.check_run_id))
+            sections.append("\n".join(lines))
+    for check in failing[_MAX_FAILING_CHECKS_DETAILED:]:
+        sections.append(f"### Check: {check.name}\n(details omitted)")
+    return "\n\n".join(sections)
+
+
+async def _check_run_details(client: httpx.AsyncClient, repo: str, check_run_id: int) -> list[str]:
+    lines: list[str] = []
+    try:
+        run_resp = await client.get(f"/repos/{repo}/check-runs/{check_run_id}")
+        run_resp.raise_for_status()
+        output = run_resp.json().get("output") or {}
+        if output.get("summary"):
+            lines.append("Output summary:\n" + sandbox_agent.tail_bytes(str(output["summary"]), 2_000))
+        if output.get("text"):
+            lines.append("Output text:\n" + sandbox_agent.tail_bytes(str(output["text"]), 2_000))
+    except Exception:
+        logger.debug("check-run output fetch failed for %s#%s", repo, check_run_id, exc_info=True)
+    try:
+        ann_resp = await client.get(f"/repos/{repo}/check-runs/{check_run_id}/annotations")
+        ann_resp.raise_for_status()
+        annotations = ann_resp.json()[:_MAX_ANNOTATIONS_PER_CHECK]
+        if annotations:
+            annotation_lines = (
+                f"- {a.get('path')}:{a.get('start_line')} [{a.get('annotation_level')}] {a.get('message', '')[:500]}"
+                for a in annotations
+            )
+            lines.append("Annotations:\n" + "\n".join(annotation_lines))
+    except Exception:
+        logger.debug("annotations fetch failed for %s#%s", repo, check_run_id, exc_info=True)
+    try:
+        # For GitHub Actions the job id equals the check-run id; other check
+        # providers 404 here, which the except swallows.
+        log_resp = await client.get(f"/repos/{repo}/actions/jobs/{check_run_id}/logs")
+        log_resp.raise_for_status()
+        lines.append("Log tail:\n" + sandbox_agent.tail_bytes(log_resp.text, _LOG_TAIL_BYTES_PER_CHECK))
+    except Exception:
+        logger.debug("job log fetch failed for %s#%s", repo, check_run_id, exc_info=True)
+    return lines
+
+
+async def post_pr_comment(repo: str, pr_number: int, body: str) -> str:
+    """Post a PR comment; returns the comment's html_url."""
+    async with _client() as client:
+        resp = await client.post(f"/repos/{repo}/issues/{pr_number}/comments", json={"body": body})
+        resp.raise_for_status()
+        return str(resp.json().get("html_url", ""))
