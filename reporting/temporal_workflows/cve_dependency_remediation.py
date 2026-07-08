@@ -134,6 +134,12 @@ class CveDependencyRemediationWorkflow:
                     return
                 continue
             status_errors = 0
+            # The empty-poll grace applies to CONSECUTIVE no_checks polls only:
+            # once any checks were observed, a later empty poll (e.g. right
+            # after a fix push, before CI registers runs on the new head) must
+            # not inherit the earlier count and end the watch prematurely.
+            if status.state != "no_checks":
+                empty_polls = 0
 
             if status.state in ("merged", "closed"):
                 result.ci_status = "merged" if status.state == "merged" else "pr_closed"
@@ -195,6 +201,8 @@ class CveDependencyRemediationWorkflow:
                 result.ci_detail = fix.error or "the CI fix run produced no fix and no comment"
                 return
             # Fixes were pushed: the new head re-triggers CI; keep watching
-            # until the deadline for the fresh checks to settle.
+            # until the deadline for the fresh checks to settle. The new head
+            # starts its own empty-poll grace period.
+            empty_polls = 0
             if fix.comment_url:
                 result.ci_detail = fix.comment_url

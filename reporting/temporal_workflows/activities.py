@@ -468,7 +468,11 @@ async def run_dependency_ci_fix(input: CiFixInput) -> CiFixResult:
     comment_error: str | None = None
     if result.comment_body:
         try:
-            comment_url = await github_checks.post_pr_comment(input.repo, pr_number, result.comment_body)
+            # Never post the agent's text verbatim: it read untrusted CI output,
+            # so it is rendered into a fixed template with mentions and
+            # slash-commands neutralized (see render_agent_pr_comment).
+            rendered = github_checks.render_agent_pr_comment(result.comment_body)
+            comment_url = await github_checks.post_pr_comment(input.repo, pr_number, rendered)
         except Exception as exc:
             logger.exception("PR comment post failed for %s PR #%s", input.repo, pr_number)
             comment_error = f"failed to post the PR comment: {exc}"

@@ -190,8 +190,12 @@ untrusted data. The agent triages each failure:
   which re-triggers CI and resumes the watch.
 - **Unrelated to the upgrade** (flaky test, failure already on the base
   branch, infrastructure error) → it writes a PR-comment file explaining why,
-  per check; the worker posts the comment through the GitHub API (the agent
-  still has no credentials), and the watch ends.
+  per check; the worker posts it through the GitHub API (the agent still has
+  no credentials), and the watch ends. The agent's text is never posted
+  verbatim: it is rendered into a fixed template as a block quote, with
+  `@`-mentions and line-leading slash commands neutralized and its length
+  capped, so a prompt-injected agent cannot ping people or drive
+  slash-command bots under the bot identity.
 
 The per-dependency workflow result records the outcome in `ci_status`
 (`passed`, `fixed`, `failures_commented`, `ci_failed`, `fix_failed`,

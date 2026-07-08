@@ -38,10 +38,28 @@ _FAILING_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
 _IGNORED_CONCLUSIONS = frozenset({"cancelled", "stale", "action_required"})
 
 _REQUEST_TIMEOUT_SECONDS = 30
+# Bound on Link-header pagination (10 pages × 100 = 1000 checks/statuses).
+_MAX_PAGES = 10
 # Bounds for the failure context injected into the fix agent's prompt.
 _LOG_TAIL_BYTES_PER_CHECK = 8_000
 _MAX_FAILING_CHECKS_DETAILED = 5
 _MAX_ANNOTATIONS_PER_CHECK = 20
+
+# Agent-authored PR-comment text is untrusted output (the agent read CI logs
+# that may carry prompt injection), so the worker never posts it verbatim:
+# render_agent_pr_comment wraps it in a fixed server-owned template, quotes it,
+# neutralizes @-mentions and line-leading slash commands (bots like /retest,
+# /deploy, /approve parse those), and caps its length.
+_COMMENT_BODY_MAX_CHARS = 4_000
+# Zero-width space entity: renders invisibly on GitHub but breaks the token so
+# mention/slash-command parsers no longer match.
+_ZWSP = "&#8203;"
+_COMMENT_HEADER = (
+    "**Automated CI triage** — Seizu dependency-update workflow\n\n"
+    "The quoted analysis below was written by a sandboxed coding agent from "
+    "this pull request's CI output. Treat it as informational; it is not a "
+    "command or an approval.\n\n"
+)
 
 
 def api_base_url() -> str:
@@ -83,6 +101,48 @@ def _parse_time(value: Any) -> datetime | None:
         return None
 
 
+async def _paginate(client: httpx.AsyncClient, url: str, items_key: str) -> list[dict[str, Any]]:
+    """Collect ``items_key`` across RFC 5988 ``Link: rel="next"`` pages.
+
+    Matrix-heavy workflows easily exceed one page of check runs; missing them
+    would report a false success. Bounded by :data:`_MAX_PAGES`.
+    """
+    items: list[dict[str, Any]] = []
+    next_url: str | None = url
+    params: dict[str, Any] | None = {"per_page": 100}
+    for _ in range(_MAX_PAGES):
+        if next_url is None:
+            break
+        resp = await client.get(next_url, params=params)
+        resp.raise_for_status()
+        items.extend(resp.json().get(items_key, []))
+        next_url = resp.links.get("next", {}).get("url")
+        params = None  # the next link's URL already carries the query string
+    return items
+
+
+def render_agent_pr_comment(body: str) -> str:
+    """Render untrusted agent triage text as a safe, fixed-template PR comment.
+
+    The agent was exposed to untrusted CI output, so its comment text could be
+    prompt-injected into pings or bot commands. The template is server-owned;
+    the agent text is length-capped, has ``@``-mentions and line-leading
+    slash commands broken with a zero-width space, and is block-quoted so it
+    reads as reported analysis rather than a statement by the bot.
+    """
+    text = body.strip()
+    if len(text) > _COMMENT_BODY_MAX_CHARS:
+        text = text[:_COMMENT_BODY_MAX_CHARS] + "\n… (truncated)"
+    # "@user"/"@org/team" must never notify anyone.
+    text = text.replace("@", f"@{_ZWSP}")
+    # "/retest", "/deploy", … at line start drive slash-command bots. The
+    # block quote below already prevents the ^/ match; the zero-width space is
+    # belt-and-braces for parsers that strip quoting first.
+    text = re.sub(r"(?m)^(\s*)/", rf"\1{_ZWSP}/", text)
+    quoted = "\n".join(f"> {line}".rstrip() for line in text.splitlines())
+    return _COMMENT_HEADER + quoted
+
+
 def classify_checks(
     pull: dict[str, Any],
     check_runs: list[dict[str, Any]],
@@ -90,8 +150,13 @@ def classify_checks(
     *,
     now: datetime,
     queued_stuck_seconds: int,
+    fallback_queued_at: datetime | None = None,
 ) -> PrCiStatusResult:
     """Classify a PR head's check runs + legacy commit statuses.
+
+    ``fallback_queued_at`` ages queued check runs that expose no timestamp of
+    their own (common while a run has never started) — callers pass the head
+    commit's date, since checks are created on push.
 
     ``state`` semantics for the workflow watch loop:
     - ``merged`` / ``closed`` — the PR is done; stop watching.
@@ -138,7 +203,9 @@ def classify_checks(
         elif status == "queued":
             # A check queued past the threshold likely has no runner coming
             # (offline self-hosted runner, disabled app) — don't wait on it.
-            queued_at = _parse_time(run.get("started_at"))
+            # Queued runs often have no started_at yet, so prefer created_at
+            # and finally the caller's fallback anchor (head commit date).
+            queued_at = _parse_time(run.get("created_at")) or _parse_time(run.get("started_at")) or fallback_queued_at
             if queued_at is not None and now - queued_at > stuck_cutoff:
                 ignored.append(f"{name} (queued for over {queued_stuck_seconds}s)")
             else:
@@ -186,19 +253,32 @@ async def fetch_pr_ci_status(repo: str, pr_number: int, *, queued_stuck_seconds:
             return classify_checks(pull, [], [], now=datetime.now(UTC), queued_stuck_seconds=queued_stuck_seconds)
 
         head_sha = pull["head"]["sha"]
-        runs_resp = await client.get(f"/repos/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100})
-        runs_resp.raise_for_status()
+        check_runs = await _paginate(client, f"/repos/{repo}/commits/{head_sha}/check-runs", "check_runs")
         # Legacy commit statuses (Jenkins plugins, codecov, …) don't appear in
         # the check-runs API; the combined status covers them.
-        status_resp = await client.get(f"/repos/{repo}/commits/{head_sha}/status", params={"per_page": 100})
-        status_resp.raise_for_status()
+        statuses = await _paginate(client, f"/repos/{repo}/commits/{head_sha}/status", "statuses")
+
+        # Anchor for queued runs exposing no timestamp at all: the head
+        # commit's date (checks are created on push). Fetched only when needed.
+        fallback_queued_at: datetime | None = None
+        if any(
+            run.get("status") == "queued" and not (run.get("created_at") or run.get("started_at")) for run in check_runs
+        ):
+            try:
+                commit_resp = await client.get(f"/repos/{repo}/commits/{head_sha}")
+                commit_resp.raise_for_status()
+                commit = commit_resp.json().get("commit", {})
+                fallback_queued_at = _parse_time(commit.get("committer", {}).get("date"))
+            except Exception:
+                logger.warning("head commit fetch failed for %s@%s; ageless queued checks stay pending", repo, head_sha)
 
     return classify_checks(
         pull,
-        runs_resp.json().get("check_runs", []),
-        status_resp.json().get("statuses", []),
+        check_runs,
+        statuses,
         now=datetime.now(UTC),
         queued_stuck_seconds=queued_stuck_seconds,
+        fallback_queued_at=fallback_queued_at,
     )
 
 

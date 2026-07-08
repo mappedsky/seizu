@@ -476,7 +476,12 @@ async def test_run_dependency_ci_fix_comment_posted_worker_side(mocker):
 
     assert result.action == "commented"
     assert result.comment_url == "https://github.com/org/app/pull/42#issuecomment-1"
-    post.assert_awaited_once_with("org/app", 42, "Flaky test, fails on develop too.")
+    post.assert_awaited_once()
+    repo_arg, number_arg, body_arg = post.await_args.args
+    assert (repo_arg, number_arg) == ("org/app", 42)
+    # The agent text is never posted verbatim: fixed template + block quote.
+    assert body_arg.startswith("**Automated CI triage**")
+    assert "> Flaky test, fails on develop too." in body_arg
 
 
 async def test_run_dependency_ci_fix_comment_post_failure_is_an_error(mocker):

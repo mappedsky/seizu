@@ -208,6 +208,48 @@ async def test_ci_watch_gives_up_on_missing_checks_after_grace():
     assert len(status_calls) == 3
 
 
+async def test_ci_watch_no_checks_grace_counts_consecutive_polls_only():
+    # An early empty poll must not combine with later ones once checks were
+    # seen: 2× no_checks, then pending resets the grace, then 3 consecutive
+    # empty polls end the watch.
+    states = [
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="pending", pending=["tests"]),
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="no_checks"),
+    ]
+    status, status_calls = _status_activity(states)
+    fix, _ = _fix_activity("pushed")
+    result = await _run_workflow(_watch_input(), [_mock_remediation, status, fix], "wf-ci-grace")
+
+    (dep,) = result["per_dependency"]
+    assert dep["ci_status"] == "no_checks"
+    # Without the consecutive reset this would have ended one poll earlier.
+    assert len(status_calls) == 5
+
+
+async def test_ci_watch_no_checks_grace_resets_after_fix_push():
+    # Right after a fix push, CI may not have registered runs on the new head
+    # yet — those empty polls must not inherit the pre-push count.
+    states = [
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="failure", failing=_FAILING),
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="no_checks"),
+        PrCiStatusResult(state="success"),
+    ]
+    status, status_calls = _status_activity(states)
+    fix, fix_calls = _fix_activity("pushed")
+    result = await _run_workflow(_watch_input(), [_mock_remediation, status, fix], "wf-ci-grace-push")
+
+    (dep,) = result["per_dependency"]
+    assert dep["ci_status"] == "fixed"
+    assert len(fix_calls) == 1
+    assert len(status_calls) == 6
+
+
 async def test_ci_watch_ends_when_pr_is_merged():
     status, _ = _status_activity([PrCiStatusResult(state="merged")])
     fix, fix_calls = _fix_activity("pushed")

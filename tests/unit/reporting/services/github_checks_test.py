@@ -4,7 +4,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
-from reporting.services.github_checks import api_base_url, classify_checks, parse_pr_number
+from reporting.services.github_checks import (
+    _paginate,
+    api_base_url,
+    classify_checks,
+    parse_pr_number,
+    render_agent_pr_comment,
+)
 from reporting.temporal_workflows.shared import PrCiCheck
 
 _NOW = datetime(2026, 7, 8, 12, 0, 0, tzinfo=UTC)
@@ -103,10 +109,30 @@ def test_queued_forever_does_not_mask_real_failures() -> None:
     assert len(result.ignored) == 1
 
 
-def test_queued_with_no_timestamp_stays_pending() -> None:
-    # No started_at to age against → keep waiting; the max wait bounds it.
-    result = _classify([_run("tests", status="queued", started_at=None)])
-    assert result.state == "pending"
+def test_queued_ages_from_created_at_when_started_at_is_null() -> None:
+    # Queued runs commonly have no started_at yet; created_at must drive the
+    # stuck detection or REMEDIATION_CI_QUEUED_STUCK_SECONDS never fires.
+    run = _run("ghost", status="queued", started_at=None)
+    run["created_at"] = (_NOW - timedelta(seconds=_STUCK + 60)).isoformat()
+    result = _classify([run])
+    assert result.state == "success"
+    assert result.ignored == [f"ghost (queued for over {_STUCK}s)"]
+
+    fresh = _run("fresh", status="queued", started_at=None)
+    fresh["created_at"] = (_NOW - timedelta(seconds=60)).isoformat()
+    assert _classify([fresh]).state == "pending"
+
+
+def test_queued_with_no_timestamps_ages_from_fallback_anchor() -> None:
+    # No created_at/started_at at all → the caller's head-commit-date anchor
+    # decides; without an anchor the check stays pending (max wait bounds it).
+    run = _run("ghost", status="queued", started_at=None)
+    old_anchor = _NOW - timedelta(seconds=_STUCK + 60)
+    result = classify_checks(_pull(), [run], [], now=_NOW, queued_stuck_seconds=_STUCK, fallback_queued_at=old_anchor)
+    assert result.state == "success"
+    assert result.ignored == [f"ghost (queued for over {_STUCK}s)"]
+
+    assert _classify([_run("tests", status="queued", started_at=None)]).state == "pending"
 
 
 def test_cancelled_and_stale_and_action_required_are_ignored() -> None:
@@ -157,3 +183,86 @@ def test_failing_check_dataclass_carries_lookup_identity() -> None:
     assert isinstance(check, PrCiCheck)
     assert check.check_run_id == 99
     assert check.details_url.endswith("/99")
+
+
+# ---------------------------------------------------------------------------
+# Link-header pagination
+# ---------------------------------------------------------------------------
+
+
+class _StubResponse:
+    def __init__(self, payload: dict[str, Any], next_url: str | None = None) -> None:
+        self._payload = payload
+        self.links = {"next": {"url": next_url}} if next_url else {}
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _StubClient:
+    def __init__(self, responses: dict[str, _StubResponse]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def get(self, url: str, params: dict[str, Any] | None = None) -> _StubResponse:
+        self.calls.append((url, params))
+        return self._responses[url]
+
+
+async def test_paginate_follows_next_links() -> None:
+    # Matrix-heavy workflows exceed one page of check runs; a single page
+    # would miss failures and report a false success.
+    client = _StubClient(
+        {
+            "/checks": _StubResponse({"check_runs": [{"name": "a"}]}, next_url="https://api/checks?page=2"),
+            "https://api/checks?page=2": _StubResponse({"check_runs": [{"name": "b"}]}),
+        }
+    )
+    items = await _paginate(client, "/checks", "check_runs")  # type: ignore[arg-type]
+    assert [i["name"] for i in items] == ["a", "b"]
+    # per_page only on the first request; the next link carries its own query.
+    assert client.calls == [("/checks", {"per_page": 100}), ("https://api/checks?page=2", None)]
+
+
+async def test_paginate_is_bounded() -> None:
+    # A pathological/looping Link chain cannot spin forever.
+    client = _StubClient({"/loop": _StubResponse({"check_runs": [{"name": "x"}]}, next_url="/loop")})
+    items = await _paginate(client, "/loop", "check_runs")  # type: ignore[arg-type]
+    assert len(items) == 10  # _MAX_PAGES
+
+
+# ---------------------------------------------------------------------------
+# Agent-comment rendering (untrusted text → fixed server-owned template)
+# ---------------------------------------------------------------------------
+
+
+def test_render_agent_pr_comment_neutralizes_mentions_and_commands() -> None:
+    body = "/deploy production\ncc @octocat and @org/security-team\n  /retest"
+    rendered = render_agent_pr_comment(body)
+    # Fixed server-owned header, agent text only as a block quote.
+    assert rendered.startswith("**Automated CI triage**")
+    for line in rendered.splitlines():
+        assert not line.startswith("/")
+    assert all(line.startswith(">") or not line.strip().startswith("/") for line in rendered.splitlines())
+    # Mentions can never ping: the @ is broken with a zero-width space.
+    assert "@octocat" not in rendered
+    assert "@&#8203;octocat" in rendered
+    assert "@org/security-team" not in rendered
+    # Slash commands are quoted AND zero-width-prefixed.
+    assert "> &#8203;/deploy production" in rendered
+    assert "&#8203;/retest" in rendered
+
+
+def test_render_agent_pr_comment_caps_length() -> None:
+    rendered = render_agent_pr_comment("x" * 50_000)
+    assert "… (truncated)" in rendered
+    assert len(rendered) < 6_000
+
+
+def test_render_agent_pr_comment_quotes_every_line() -> None:
+    rendered = render_agent_pr_comment("first\n\nsecond")
+    quoted = rendered.split("\n\n", 2)[2]
+    assert quoted.splitlines() == ["> first", ">", "> second"]
