@@ -46,6 +46,10 @@ def _cve_dependency_remediation_input(context: WorkflowInputContext) -> CveDepen
         creator_user_id=context.creator_user_id,
         rows=context.rows,
         timeout_seconds=settings.REMEDIATION_TIMEOUT_SECONDS,
+        ci_watch_max_seconds=settings.REMEDIATION_CI_MAX_WAIT_SECONDS,
+        ci_poll_seconds=settings.REMEDIATION_CI_POLL_SECONDS,
+        ci_queued_stuck_seconds=settings.REMEDIATION_CI_QUEUED_STUCK_SECONDS,
+        ci_fix_max_attempts=settings.REMEDIATION_CI_FIX_MAX_ATTEMPTS,
     )
 
 
