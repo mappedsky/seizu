@@ -111,6 +111,7 @@ seizu scheduled-queries list
 seizu scheduled-queries get <scheduled_query_id>
 seizu scheduled-queries versions <scheduled_query_id>
 seizu scheduled-queries version-get <scheduled_query_id> <version>
+seizu scheduled-queries run <scheduled_query_id>
 seizu scheduled-queries delete <scheduled_query_id>
 ```
 

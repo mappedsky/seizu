@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
+import { ScheduleSpec } from 'src/scheduleSpec';
 
 export interface ScheduledChatWatchScan {
   grouptype?: string;
@@ -7,17 +8,9 @@ export interface ScheduledChatWatchScan {
   groupid?: string;
 }
 
-export interface ChatScheduleSpec {
-  type: 'hourly' | 'daily' | 'monthly';
-  // hourly: run every N hours.
-  interval_hours?: number | null;
-  // daily: 0=Monday .. 6=Sunday.
-  days_of_week?: number[];
-  // daily: hour of day (UTC).
-  hour?: number;
-  // monthly: days 1-31; months without a selected day run on their last day.
-  days_of_month?: number[];
-}
+// Scheduled chats use the shared ScheduleSpec shape, limited server-side to
+// hourly granularity (no 'interval' type, no minute-of-hour).
+export type ChatScheduleSpec = ScheduleSpec;
 
 export interface ScheduledChat {
   scheduled_chat_id: string;
@@ -82,6 +75,7 @@ export function useChatSchedules(
   createSchedule: (req: ScheduledChatRequest) => Promise<void>;
   updateSchedule: (id: string, req: ScheduledChatRequest) => Promise<void>;
   deleteSchedule: (id: string) => Promise<void>;
+  runSchedule: (id: string) => Promise<void>;
 } {
   const { checkAuthReady, authHeaders } = useAuthHeaders();
   const [schedules, setSchedules] = useState<ScheduledChat[]>([]);
@@ -171,6 +165,20 @@ export function useChatSchedules(
     [authHeaders, refresh],
   );
 
+  const runSchedule = useCallback(
+    async (id: string) => {
+      const res = await fetch(
+        `/api/v1/chat/schedules/${encodeURIComponent(id)}/run`,
+        {
+          method: 'POST',
+          headers: { 'X-Seizu-Csrf': '1', ...authHeaders() },
+        },
+      );
+      if (!res.ok) throw new Error('Failed to request scheduled chat run');
+    },
+    [authHeaders],
+  );
+
   return {
     schedules,
     loading,
@@ -179,6 +187,7 @@ export function useChatSchedules(
     createSchedule,
     updateSchedule,
     deleteSchedule,
+    runSchedule,
   };
 }
 

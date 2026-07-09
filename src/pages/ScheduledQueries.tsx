@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Box, Button, Chip, Tooltip, Typography } from '@mui/material';
+import {
+  Box,
+  Button,
+  Chip,
+  Snackbar,
+  Tooltip,
+  Typography,
+} from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import BadgeIcon from '@mui/icons-material/Badge';
 import CancelOutlinedIcon from '@mui/icons-material/CancelOutlined';
@@ -11,6 +18,7 @@ import HelpOutlineIcon from '@mui/icons-material/Help';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircle';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
 import HistoryIcon from '@mui/icons-material/History';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import ToggleOnIcon from '@mui/icons-material/ToggleOn';
 import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import VisibilityIcon from '@mui/icons-material/Visibility';
@@ -37,6 +45,7 @@ import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import type { BackState } from 'src/navigation';
+import { describeSchedule } from 'src/scheduleSpec';
 import { pageContentSx } from 'src/theme/layout';
 
 const actionsColumnSx = { width: '18%' };
@@ -45,6 +54,7 @@ const statusColumnSx = { width: 128 };
 function triggerSummary(item: ScheduledQueryItem): string {
   if (item.watch_scans.length > 0)
     return `Watch scans (${item.watch_scans.length})`;
+  if (item.schedule) return describeSchedule(item.schedule);
   if (item.frequency != null) return `Every ${item.frequency} min`;
   return 'Not configured';
 }
@@ -57,9 +67,14 @@ function ScheduledQueries() {
   const navigate = useNavigate();
   const { scheduledQueries, loading, error, refresh } =
     useScheduledQueriesList();
-  const { createScheduledQuery, updateScheduledQuery, deleteScheduledQuery } =
-    useScheduledQueriesMutations();
+  const {
+    createScheduledQuery,
+    updateScheduledQuery,
+    deleteScheduledQuery,
+    runScheduledQuery,
+  } = useScheduledQueriesMutations();
   const hasPermission = usePermissions();
+  const [runMessage, setRunMessage] = useState<string | null>(null);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<ScheduledQueryItem | null>(null);
@@ -139,6 +154,17 @@ function ScheduledQueries() {
       state: { fromLabel: 'Scheduled Queries' } satisfies BackState,
     });
 
+  const handleRunNow = async (item: ScheduledQueryItem) => {
+    try {
+      await runScheduledQuery(item.scheduled_query_id);
+      setRunMessage(
+        `Run requested for "${item.name}". The worker will pick it up on its next poll.`,
+      );
+    } catch {
+      setRunMessage('Failed to request run. Please try again.');
+    }
+  };
+
   const rowActions = (item: ScheduledQueryItem): RowMenuAction[] => {
     const canWrite = hasPermission('scheduled_queries:write');
     const canDelete = hasPermission('scheduled_queries:delete');
@@ -158,6 +184,16 @@ function ScheduledQueries() {
         tooltip: canWrite
           ? undefined
           : 'You do not have permission to edit scheduled queries',
+      },
+      {
+        key: 'run',
+        label: 'Run now',
+        icon: <PlayArrowIcon fontSize="small" />,
+        onClick: () => void handleRunNow(item),
+        disabled: !canWrite,
+        tooltip: canWrite
+          ? 'Runs on the worker’s next poll, even if disabled'
+          : 'You do not have permission to run scheduled queries',
       },
       {
         key: 'history',
@@ -450,6 +486,13 @@ function ScheduledQueries() {
         Permanently delete <strong>{deleteTarget?.name}</strong> and all its
         versions? This cannot be undone.
       </ConfirmDeleteDialog>
+
+      <Snackbar
+        open={runMessage !== null}
+        autoHideDuration={6000}
+        onClose={() => setRunMessage(null)}
+        message={runMessage}
+      />
     </>
   );
 }

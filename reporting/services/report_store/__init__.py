@@ -210,6 +210,7 @@ async def create_scheduled_query(
     cypher: str,
     params: list[dict[str, Any]],
     frequency: int | None,
+    schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
     actions: list[dict[str, Any]],
@@ -220,6 +221,7 @@ async def create_scheduled_query(
         cypher=cypher,
         params=params,
         frequency=frequency,
+        schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
         actions=actions,
@@ -233,6 +235,7 @@ async def update_scheduled_query(
     cypher: str,
     params: list[dict[str, Any]],
     frequency: int | None,
+    schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
     actions: list[dict[str, Any]],
@@ -245,6 +248,7 @@ async def update_scheduled_query(
         cypher=cypher,
         params=params,
         frequency=frequency,
+        schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
         actions=actions,
@@ -261,6 +265,10 @@ async def acquire_scheduled_query_lock(sq_id: str, expected_last_scheduled_at: s
 
 async def record_scheduled_query_result(sq_id: str, status: str, error: str | None = None) -> None:
     await get_store().record_scheduled_query_result(sq_id=sq_id, status=status, error=error)
+
+
+async def request_scheduled_query_run(sq_id: str) -> str | None:
+    return await get_store().request_scheduled_query_run(sq_id)
 
 
 async def delete_scheduled_query(sq_id: str) -> bool:
@@ -751,6 +759,10 @@ async def acquire_scheduled_chat_lock(sc_id: str, expected_last_scheduled_at: st
 
 async def record_scheduled_chat_result(sc_id: str, status: str, error: str | None = None) -> None:
     await get_store().record_scheduled_chat_result(sc_id, status, error=error)
+
+
+async def request_scheduled_chat_run(sc_id: str) -> str | None:
+    return await get_store().request_scheduled_chat_run(sc_id)
 
 
 # ---------------------------------------------------------------------------

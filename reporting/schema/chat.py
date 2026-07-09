@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from reporting.schema.reporting_config import ScheduleSpec
+
 CHAT_THREAD_ID_PATTERN = r"^[0-9]+$"
 
 
@@ -63,40 +65,16 @@ class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-class ChatScheduleSpec(BaseModel):
-    """When a scheduled chat runs. All times are UTC.
-
-    - ``hourly``: every ``interval_hours`` hours, anchored to the last run
-      (a new schedule runs immediately).
-    - ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at
-      ``hour``.
-    - ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a
-      month doesn't have runs on that month's last day instead (e.g. 31 in
-      April runs on the 30th).
-    """
-
-    model_config = ConfigDict(extra="forbid")
+class ChatScheduleSpec(ScheduleSpec):
+    """When a scheduled chat runs: a ``ScheduleSpec`` limited to hourly
+    granularity (no ``interval`` type and no minute-of-hour offset)."""
 
     type: Literal["hourly", "daily", "monthly"]
-    interval_hours: int | None = Field(default=None, ge=1, le=720)
-    days_of_week: list[int] = Field(default_factory=list)
-    hour: int = Field(default=0, ge=0, le=23)
-    days_of_month: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def require_type_fields(self) -> "ChatScheduleSpec":
-        if self.type == "hourly" and not self.interval_hours:
-            raise ValueError("interval_hours is required for hourly schedules")
-        if self.type == "daily":
-            if not self.days_of_week:
-                raise ValueError("days_of_week is required for daily schedules")
-            if any(day < 0 or day > 6 for day in self.days_of_week):
-                raise ValueError("days_of_week values must be 0 (Monday) through 6 (Sunday)")
-        if self.type == "monthly":
-            if not self.days_of_month:
-                raise ValueError("days_of_month is required for monthly schedules")
-            if any(day < 1 or day > 31 for day in self.days_of_month):
-                raise ValueError("days_of_month values must be 1 through 31")
+    def require_hourly_granularity(self) -> "ChatScheduleSpec":
+        if self.minute != 0:
+            raise ValueError("scheduled chats do not support minute-of-hour offsets")
         return self
 
 
@@ -125,6 +103,10 @@ class ScheduledChatItem(BaseModel):
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default_factory=list)
     last_scheduled_at: str | None = None
+    # Set by "run now": the worker runs the schedule on its next poll when
+    # this is newer than last_scheduled_at (even when the schedule is
+    # disabled, so owners can test before enabling).
+    run_requested_at: str | None = None
 
 
 class ScheduledChatVersion(BaseModel):
@@ -164,6 +146,13 @@ class CreateScheduledChatRequest(BaseModel):
 
 class ScheduledChatsResponse(BaseModel):
     schedules: list[ScheduledChatItem]
+
+
+class ScheduledChatRunRequestedResponse(BaseModel):
+    """Acknowledgement that a manual run was requested."""
+
+    scheduled_chat_id: str
+    run_requested_at: str
 
 
 class ScheduledChatVersionListResponse(BaseModel):

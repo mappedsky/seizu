@@ -729,6 +729,83 @@
             "title": "Row",
             "type": "object"
         },
+        "ScheduleSpec": {
+            "additionalProperties": false,
+            "description": "A structured time-based schedule. All times are UTC.\n\n- ``interval``: every ``interval_minutes`` minutes, anchored to the last\n  run (a new schedule runs immediately).\n- ``hourly``: every ``interval_hours`` hours, anchored to the last run\n  (a new schedule runs immediately).\n- ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at\n  ``hour``:``minute``.\n- ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a\n  month doesn't have runs on that month's last day instead (e.g. 31 in\n  April runs on the 30th).",
+            "properties": {
+                "type": {
+                    "enum": [
+                        "interval",
+                        "hourly",
+                        "daily",
+                        "monthly"
+                    ],
+                    "title": "Type",
+                    "type": "string"
+                },
+                "interval_minutes": {
+                    "anyOf": [
+                        {
+                            "maximum": 43200,
+                            "minimum": 1,
+                            "type": "integer"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Interval Minutes"
+                },
+                "interval_hours": {
+                    "anyOf": [
+                        {
+                            "maximum": 720,
+                            "minimum": 1,
+                            "type": "integer"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Interval Hours"
+                },
+                "days_of_week": {
+                    "items": {
+                        "type": "integer"
+                    },
+                    "title": "Days Of Week",
+                    "type": "array"
+                },
+                "hour": {
+                    "default": 0,
+                    "maximum": 23,
+                    "minimum": 0,
+                    "title": "Hour",
+                    "type": "integer"
+                },
+                "minute": {
+                    "default": 0,
+                    "maximum": 59,
+                    "minimum": 0,
+                    "title": "Minute",
+                    "type": "integer"
+                },
+                "days_of_month": {
+                    "items": {
+                        "type": "integer"
+                    },
+                    "title": "Days Of Month",
+                    "type": "array"
+                }
+            },
+            "required": [
+                "type"
+            ],
+            "title": "ScheduleSpec",
+            "type": "object"
+        },
         "ScheduledQuery": {
             "properties": {
                 "name": {
@@ -768,11 +845,26 @@
                         }
                     ],
                     "default": null,
-                    "description": "The frequency of the scheduled query in minutes. Mutually exclusive with ``watch_scans``.",
+                    "description": "The frequency of the scheduled query in minutes. Deprecated in favor of ``schedule``; mutually exclusive with ``schedule`` and ``watch_scans``.",
                     "examples": [
                         "1440"
                     ],
                     "title": "Frequency"
+                },
+                "schedule": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/ScheduleSpec"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "A structured time-based schedule (interval/hourly/daily/monthly, UTC). Mutually exclusive with ``frequency`` and ``watch_scans``.",
+                    "examples": [
+                        "\n            .. code-block:: yaml\n\n              schedule:\n                type: daily\n                days_of_week: [0, 2, 4]\n                hour: 9\n                minute: 30\n            "
+                    ]
                 },
                 "watch_scans": {
                     "description": "The scans to watch for the scheduled query. Based on SyncMetadata. Query will triger if any of the watched scans listed are updated. Mutually exclusive with ``frequency``.",

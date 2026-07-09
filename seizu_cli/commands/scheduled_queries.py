@@ -32,6 +32,7 @@ def _print_sq_detail(data: dict[str, Any], as_json: bool) -> None:
     console.print(f"[bold]Name[/bold]: {data['name']}")
     console.print(f"[bold]Enabled[/bold]: {data.get('enabled', True)}")
     console.print(f"[bold]Frequency[/bold]: {data.get('frequency')}")
+    console.print(f"[bold]Schedule[/bold]: {json.dumps(data['schedule']) if data.get('schedule') else None}")
     console.print(f"[bold]Version[/bold]: {data.get('current_version', data.get('version'))}")
     console.print(f"[bold]Created By[/bold]: {data['created_by']}")
     console.print(f"[bold]Updated By[/bold]: {data.get('updated_by', '')}")
@@ -91,6 +92,19 @@ def get_scheduled_query(
         _die(exc)
         return
     _print_sq_detail(data, as_json=(output == "json"))
+
+
+@app.command("run")
+def run_scheduled_query(
+    sq_id: str = typer.Argument(help="Scheduled query ID."),
+) -> None:
+    """Request an immediate run of a scheduled query (picked up by the worker)."""
+    try:
+        data = state.get_client().post(f"/api/v1/scheduled-queries/{sq_id}/run")
+    except Exception as exc:
+        _die(exc)
+        return
+    console.print(f"[green]Run requested[/green]: {sq_id} at {data.get('run_requested_at', '')}")
 
 
 @app.command("delete")

@@ -31,6 +31,10 @@ Schedules repeat **hourly**, **daily**, or **monthly** (all times UTC):
 
 The list shows each schedule's trigger and the status of its last run; run errors are recorded on the schedule (last five).
 
+### Running a schedule on demand
+
+Choose **Run now** from a schedule's **⋮** menu (owner only) to request an immediate run without waiting for the trigger. The worker picks the request up on its next poll (`CHAT_SCHEDULES_POLL_SECONDS`) and runs the schedule as usual — **even if it is disabled**, so you can test a schedule before enabling it. The same is available via `POST /api/v1/chat/schedules/<id>/run`.
+
 ## Run sessions
 
 Each run creates a chat session owned by the schedule's creator, but these sessions are kept out of the chat sidebar's session list so scheduled runs don't crowd out interactive conversations. The detail view lists a schedule's runs as collapsed entries; expanding one shows the full transcript — the prompt, the assistant's response, and an expandable **Details** section with the run's thinking and tool calls (arguments and output included). Run transcripts are **read-only**: the web UI cannot send messages to a scheduled session, and the API rejects attempts to continue one.

@@ -18,6 +18,7 @@ from reporting.schema.reporting_config import (
 )
 from reporting.services import report_store
 from reporting.services.reporting_neo4j import check_watch_scan_triggered, run_query_with_retry
+from reporting.services.schedule_spec import run_requested, schedule_due
 from reporting.worker_bootstrap import initialize_report_store, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ def _item_to_scheduled_query(item: ScheduledQueryItem) -> ScheduledQuery:
         cypher=item.cypher,
         params=[ScheduledQueryParam(**p) for p in item.params],
         frequency=item.frequency,
+        schedule=item.schedule,
         watch_scans=[ScheduledQueryWatchScan(**ws) for ws in item.watch_scans],
         enabled=item.enabled,
         actions=[ScheduledQueryAction(**a) for a in item.actions],
@@ -51,6 +53,12 @@ def _frequency_triggered(last_scheduled_at: str | None, frequency: int) -> bool:
 
 async def _is_triggered(item: ScheduledQueryItem, sq: ScheduledQuery) -> bool:
     """Return True if any trigger condition is met for this scheduled query."""
+    if sq.schedule and schedule_due(sq.schedule, item.last_scheduled_at, item.created_at):
+        logger.debug(
+            "Schedule trigger fired",
+            extra={"scheduled_query_id": item.scheduled_query_id},
+        )
+        return True
     if sq.frequency and _frequency_triggered(item.last_scheduled_at, sq.frequency):
         logger.debug(
             "Frequency trigger fired",
@@ -69,11 +77,15 @@ async def _is_triggered(item: ScheduledQueryItem, sq: ScheduledQuery) -> bool:
 async def schedule_query(item: ScheduledQueryItem) -> None:
     sq = _item_to_scheduled_query(item)
     sq_id = item.scheduled_query_id
-    if not sq.enabled:
+    # A pending "run now" request runs even when the query is disabled, so
+    # operators can test a query before enabling it.
+    manual_run = run_requested(item.run_requested_at, item.last_scheduled_at)
+    if manual_run:
+        logger.info("Manual run requested", extra={"scheduled_query_id": sq_id})
+    elif not sq.enabled:
         logger.debug("Skipping disabled query", extra={"scheduled_query_id": sq_id})
         return
-    logger.debug("Checking query", extra={"scheduled_query_id": sq_id})
-    if not await _is_triggered(item, sq):
+    elif not await _is_triggered(item, sq):
         logger.debug("No trigger for query", extra={"scheduled_query_id": sq_id})
         return
     if not await report_store.acquire_scheduled_query_lock(sq_id, item.last_scheduled_at):

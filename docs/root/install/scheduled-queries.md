@@ -18,8 +18,12 @@ Scheduled queries are stored in the database and managed through the Seizu UI or
 Navigate to **Scheduled Queries** in the sidebar to view all scheduled queries. From the list you can:
 
 - Click a query name to view its current configuration in a read-only detail dialog.
-- Open the **⋮** menu on any row to **Edit**, **View history**, or **Delete** a query.
+- Open the **⋮** menu on any row to **Edit**, **Run now**, **View history**, or **Delete** a query.
 - The table shows the trigger type, configured actions, enabled status, current version, latest update timestamp, and who last updated each query.
+
+### Running a query on demand
+
+Choose **Run now** from the **⋮** menu (requires `scheduled_queries:write`) to request an immediate run. The worker picks the request up on its next poll (`SCHEDULED_QUERY_FREQUENCY`, default a few seconds) and runs the query with its configured actions — **even if the query is disabled**, so you can test a query before enabling it. The same is available via `POST /api/v1/scheduled-queries/<id>/run` and `seizu scheduled-queries run <id>` from the CLI.
 
 ### Creating a scheduled query
 
@@ -30,8 +34,8 @@ Click **New scheduled query** on the Scheduled Queries page. The form includes:
 | name | A user-friendly name for the scheduled query. |
 | cypher | A Cypher query to run. The query must return the data as `details` (or as configured via `query_return_attribute` in the action config). |
 | enabled | Whether the query will be run by the worker. |
-| trigger | Choose **Fixed frequency** (run every N minutes) or **Watch scans** (run when matching SyncMetadata nodes are updated). |
-| frequency | Minutes between runs. Used when trigger is **Fixed frequency**. |
+| trigger | Choose **Schedule** (a structured time-based schedule) or **Watch scans** (run when matching SyncMetadata nodes are updated). |
+| schedule | The structured schedule: **Every N minutes**, **Hourly** (every N hours), **Daily** (selected weekdays at an HH:MM UTC time), or **Monthly** (selected days of month at 00:00 UTC). Used when trigger is **Schedule**. |
 | watch scans | List of SyncMetadata filters. Each entry takes `grouptype`, `syncedtype`, and `groupid` (all support `.*` as a wildcard). Used when trigger is **Watch scans**. |
 | params | Query parameters. Each param has a name and a value. Toggle the **list** button to switch between a single value and a comma-separated list of values. |
 | actions | One or more actions to run with the query results. See the Built-in Actions section below. |
@@ -107,14 +111,39 @@ Seeding is idempotent by name: existing queries are skipped unless their content
 
 ## Scheduling
 
-### Fixed frequency
+### Structured schedule
 
-Use the `frequency` field (minutes) to run a query on a regular schedule:
+Use the `schedule` field for a time-based schedule (all times UTC). Four types are supported:
 
 ```yaml
-  - name: Recently published HIGH/CRITICAL CVEs
-    frequency: 1440   # every 24 hours
+  - name: Fast-moving inventory check
+    schedule:
+      type: interval          # every N minutes
+      interval_minutes: 15
+
+  - name: Hourly sweep
+    schedule:
+      type: hourly            # every N hours
+      interval_hours: 4
+
+  - name: Weekday morning report
+    schedule:
+      type: daily             # selected weekdays at hour:minute UTC
+      days_of_week: [0, 1, 2, 3, 4]   # 0=Monday .. 6=Sunday
+      hour: 9
+      minute: 30
+
+  - name: Month-end review
+    schedule:
+      type: monthly           # selected days of month at 00:00 UTC
+      days_of_month: [1, 15, 31]      # days a month lacks clamp to its last day
 ```
+
+`interval` and `hourly` schedules are anchored to the last run (a new schedule runs immediately). `daily` and `monthly` schedules wait for the first selected occurrence after the schedule is created.
+
+### Fixed frequency (deprecated)
+
+The legacy `frequency` field (minutes between runs) is still honored by the worker for existing records, but is superseded by `schedule` — `frequency: 1440` is equivalent to `schedule: {type: interval, interval_minutes: 1440}`. `frequency` and `schedule` are mutually exclusive; editing a legacy query in the UI migrates it to the equivalent `schedule` on save.
 
 ### Watch scans
 
@@ -131,7 +160,7 @@ Use `watch_scans` to trigger a query when Cartography SyncMetadata nodes are upd
 
 In the UI, the `grouptype`, `syncedtype`, and `groupid` fields autocomplete from the distinct values present on `SyncMetadata` nodes in the graph (`GET /api/v1/sync-metadata/values`); free-form input (e.g. `.*` regexes) is still accepted.
 
-`frequency` and `watch_scans` are mutually exclusive.
+`schedule`/`frequency` and `watch_scans` are mutually exclusive.
 
 ## Built-in Actions
 

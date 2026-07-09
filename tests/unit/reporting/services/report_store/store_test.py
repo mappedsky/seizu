@@ -82,6 +82,7 @@ def mock_store():
         "update_scheduled_query": None,
         "acquire_scheduled_query_lock": True,
         "record_scheduled_query_result": None,
+        "request_scheduled_query_run": "now",
         "delete_scheduled_query": True,
         "list_scheduled_chats": [],
         "get_scheduled_chat": None,
@@ -90,6 +91,7 @@ def mock_store():
         "delete_scheduled_chat": True,
         "acquire_scheduled_chat_lock": True,
         "record_scheduled_chat_result": None,
+        "request_scheduled_chat_run": "now",
         "list_scheduled_chat_versions": [],
         "get_scheduled_chat_version": None,
         "list_scheduled_chat_sessions": [],
@@ -256,6 +258,7 @@ async def test_facade_delegates_remaining_methods(mock_store):
         cypher="MATCH (n) RETURN n",
         params=[],
         frequency=None,
+        schedule=None,
         watch_scans=[],
         enabled=True,
         actions=[],
@@ -266,11 +269,14 @@ async def test_facade_delegates_remaining_methods(mock_store):
         cypher="MATCH (n) RETURN n",
         params=[],
         frequency=None,
+        schedule=None,
         watch_scans=[],
         enabled=True,
         actions=[],
         created_by="u1",
     )
+    await report_store.request_scheduled_query_run("sq1")
+    mock_store.request_scheduled_query_run.assert_awaited_once_with("sq1")
 
     await report_store.acquire_scheduled_query_lock("sq1", None)
     mock_store.acquire_scheduled_query_lock.assert_awaited_once_with(
@@ -524,3 +530,5 @@ async def test_scheduled_chat_facade_delegates(mock_store):
 
     await report_store.record_scheduled_chat_result("sc1", "failure", error="boom")
     mock_store.record_scheduled_chat_result.assert_awaited_once_with("sc1", "failure", error="boom")
+    await report_store.request_scheduled_chat_run("sc1")
+    mock_store.request_scheduled_chat_run.assert_awaited_once_with("sc1")

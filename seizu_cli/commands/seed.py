@@ -60,6 +60,7 @@ def _sq_content_changed(
     resolved_cypher: str,
     params: list[dict[str, Any]],
     frequency: int | None,
+    schedule: dict[str, Any] | None,
     watch_scans: list[dict[str, Any]],
     enabled: bool,
     actions: list[dict[str, Any]],
@@ -68,6 +69,7 @@ def _sq_content_changed(
         existing.get("cypher") != resolved_cypher
         or existing.get("params") != params
         or existing.get("frequency") != frequency
+        or existing.get("schedule") != schedule
         or existing.get("watch_scans") != watch_scans
         or existing.get("enabled", True) != enabled
         or existing.get("actions") != actions
@@ -296,6 +298,7 @@ def _seed_scheduled_queries(
         actions = [a.model_dump() for a in sq.actions]
         enabled = sq.enabled if sq.enabled is not None else True
         frequency: int | None = sq.frequency
+        schedule: dict[str, Any] | None = sq.schedule.model_dump() if sq.schedule else None
 
         existing = existing_items.get(sq.name)
 
@@ -305,6 +308,7 @@ def _seed_scheduled_queries(
                 resolved_cypher,
                 params,
                 frequency,
+                schedule,
                 watch_scans,
                 enabled,
                 actions,
@@ -325,6 +329,7 @@ def _seed_scheduled_queries(
                         "cypher": resolved_cypher,
                         "params": params,
                         "frequency": frequency,
+                        "schedule": schedule,
                         "watch_scans": watch_scans,
                         "enabled": enabled,
                         "actions": actions,
@@ -351,6 +356,7 @@ def _seed_scheduled_queries(
                     "cypher": resolved_cypher,
                     "params": params,
                     "frequency": frequency,
+                    "schedule": schedule,
                     "watch_scans": watch_scans,
                     "enabled": enabled,
                     "actions": actions,

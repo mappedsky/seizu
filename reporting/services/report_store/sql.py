@@ -100,6 +100,7 @@ class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
     cypher: str
     params: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     frequency: int | None = None
+    schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
@@ -112,6 +113,7 @@ class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     last_scheduled_at: str | None = None
+    run_requested_at: str | None = None
 
 
 class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
@@ -123,6 +125,7 @@ class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
     cypher: str
     params: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     frequency: int | None = None
+    schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
@@ -296,6 +299,7 @@ class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     last_scheduled_at: str | None = None
+    run_requested_at: str | None = None
 
 
 class ScheduledChatVersionRecord(SQLModel, table=True):  # type: ignore
@@ -577,6 +581,16 @@ class SQLModelReportStore(ReportStore):
                             "ADD COLUMN IF NOT EXISTS arguments_hash VARCHAR DEFAULT ''"
                         )
                     )
+                    await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN IF NOT EXISTS schedule JSON"))
+                    await conn.execute(
+                        text("ALTER TABLE scheduled_query_versions ADD COLUMN IF NOT EXISTS schedule JSON")
+                    )
+                    await conn.execute(
+                        text("ALTER TABLE scheduled_queries ADD COLUMN IF NOT EXISTS run_requested_at VARCHAR")
+                    )
+                    await conn.execute(
+                        text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS run_requested_at VARCHAR")
+                    )
                 elif conn.dialect.name == "sqlite":
                     # SQLite cannot drop NOT NULL in-place. Existing SQLite
                     # dev DBs created before nullable email still require email;
@@ -619,6 +633,18 @@ class SQLModelReportStore(ReportStore):
                         await conn.execute(
                             text("ALTER TABLE action_confirmations ADD COLUMN arguments_hash VARCHAR DEFAULT ''")
                         )
+                    sq_columns = await conn.execute(text("PRAGMA table_info(scheduled_queries)"))
+                    sq_column_names = {row[1] for row in sq_columns}
+                    if sq_column_names and "schedule" not in sq_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN schedule JSON"))
+                    if sq_column_names and "run_requested_at" not in sq_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN run_requested_at VARCHAR"))
+                    sqv_columns = await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))
+                    sqv_column_names = {row[1] for row in sqv_columns}
+                    if sqv_column_names and "schedule" not in sqv_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_query_versions ADD COLUMN schedule JSON"))
+                    if sc_column_names and "run_requested_at" not in sc_column_names:
+                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN run_requested_at VARCHAR"))
                 await conn.execute(text("DROP INDEX IF EXISTS ix_action_conf_user_status_list"))
                 await conn.execute(
                     text(
@@ -913,6 +939,7 @@ class SQLModelReportStore(ReportStore):
                     cypher=r.cypher,
                     params=r.params or [],
                     frequency=r.frequency,
+                    schedule=r.schedule,
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
@@ -925,6 +952,7 @@ class SQLModelReportStore(ReportStore):
                     last_run_at=r.last_run_at,
                     last_errors=r.last_errors or [],
                     last_scheduled_at=r.last_scheduled_at,
+                    run_requested_at=r.run_requested_at,
                 )
                 for r in rows
             ]
@@ -940,6 +968,7 @@ class SQLModelReportStore(ReportStore):
                 cypher=record.cypher,
                 params=record.params or [],
                 frequency=record.frequency,
+                schedule=record.schedule,
                 watch_scans=record.watch_scans or [],
                 enabled=record.enabled,
                 actions=record.actions or [],
@@ -952,6 +981,7 @@ class SQLModelReportStore(ReportStore):
                 last_run_at=record.last_run_at,
                 last_errors=record.last_errors or [],
                 last_scheduled_at=record.last_scheduled_at,
+                run_requested_at=record.run_requested_at,
             )
 
     async def create_scheduled_query(
@@ -960,6 +990,7 @@ class SQLModelReportStore(ReportStore):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -975,6 +1006,7 @@ class SQLModelReportStore(ReportStore):
                 cypher=cypher,
                 params=params,
                 frequency=frequency,
+                schedule=schedule,
                 watch_scans=watch_scans,
                 enabled=enabled,
                 actions=actions,
@@ -992,6 +1024,7 @@ class SQLModelReportStore(ReportStore):
                     cypher=cypher,
                     params=params,
                     frequency=frequency,
+                    schedule=schedule,
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
@@ -1007,6 +1040,7 @@ class SQLModelReportStore(ReportStore):
             cypher=cypher,
             params=params,
             frequency=frequency,
+            schedule=schedule,
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
@@ -1028,6 +1062,7 @@ class SQLModelReportStore(ReportStore):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -1045,11 +1080,13 @@ class SQLModelReportStore(ReportStore):
             orig_last_run_at = record.last_run_at
             orig_last_errors = list(record.last_errors or [])
             orig_last_scheduled_at = record.last_scheduled_at
+            orig_run_requested_at = record.run_requested_at
             version = record.current_version + 1
             record.name = name
             record.cypher = cypher
             record.params = params
             record.frequency = frequency
+            record.schedule = schedule
             record.watch_scans = watch_scans
             record.enabled = enabled
             record.actions = actions
@@ -1064,6 +1101,7 @@ class SQLModelReportStore(ReportStore):
                     cypher=cypher,
                     params=params,
                     frequency=frequency,
+                    schedule=schedule,
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
@@ -1079,6 +1117,7 @@ class SQLModelReportStore(ReportStore):
             cypher=cypher,
             params=params,
             frequency=frequency,
+            schedule=schedule,
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
@@ -1091,6 +1130,7 @@ class SQLModelReportStore(ReportStore):
             last_run_at=orig_last_run_at,
             last_errors=orig_last_errors,
             last_scheduled_at=orig_last_scheduled_at,
+            run_requested_at=orig_run_requested_at,
         )
 
     async def list_scheduled_query_versions(self, sq_id: str) -> list[ScheduledQueryVersion]:
@@ -1113,6 +1153,7 @@ class SQLModelReportStore(ReportStore):
                     cypher=r.cypher,
                     params=r.params or [],
                     frequency=r.frequency,
+                    schedule=r.schedule,
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
@@ -1144,6 +1185,7 @@ class SQLModelReportStore(ReportStore):
                 cypher=row.cypher,
                 params=row.params or [],
                 frequency=row.frequency,
+                schedule=row.schedule,
                 watch_scans=row.watch_scans or [],
                 enabled=row.enabled,
                 actions=row.actions or [],
@@ -1187,6 +1229,17 @@ class SQLModelReportStore(ReportStore):
             session.add(record)
             await session.commit()
 
+    async def request_scheduled_query_run(self, sq_id: str) -> str | None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledQueryRecord, sq_id)
+            if not record:
+                return None
+            record.run_requested_at = now
+            session.add(record)
+            await session.commit()
+        return now
+
     async def delete_scheduled_query(self, sq_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
             record = await session.get(ScheduledQueryRecord, sq_id)
@@ -1217,6 +1270,7 @@ class SQLModelReportStore(ReportStore):
             last_run_at=record.last_run_at,
             last_errors=record.last_errors or [],
             last_scheduled_at=record.last_scheduled_at,
+            run_requested_at=record.run_requested_at,
         )
 
     def _scheduled_chat_version_from_record(self, record: ScheduledChatVersionRecord) -> ScheduledChatVersion:
@@ -1407,6 +1461,17 @@ class SQLModelReportStore(ReportStore):
                 record.last_errors = []
             session.add(record)
             await session.commit()
+
+    async def request_scheduled_chat_run(self, sc_id: str) -> str | None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
+            if not record:
+                return None
+            record.run_requested_at = now
+            session.add(record)
+            await session.commit()
+        return now
 
     async def get_or_create_user(
         self,

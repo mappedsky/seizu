@@ -1,7 +1,9 @@
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from reporting.schema.reporting_config import ScheduleSpec
 
 
 def _coerce_decimal(value: Any) -> Any:
@@ -172,7 +174,10 @@ class ScheduledQueryItem(BaseModel):
     name: str
     cypher: str
     params: list[dict[str, Any]] = Field(default_factory=list)
+    # Interval in minutes. Deprecated in favor of schedule; still honored by
+    # the worker for existing records.
     frequency: int | None = None
+    schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -185,6 +190,10 @@ class ScheduledQueryItem(BaseModel):
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default_factory=list)
     last_scheduled_at: str | None = None
+    # Set by "run now": the worker runs the query on its next poll when this
+    # is newer than last_scheduled_at (even when the query is disabled, so
+    # operators can test before enabling).
+    run_requested_at: str | None = None
 
     @field_validator("current_version", mode="before")
     @classmethod
@@ -197,6 +206,11 @@ class ScheduledQueryItem(BaseModel):
     @classmethod
     def coerce_json_fields(cls, v: Any) -> list[dict[str, Any]]:
         return _coerce_decimal(v) if v is not None else []
+
+    @field_validator("schedule", mode="before")
+    @classmethod
+    def coerce_schedule(cls, v: Any) -> Any:
+        return _coerce_decimal(v)
 
     @field_validator("last_errors", mode="before")
     @classmethod
@@ -213,6 +227,7 @@ class ScheduledQueryVersion(BaseModel):
     cypher: str
     params: list[dict[str, Any]] = Field(default_factory=list)
     frequency: int | None = None
+    schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -232,6 +247,11 @@ class ScheduledQueryVersion(BaseModel):
     def coerce_json_fields(cls, v: Any) -> list[dict[str, Any]]:
         return _coerce_decimal(v) if v is not None else []
 
+    @field_validator("schedule", mode="before")
+    @classmethod
+    def coerce_schedule(cls, v: Any) -> Any:
+        return _coerce_decimal(v)
+
 
 class CreateScheduledQueryRequest(BaseModel):
     """Request body for POST/PUT /api/v1/scheduled-queries."""
@@ -239,11 +259,26 @@ class CreateScheduledQueryRequest(BaseModel):
     name: str
     cypher: str
     params: list[dict[str, Any]] = Field(default_factory=list)
+    # Deprecated: interval in minutes. Use schedule instead.
     frequency: int | None = None
+    schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
     comment: str | None = None
+
+    @model_validator(mode="after")
+    def frequency_or_schedule(self) -> "CreateScheduledQueryRequest":
+        if self.frequency is not None and self.schedule is not None:
+            raise ValueError("frequency and schedule are mutually exclusive; use schedule")
+        return self
+
+
+class ScheduledQueryRunRequestedResponse(BaseModel):
+    """Acknowledgement that a manual run was requested."""
+
+    scheduled_query_id: str
+    run_requested_at: str
 
 
 class ActionConfigFieldDef(BaseModel):

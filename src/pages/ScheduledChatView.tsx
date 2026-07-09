@@ -27,9 +27,8 @@ import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ListPageHeader from 'src/components/ListPageHeader';
 import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
-import ScheduledChatDialog, {
-  describeSchedule,
-} from 'src/components/ScheduledChatDialog';
+import ScheduledChatDialog from 'src/components/ScheduledChatDialog';
+import { describeSchedule } from 'src/scheduleSpec';
 import UserDisplay from 'src/components/UserDisplay';
 import { MarkdocRenderer } from 'src/components/markdoc/renderer';
 import {

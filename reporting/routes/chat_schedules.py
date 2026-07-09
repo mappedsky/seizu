@@ -17,6 +17,7 @@ from reporting.schema.chat import (
     ChatSessionsResponse,
     CreateScheduledChatRequest,
     ScheduledChatItem,
+    ScheduledChatRunRequestedResponse,
     ScheduledChatsResponse,
     ScheduledChatVersion,
     ScheduledChatVersionListResponse,
@@ -176,6 +177,32 @@ async def update_scheduled_chat(
         extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},
     )
     return item
+
+
+@router.post(
+    "/api/v1/chat/schedules/{sc_id}/run",
+    response_model=ScheduledChatRunRequestedResponse,
+    status_code=202,
+)
+async def run_scheduled_chat(
+    sc_id: str,
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
+) -> ScheduledChatRunRequestedResponse:
+    """Request an immediate run of one of the requesting user's scheduled chats.
+
+    The worker picks the request up on its next poll and runs the schedule
+    (as its owner) even if it is disabled, so it can be tested before
+    enabling.
+    """
+    await _owned_schedule(sc_id, current)
+    run_requested_at = await report_store.request_scheduled_chat_run(sc_id)
+    if run_requested_at is None:
+        raise HTTPException(status_code=404, detail="Scheduled chat not found")
+    logger.info(
+        "Scheduled chat run requested",
+        extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},
+    )
+    return ScheduledChatRunRequestedResponse(scheduled_chat_id=sc_id, run_requested_at=run_requested_at)
 
 
 @router.get("/api/v1/chat/schedules/{sc_id}/versions", response_model=ScheduledChatVersionListResponse)

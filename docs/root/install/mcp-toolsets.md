@@ -204,7 +204,7 @@ Built-in tools are grouped by area. Permissions for each tool mirror the equival
 |-------|-------|
 | `graph` | `graph__schema` (Neo4j labels/relationship types/property keys), `graph__query` (validated read-only Cypher) |
 | `reports` | list / get / create / update metadata / delete / pin / set_dashboard / get_dashboard reports, plus save/list/get version history |
-| `scheduled_queries` | Full CRUD plus version history. Create/update reuse the same Cypher + action-config validation as the REST routes. |
+| `scheduled_queries` | Full CRUD plus version history and an on-demand `run` (picked up by the worker's next poll). Create/update reuse the same Cypher + action-config validation as the REST routes. |
 | `toolsets` | Full CRUD for toolsets and nested tools, plus version history. Create/update tool calls reuse Cypher validation. |
 | `roles` | List built-in and user-defined roles; CRUD for user-defined roles; role version history. |
 

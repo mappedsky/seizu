@@ -1,6 +1,7 @@
 import { useState, useEffect, useContext, useCallback } from 'react';
 import { AuthContext } from 'src/auth.context';
 import { AuthConfigContext } from 'src/authConfig.context';
+import { ScheduleSpec } from 'src/scheduleSpec';
 
 export interface ScheduledQueryParam {
   name: string;
@@ -28,7 +29,9 @@ export interface ScheduledQueryItem {
   name: string;
   cypher: string;
   params: ScheduledQueryParam[];
+  // Deprecated: interval in minutes; superseded by schedule.
   frequency: number | null;
+  schedule: ScheduleSpec | null;
   watch_scans: ScheduledQueryWatchScan[];
   enabled: boolean;
   actions: ScheduledQueryAction[];
@@ -49,6 +52,7 @@ export interface ScheduledQueryVersion {
   cypher: string;
   params: ScheduledQueryParam[];
   frequency: number | null;
+  schedule: ScheduleSpec | null;
   watch_scans: ScheduledQueryWatchScan[];
   enabled: boolean;
   actions: ScheduledQueryAction[];
@@ -61,7 +65,9 @@ export interface ScheduledQueryRequest {
   name: string;
   cypher: string;
   params: ScheduledQueryParam[];
+  // Deprecated: interval in minutes; superseded by schedule.
   frequency: number | null;
+  schedule: ScheduleSpec | null;
   watch_scans: ScheduledQueryWatchScan[];
   enabled: boolean;
   actions: ScheduledQueryAction[];
@@ -205,6 +211,7 @@ export function useScheduledQueriesMutations(): {
     req: ScheduledQueryRequest,
   ) => Promise<ScheduledQueryItem>;
   deleteScheduledQuery: (id: string) => Promise<void>;
+  runScheduledQuery: (id: string) => Promise<void>;
 } {
   const { accessToken } = useContext(AuthContext);
 
@@ -257,5 +264,22 @@ export function useScheduledQueriesMutations(): {
     [accessToken],
   );
 
-  return { createScheduledQuery, updateScheduledQuery, deleteScheduledQuery };
+  const runScheduledQuery = useCallback(
+    async (id: string): Promise<void> => {
+      const res = await fetch(`/api/v1/scheduled-queries/${id}/run`, {
+        method: 'POST',
+        headers: getApiHeaders(accessToken),
+      });
+      if (!res.ok)
+        throw new Error(`Failed to request scheduled query run: ${res.status}`);
+    },
+    [accessToken],
+  );
+
+  return {
+    createScheduledQuery,
+    updateScheduledQuery,
+    deleteScheduledQuery,
+    runScheduledQuery,
+  };
 }

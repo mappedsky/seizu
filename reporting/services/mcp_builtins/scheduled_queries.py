@@ -46,6 +46,14 @@ async def _confirm_delete(args: dict[str, Any], current_user: CurrentUser | None
     )
 
 
+async def _confirm_run(args: dict[str, Any], current_user: CurrentUser | None) -> ActionConfirmationTarget | None:
+    return ActionConfirmationTarget(
+        action="run",
+        resource_type="scheduled_query",
+        resource_id=str(args["scheduled_query_id"]),
+    )
+
+
 async def _list(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     items = await report_store.list_scheduled_queries()
     return {"scheduled_queries": [i.model_dump() for i in items]}
@@ -72,6 +80,7 @@ async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dic
         cypher=body.cypher,
         params=body.params,
         frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         actions=body.actions,
@@ -96,6 +105,7 @@ async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dic
         cypher=body.cypher,
         params=body.params,
         frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         actions=body.actions,
@@ -112,6 +122,14 @@ async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dic
     if not ok:
         return {"error": "Scheduled query not found"}
     return {"scheduled_query_id": args["scheduled_query_id"]}
+
+
+async def _run(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    sq_id = args["scheduled_query_id"]
+    run_requested_at = await report_store.request_scheduled_query_run(sq_id)
+    if run_requested_at is None:
+        return {"error": "Scheduled query not found"}
+    return {"scheduled_query_id": sq_id, "run_requested_at": run_requested_at}
 
 
 async def _list_versions(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -192,6 +210,23 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.SCHEDULED_QUERIES_DELETE.value],
             handler=_delete,
             confirmation=_confirm_delete,
+        ),
+        BuiltinTool(
+            name="scheduled_queries__run",
+            group=GROUP,
+            description=(
+                "Request an immediate run of a scheduled query. The scheduled-"
+                "query worker picks the request up on its next poll and runs "
+                "the query (with its configured actions) even if it is disabled."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": _id_prop(),
+                "required": ["scheduled_query_id"],
+            },
+            required_permissions=[Permission.SCHEDULED_QUERIES_WRITE.value],
+            handler=_run,
+            confirmation=_confirm_run,
         ),
         BuiltinTool(
             name="scheduled_queries__list_versions",
