@@ -1422,8 +1422,13 @@ class DynamoDBReportStore(ReportStore):
             current_version = int(existing.get("current_version", 0))
             version = current_version + 1
             now = datetime.now(tz=UTC).isoformat()
+            # Spread the existing item first so operational fields set outside
+            # updates (last_run_*, last_scheduled_at, run_requested_at) carry
+            # forward; a None config value overwrites and is then stripped, so
+            # cleared triggers do not survive.
             base = _strip_none(
                 {
+                    **{k: v for k, v in existing.items() if k not in ("PK", "SK")},
                     "scheduled_query_id": sq_id,
                     "name": name,
                     "cypher": cypher,

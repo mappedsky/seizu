@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from reporting.schema.reporting_config import ScheduleSpec
+from reporting.schema.reporting_config import ScheduleSpec, validate_exclusive_triggers
 
 
 def _coerce_decimal(value: Any) -> Any:
@@ -268,9 +268,8 @@ class CreateScheduledQueryRequest(BaseModel):
     comment: str | None = None
 
     @model_validator(mode="after")
-    def frequency_or_schedule(self) -> "CreateScheduledQueryRequest":
-        if self.frequency is not None and self.schedule is not None:
-            raise ValueError("frequency and schedule are mutually exclusive; use schedule")
+    def exclusive_triggers(self) -> "CreateScheduledQueryRequest":
+        validate_exclusive_triggers(self.frequency, self.schedule, self.watch_scans)
         return self
 
 

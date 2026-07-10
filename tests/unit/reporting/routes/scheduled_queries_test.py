@@ -333,6 +333,19 @@ async def test_update_scheduled_query_invalid_body(mocker):
     assert ret.status_code == 422
 
 
+async def test_update_scheduled_query_rejects_multiple_triggers(mocker):
+    body = {
+        "name": "My Query",
+        "cypher": "MATCH (n) RETURN n",
+        "frequency": 60,
+        "watch_scans": [{"grouptype": "CVE"}],
+    }
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put(f"/api/v1/scheduled-queries/{_SQ_ID}", json=body)
+    assert ret.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # GET /api/v1/scheduled-queries/<sq_id>/versions
 # ---------------------------------------------------------------------------
@@ -502,6 +515,32 @@ async def test_create_scheduled_query_rejects_frequency_and_schedule(mocker):
         "cypher": "MATCH (n) RETURN n",
         "frequency": 60,
         "schedule": {"type": "interval", "interval_minutes": 5},
+    }
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post("/api/v1/scheduled-queries", json=body)
+    assert ret.status_code == 422
+
+
+async def test_create_scheduled_query_rejects_zero_frequency_and_schedule(mocker):
+    body = {
+        "name": "My Query",
+        "cypher": "MATCH (n) RETURN n",
+        "frequency": 0,
+        "schedule": {"type": "interval", "interval_minutes": 5},
+    }
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post("/api/v1/scheduled-queries", json=body)
+    assert ret.status_code == 422
+
+
+async def test_create_scheduled_query_rejects_schedule_and_watch_scans(mocker):
+    body = {
+        "name": "My Query",
+        "cypher": "MATCH (n) RETURN n",
+        "schedule": {"type": "interval", "interval_minutes": 5},
+        "watch_scans": [{"grouptype": "CVE"}],
     }
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

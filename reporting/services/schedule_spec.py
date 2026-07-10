@@ -25,7 +25,8 @@ def _latest_daily_occurrence(spec: ScheduleSpec, now: datetime) -> datetime | No
 
 
 def _latest_monthly_occurrence(spec: ScheduleSpec, now: datetime) -> datetime | None:
-    """Most recent selected-day-of-month occurrence (00:00 UTC) that is <= now.
+    """Most recent selected-day-of-month occurrence (at hour:minute UTC,
+    default 00:00) that is <= now.
 
     A selected day a month doesn't have is clamped to that month's last day,
     so 31 runs on Apr 30, Feb 28/29, etc.
@@ -35,7 +36,9 @@ def _latest_monthly_occurrence(spec: ScheduleSpec, now: datetime) -> datetime | 
         last_day = calendar.monthrange(year, month)[1]
         effective_days = {min(day, last_day) for day in spec.days_of_month}
         candidates = [
-            occurrence for day in effective_days if (occurrence := datetime(year, month, day, tzinfo=UTC)) <= now
+            occurrence
+            for day in effective_days
+            if (occurrence := datetime(year, month, day, spec.hour, spec.minute, tzinfo=UTC)) <= now
         ]
         if candidates:
             return max(candidates)

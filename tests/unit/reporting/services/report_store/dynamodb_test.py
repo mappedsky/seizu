@@ -2321,3 +2321,39 @@ async def test_find_action_confirmation_grant_skips_missing_metadata(patch_table
     )
 
     assert result is None
+
+
+async def test_update_scheduled_query_preserves_operational_fields(patch_table, store):
+    """Updates must not drop run-state fields written outside the update path
+    (e.g. a pending run-now request or the last-run bookkeeping)."""
+    existing = _sq_metadata_item(current_version=1)
+    existing["last_scheduled_at"] = "2026-01-01T00:00:00+00:00"
+    existing["run_requested_at"] = "2026-01-01T00:05:00+00:00"
+    existing["last_run_status"] = "success"
+    patch_table.get_item.return_value = {"Item": existing}
+    patch_table.meta.client.transact_write_items = MagicMock()
+    result = await store.update_scheduled_query(
+        sq_id="sq1",
+        name="Updated",
+        cypher="MATCH (n) RETURN n LIMIT 1",
+        params=[],
+        frequency=None,
+        schedule={"type": "interval", "interval_minutes": 5},
+        watch_scans=[],
+        enabled=True,
+        actions=[],
+        updated_by="editor@example.com",
+    )
+    assert result is not None
+    assert result.run_requested_at == "2026-01-01T00:05:00+00:00"
+    assert result.last_scheduled_at == "2026-01-01T00:00:00+00:00"
+    assert result.last_run_status == "success"
+    # The old frequency trigger is cleared in favor of the new schedule.
+    assert result.frequency is None
+    transact_items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    metadata_put = transact_items[0]["Put"]["Item"]
+    list_put = transact_items[1]["Put"]["Item"]
+    assert metadata_put["run_requested_at"] == "2026-01-01T00:05:00+00:00"
+    assert list_put["run_requested_at"] == "2026-01-01T00:05:00+00:00"
+    assert "frequency" not in metadata_put
+    assert "frequency" not in list_put

@@ -731,7 +731,7 @@
         },
         "ScheduleSpec": {
             "additionalProperties": false,
-            "description": "A structured time-based schedule. All times are UTC.\n\n- ``interval``: every ``interval_minutes`` minutes, anchored to the last\n  run (a new schedule runs immediately).\n- ``hourly``: every ``interval_hours`` hours, anchored to the last run\n  (a new schedule runs immediately).\n- ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at\n  ``hour``:``minute``.\n- ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a\n  month doesn't have runs on that month's last day instead (e.g. 31 in\n  April runs on the 30th).",
+            "description": "A structured time-based schedule. All times are UTC.\n\n- ``interval``: every ``interval_minutes`` minutes, anchored to the last\n  run (a new schedule runs immediately).\n- ``hourly``: every ``interval_hours`` hours, anchored to the last run\n  (a new schedule runs immediately).\n- ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at\n  ``hour``:``minute``.\n- ``monthly``: on the selected ``days_of_month`` (1-31) at\n  ``hour``:``minute`` (default 00:00). A day a month doesn't have runs on\n  that month's last day instead (e.g. 31 in April runs on the 30th).",
             "properties": {
                 "type": {
                     "enum": [

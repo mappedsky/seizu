@@ -92,6 +92,7 @@ function ScheduleSpecEditor({
     return {
       type: 'monthly',
       days_of_month: [...daysOfMonth].sort((a, b) => a - b),
+      ...(allowMinutes ? { hour, minute } : {}),
     };
   };
 
@@ -103,6 +104,41 @@ function ScheduleSpecEditor({
   useEffect(() => {
     onChangeRef.current(JSON.parse(specJson) as ScheduleSpec | null);
   }, [specJson]);
+
+  const timeOfDayPicker = (
+    <Box sx={{ display: 'flex', gap: 2 }}>
+      <FormControl size="small" sx={{ width: 220 }}>
+        <InputLabel>Hour of day (UTC)</InputLabel>
+        <Select
+          label="Hour of day (UTC)"
+          value={hour}
+          onChange={(e) => setHour(Number(e.target.value))}
+        >
+          {HOURS.map((h) => (
+            <MenuItem key={h} value={h}>
+              {formatTimeOfDay(h, 0)}
+            </MenuItem>
+          ))}
+        </Select>
+      </FormControl>
+      {allowMinutes ? (
+        <FormControl size="small" sx={{ width: 140 }}>
+          <InputLabel>Minute</InputLabel>
+          <Select
+            label="Minute"
+            value={minute}
+            onChange={(e) => setMinute(Number(e.target.value))}
+          >
+            {MINUTES.map((m) => (
+              <MenuItem key={m} value={m}>
+                :{String(m).padStart(2, '0')}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      ) : null}
+    </Box>
+  );
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -177,71 +213,45 @@ function ScheduleSpecEditor({
               </Typography>
             ) : null}
           </Box>
-          <Box sx={{ display: 'flex', gap: 2 }}>
-            <FormControl size="small" sx={{ width: 220 }}>
-              <InputLabel>Hour of day (UTC)</InputLabel>
-              <Select
-                label="Hour of day (UTC)"
-                value={hour}
-                onChange={(e) => setHour(Number(e.target.value))}
-              >
-                {HOURS.map((h) => (
-                  <MenuItem key={h} value={h}>
-                    {formatTimeOfDay(h, 0)}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            {allowMinutes ? (
-              <FormControl size="small" sx={{ width: 140 }}>
-                <InputLabel>Minute</InputLabel>
-                <Select
-                  label="Minute"
-                  value={minute}
-                  onChange={(e) => setMinute(Number(e.target.value))}
-                >
-                  {MINUTES.map((m) => (
-                    <MenuItem key={m} value={m}>
-                      :{String(m).padStart(2, '0')}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            ) : null}
-          </Box>
+          {timeOfDayPicker}
         </>
       ) : null}
       {scheduleType === 'monthly' ? (
-        <Box>
-          <FormLabel sx={{ fontSize: 13 }}>Days of month</FormLabel>
-          <ToggleButtonGroup
-            value={daysOfMonth}
-            onChange={(_e, value: number[]) => setDaysOfMonth(value)}
-            size="small"
-            sx={{ display: 'flex', flexWrap: 'wrap', mt: 0.5 }}
-          >
-            {DAYS_OF_MONTH.map((day) => (
-              <ToggleButton key={day} value={day} sx={{ minWidth: 40, px: 0 }}>
-                {day}
-              </ToggleButton>
-            ))}
-          </ToggleButtonGroup>
-          {daysOfMonth.length === 0 ? (
-            <Typography
-              variant="caption"
-              color="error"
-              sx={{ display: 'block', mt: 0.5 }}
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Box>
+            <FormLabel sx={{ fontSize: 13 }}>Days of month</FormLabel>
+            <ToggleButtonGroup
+              value={daysOfMonth}
+              onChange={(_e, value: number[]) => setDaysOfMonth(value)}
+              size="small"
+              sx={{ display: 'flex', flexWrap: 'wrap', mt: 0.5 }}
             >
-              Select at least one day
-            </Typography>
-          ) : null}
-          {monthEndDays.length > 0 ? (
-            <Alert severity="warning" sx={{ mt: 1 }}>
-              Some months do not have day
-              {monthEndDays.length > 1 ? 's' : ''} {monthEndDays.join(', ')}; in
-              those months the run happens on the last day of the month instead.
-            </Alert>
-          ) : null}
+              {DAYS_OF_MONTH.map((day) => (
+                <ToggleButton
+                  key={day}
+                  value={day}
+                  sx={{ minWidth: 40, px: 0 }}
+                >
+                  {day}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+            {daysOfMonth.length === 0 ? (
+              <Typography
+                variant="caption"
+                color="error"
+                sx={{ display: 'block', mt: 0.5 }}
+              >
+                Select at least one day
+              </Typography>
+            ) : null}
+            {monthEndDays.length > 0 ? (
+              <Alert severity="warning" sx={{ mt: 1 }}>
+                {`Some months do not have day${monthEndDays.length > 1 ? 's' : ''} ${monthEndDays.join(', ')}; in those months the run happens on the last day of the month instead.`}
+              </Alert>
+            ) : null}
+          </Box>
+          {allowMinutes ? timeOfDayPicker : null}
         </Box>
       ) : null}
     </Box>
