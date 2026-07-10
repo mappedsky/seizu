@@ -629,9 +629,9 @@ class ScheduleSpec(BaseModel):
       (a new schedule runs immediately).
     - ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at
       ``hour``:``minute``.
-    - ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a
-      month doesn't have runs on that month's last day instead (e.g. 31 in
-      April runs on the 30th).
+    - ``monthly``: on the selected ``days_of_month`` (1-31) at
+      ``hour``:``minute`` (default 00:00). A day a month doesn't have runs on
+      that month's last day instead (e.g. 31 in April runs on the 30th).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -661,6 +661,27 @@ class ScheduleSpec(BaseModel):
             if any(day < 1 or day > 31 for day in self.days_of_month):
                 raise ValueError("days_of_month values must be 1 through 31")
         return self
+
+
+def validate_exclusive_triggers(
+    frequency: int | None,
+    schedule: "ScheduleSpec | None",
+    watch_scans: list[Any],
+) -> None:
+    """Raise if more than one scheduled-query trigger is configured.
+
+    ``frequency``, ``schedule``, and ``watch_scans`` are mutually exclusive;
+    shared by the YAML config model and the API request model.
+    """
+    configured = []
+    if frequency is not None:
+        configured.append("frequency")
+    if schedule is not None:
+        configured.append("schedule")
+    if watch_scans:
+        configured.append("watch_scans")
+    if len(configured) > 1:
+        raise ValueError(f"triggers are mutually exclusive; got {' and '.join(configured)}")
 
 
 class ScheduledQuery(BaseModel):
@@ -769,6 +790,11 @@ class ScheduledQuery(BaseModel):
             """
         ],
     )
+
+    @model_validator(mode="after")
+    def exclusive_triggers(self) -> "ScheduledQuery":
+        validate_exclusive_triggers(self.frequency, self.schedule, self.watch_scans)
+        return self
 
 
 class ToolParamDef(BaseModel):

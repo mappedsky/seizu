@@ -48,5 +48,10 @@ export function describeSchedule(schedule: ScheduleSpec): string {
       .join(', ');
     return `${days} at ${formatTimeOfDay(schedule.hour ?? 0, schedule.minute ?? 0)} UTC`;
   }
-  return `Monthly on ${(schedule.days_of_month ?? []).join(', ')}`;
+  const days = (schedule.days_of_month ?? []).join(', ');
+  const hour = schedule.hour ?? 0;
+  const minute = schedule.minute ?? 0;
+  return hour || minute
+    ? `Monthly on ${days} at ${formatTimeOfDay(hour, minute)} UTC`
+    : `Monthly on ${days}`;
 }

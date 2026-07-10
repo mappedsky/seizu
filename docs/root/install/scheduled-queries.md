@@ -35,7 +35,7 @@ Click **New scheduled query** on the Scheduled Queries page. The form includes:
 | cypher | A Cypher query to run. The query must return the data as `details` (or as configured via `query_return_attribute` in the action config). |
 | enabled | Whether the query will be run by the worker. |
 | trigger | Choose **Schedule** (a structured time-based schedule) or **Watch scans** (run when matching SyncMetadata nodes are updated). |
-| schedule | The structured schedule: **Every N minutes**, **Hourly** (every N hours), **Daily** (selected weekdays at an HH:MM UTC time), or **Monthly** (selected days of month at 00:00 UTC). Used when trigger is **Schedule**. |
+| schedule | The structured schedule: **Every N minutes**, **Hourly** (every N hours), **Daily** (selected weekdays at an HH:MM UTC time), or **Monthly** (selected days of month at an HH:MM UTC time). Used when trigger is **Schedule**. |
 | watch scans | List of SyncMetadata filters. Each entry takes `grouptype`, `syncedtype`, and `groupid` (all support `.*` as a wildcard). Used when trigger is **Watch scans**. |
 | params | Query parameters. Each param has a name and a value. Toggle the **list** button to switch between a single value and a comma-separated list of values. |
 | actions | One or more actions to run with the query results. See the Built-in Actions section below. |
@@ -135,8 +135,10 @@ Use the `schedule` field for a time-based schedule (all times UTC). Four types a
 
   - name: Month-end review
     schedule:
-      type: monthly           # selected days of month at 00:00 UTC
+      type: monthly           # selected days of month at hour:minute UTC (default 00:00)
       days_of_month: [1, 15, 31]      # days a month lacks clamp to its last day
+      hour: 6
+      minute: 15
 ```
 
 `interval` and `hourly` schedules are anchored to the last run (a new schedule runs immediately). `daily` and `monthly` schedules wait for the first selected occurrence after the schedule is created.
@@ -160,7 +162,7 @@ Use `watch_scans` to trigger a query when Cartography SyncMetadata nodes are upd
 
 In the UI, the `grouptype`, `syncedtype`, and `groupid` fields autocomplete from the distinct values present on `SyncMetadata` nodes in the graph (`GET /api/v1/sync-metadata/values`); free-form input (e.g. `.*` regexes) is still accepted.
 
-`schedule`/`frequency` and `watch_scans` are mutually exclusive.
+`frequency`, `schedule`, and `watch_scans` are mutually exclusive; configs with more than one trigger are rejected at save/seed time.
 
 ## Built-in Actions
 

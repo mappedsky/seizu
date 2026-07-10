@@ -159,7 +159,16 @@ async def _schedule_queries() -> None:
         logger.debug("Checking queries to schedule...")
         sq_items = await report_store.list_scheduled_queries()
         for item in sq_items:
-            await schedule_query(item)
+            try:
+                await schedule_query(item)
+            except Exception:
+                # e.g. a stored record that no longer validates (such as a
+                # legacy item with multiple triggers); skip it rather than
+                # crashing the poll loop.
+                logger.exception(
+                    "Failed to schedule query",
+                    extra={"scheduled_query_id": item.scheduled_query_id},
+                )
         if not _shutdown_event.is_set():
             await asyncio.sleep(settings.SCHEDULED_QUERY_FREQUENCY)
 

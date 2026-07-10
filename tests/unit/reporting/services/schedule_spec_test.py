@@ -53,3 +53,36 @@ def test_run_requested_absent_or_claimed():
     assert run_requested(None, "2026-01-01T00:00:00+00:00") is False
     # The claim (lock) advanced last_scheduled_at past the request.
     assert run_requested("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00") is False
+
+
+def test_monthly_honors_hour_and_minute():
+    spec = ScheduleSpec(type="monthly", days_of_month=[15], hour=6, minute=15)
+    last = "2026-01-01T00:00:00+00:00"
+    assert schedule_due(spec, last, _CREATED, now=_now("2026-01-15T06:14:00+00:00")) is False
+    assert schedule_due(spec, last, _CREATED, now=_now("2026-01-15T06:15:00+00:00")) is True
+
+
+def test_yaml_scheduled_query_rejects_multiple_triggers():
+    from seizu_schema.reporting_config import ScheduledQuery
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ScheduledQuery(
+            name="x",
+            cypher="RETURN 1",
+            frequency=5,
+            watch_scans=[{"grouptype": "CVE"}],
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ScheduledQuery(
+            name="x",
+            cypher="RETURN 1",
+            schedule={"type": "interval", "interval_minutes": 5},
+            watch_scans=[{"grouptype": "CVE"}],
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ScheduledQuery(
+            name="x",
+            cypher="RETURN 1",
+            frequency=0,
+            schedule={"type": "interval", "interval_minutes": 5},
+        )
