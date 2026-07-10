@@ -47,6 +47,7 @@ const QUERY: scheduledQueriesApiModule.ScheduledQueryItem = {
   cypher: 'MATCH (c:CVE) RETURN c LIMIT 10',
   params: [{ name: 'limit', value: '10' }],
   frequency: 60,
+  schedule: null,
   watch_scans: [],
   enabled: true,
   actions: [{ action_type: 'slack', action_config: { channel: '#security' } }],

@@ -422,3 +422,88 @@ async def test_delete_scheduled_query_not_found(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.delete(f"/api/v1/scheduled-queries/{_SQ_ID}")
     assert ret.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/scheduled-queries/<sq_id>/run
+# ---------------------------------------------------------------------------
+
+
+async def test_run_scheduled_query_success(mocker):
+    mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.request_scheduled_query_run",
+        new=AsyncMock(return_value="2026-01-01T00:00:00+00:00"),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(f"/api/v1/scheduled-queries/{_SQ_ID}/run")
+    assert ret.status_code == 202
+    assert ret.json() == {
+        "scheduled_query_id": _SQ_ID,
+        "run_requested_at": "2026-01-01T00:00:00+00:00",
+    }
+
+
+async def test_run_scheduled_query_not_found(mocker):
+    mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.request_scheduled_query_run",
+        new=AsyncMock(return_value=None),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(f"/api/v1/scheduled-queries/{_SQ_ID}/run")
+    assert ret.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# schedule field
+# ---------------------------------------------------------------------------
+
+
+async def test_create_scheduled_query_with_schedule(mocker):
+    mocker.patch(
+        "reporting.services.scheduled_query_validation.scheduled_query_modules.get_action_schemas",
+        return_value={"log": []},
+    )
+    mocker.patch(
+        "reporting.routes.scheduled_queries.validate_query",
+        new=AsyncMock(return_value=ValidationResult(errors=[], warnings=[])),
+    )
+    create_mock = mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.create_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
+    body = {
+        "name": "My Query",
+        "cypher": "MATCH (n) RETURN n",
+        "schedule": {"type": "daily", "days_of_week": [0, 2], "hour": 9, "minute": 30},
+        "enabled": True,
+        "actions": [{"action_type": "log", "action_config": {}}],
+    }
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post("/api/v1/scheduled-queries", json=body)
+    assert ret.status_code == 201
+    assert create_mock.await_args.kwargs["schedule"] == {
+        "type": "daily",
+        "interval_minutes": None,
+        "interval_hours": None,
+        "days_of_week": [0, 2],
+        "hour": 9,
+        "minute": 30,
+        "days_of_month": [],
+    }
+    assert create_mock.await_args.kwargs["frequency"] is None
+
+
+async def test_create_scheduled_query_rejects_frequency_and_schedule(mocker):
+    body = {
+        "name": "My Query",
+        "cypher": "MATCH (n) RETURN n",
+        "frequency": 60,
+        "schedule": {"type": "interval", "interval_minutes": 5},
+    }
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post("/api/v1/scheduled-queries", json=body)
+    assert ret.status_code == 422

@@ -9,7 +9,7 @@ import {
   useChatSchedules,
   useChatScheduleVersions,
 } from 'src/hooks/useChatSchedules';
-import { describeSchedule } from 'src/components/ScheduledChatDialog';
+import { describeSchedule } from 'src/scheduleSpec';
 import ListTable, {
   ListTableColumn,
   listTableActionColumnSx,

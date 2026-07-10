@@ -30,11 +30,13 @@ import {
 } from 'src/hooks/useScheduledQueriesApi';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
+import { describeSchedule } from 'src/scheduleSpec';
 import { pageContentSx } from 'src/theme/layout';
 
 function triggerLabel(item: ScheduledQueryItem): string {
   if (item.watch_scans.length > 0)
     return `Watch scans (${item.watch_scans.length})`;
+  if (item.schedule) return describeSchedule(item.schedule);
   if (item.frequency != null) return `Every ${item.frequency} min`;
   return 'Not configured';
 }

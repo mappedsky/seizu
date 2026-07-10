@@ -11,6 +11,7 @@ from reporting.schema.report_config import (
     ScheduledQueryIdResponse,
     ScheduledQueryItem,
     ScheduledQueryListResponse,
+    ScheduledQueryRunRequestedResponse,
     ScheduledQueryVersion,
     ScheduledQueryVersionListResponse,
 )
@@ -69,6 +70,7 @@ async def create_scheduled_query(
         cypher=body.cypher,
         params=body.params,
         frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         actions=body.actions,
@@ -101,6 +103,7 @@ async def update_scheduled_query(
         cypher=body.cypher,
         params=body.params,
         frequency=body.frequency,
+        schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         actions=body.actions,
@@ -110,6 +113,30 @@ async def update_scheduled_query(
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
     return item
+
+
+@router.post(
+    "/api/v1/scheduled-queries/{sq_id}/run",
+    response_model=ScheduledQueryRunRequestedResponse,
+    status_code=202,
+)
+async def run_scheduled_query(
+    sq_id: str,
+    current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_WRITE)),
+) -> ScheduledQueryRunRequestedResponse:
+    """Request an immediate run of a scheduled query.
+
+    The worker picks the request up on its next poll and runs the query even
+    if it is disabled (so it can be tested before enabling).
+    """
+    run_requested_at = await report_store.request_scheduled_query_run(sq_id)
+    if run_requested_at is None:
+        raise HTTPException(status_code=404, detail="Scheduled query not found")
+    logger.info(
+        "Scheduled query run requested",
+        extra={"type": "AUDIT", "scheduled_query_id": sq_id, "user": current.user.user_id},
+    )
+    return ScheduledQueryRunRequestedResponse(scheduled_query_id=sq_id, run_requested_at=run_requested_at)
 
 
 @router.get(

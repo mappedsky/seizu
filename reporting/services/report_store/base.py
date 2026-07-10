@@ -219,6 +219,7 @@ class ReportStore(ABC):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -234,6 +235,7 @@ class ReportStore(ABC):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -265,6 +267,14 @@ class ReportStore(ABC):
         Updates ``last_run_status`` and ``last_run_at`` on the item.  When
         *status* is ``"failure"`` and *error* is provided, the error is
         prepended to ``last_errors`` (capped at 5 entries).
+        """
+
+    @abstractmethod
+    async def request_scheduled_query_run(self, sq_id: str) -> str | None:
+        """Request a manual "run now" by setting run_requested_at to now.
+
+        The worker picks the request up on its next poll. Returns the
+        timestamp set, or None if the scheduled query does not exist.
         """
 
     @abstractmethod
@@ -688,6 +698,14 @@ class ReportStore(ABC):
     @abstractmethod
     async def record_scheduled_chat_result(self, sc_id: str, status: str, error: str | None = None) -> None:
         """Record a run outcome (last_run_status/last_run_at/last_errors)."""
+
+    @abstractmethod
+    async def request_scheduled_chat_run(self, sc_id: str) -> str | None:
+        """Request a manual "run now" by setting run_requested_at to now.
+
+        The worker picks the request up on its next poll. Returns the
+        timestamp set, or None if the scheduled chat does not exist.
+        """
 
     # ------------------------------------------------------------------
     # Action confirmations

@@ -10,6 +10,7 @@ import {
   ScheduledQueryAction,
   ScheduledQueryRunError,
 } from 'src/hooks/useScheduledQueriesApi';
+import { ScheduleSpec, describeSchedule } from 'src/scheduleSpec';
 
 export interface ScheduledQueryViewData {
   name: string;
@@ -17,6 +18,7 @@ export interface ScheduledQueryViewData {
   cypher: string;
   params: ScheduledQueryParam[];
   frequency: number | null;
+  schedule: ScheduleSpec | null;
   watch_scans: ScheduledQueryWatchScan[];
   enabled: boolean;
   actions: ScheduledQueryAction[];
@@ -41,9 +43,11 @@ export default function ScheduledQueryDetailDialog({
   const triggerLabel =
     data.watch_scans.length > 0
       ? `Watch scans (${data.watch_scans.length})`
-      : data.frequency != null
-        ? `Every ${data.frequency} min`
-        : 'Not configured';
+      : data.schedule
+        ? describeSchedule(data.schedule)
+        : data.frequency != null
+          ? `Every ${data.frequency} min`
+          : 'Not configured';
 
   return (
     <DetailDialog

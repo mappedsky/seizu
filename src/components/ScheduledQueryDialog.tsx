@@ -26,6 +26,7 @@ import {
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import ScheduleSpecEditor from 'src/components/ScheduleSpecEditor';
 import SyncMetadataAutocomplete from 'src/components/SyncMetadataAutocomplete';
 import { ActionConfigFieldDef } from 'src/config.context';
 import {
@@ -36,19 +37,32 @@ import {
   ScheduledQueryWatchScan,
 } from 'src/hooks/useScheduledQueriesApi';
 import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
+import { ScheduleSpec } from 'src/scheduleSpec';
 
 const EMPTY_FORM: ScheduledQueryRequest = {
   name: '',
   cypher: '',
   params: [],
-  frequency: 60,
+  frequency: null,
+  schedule: { type: 'interval', interval_minutes: 60 },
   watch_scans: [],
   enabled: true,
   actions: [],
   comment: null,
 };
 
-type TriggerType = 'frequency' | 'watch_scans';
+type TriggerType = 'schedule' | 'watch_scans';
+
+// The editor seed: an existing schedule wins; a legacy frequency (minutes)
+// maps onto the equivalent interval schedule; new queries default to every
+// 60 minutes.
+function initialSchedule(initial: ScheduledQueryItem | null): ScheduleSpec {
+  if (initial?.schedule) return initial.schedule;
+  if (initial?.frequency != null) {
+    return { type: 'interval', interval_minutes: initial.frequency };
+  }
+  return EMPTY_FORM.schedule as ScheduleSpec;
+}
 
 type ParamValueType = 'string' | 'list';
 
@@ -249,10 +263,10 @@ export default function ScheduledQueryDialog({
     initial?.enabled ?? EMPTY_FORM.enabled,
   );
   const [triggerType, setTriggerType] = useState<TriggerType>(
-    initial && initial.watch_scans.length > 0 ? 'watch_scans' : 'frequency',
+    initial && initial.watch_scans.length > 0 ? 'watch_scans' : 'schedule',
   );
-  const [frequency, setFrequency] = useState<string>(
-    initial?.frequency != null ? String(initial.frequency) : '60',
+  const [schedule, setSchedule] = useState<ScheduleSpec | null>(
+    initialSchedule(initial),
   );
   const [watchScans, setWatchScans] = useState<ScheduledQueryWatchScan[]>(
     initial?.watch_scans ?? [],
@@ -281,6 +295,10 @@ export default function ScheduledQueryDialog({
     }
     if (!cypher.trim()) {
       setError('Cypher query is required.');
+      return;
+    }
+    if (triggerType === 'schedule' && schedule === null) {
+      setError('Complete the schedule before saving.');
       return;
     }
 
@@ -323,8 +341,10 @@ export default function ScheduledQueryDialog({
                 .filter(Boolean)
             : p.value_str,
       })),
-      frequency:
-        triggerType === 'frequency' ? parseInt(frequency, 10) || null : null,
+      // Saving always writes the structured schedule; a legacy frequency is
+      // migrated to the equivalent interval schedule on the next edit.
+      frequency: null,
+      schedule: triggerType === 'schedule' ? schedule : null,
       watch_scans: triggerType === 'watch_scans' ? watchScans : [],
       enabled,
       actions: parsedActions,
@@ -459,9 +479,9 @@ export default function ScheduledQueryDialog({
               onChange={(e) => setTriggerType(e.target.value as TriggerType)}
             >
               <FormControlLabel
-                value="frequency"
+                value="schedule"
                 control={<Radio />}
-                label="Fixed frequency"
+                label="Schedule"
               />
               <FormControlLabel
                 value="watch_scans"
@@ -471,14 +491,11 @@ export default function ScheduledQueryDialog({
             </RadioGroup>
           </FormControl>
 
-          {triggerType === 'frequency' && (
-            <TextField
-              label="Frequency (minutes)"
-              type="number"
-              value={frequency}
-              onChange={(e) => setFrequency(e.target.value)}
-              slotProps={{ htmlInput: { min: 1 } }}
-              sx={{ maxWidth: 220 }}
+          {triggerType === 'schedule' && (
+            <ScheduleSpecEditor
+              initial={initialSchedule(initial)}
+              onChange={setSchedule}
+              allowMinutes
             />
           )}
 

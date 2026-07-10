@@ -9,19 +9,18 @@ updates.
 """
 
 import asyncio
-import calendar
 import logging
-from datetime import UTC, datetime, time, timedelta
 
 from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
 from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
-from reporting.schema.chat import ChatScheduleSpec, ScheduledChatItem
+from reporting.schema.chat import ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
 from reporting.services import headless_chat, report_store
 from reporting.services.reporting_neo4j import check_watch_scan_triggered
+from reporting.services.schedule_spec import run_requested, schedule_due
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
@@ -31,68 +30,6 @@ _shutdown_event: asyncio.Event = asyncio.Event()
 
 def _bootstrap() -> None:
     install_shutdown_handlers(_shutdown_event, logger)
-
-
-def _latest_daily_occurrence(spec: ChatScheduleSpec, now: datetime) -> datetime | None:
-    """Most recent selected-weekday-at-hour occurrence that is <= now (UTC)."""
-    for offset in range(8):
-        day = (now - timedelta(days=offset)).date()
-        if day.weekday() not in spec.days_of_week:
-            continue
-        occurrence = datetime.combine(day, time(hour=spec.hour), tzinfo=UTC)
-        if occurrence <= now:
-            return occurrence
-    return None
-
-
-def _latest_monthly_occurrence(spec: ChatScheduleSpec, now: datetime) -> datetime | None:
-    """Most recent selected-day-of-month occurrence (00:00 UTC) that is <= now.
-
-    A selected day a month doesn't have is clamped to that month's last day,
-    so 31 runs on Apr 30, Feb 28/29, etc.
-    """
-    year, month = now.year, now.month
-    for _ in range(3):
-        last_day = calendar.monthrange(year, month)[1]
-        effective_days = {min(day, last_day) for day in spec.days_of_month}
-        candidates = [
-            occurrence for day in effective_days if (occurrence := datetime(year, month, day, tzinfo=UTC)) <= now
-        ]
-        if candidates:
-            return max(candidates)
-        month -= 1
-        if month == 0:
-            year, month = year - 1, 12
-    return None
-
-
-def schedule_due(
-    spec: ChatScheduleSpec,
-    last_scheduled_at: str | None,
-    created_at: str,
-    now: datetime | None = None,
-) -> bool:
-    """Whether a schedule spec is due, given the last claimed run time.
-
-    Hourly schedules run immediately when never run. Daily/monthly schedules
-    wait for the first selected occurrence after the schedule was created
-    (creating one on Tuesday for "Mondays at 09:00" must not fire until next
-    Monday).
-    """
-    now = now or datetime.now(tz=UTC)
-    if spec.type == "hourly":
-        if last_scheduled_at is None:
-            return True
-        last = datetime.fromisoformat(last_scheduled_at)
-        return now >= last + timedelta(hours=spec.interval_hours or 1)
-    if spec.type == "daily":
-        occurrence = _latest_daily_occurrence(spec, now)
-    else:
-        occurrence = _latest_monthly_occurrence(spec, now)
-    if occurrence is None:
-        return False
-    floor = datetime.fromisoformat(last_scheduled_at or created_at)
-    return floor < occurrence
 
 
 async def _is_triggered(item: ScheduledChatItem) -> bool:
@@ -109,10 +46,15 @@ async def _is_triggered(item: ScheduledChatItem) -> bool:
 
 async def run_scheduled_chat(item: ScheduledChatItem) -> None:
     sc_id = item.scheduled_chat_id
-    if not item.enabled:
+    # A pending "run now" request runs even when the schedule is disabled, so
+    # owners can test a schedule before enabling it.
+    manual_run = run_requested(item.run_requested_at, item.last_scheduled_at)
+    if manual_run:
+        logger.info("Manual run requested", extra={"scheduled_chat_id": sc_id})
+    elif not item.enabled:
         logger.debug("Skipping disabled scheduled chat", extra={"scheduled_chat_id": sc_id})
         return
-    if not await _is_triggered(item):
+    elif not await _is_triggered(item):
         return
     if not await report_store.acquire_scheduled_chat_lock(sc_id, item.last_scheduled_at):
         logger.debug("Could not acquire lock for scheduled chat", extra={"scheduled_chat_id": sc_id})

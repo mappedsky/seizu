@@ -85,9 +85,11 @@ async def test_create_scheduled_chat(mocker):
         prompt="Summarize new findings",
         schedule={
             "type": "daily",
+            "interval_minutes": None,
             "interval_hours": None,
             "days_of_week": [0, 2],
             "hour": 9,
+            "minute": 0,
             "days_of_month": [],
         },
         watch_scans=[],
@@ -405,3 +407,42 @@ async def test_run_session_history_resolves_owner_thread(mocker):
     assert response.status_code == 200
     owner_arg = load_mock.await_args.args[0]
     assert owner_arg.user.user_id == "someone-else"
+
+
+async def test_run_scheduled_chat(mocker):
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    run_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.request_scheduled_chat_run",
+        mocker.AsyncMock(return_value="2026-01-01T00:00:00+00:00"),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/schedules/sc-1/run")
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "scheduled_chat_id": "sc-1",
+        "run_requested_at": "2026-01-01T00:00:00+00:00",
+    }
+    run_mock.assert_awaited_once_with("sc-1")
+
+
+async def test_run_scheduled_chat_owner_only(mocker):
+    """Another user's schedule is hidden (404) from run requests, even for read_all holders."""
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule(created_by="someone-else")),
+    )
+    run_mock = mocker.patch(
+        "reporting.routes.chat_schedules.report_store.request_scheduled_chat_run",
+        mocker.AsyncMock(),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/schedules/sc-1/run")
+
+    assert response.status_code == 404
+    run_mock.assert_not_called()

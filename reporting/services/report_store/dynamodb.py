@@ -500,6 +500,7 @@ def _scheduled_chat_from_item(item: dict) -> ScheduledChatItem:
         last_run_at=item.get("last_run_at"),
         last_errors=item.get("last_errors", []),
         last_scheduled_at=item.get("last_scheduled_at"),
+        run_requested_at=item.get("run_requested_at"),
     )
 
 
@@ -694,6 +695,7 @@ def _sq_from_item(item: dict) -> ScheduledQueryItem:
         cypher=item["cypher"],
         params=item.get("params", []),
         frequency=item.get("frequency"),
+        schedule=item.get("schedule"),
         watch_scans=item.get("watch_scans", []),
         enabled=item.get("enabled", True),
         actions=item.get("actions", []),
@@ -706,6 +708,7 @@ def _sq_from_item(item: dict) -> ScheduledQueryItem:
         last_run_at=item.get("last_run_at"),
         last_errors=item.get("last_errors", []),
         last_scheduled_at=item.get("last_scheduled_at"),
+        run_requested_at=item.get("run_requested_at"),
     )
 
 
@@ -717,6 +720,7 @@ def _sq_version_from_item(item: dict) -> ScheduledQueryVersion:
         cypher=item["cypher"],
         params=item.get("params", []),
         frequency=item.get("frequency"),
+        schedule=item.get("schedule"),
         watch_scans=item.get("watch_scans", []),
         enabled=item.get("enabled", True),
         actions=item.get("actions", []),
@@ -1335,6 +1339,7 @@ class DynamoDBReportStore(ReportStore):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -1350,6 +1355,7 @@ class DynamoDBReportStore(ReportStore):
                 "cypher": cypher,
                 "params": _floats_to_decimal(params),
                 "frequency": frequency,
+                "schedule": _floats_to_decimal(schedule),
                 "watch_scans": _floats_to_decimal(watch_scans),
                 "enabled": enabled,
                 "actions": _floats_to_decimal(actions),
@@ -1376,6 +1382,7 @@ class DynamoDBReportStore(ReportStore):
                 "cypher": cypher,
                 "params": _floats_to_decimal(params),
                 "frequency": frequency,
+                "schedule": _floats_to_decimal(schedule),
                 "watch_scans": _floats_to_decimal(watch_scans),
                 "enabled": enabled,
                 "actions": _floats_to_decimal(actions),
@@ -1399,6 +1406,7 @@ class DynamoDBReportStore(ReportStore):
         cypher: str,
         params: list[dict[str, Any]],
         frequency: int | None,
+        schedule: dict[str, Any] | None,
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         actions: list[dict[str, Any]],
@@ -1421,6 +1429,7 @@ class DynamoDBReportStore(ReportStore):
                     "cypher": cypher,
                     "params": _floats_to_decimal(params),
                     "frequency": frequency,
+                    "schedule": _floats_to_decimal(schedule),
                     "watch_scans": _floats_to_decimal(watch_scans),
                     "enabled": enabled,
                     "actions": _floats_to_decimal(actions),
@@ -1447,6 +1456,7 @@ class DynamoDBReportStore(ReportStore):
                     "cypher": cypher,
                     "params": _floats_to_decimal(params),
                     "frequency": frequency,
+                    "schedule": _floats_to_decimal(schedule),
                     "watch_scans": _floats_to_decimal(watch_scans),
                     "enabled": enabled,
                     "actions": _floats_to_decimal(actions),
@@ -1576,6 +1586,31 @@ class DynamoDBReportStore(ReportStore):
             )
 
         await asyncio.to_thread(_op)
+
+    async def request_scheduled_query_run(self, sq_id: str) -> str | None:
+        def _op() -> str | None:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+            try:
+                table.update_item(
+                    Key={"PK": _sq_pk(sq_id), "SK": _SK_METADATA},
+                    UpdateExpression="SET run_requested_at = :now",
+                    ExpressionAttributeValues={":now": now},
+                    ConditionExpression="attribute_exists(PK)",
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return None
+                raise
+            # Update the list item too; the worker reads from the list.
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_QUERY_LIST, "SK": _sq_pk(sq_id)},
+                UpdateExpression="SET run_requested_at = :now",
+                ExpressionAttributeValues={":now": now},
+            )
+            return now
+
+        return await asyncio.to_thread(_op)
 
     async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
         def _op() -> list[ScheduledChatItem]:
@@ -1863,6 +1898,31 @@ class DynamoDBReportStore(ReportStore):
             )
 
         await asyncio.to_thread(_op)
+
+    async def request_scheduled_chat_run(self, sc_id: str) -> str | None:
+        def _op() -> str | None:
+            table = _get_table()
+            now = datetime.now(tz=UTC).isoformat()
+            try:
+                table.update_item(
+                    Key={"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                    UpdateExpression="SET run_requested_at = :now",
+                    ExpressionAttributeValues={":now": now},
+                    ConditionExpression="attribute_exists(PK)",
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return None
+                raise
+            # Update the list item too; the worker reads from the list.
+            table.update_item(
+                Key={"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
+                UpdateExpression="SET run_requested_at = :now",
+                ExpressionAttributeValues={":now": now},
+            )
+            return now
+
+        return await asyncio.to_thread(_op)
 
     async def get_or_create_user(
         self,

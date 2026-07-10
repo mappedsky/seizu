@@ -9,7 +9,8 @@ def _make_sq_item(
     sq_id: str,
     name: str,
     enabled: bool = True,
-    frequency: int = 5,
+    frequency: int | None = 5,
+    schedule: dict | None = None,
     last_scheduled_at: str | None = None,
 ) -> ScheduledQueryItem:
     return ScheduledQueryItem(
@@ -18,6 +19,7 @@ def _make_sq_item(
         cypher="TEST",
         enabled=enabled,
         frequency=frequency,
+        schedule=schedule,
         params=[],
         watch_scans=[],
         actions=[{"action_type": "sqs", "action_config": {"sqs_queue": "test"}}],
@@ -296,6 +298,76 @@ async def test__is_triggered_no_trigger(mocker):
     sq = scheduled_queries._item_to_scheduled_query(item)
     result = await scheduled_queries._is_triggered(item, sq)
     assert result is False
+
+
+async def test__is_triggered_schedule_spec(mocker):
+    """_is_triggered returns True when the structured schedule is due."""
+    item = _make_sq_item(
+        "sq1",
+        "test",
+        frequency=None,
+        schedule={"type": "interval", "interval_minutes": 5},
+        last_scheduled_at=None,
+    )
+    sq = scheduled_queries._item_to_scheduled_query(item)
+    assert await scheduled_queries._is_triggered(item, sq) is True
+
+
+async def test__is_triggered_schedule_spec_not_due(mocker):
+    """A schedule whose interval has not elapsed does not trigger."""
+    item = _make_sq_item(
+        "sq1",
+        "test",
+        frequency=None,
+        schedule={"type": "interval", "interval_minutes": 5},
+        last_scheduled_at="2099-01-01T00:00:00+00:00",
+    )
+    sq = scheduled_queries._item_to_scheduled_query(item)
+    assert await scheduled_queries._is_triggered(item, sq) is False
+
+
+async def test_schedule_query_run_requested_runs_even_when_disabled(mocker):
+    """A pending run request runs a disabled query without checking triggers."""
+    item = _make_sq_item("test_query", "test name", enabled=False)
+    item.run_requested_at = "2024-01-02T00:00:00+00:00"
+    trigger_mock = mocker.patch(
+        "reporting.scheduled_queries._is_triggered",
+        new=AsyncMock(return_value=False),
+    )
+    mocker.patch(
+        "reporting.scheduled_queries.report_store.acquire_scheduled_query_lock",
+        new=AsyncMock(return_value=True),
+    )
+    run_mock = mocker.patch(
+        "reporting.scheduled_queries.run_query_with_retry",
+        new=AsyncMock(return_value=[]),
+    )
+    mocker.patch("reporting.scheduled_queries._handle_results", new=AsyncMock())
+    record_result_mock = mocker.patch(
+        "reporting.scheduled_queries.report_store.record_scheduled_query_result",
+        new=AsyncMock(),
+    )
+    await scheduled_queries.schedule_query(item)
+    assert trigger_mock.call_count == 0
+    assert run_mock.call_count == 1
+    record_result_mock.assert_called_once_with(item.scheduled_query_id, "success")
+
+
+async def test_schedule_query_stale_run_request_ignored(mocker):
+    """A run request older than the last claimed run does not re-trigger."""
+    item = _make_sq_item(
+        "test_query",
+        "test name",
+        enabled=False,
+        last_scheduled_at="2024-01-03T00:00:00+00:00",
+    )
+    item.run_requested_at = "2024-01-02T00:00:00+00:00"
+    run_mock = mocker.patch(
+        "reporting.scheduled_queries.run_query_with_retry",
+        new=AsyncMock(),
+    )
+    await scheduled_queries.schedule_query(item)
+    assert run_mock.call_count == 0
 
 
 async def test_schedule_query_record_result_failure_on_success(mocker):

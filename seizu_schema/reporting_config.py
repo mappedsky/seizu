@@ -9,7 +9,7 @@ import re
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
@@ -620,6 +620,49 @@ class ScheduledQueryParam(BaseModel):
     )
 
 
+class ScheduleSpec(BaseModel):
+    """A structured time-based schedule. All times are UTC.
+
+    - ``interval``: every ``interval_minutes`` minutes, anchored to the last
+      run (a new schedule runs immediately).
+    - ``hourly``: every ``interval_hours`` hours, anchored to the last run
+      (a new schedule runs immediately).
+    - ``daily``: on the selected ``days_of_week`` (0=Monday..6=Sunday) at
+      ``hour``:``minute``.
+    - ``monthly``: on the selected ``days_of_month`` (1-31) at 00:00. A day a
+      month doesn't have runs on that month's last day instead (e.g. 31 in
+      April runs on the 30th).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["interval", "hourly", "daily", "monthly"]
+    interval_minutes: int | None = Field(default=None, ge=1, le=43200)
+    interval_hours: int | None = Field(default=None, ge=1, le=720)
+    days_of_week: list[int] = Field(default_factory=list)
+    hour: int = Field(default=0, ge=0, le=23)
+    minute: int = Field(default=0, ge=0, le=59)
+    days_of_month: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_type_fields(self) -> "ScheduleSpec":
+        if self.type == "interval" and not self.interval_minutes:
+            raise ValueError("interval_minutes is required for interval schedules")
+        if self.type == "hourly" and not self.interval_hours:
+            raise ValueError("interval_hours is required for hourly schedules")
+        if self.type == "daily":
+            if not self.days_of_week:
+                raise ValueError("days_of_week is required for daily schedules")
+            if any(day < 0 or day > 6 for day in self.days_of_week):
+                raise ValueError("days_of_week values must be 0 (Monday) through 6 (Sunday)")
+        if self.type == "monthly":
+            if not self.days_of_month:
+                raise ValueError("days_of_month is required for monthly schedules")
+            if any(day < 1 or day > 31 for day in self.days_of_month):
+                raise ValueError("days_of_month values must be 1 through 31")
+        return self
+
+
 class ScheduledQuery(BaseModel):
     name: str = Field(
         description="The name of the scheduled query.",
@@ -655,8 +698,31 @@ class ScheduledQuery(BaseModel):
 
     frequency: int | None = Field(
         default=None,
-        description=("The frequency of the scheduled query in minutes. Mutually exclusive with ``watch_scans``."),
+        description=(
+            "The frequency of the scheduled query in minutes. Deprecated in"
+            " favor of ``schedule``; mutually exclusive with ``schedule`` and"
+            " ``watch_scans``."
+        ),
         examples=["1440"],
+    )
+
+    schedule: ScheduleSpec | None = Field(
+        default=None,
+        description=(
+            "A structured time-based schedule (interval/hourly/daily/monthly,"
+            " UTC). Mutually exclusive with ``frequency`` and ``watch_scans``."
+        ),
+        examples=[
+            """
+            .. code-block:: yaml
+
+              schedule:
+                type: daily
+                days_of_week: [0, 2, 4]
+                hour: 9
+                minute: 30
+            """
+        ],
     )
 
     watch_scans: list[ScheduledQueryWatchScan] = Field(

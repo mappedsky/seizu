@@ -180,6 +180,27 @@ async def test_run_error_records_failure(mocker):
     record.assert_awaited_once_with("sc-1", "failure", error="boom")
 
 
+async def test_run_requested_runs_even_when_disabled(mocker):
+    """A pending "run now" request runs a disabled, not-due schedule."""
+    run_chat, lock, record = _patch_run(mocker)
+
+    await scheduled_chats.run_scheduled_chat(_item(enabled=False, last_scheduled_at=_PAST, run_requested_at=_NOW))
+
+    lock.assert_awaited_once_with("sc-1", _PAST)
+    run_chat.assert_awaited_once()
+    record.assert_awaited_once_with("sc-1", "success")
+
+
+async def test_stale_run_request_ignored(mocker):
+    """A run request older than the last claimed run does not re-trigger."""
+    run_chat, lock, _record = _patch_run(mocker)
+
+    await scheduled_chats.run_scheduled_chat(_item(enabled=False, last_scheduled_at=_NOW, run_requested_at=_PAST))
+
+    lock.assert_not_called()
+    run_chat.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # schedule_due
 # ---------------------------------------------------------------------------

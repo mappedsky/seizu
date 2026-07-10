@@ -7,6 +7,7 @@ import {
   Button,
   Chip,
   FormControlLabel,
+  Snackbar,
   Switch,
   Typography,
 } from '@mui/material';
@@ -15,6 +16,7 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import HistoryIcon from '@mui/icons-material/History';
 import PersonIcon from '@mui/icons-material/Person';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import ListTable, {
   ListTableColumn,
@@ -28,9 +30,8 @@ import ListPageHeader from 'src/components/ListPageHeader';
 import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
-import ScheduledChatDialog, {
-  describeSchedule,
-} from 'src/components/ScheduledChatDialog';
+import ScheduledChatDialog from 'src/components/ScheduledChatDialog';
+import { describeSchedule } from 'src/scheduleSpec';
 import UserDisplay from 'src/components/UserDisplay';
 import { ScheduledChat, useChatSchedules } from 'src/hooks/useChatSchedules';
 import { usePermissionState } from 'src/hooks/usePermissions';
@@ -62,6 +63,7 @@ function ScheduledChats() {
     createSchedule,
     updateSchedule,
     deleteSchedule,
+    runSchedule,
   } = useChatSchedules(canSchedule, { all: allMode });
   const owners = Array.from(
     new Set(schedules.map((schedule) => schedule.created_by)),
@@ -88,6 +90,18 @@ function ScheduledChats() {
   const [deleteTarget, setDeleteTarget] = useState<ScheduledChat | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
+
+  const handleRunNow = async (schedule: ScheduledChat) => {
+    try {
+      await runSchedule(schedule.scheduled_chat_id);
+      setRunMessage(
+        `Run requested for "${schedule.name}". The worker will pick it up on its next poll.`,
+      );
+    } catch {
+      setRunMessage('Failed to request run. Please try again.');
+    }
+  };
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -130,6 +144,16 @@ function ScheduledChats() {
         },
         disabled: !isOwner,
         tooltip: ownerOnlyTooltip,
+      },
+      {
+        key: 'run',
+        label: 'Run now',
+        icon: <PlayArrowIcon fontSize="small" />,
+        onClick: () => void handleRunNow(schedule),
+        disabled: !isOwner,
+        tooltip: isOwner
+          ? 'Runs on the worker’s next poll, even if disabled'
+          : 'Only the schedule owner can run this scheduled chat.',
       },
       {
         key: 'history',
@@ -325,6 +349,13 @@ function ScheduledChats() {
         Delete scheduled chat <strong>{deleteTarget?.name}</strong>? This cannot
         be undone.
       </ConfirmDeleteDialog>
+
+      <Snackbar
+        open={runMessage !== null}
+        autoHideDuration={6000}
+        onClose={() => setRunMessage(null)}
+        message={runMessage}
+      />
     </>
   );
 }
