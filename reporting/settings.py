@@ -397,11 +397,15 @@ REMEDIATION_GH_VERSION = str_env("REMEDIATION_GH_VERSION", "2.62.0")
 REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")
 
 # GitHub token used to clone the repo (setup phase) and push/open the PR (push
-# phase) — never present while the coding agent runs. Use a fine-grained PAT
-# restricted to the target org/repos with contents:write + pull_requests:write,
-# and keep branch protection on: PR review is the gate. With
-# REMEDIATION_USE_FORK the token pushes only to its own forks, so it needs just
-# pull_requests:write (plus fork/read access) on the targets.
+# phase) — never present while the coding agent runs. Direct mode: use a
+# fine-grained PAT restricted to the target org/repos with contents:write +
+# pull_requests:write, and keep branch protection on: PR review is the gate.
+# Fork mode (REMEDIATION_USE_FORK): the token pushes only to its own forks —
+# but a fine-grained PAT has a single resource owner, so it cannot both write
+# to the bot's forks and open PRs on targets under a different owner (and fork
+# creation needs the Administration:write permission besides). Use a classic
+# PAT on the bot account (public_repo, or repo for private targets, plus read
+# access to the targets) or a GitHub App token.
 REMEDIATION_GITHUB_TOKEN = str_env("REMEDIATION_GITHUB_TOKEN", "")
 
 # Fork-based flow: when true, the push phase pushes the work branch to a

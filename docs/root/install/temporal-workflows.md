@@ -152,9 +152,20 @@ the fork's base branch is best-effort synced with upstream (GitHub's
 clone and push the PR branch on the fork. The credential phase isolation above
 is identical in both modes.
 
-Two operational caveats: the token owner must be able to fork the target (a
-repository cannot be forked into the account that already owns it), and many
-organizations restrict GitHub Actions on PRs from forks (no secrets, or
+**Token choice matters in fork mode.** A fine-grained PAT has a single
+resource owner, so one fine-grained token cannot both push to forks under the
+bot account *and* open pull requests on targets owned by a different
+user/org — and GitHub additionally requires the **Administration (write)**
+repository permission on a fine-grained token to create a fork (it creates a
+repository). In practice, cross-owner fork mode needs a **classic PAT** on the
+bot (fork-holding) account — `public_repo` scope for public targets, `repo`
+for private ones — with the bot account granted read access to the targets so
+it can clone private repos and open PRs on them. (A GitHub App installation
+token also works if you have external tooling to mint and rotate it.)
+
+Two more operational caveats: the token owner must be able to fork the target
+(a repository cannot be forked into the account that already owns it), and
+many organizations restrict GitHub Actions on PRs from forks (no secrets, or
 `approve-first` policies) — if the CI watch keeps reporting `no_checks` on
 fork PRs, check the target's Actions fork policy.
 
