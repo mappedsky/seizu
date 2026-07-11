@@ -1,8 +1,10 @@
-"""Worker-side GitHub PR check-suite inspection and commenting.
+"""Worker-side GitHub PR check-suite inspection, commenting, and fork management.
 
 Used by the ``cve_dependency_remediation`` workflow's CI-watch stage (via
 ``reporting/temporal_workflows/activities.py``) to poll a remediation PR's
-checks, gather failure context for the fix agent, and post PR comments.
+checks, gather failure context for the fix agent, and post PR comments — and
+by ``sandbox_remediation`` to ensure the bot-owned fork in fork mode
+(``REMEDIATION_USE_FORK``).
 
 This runs in the Temporal worker with ``REMEDIATION_GITHUB_TOKEN`` — safe,
 unlike the sandboxes, because no untrusted code executes here: it is plain
@@ -15,8 +17,10 @@ payloads so the queued-stuck / failing / pending logic is unit-testable
 without HTTP mocking.
 """
 
+import asyncio
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -119,6 +123,42 @@ async def _paginate(client: httpx.AsyncClient, url: str, items_key: str) -> list
         next_url = resp.links.get("next", {}).get("url")
         params = None  # the next link's URL already carries the query string
     return items
+
+
+# Fork mode: how long to wait for a newly created fork's git data to become
+# available (fork creation is asynchronous on GitHub's side) and how often to
+# probe. Existing forks answer the first probe immediately.
+_FORK_READY_TIMEOUT_SECONDS = 300
+_FORK_READY_POLL_SECONDS = 5
+
+
+async def ensure_fork(repo: str, *, org: str = "") -> str:
+    """Create (or find) the token owner's fork of ``repo``; return its full name.
+
+    ``POST /repos/{repo}/forks`` is idempotent — when a fork already exists it
+    returns that fork — and the response carries the fork's actual
+    ``full_name`` (GitHub renames on collision, e.g. ``app-1``, so the name is
+    taken from the API rather than assumed). Fork creation is asynchronous:
+    a brand-new fork is polled until its git data is reachable (the commits
+    endpoint answers 404/409 until then), so the caller can clone/push it.
+    """
+    payload: dict[str, Any] = {"organization": org} if org else {}
+    async with _client() as client:
+        resp = await client.post(f"/repos/{repo}/forks", json=payload)
+        resp.raise_for_status()
+        full_name = str(resp.json().get("full_name") or "")
+        if not full_name:
+            raise RuntimeError(f"fork of {repo} returned no full_name")
+        deadline = time.monotonic() + _FORK_READY_TIMEOUT_SECONDS
+        while True:
+            probe = await client.get(f"/repos/{full_name}/commits", params={"per_page": 1})
+            if probe.status_code == 200:
+                return full_name
+            if probe.status_code not in (404, 409):
+                probe.raise_for_status()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"fork {full_name} has no git data after {_FORK_READY_TIMEOUT_SECONDS}s")
+            await asyncio.sleep(_FORK_READY_POLL_SECONDS)
 
 
 def render_agent_pr_comment(body: str) -> str:

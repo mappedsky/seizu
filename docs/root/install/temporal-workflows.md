@@ -137,6 +137,27 @@ lands without human PR review. Workflow-supplied values (repo, branch names)
 are strictly validated and reach the phase scripts only via environment
 variables; tokens are masked in all captured output.
 
+### Fork-based pull requests
+
+By default the push phase writes the work branch into the target repository,
+which requires `contents:write` there. With `REMEDIATION_USE_FORK=true` the
+worker instead ensures a bot-owned fork of each target repository — created on
+demand through the GitHub API, under `REMEDIATION_FORK_ORG` when set, else the
+token user's account — the push sandbox pushes the branch to that fork, and
+the PR is opened cross-repo (`fork-owner:branch` → target base branch). The
+token then needs `contents:write` only on its own forks, plus
+`pull_requests:write` and read/fork access on the targets. Before each push
+the fork's base branch is best-effort synced with upstream (GitHub's
+"sync fork" API) so the shallow push finds its ancestor objects; CI-fix runs
+clone and push the PR branch on the fork. The credential phase isolation above
+is identical in both modes.
+
+Two operational caveats: the token owner must be able to fork the target (a
+repository cannot be forked into the account that already owns it), and many
+organizations restrict GitHub Actions on PRs from forks (no secrets, or
+`approve-first` policies) — if the CI watch keeps reporting `no_checks` on
+fork PRs, check the target's Actions fork policy.
+
 ### Behavior and access control
 
 Input rows must carry `repo` and `package` keys; multiple CVEs (or manifests)
@@ -229,6 +250,8 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `REMEDIATION_GH_SHA256` | `""` | Expected SHA-256 of the pinned `gh` linux_amd64 tarball. Set it (out of band) for an independent supply-chain pin, or bake `gh` into a pinned sandbox image — since the installed `gh` later handles the token. Empty → verify against the release's own checksums (integrity only). |
 | `REMEDIATION_GITHUB_HOST` | `github.com` | GitHub host the target repositories live on — `github.com` or a GitHub Enterprise Server hostname. Used for the clone URL and `gh` (`GH_HOST`/`GH_ENTERPRISE_TOKEN`). |
 | `REMEDIATION_GITHUB_TOKEN` | `""` | Fine-grained PAT used only by the setup and push phases. Required (configured = enabled). |
+| `REMEDIATION_USE_FORK` | `false` | Push the work branch to a bot-owned fork (created on demand) and open cross-repo PRs instead of writing branches into the target repositories — see [Fork-based pull requests](#fork-based-pull-requests). |
+| `REMEDIATION_FORK_ORG` | `""` | Organization that owns the bot forks in fork mode; empty → forks live under the token user's account. |
 | `REMEDIATION_GIT_USER` / `REMEDIATION_GIT_EMAIL` | `seizu-remediation-bot` / `seizu-remediation@localhost` | git author identity for the remediation commits. |
 
 The remediation workflow also uses the sandbox provider configuration
@@ -262,3 +285,5 @@ Unit tests mock the sandbox, so they confirm the phase/credential logic but **no
 - **A public target repo hides auth failures until push.** Cloning a public repo is anonymous, so the GitHub token is first exercised on `git push`. When testing, always push a branch — a successful clone proves nothing about the token.
 
 To smoke-test the sandbox side directly (auth, gh, git, and the two-sandbox patch handoff) without running the full workflow, use the bundled `make remediation_smoke SMOKE_REPO=org/repo` (`scripts/remediation_smoke.py`). It opens two real E2B sandboxes with the configured `SANDBOX_*`/`REMEDIATION_*` settings and reproduces the credential-sensitive mechanics: an *agent sandbox* installs `gh`, clones (token), makes a throwaway commit **with no token in the environment** (standing in for the coding agent), and extracts the change as a base64 git diff; a fresh *push sandbox* (which never ran the "agent") applies the patch and pushes the branch with the token. It then deletes the branch. It does not run a real coding agent or open a PR; a `SMOKE PASS` line confirms the handoff and auth end-to-end. Check the token's write access first with `gh api repos/<org>/<repo> --jq .permissions` — `push` must be `true`, and a fine-grained PAT needs Contents + Pull requests read/write, org approval, and an owner who has write access to the repo.
+
+With `REMEDIATION_USE_FORK=true` (or `SMOKE_FORK=1` to force it for one run) the smoke test exercises the fork path instead: it ensures the bot fork through the real `ensure_fork` (creation, readiness poll, `REMEDIATION_FORK_ORG`), and the push sandbox syncs the fork's base branch (merge-upstream) and pushes — then deletes — the branch on the **fork**. `SMOKE_REPO` then only needs read/fork access, not push; cross-repo PR creation itself is not exercised (the smoke test never opens PRs).

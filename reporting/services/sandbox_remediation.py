@@ -39,6 +39,14 @@ The work branch is keyed on the target version (``…/{ecosystem}-{package}-{ver
 so re-runs of the same pending fix converge on one PR while a later, different
 fix for the same package gets its own branch.
 
+By default the branch is pushed to the target repository itself. With
+``REMEDIATION_USE_FORK`` the worker instead ensures a bot-owned fork (created
+on demand via the GitHub API, under ``REMEDIATION_FORK_ORG`` when set), the
+push phase pushes the branch to that fork, and the PR is opened cross-repo
+(``fork-owner:branch`` → target base branch) — so the token needs no write
+access to the target repositories. Fix-mode runs clone and push the PR branch
+on the fork. The credential phase isolation is identical in both modes.
+
 A second entry point, :func:`run_ci_fix`, reuses the same two-sandbox flow
 against an *existing* remediation PR whose CI checks failed: the agent checks
 out the PR branch (no guard phase) with the CI failure context in its prompt,
@@ -65,7 +73,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from reporting.services import sandbox_agent
+from reporting.services import github_checks, sandbox_agent
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
@@ -157,23 +165,27 @@ git checkout -b "$SEIZU_BRANCH"
 """
 
 # Fix-mode setup: check out the EXISTING PR branch (it was pushed by an earlier
-# run) instead of creating one from the base branch. The base branch is never
-# fetched: fix extraction/push work entirely against the PR branch tip, so a
-# base branch that advanced since the PR opened cannot leak reverted commits
-# into the fix diff.
+# run) instead of creating one from the base branch. The clone targets
+# SEIZU_HEAD_REPO — the repository the PR branch lives on: the target repo, or
+# the bot fork in fork mode. The base branch is never fetched: fix
+# extraction/push work entirely against the PR branch tip, so a base branch
+# that advanced since the PR opened cannot leak reverted commits into the fix
+# diff.
 _FIX_SETUP_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 git config --global user.name "$SEIZU_GIT_USER"
 git config --global user.email "$SEIZU_GIT_EMAIL"
 gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
-git clone --depth 50 --branch "$SEIZU_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
+git clone --depth 50 --branch "$SEIZU_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_HEAD_REPO.git" {REPO_PATH}
 cd {REPO_PATH}
 """
 
 # Guard: if an open PR already exists for this branch, there is nothing to do —
 # skip the expensive coding-agent run. Runs after the clone (origin is set, gh
-# is configured). `gh pr list --head` matches by branch name on the remote.
+# is configured). `gh pr list --head` matches by head branch name on the target
+# repo, which covers cross-repo (fork-mode) PRs too — the bot's branch names
+# are unique to it.
 _GUARD_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
@@ -220,8 +232,12 @@ fi
 # fresh, apply the patch (data only — no hooks run, cannot write into .git/),
 # commit as one squashed commit (a property of applying a single diff), push,
 # and open the PR. The GitHub token only ever lives here and in the agent
-# sandbox's pre-agent clone — never after untrusted execution. Keeping CVE ids
-# out of the title/body/commit is left to the agent prompt (they are public and
+# sandbox's pre-agent clone — never after untrusted execution. In fork mode
+# (SEIZU_FORK_REPO set) the branch is pushed to the bot-owned fork — after a
+# best-effort sync of the fork's base branch, so the shallow push finds its
+# ancestor objects server-side — and the PR is opened cross-repo
+# (fork-owner:branch → target base). Keeping CVE ids out of the
+# title/body/commit is left to the agent prompt (they are public and
 # discoverable from the repo's dependency manifest anyway).
 _PUSH_SCRIPT = f"""\
 set -euo pipefail
@@ -238,30 +254,41 @@ if [ -s {PR_TITLE_PATH} ]; then
   PR_TITLE="$(head -c 200 {PR_TITLE_PATH} | tr -d '\\n')"
 fi
 git commit -q -m "$PR_TITLE"
-git push --force -u origin "$SEIZU_BRANCH"
-PR_URL="$(gh pr create --base "$SEIZU_BASE_BRANCH" --head "$SEIZU_BRANCH" \\
+if [ -n "${{SEIZU_FORK_REPO:-}}" ]; then
+  gh api --method POST "repos/$SEIZU_FORK_REPO/merge-upstream" -f "branch=$SEIZU_BASE_BRANCH" >/dev/null 2>&1 \\
+    || echo "fork base-branch sync failed; pushing anyway"
+  git remote add fork "https://$SEIZU_GITHUB_HOST/$SEIZU_FORK_REPO.git"
+  git push --force -u fork "$SEIZU_BRANCH"
+  PR_HEAD="${{SEIZU_FORK_REPO%%/*}}:$SEIZU_BRANCH"
+else
+  git push --force -u origin "$SEIZU_BRANCH"
+  PR_HEAD="$SEIZU_BRANCH"
+fi
+PR_URL="$(gh pr create --repo "$SEIZU_REPO" --base "$SEIZU_BASE_BRANCH" --head "$PR_HEAD" \\
     --title "$PR_TITLE" --body-file {PR_BODY_PATH} 2>/dev/null \\
-  || gh pr view "$SEIZU_BRANCH" --json url --jq .url)"
+  || gh pr view "$SEIZU_BRANCH" --repo "$SEIZU_REPO" --json url --jq .url)"
 echo "SEIZU_PR_URL=$PR_URL"
 """
 
 # Fix-mode push (fresh, trusted sandbox — same isolation rationale as
-# _PUSH_SCRIPT): clone the PR branch, apply only the agent's fix commits as one
-# patch, and fast-forward push. The PR already exists, so there is no
-# `gh pr create` and no force push; a concurrent update to the branch makes the
-# apply or push fail loudly rather than clobbering it.
+# _PUSH_SCRIPT): clone the PR branch from the repo it lives on (SEIZU_HEAD_REPO
+# — the fork in fork mode), apply only the agent's fix commits as one patch,
+# and fast-forward push. The PR already exists, so there is no `gh pr create`
+# and no force push; a concurrent update to the branch makes the apply or push
+# fail loudly rather than clobbering it. `gh pr view --repo` looks the PR up on
+# the target repo by head branch name, which matches fork-mode PRs too.
 _FIX_PUSH_SCRIPT = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 git config --global user.name "$SEIZU_GIT_USER"
 git config --global user.email "$SEIZU_GIT_EMAIL"
 gh auth setup-git --hostname "$SEIZU_GITHUB_HOST"
-git clone --depth 50 --branch "$SEIZU_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_REPO.git" {REPO_PATH}
+git clone --depth 50 --branch "$SEIZU_BRANCH" "https://$SEIZU_GITHUB_HOST/$SEIZU_HEAD_REPO.git" {REPO_PATH}
 cd {REPO_PATH}
 base64 -d {CHANGES_B64_PATH} | git apply --index --whitespace=nowarn
 git commit -q -m "$SEIZU_COMMIT_TITLE"
 git push origin "HEAD:$SEIZU_BRANCH"
-PR_URL="$(gh pr view "$SEIZU_BRANCH" --json url --jq .url)"
+PR_URL="$(gh pr view "$SEIZU_BRANCH" --repo "$SEIZU_REPO" --json url --jq .url)"
 echo "SEIZU_PR_URL=$PR_URL"
 """
 
@@ -509,6 +536,9 @@ async def _run(
         "SEIZU_BASE_BRANCH": base_branch,
         "SEIZU_BRANCH": branch_name,
         "SEIZU_GITHUB_HOST": github_host,
+        # The repo the PR branch lives on (fix-mode clone/push target);
+        # overridden to the bot fork in fork mode below.
+        "SEIZU_HEAD_REPO": repo,
     }
     # gh install has no secrets; the (non-secret) digest pins gh independently.
     gh_install_env = {"SEIZU_GH_VERSION": settings.REMEDIATION_GH_VERSION}
@@ -658,6 +688,27 @@ async def _run(
 
     ticker = asyncio.create_task(_ticker())
     try:
+        if settings.REMEDIATION_USE_FORK:
+            # The fork is ensured worker-side (plain GitHub API I/O — the token
+            # never needs a sandbox for it); the ticker above keeps Temporal
+            # heartbeats flowing while a brand-new fork's git data appears. In
+            # fix mode this resolves the same, already-existing fork the PR was
+            # opened from: the CI watch only ever fixes PRs pushed by the same
+            # workflow run (guard-skipped PRs are not re-watched), so the
+            # settings-derived fork matches the PR's actual head repo.
+            try:
+                fork_repo = await github_checks.ensure_fork(repo, org=settings.REMEDIATION_FORK_ORG)
+            except Exception as exc:
+                logger.exception("fork creation failed for %s", repo)
+                return RemediationRunResult(
+                    status="failed", error=f"could not ensure a fork of {repo}: {_mask(str(exc))}"
+                )
+            # The fork name goes into shell env like the validated targets do —
+            # hold the API's answer to the same shape.
+            if not _REPO_FULLNAME_RE.match(fork_repo):
+                return RemediationRunResult(status="failed", error=f"invalid fork repo {fork_repo!r}")
+            target_env["SEIZU_FORK_REPO"] = fork_repo
+            target_env["SEIZU_HEAD_REPO"] = fork_repo
         # _remaining() bounds each agent-sandbox phase; the outer wait_for also
         # covers sandbox creation and file writes.
         guard_or_none = await asyncio.wait_for(_run_agent(), timeout=timeout + 60)

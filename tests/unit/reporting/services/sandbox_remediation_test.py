@@ -149,6 +149,8 @@ def _settings(**overrides: Any) -> ExitStack:
         "SANDBOX_AGENT_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
+        "REMEDIATION_USE_FORK": False,
+        "REMEDIATION_FORK_ORG": "",
         "REMEDIATION_GIT_USER": "bot",
         "REMEDIATION_GIT_EMAIL": "bot@localhost",
         "SANDBOX_API_KEY": "e2b-key",
@@ -575,6 +577,123 @@ async def test_github_enterprise_host() -> None:
     assert push_env["GH_ENTERPRISE_TOKEN"] == _GH_TOKEN
     # The PR URL marker is parsed host-agnostically.
     assert result.pr_url == "https://github.example.com/org/app/pull/7"
+
+
+# ---------------------------------------------------------------------------
+# Fork mode (REMEDIATION_USE_FORK)
+# ---------------------------------------------------------------------------
+
+
+def _patched_fork(mock: AsyncMock) -> Any:
+    return patch("reporting.services.github_checks.ensure_fork", mock)
+
+
+async def test_fork_mode_pushes_to_the_fork_and_opens_a_cross_repo_pr() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/8\n"})
+    ensure = AsyncMock(return_value="seizu-bot/app")
+    with _settings(REMEDIATION_USE_FORK=True), _patched_fork(ensure), _patched_open([agent, push], []):
+        result = await run_remediation(**_TARGET)
+
+    # The fork is ensured worker-side (never from a sandbox), under the token
+    # user's account when no org is configured.
+    ensure.assert_awaited_once_with("org/app", org="")
+    push_env = dict(push.calls)["push"]
+    assert push_env["SEIZU_FORK_REPO"] == "seizu-bot/app"
+    assert push_env["SEIZU_HEAD_REPO"] == "seizu-bot/app"
+    assert push_env["SEIZU_REPO"] == "org/app"  # the PR still targets upstream
+    # The agent phase is unchanged — still no GitHub token, no fork knowledge.
+    assert dict(agent.calls)["agent"] == {"ANTHROPIC_API_KEY": _AGENT_KEY}
+    assert result.status == "completed"
+    assert result.pr_url == "https://github.com/org/app/pull/8"
+
+
+async def test_fork_org_is_forwarded_to_ensure_fork() -> None:
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/8\n"})
+    ensure = AsyncMock(return_value="bots-inc/app")
+    with (
+        _settings(REMEDIATION_USE_FORK=True, REMEDIATION_FORK_ORG="bots-inc"),
+        _patched_fork(ensure),
+        _patched_open([_FakeBackend(), push], []),
+    ):
+        result = await run_remediation(**_TARGET)
+    ensure.assert_awaited_once_with("org/app", org="bots-inc")
+    assert result.status == "completed"
+
+
+async def test_direct_mode_never_touches_forks() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/8\n"})
+    ensure = AsyncMock()
+    with _settings(), _patched_fork(ensure), _patched_open([agent, push], []):
+        await run_remediation(**_TARGET)
+
+    ensure.assert_not_awaited()
+    push_env = dict(push.calls)["push"]
+    assert "SEIZU_FORK_REPO" not in push_env
+    assert push_env["SEIZU_HEAD_REPO"] == "org/app"  # PR branch lives upstream
+
+
+async def test_fork_failure_fails_the_run_before_any_sandbox() -> None:
+    opens: list[dict[str, Any]] = []
+    ensure = AsyncMock(side_effect=RuntimeError(f"403 forbidden for {_GH_TOKEN}"))
+    with _settings(REMEDIATION_USE_FORK=True), _patched_fork(ensure), _patched_open([], opens):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert "could not ensure a fork of org/app" in (result.error or "")
+    assert _GH_TOKEN not in (result.error or "")  # masked like all run errors
+    assert opens == []
+
+
+async def test_fork_name_from_the_api_is_validated_before_reaching_shell() -> None:
+    opens: list[dict[str, Any]] = []
+    ensure = AsyncMock(return_value="bot/app; rm -rf /")
+    with _settings(REMEDIATION_USE_FORK=True), _patched_fork(ensure), _patched_open([], opens):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert "invalid fork repo" in (result.error or "")
+    assert opens == []
+
+
+async def test_fork_mode_fix_clones_and_pushes_the_pr_branch_on_the_fork() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    ensure = AsyncMock(return_value="seizu-bot/app")
+    with _settings(REMEDIATION_USE_FORK=True), _patched_fork(ensure), _patched_open([agent, push], []):
+        result = await run_ci_fix(**_FIX_TARGET)
+
+    # Both the agent-sandbox clone and the fresh push-sandbox clone target the
+    # fork — that is where the PR branch lives in fork mode.
+    assert dict(agent.calls)["setup"]["SEIZU_HEAD_REPO"] == "seizu-bot/app"
+    push_env = dict(push.calls)["push"]
+    assert push_env["SEIZU_HEAD_REPO"] == "seizu-bot/app"
+    assert push_env["SEIZU_REPO"] == "org/app"  # PR lookup stays on upstream
+    assert result.status == "completed"
+    assert result.pushed is True
+
+
+def test_push_script_fork_branch_is_cross_repo() -> None:
+    push = sandbox_remediation._PUSH_SCRIPT
+    # Fork mode pushes the branch to the fork remote and opens the PR on the
+    # target repo with a fork-owner-qualified head.
+    assert 'git push --force -u fork "$SEIZU_BRANCH"' in push
+    assert "${SEIZU_FORK_REPO%%/*}:$SEIZU_BRANCH" in push
+    # The fork's base branch is synced first so the shallow push finds its
+    # ancestor objects server-side.
+    assert "merge-upstream" in push
+    # PR creation and the exists-fallback always address the target repo
+    # explicitly (two remotes exist in fork mode).
+    assert 'gh pr create --repo "$SEIZU_REPO"' in push
+    assert 'gh pr view "$SEIZU_BRANCH" --repo "$SEIZU_REPO"' in push
+    assert "$GH_TOKEN" not in push
+
+
+def test_fix_scripts_clone_the_head_repo_and_look_up_the_pr_on_the_target() -> None:
+    assert "$SEIZU_HEAD_REPO" in sandbox_remediation._FIX_SETUP_SCRIPT
+    assert "$SEIZU_HEAD_REPO" in sandbox_remediation._FIX_PUSH_SCRIPT
+    assert '--repo "$SEIZU_REPO"' in sandbox_remediation._FIX_PUSH_SCRIPT
 
 
 # ---------------------------------------------------------------------------
