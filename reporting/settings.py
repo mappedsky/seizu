@@ -396,16 +396,16 @@ REMEDIATION_GH_VERSION = str_env("REMEDIATION_GH_VERSION", "2.62.0")
 # Enterprise Server hostname (e.g. "github.example.com").
 REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")
 
-# GitHub token used to clone the repo (setup phase) and push/open the PR (push
-# phase) — never present while the coding agent runs. Direct mode: use a
-# fine-grained PAT restricted to the target org/repos with contents:write +
-# pull_requests:write, and keep branch protection on: PR review is the gate.
-# Fork mode (REMEDIATION_USE_FORK): the token pushes only to its own forks —
-# but a fine-grained PAT has a single resource owner, so it cannot both write
-# to the bot's forks and open PRs on targets under a different owner (and fork
-# creation needs the Administration:write permission besides). Use a classic
-# PAT on the bot account (public_repo, or repo for private targets, plus read
-# access to the targets) or a GitHub App token.
+# GitHub token used to clone the repo (setup phase), push/open the PR (push
+# phase) — never present while the coding agent runs — and by the worker-side
+# CI watch (read checks, post triage comments). Direct mode: a fine-grained
+# PAT scoped to the target repos (contents + pull requests write; issues
+# write and checks/commit-statuses read for the CI watch). Fork mode
+# (REMEDIATION_USE_FORK): a fine-grained PAT cannot span the bot's forks and
+# another owner's targets (and fork creation needs Administration:write) —
+# use a classic PAT on a machine account (public_repo, or repo for private
+# targets). Full walkthrough: docs/root/install/temporal-workflows.md,
+# "GitHub token setup". Keep branch protection on: PR review is the gate.
 REMEDIATION_GITHUB_TOKEN = str_env("REMEDIATION_GITHUB_TOKEN", "")
 
 # Fork-based flow: when true, the push phase pushes the work branch to a
