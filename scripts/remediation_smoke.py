@@ -20,6 +20,14 @@ install scripts and paths so it stays faithful as the code evolves.
 
 Requires ``SANDBOX_API_KEY`` and ``REMEDIATION_GITHUB_TOKEN`` configured, plus
 ``SMOKE_REPO`` naming a repo the token can push to. Exits 0 on a successful push.
+
+Fork mode (``REMEDIATION_USE_FORK=true``, or ``SMOKE_FORK=1`` to force it for
+one run) exercises the fork path instead: the worker ensures the bot fork via
+the real ``github_checks.ensure_fork`` (creation, readiness poll,
+``REMEDIATION_FORK_ORG``), and the push sandbox syncs the fork's base branch
+(merge-upstream) and pushes/deletes the branch on the **fork** — ``SMOKE_REPO``
+then only needs read/fork access, not push. PR creation is not exercised in
+either mode (the smoke test never opens PRs on the target repo).
 """
 
 import asyncio
@@ -33,7 +41,10 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reporting import settings  # noqa: E402
-from reporting.services import sandbox_agent  # noqa: E402
+from reporting.services import (
+    github_checks,  # noqa: E402
+    sandbox_agent,  # noqa: E402
+)
 from reporting.services import sandbox_remediation as sr  # noqa: E402
 from reporting.services.sandbox_backend import SandboxBackend, open_backend  # noqa: E402
 
@@ -73,6 +84,10 @@ echo SEIZU_SMOKE_EXTRACT_OK
 """
 
 # Push sandbox: fresh clone, apply the patch (never ran the "agent"), push.
+# Mirrors _PUSH_SCRIPT's fork conditional: with SEIZU_FORK_REPO set, sync the
+# fork's base branch (so the shallow push finds its ancestor objects) and push
+# to the fork instead of the target repo. The smoke setup clones the default
+# branch (no --branch), so the base branch name is read from origin/HEAD.
 _PUSH = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
@@ -84,7 +99,15 @@ cd {sr.REPO_PATH}
 git checkout -b "$SEIZU_BRANCH"
 base64 -d {sr.CHANGES_B64_PATH} | git apply --index --whitespace=nowarn
 git commit -q -m "seizu remediation smoke test"
-git push --force -u origin "$SEIZU_BRANCH"
+if [ -n "${{SEIZU_FORK_REPO:-}}" ]; then
+  BASE_BRANCH="$(git rev-parse --abbrev-ref origin/HEAD | cut -d/ -f2-)"
+  gh api --method POST "repos/$SEIZU_FORK_REPO/merge-upstream" -f "branch=$BASE_BRANCH" >/dev/null 2>&1 \\
+    || echo "fork base-branch sync failed; pushing anyway"
+  git remote add fork "https://$SEIZU_GITHUB_HOST/$SEIZU_FORK_REPO.git"
+  git push --force -u fork "$SEIZU_BRANCH"
+else
+  git push --force -u origin "$SEIZU_BRANCH"
+fi
 echo SEIZU_SMOKE_PUSH_OK
 """
 
@@ -92,7 +115,11 @@ _CLEANUP = f"""\
 set -euo pipefail
 export GIT_TERMINAL_PROMPT=0
 cd {sr.REPO_PATH}
-git push origin --delete "$SEIZU_BRANCH" || true
+if [ -n "${{SEIZU_FORK_REPO:-}}" ]; then
+  git push fork --delete "$SEIZU_BRANCH" || true
+else
+  git push origin --delete "$SEIZU_BRANCH" || true
+fi
 echo SEIZU_SMOKE_CLEANUP_DONE
 """
 
@@ -128,6 +155,21 @@ async def _run() -> int:
 
     gh_env = {"GH_TOKEN": token, "GH_ENTERPRISE_TOKEN": token, "GH_HOST": host}
     target_env = {"SEIZU_GITHUB_HOST": host, "SEIZU_REPO": repo, "SEIZU_BRANCH": branch}
+
+    # Fork mode (the configured setting, or SMOKE_FORK=1 to force it for one
+    # run): ensure the bot fork exactly as the real flow does, worker-side, and
+    # hand the push script the fork name so it pushes there instead.
+    fork_repo = ""
+    if settings.REMEDIATION_USE_FORK or os.environ.get("SMOKE_FORK"):
+        print(f"Fork mode: ensuring fork of {repo} (org={settings.REMEDIATION_FORK_ORG or '(token user)'})")
+        try:
+            fork_repo = await github_checks.ensure_fork(repo, org=settings.REMEDIATION_FORK_ORG)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"ensure_fork failed: {mask(str(exc))[:800]}")
+        if not sr._REPO_FULLNAME_RE.match(fork_repo):
+            return _fail(f"ensure_fork returned an invalid repo name: {fork_repo!r}")
+        target_env["SEIZU_FORK_REPO"] = fork_repo
+
     git_id_env = {"SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER, "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL}
     token_env = {**gh_env, **git_id_env, **target_env}
     # gh install reads the pinned version from env (no secret); required by set -u.
@@ -137,7 +179,10 @@ async def _run() -> int:
         print(f"\n===== {name} =====")
         return await backend.run_bash_streaming(script, timeout_seconds=300, on_output=on_output, envs=envs)
 
-    print(f"Smoke test: repo={repo} host={host} branch={branch} template={template or '(base image)'}")
+    print(
+        f"Smoke test: repo={repo} host={host} branch={branch} "
+        f"template={template or '(base image)'} push_target={fork_repo or repo}"
+    )
 
     # --- Agent sandbox: clone, "agent" commit (no token), extract patch --------
     print("\n########## AGENT SANDBOX ##########")
@@ -187,7 +232,8 @@ async def _run() -> int:
                 print(f"cleanup best-effort failed: {mask(str(exc))}", file=sys.stderr)
 
     if pushed:
-        print("\nSMOKE PASS — patch handed from the agent sandbox to a fresh push sandbox and pushed")
+        where = f"pushed to the fork {fork_repo}" if fork_repo else "pushed"
+        print(f"\nSMOKE PASS — patch handed from the agent sandbox to a fresh push sandbox and {where}")
         return 0
     return _fail("push did not succeed — see output above")
 

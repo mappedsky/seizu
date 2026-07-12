@@ -1,13 +1,19 @@
 """Tests for the worker-side GitHub PR check classification."""
 
+import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
+
+import httpx
+import pytest
 
 from reporting.services.github_checks import (
     _paginate,
     api_base_url,
     classify_checks,
+    ensure_fork,
     parse_pr_number,
     render_agent_pr_comment,
 )
@@ -266,3 +272,81 @@ def test_render_agent_pr_comment_quotes_every_line() -> None:
     rendered = render_agent_pr_comment("first\n\nsecond")
     quoted = rendered.split("\n\n", 2)[2]
     assert quoted.splitlines() == ["> first", ">", "> second"]
+
+
+# ---------------------------------------------------------------------------
+# Fork management (fork-mode remediation)
+# ---------------------------------------------------------------------------
+
+
+def _fork_client(handler: Callable[[httpx.Request], httpx.Response]) -> Any:
+    def _make() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.com")
+
+    return patch("reporting.services.github_checks._client", _make)
+
+
+async def test_ensure_fork_creates_the_fork_and_waits_for_git_data() -> None:
+    # POST /forks answers immediately with the fork's (API-authoritative) full
+    # name, but a brand-new fork's git data appears asynchronously — the commits
+    # endpoint answers 409 until then.
+    posted: list[dict[str, Any]] = []
+    commit_probes = iter([409, 404, 200])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/repos/org/app/forks":
+            posted.append(json.loads(request.content or b"{}"))
+            return httpx.Response(202, json={"full_name": "seizu-bot/app"})
+        if request.method == "GET" and request.url.path == "/repos/seizu-bot/app/commits":
+            return httpx.Response(next(commit_probes), json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    with _fork_client(handler), patch("reporting.services.github_checks._FORK_READY_POLL_SECONDS", 0):
+        assert await ensure_fork("org/app") == "seizu-bot/app"
+    assert posted == [{}]  # no organization → the token user's account
+
+
+async def test_ensure_fork_forks_into_the_configured_org() -> None:
+    posted: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posted.append(json.loads(request.content))
+            return httpx.Response(202, json={"full_name": "bots-inc/app"})
+        return httpx.Response(200, json=[])  # existing fork: ready on first probe
+
+    with _fork_client(handler):
+        assert await ensure_fork("org/app", org="bots-inc") == "bots-inc/app"
+    assert posted == [{"organization": "bots-inc"}]
+
+
+async def test_ensure_fork_rejects_a_response_without_full_name() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={})
+
+    with _fork_client(handler), pytest.raises(RuntimeError, match="no full_name"):
+        await ensure_fork("org/app")
+
+
+async def test_ensure_fork_times_out_when_git_data_never_appears() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"full_name": "seizu-bot/app"})
+        return httpx.Response(409, json={"message": "Git Repository is empty."})
+
+    with (
+        _fork_client(handler),
+        patch("reporting.services.github_checks._FORK_READY_TIMEOUT_SECONDS", 0),
+        pytest.raises(TimeoutError, match="no git data"),
+    ):
+        await ensure_fork("org/app")
+
+
+async def test_ensure_fork_raises_on_api_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"full_name": "seizu-bot/app"})
+        return httpx.Response(403, json={"message": "rate limited"})
+
+    with _fork_client(handler), pytest.raises(httpx.HTTPStatusError):
+        await ensure_fork("org/app")

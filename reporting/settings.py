@@ -396,11 +396,29 @@ REMEDIATION_GH_VERSION = str_env("REMEDIATION_GH_VERSION", "2.62.0")
 # Enterprise Server hostname (e.g. "github.example.com").
 REMEDIATION_GITHUB_HOST = str_env("REMEDIATION_GITHUB_HOST", "github.com")
 
-# GitHub token used to clone the repo (setup phase) and push/open the PR (push
-# phase) — never present while the coding agent runs. Use a fine-grained PAT
-# restricted to the target org/repos with contents:write + pull_requests:write,
-# and keep branch protection on: PR review is the gate.
+# GitHub token used to clone the repo (setup phase), push/open the PR (push
+# phase) — never present while the coding agent runs — and by the worker-side
+# CI watch (read checks, post triage comments). Direct mode: a fine-grained
+# PAT scoped to the target repos (contents + pull requests write; issues
+# write and checks/commit-statuses read for the CI watch). Fork mode
+# (REMEDIATION_USE_FORK): a fine-grained PAT cannot span the bot's forks and
+# another owner's targets (and fork creation needs Administration:write) —
+# use a classic PAT on a machine account (public_repo, or repo for private
+# targets). Full walkthrough: docs/root/install/temporal-workflows.md,
+# "GitHub token setup". Keep branch protection on: PR review is the gate.
 REMEDIATION_GITHUB_TOKEN = str_env("REMEDIATION_GITHUB_TOKEN", "")
+
+# Fork-based flow: when true, the push phase pushes the work branch to a
+# bot-owned fork of the target repository (created on demand via the GitHub
+# API) and opens a cross-repo PR (fork-owner:branch → target base branch)
+# instead of writing a branch into the target repo. Use when the token cannot
+# — or should not — push to the target repositories. CI-fix runs clone and
+# push the PR branch on the fork; credential phase isolation is unchanged.
+REMEDIATION_USE_FORK = bool_env("REMEDIATION_USE_FORK", False)
+
+# Organization that owns the bot forks when REMEDIATION_USE_FORK is on; empty
+# → forks are created under the token user's account.
+REMEDIATION_FORK_ORG = str_env("REMEDIATION_FORK_ORG", "")
 
 # git author identity for the remediation commits.
 REMEDIATION_GIT_USER = str_env("REMEDIATION_GIT_USER", "seizu-remediation-bot")

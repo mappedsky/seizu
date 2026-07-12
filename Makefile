@@ -38,12 +38,17 @@ test_query_validator_live: config_setup
 #   patch, push it from a fresh sandbox, delete the branch).
 #   Requires SANDBOX_API_KEY + REMEDIATION_GITHUB_TOKEN. Usage:
 #     make remediation_smoke SMOKE_REPO=org/repo
+# SMOKE_FORK=1 (or REMEDIATION_USE_FORK=true in .env): exercise the fork path —
+#   ensure the bot fork, push the branch to the fork, delete it there. SMOKE_REPO
+#   then only needs read/fork access. Usage:
+#     make remediation_smoke SMOKE_REPO=org/repo SMOKE_FORK=1
 # SMOKE_PROXY=1: instead probe the credential proxy (boot a private LiteLLM proxy,
 #   mint a key, reach it from a second sandbox). Requires SANDBOX_AGENT_* with a
 #   real provider key (+ SANDBOX_AGENT_MODEL for opencode). Usage:
 #     make remediation_smoke SMOKE_PROXY=1
 remediation_smoke:
-	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) -e SMOKE_PROXY=$(SMOKE_PROXY) \
+	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) -e SMOKE_FORK=$(SMOKE_FORK) \
+		-e SMOKE_PROXY=$(SMOKE_PROXY) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
 .PHONY: test_frontend
