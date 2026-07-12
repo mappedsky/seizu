@@ -180,14 +180,26 @@ async def get_scheduled_query_workflow_run(
 ) -> WorkflowRunDetail:
     """Return one workflow run's activity breakdown (status, attempts, failures).
 
-    Workflow ids not minted for this scheduled query are treated as not found,
-    so the endpoint can't read arbitrary workflows in the namespace.
+    Only reachable for queries with a temporal action; workflow ids not minted
+    for this scheduled query by a registered workflow are treated as not
+    found, so the endpoint can't read arbitrary workflows in the namespace.
+    Activity input/result previews carry query-result rows and activity
+    outputs, so they are included only for callers who could also edit the
+    query (``scheduled_queries:write``); readers get status/timing/failure
+    information without payloads.
     """
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
+    if not any(action.get("action_type") == "temporal" for action in item.actions):
+        raise HTTPException(status_code=404, detail="Workflow run not found")
     try:
-        detail = await temporal_runs.get_workflow_run_detail(sq_id, workflow_id, run_id)
+        detail = await temporal_runs.get_workflow_run_detail(
+            sq_id,
+            workflow_id,
+            run_id,
+            include_payload_previews=Permission.SCHEDULED_QUERIES_WRITE in current.permissions,
+        )
     except temporal_runs.TemporalUnavailableError:
         raise HTTPException(status_code=503, detail="Temporal is unavailable")
     if detail is None:

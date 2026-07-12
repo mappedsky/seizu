@@ -252,6 +252,10 @@ export function useScheduledQueryWorkflowRuns(
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
+    // Reset so a remount onto a different query doesn't show the previous
+    // query's runs while the new fetch is in flight.
+    setRuns(null);
+    setError(null);
     if (!id || !enabled) return undefined;
     if (auth_required && !accessToken) return undefined;
 

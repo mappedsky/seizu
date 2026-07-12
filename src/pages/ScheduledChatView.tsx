@@ -29,6 +29,7 @@ import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ListPageHeader from 'src/components/ListPageHeader';
 import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
+import RunDetailPre from 'src/components/RunDetailPre';
 import ScheduledChatDialog from 'src/components/ScheduledChatDialog';
 import { describeSchedule } from 'src/scheduleSpec';
 import UserDisplay from 'src/components/UserDisplay';
@@ -120,33 +121,6 @@ function RunDetailRow({ detail }: { detail: ScheduledChatRunDetail }) {
         </AccordionDetails>
       ) : null}
     </Accordion>
-  );
-}
-
-function RunDetailPre({ label, value }: { label: string; value: string }) {
-  return (
-    <Box sx={{ mb: 0.5 }}>
-      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-        {label}
-      </Typography>
-      <Box
-        component="pre"
-        sx={{
-          bgcolor: 'action.hover',
-          borderRadius: 1,
-          fontFamily: 'monospace',
-          fontSize: 12,
-          m: 0,
-          maxHeight: 240,
-          overflow: 'auto',
-          p: 1,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-        }}
-      >
-        {value}
-      </Box>
-    </Box>
   );
 }
 

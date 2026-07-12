@@ -73,9 +73,14 @@ async def _get_client() -> "temporalio.client.Client":
 
 
 def workflow_id_matches(sq_id: str, workflow_id: str) -> bool:
-    """True when the workflow id was minted for this scheduled query."""
+    """True when the workflow id was minted for this scheduled query.
+
+    The workflow-name segment must be a registered workflow — the same name
+    set the run listing queries — so detail reads can never reach beyond the
+    surface the list exposes.
+    """
     parts = workflow_id.split(":", 3)
-    return len(parts) == 4 and parts[0] == "seizu" and bool(parts[1]) and parts[2] == sq_id
+    return len(parts) == 4 and parts[0] == "seizu" and parts[1] in WORKFLOW_REGISTRY and parts[2] == sq_id
 
 
 def _workflow_name(workflow_id: str) -> str:
@@ -175,12 +180,22 @@ async def list_workflow_runs(sq_id: str, limit: int) -> list[WorkflowRunSummary]
     return runs
 
 
-async def get_workflow_run_detail(sq_id: str, workflow_id: str, run_id: str) -> WorkflowRunDetail | None:
+async def get_workflow_run_detail(
+    sq_id: str,
+    workflow_id: str,
+    run_id: str,
+    *,
+    include_payload_previews: bool = True,
+) -> WorkflowRunDetail | None:
     """Return one run's activity breakdown, or None when it doesn't exist.
 
     Refuses (as not-found) any workflow id that wasn't minted for this
-    scheduled query, so the endpoint can't be used to read arbitrary
-    workflows in the namespace.
+    scheduled query by a registered workflow, so the endpoint can't be used
+    to read arbitrary workflows in the namespace.
+
+    ``include_payload_previews=False`` omits activity input/result previews —
+    those carry query-result rows and activity outputs, which is more than a
+    scheduled-query reader is entitled to see.
     """
     import temporalio.service
 
@@ -190,7 +205,9 @@ async def get_workflow_run_detail(sq_id: str, workflow_id: str, run_id: str) -> 
     handle = client.get_workflow_handle(workflow_id, run_id=run_id)
     try:
         description = await handle.describe()
-        activities, workflow_failure = await _collect_activities(handle)
+        activities, workflow_failure = await _collect_activities(
+            handle, include_payload_previews=include_payload_previews
+        )
     except temporalio.service.RPCError as exc:
         # INVALID_ARGUMENT covers malformed client-supplied ids (e.g. a run_id
         # that isn't a UUID) — same not-found semantics for this endpoint.
@@ -226,6 +243,8 @@ def _raise_if_unavailable(exc: Any) -> None:
 
 async def _collect_activities(
     handle: "temporalio.client.WorkflowHandle[Any, Any]",
+    *,
+    include_payload_previews: bool,
 ) -> tuple[dict[str, WorkflowRunActivity], str | None]:
     """Fold history events into per-activity records keyed by activity id.
 
@@ -250,7 +269,11 @@ async def _collect_activities(
                 status="scheduled",
                 maximum_attempts=(attrs.retry_policy.maximum_attempts if attrs.HasField("retry_policy") else None),
                 scheduled_at=_event_time(event),
-                input_preview=_payload_preview(attrs.input.payloads if attrs.HasField("input") else []),
+                input_preview=(
+                    _payload_preview(attrs.input.payloads if attrs.HasField("input") else [])
+                    if include_payload_previews
+                    else None
+                ),
             )
         elif event.HasField("activity_task_started_event_attributes"):
             started = event.activity_task_started_event_attributes
@@ -267,9 +290,10 @@ async def _collect_activities(
             if activity is not None:
                 activity.status = "completed"
                 activity.closed_at = _event_time(event)
-                activity.result_preview = _payload_preview(
-                    completed.result.payloads if completed.HasField("result") else []
-                )
+                if include_payload_previews:
+                    activity.result_preview = _payload_preview(
+                        completed.result.payloads if completed.HasField("result") else []
+                    )
         elif event.HasField("activity_task_failed_event_attributes"):
             failed = event.activity_task_failed_event_attributes
             activity = _for_scheduled_event(failed.scheduled_event_id)

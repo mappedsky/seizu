@@ -32,9 +32,16 @@ _FAKE_CURRENT_USER = CurrentUser(user=_FAKE_USER, jwt_claims={}, permissions=ALL
 _SQ_ID = "sq-abc123"
 
 
-def _make_app():
+_READONLY_CURRENT_USER = CurrentUser(
+    user=_FAKE_USER,
+    jwt_claims={},
+    permissions=frozenset({"scheduled_queries:read"}),
+)
+
+
+def _make_app(current_user=_FAKE_CURRENT_USER):
     app = create_app()
-    app.dependency_overrides[get_current_user] = lambda: _FAKE_CURRENT_USER
+    app.dependency_overrides[get_current_user] = lambda: current_user
     return app
 
 
@@ -684,7 +691,46 @@ async def test_get_workflow_run_success(mocker):
     body = ret.json()
     assert body["status"] == "failed"
     assert body["activities"][0]["attempts"] == 3
-    detail_mock.assert_awaited_once_with(_SQ_ID, _WORKFLOW_ID, "run-1")
+    detail_mock.assert_awaited_once_with(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=True)
+
+
+async def test_get_workflow_run_readers_get_no_payload_previews(mocker):
+    mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_temporal_sq_item()),
+    )
+    detail_mock = mocker.patch(
+        "reporting.routes.scheduled_queries.temporal_runs.get_workflow_run_detail",
+        new=AsyncMock(
+            return_value=WorkflowRunDetail(
+                workflow_id=_WORKFLOW_ID,
+                run_id="run-1",
+                workflow_name="cve_repo_report",
+                status="completed",
+            )
+        ),
+    )
+    app = _make_app(_READONLY_CURRENT_USER)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get(f"/api/v1/scheduled-queries/{_SQ_ID}/workflow-runs/{quote(_WORKFLOW_ID, safe='')}/run-1")
+    assert ret.status_code == 200
+    detail_mock.assert_awaited_once_with(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=False)
+
+
+async def test_get_workflow_run_requires_temporal_action(mocker):
+    mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
+    detail_mock = mocker.patch(
+        "reporting.routes.scheduled_queries.temporal_runs.get_workflow_run_detail",
+        new=AsyncMock(),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get(f"/api/v1/scheduled-queries/{_SQ_ID}/workflow-runs/{quote(_WORKFLOW_ID, safe='')}/run-1")
+    assert ret.status_code == 404
+    detail_mock.assert_not_awaited()
 
 
 async def test_get_workflow_run_not_found(mocker):

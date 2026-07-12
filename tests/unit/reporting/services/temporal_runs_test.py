@@ -77,14 +77,16 @@ def _mock_handle(events, *, status=temporalio.client.WorkflowExecutionStatus.COM
 def test_workflow_id_matches():
     assert temporal_runs.workflow_id_matches(_SQ_ID, _WORKFLOW_ID)
     # Timestamp segment may itself contain colons.
-    assert temporal_runs.workflow_id_matches("sq1", "seizu:wf:sq1:2024-01-01T00:00:00+00:00")
+    assert temporal_runs.workflow_id_matches("sq1", "seizu:cve_repo_report:sq1:2024-01-01T00:00:00+00:00")
 
 
 def test_workflow_id_matches_rejects_foreign_ids():
     assert not temporal_runs.workflow_id_matches("other-sq", _WORKFLOW_ID)
     assert not temporal_runs.workflow_id_matches(_SQ_ID, f"other:{_SQ_ID}:x:y")
     assert not temporal_runs.workflow_id_matches(_SQ_ID, f"seizu::{_SQ_ID}:x")
-    assert not temporal_runs.workflow_id_matches(_SQ_ID, "seizu:wf")
+    # Workflow-name segment must be a registered workflow.
+    assert not temporal_runs.workflow_id_matches(_SQ_ID, f"seizu:not_a_registered_workflow:{_SQ_ID}:x")
+    assert not temporal_runs.workflow_id_matches(_SQ_ID, "seizu:cve_repo_report")
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +306,47 @@ async def test_get_workflow_run_detail_merges_pending(mocker):
     assert activity.maximum_attempts == 5
     assert activity.last_attempt_failure == "first attempt failed"
     assert activity.started_at == "2024-01-01T00:30:00+00:00"
+
+
+async def test_get_workflow_run_detail_without_payload_previews(mocker):
+    events = [
+        _event(
+            1,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="1",
+                activity_type=common_pb.ActivityType(name="run_repo_report_chat"),
+                input=_payloads({"repo": "org/app"}),
+            ),
+        ),
+        _event(
+            2,
+            activity_task_started_event_attributes=history_pb.ActivityTaskStartedEventAttributes(
+                scheduled_event_id=1,
+                attempt=2,
+                last_failure=failure_pb.Failure(message="attempt 1 crashed"),
+            ),
+        ),
+        _event(
+            3,
+            activity_task_completed_event_attributes=history_pb.ActivityTaskCompletedEventAttributes(
+                scheduled_event_id=1,
+                result=_payloads({"status": "ok"}),
+            ),
+        ),
+    ]
+    handle = _mock_handle(events)
+    _mock_client(mocker, handle=handle)
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=False)
+
+    assert detail is not None
+    activity = detail.activities[0]
+    # Status/attempt/failure detail is kept; payload previews are omitted.
+    assert activity.status == "completed"
+    assert activity.attempts == 2
+    assert activity.last_attempt_failure == "attempt 1 crashed"
+    assert activity.input_preview is None
+    assert activity.result_preview is None
 
 
 async def test_payload_preview_truncates_and_survives_garbage():
