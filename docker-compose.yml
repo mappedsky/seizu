@@ -693,6 +693,10 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_LLM_MODEL
+      # The scheduled-query workflow-runs endpoints read run history live
+      # from Temporal.
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE
       # In dev the project is bind-mounted here; the production image copies
       # the frontend build to /build via the Dockerfile nodebuilder stage.
       - STATIC_FOLDER=/home/seizu/seizu/build

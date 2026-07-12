@@ -17,13 +17,17 @@ Scheduled queries are stored in the database and managed through the Seizu UI or
 
 Navigate to **Scheduled Queries** in the sidebar to view all scheduled queries. From the list you can:
 
-- Click a query name to view its current configuration in a read-only detail dialog.
+- Click a query name to open its details page.
 - Open the **⋮** menu on any row to **Edit**, **Run now**, **View history**, or **Delete** a query.
 - The table shows the trigger type, configured actions, enabled status, current version, latest update timestamp, and who last updated each query.
 
+### Details page
+
+The details page shows the query's status, trigger, version, owner, and last-run outcome alongside its Cypher, parameters, and configured actions, plus any recent run errors. For queries with a `temporal` action it also shows a **Workflow runs** panel with the recent workflow executions and their per-activity status, retries, and failures — see [Run visibility in the UI](temporal-workflows.html#run-visibility-in-the-ui). The **Edit** button and the **⋮** menu (**Run now**, **View history**, **Delete**) mirror the list-row actions.
+
 ### Running a query on demand
 
-Choose **Run now** from the **⋮** menu (requires `scheduled_queries:write`) to request an immediate run. The worker picks the request up on its next poll (`SCHEDULED_QUERY_FREQUENCY`, default a few seconds) and runs the query with its configured actions — **even if the query is disabled**, so you can test a query before enabling it. The same is available via `POST /api/v1/scheduled-queries/<id>/run` and `seizu scheduled-queries run <id>` from the CLI.
+Choose **Run now** from the **⋮** menu — on a list row or on the details page (requires `scheduled_queries:write`) — to request an immediate run. The worker picks the request up on its next poll (`SCHEDULED_QUERY_FREQUENCY`, default a few seconds) and runs the query with its configured actions — **even if the query is disabled**, so you can test a query before enabling it. The same is available via `POST /api/v1/scheduled-queries/<id>/run` and `seizu scheduled-queries run <id>` from the CLI.
 
 ### Creating a scheduled query
 

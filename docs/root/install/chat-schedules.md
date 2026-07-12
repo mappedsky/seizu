@@ -33,7 +33,7 @@ The list shows each schedule's trigger and the status of its last run; run error
 
 ### Running a schedule on demand
 
-Choose **Run now** from a schedule's **⋮** menu (owner only) to request an immediate run without waiting for the trigger. The worker picks the request up on its next poll (`CHAT_SCHEDULES_POLL_SECONDS`) and runs the schedule as usual — **even if it is disabled**, so you can test a schedule before enabling it. The same is available via `POST /api/v1/chat/schedules/<id>/run`.
+Choose **Run now** from a schedule's **⋮** menu — on a list row or on the detail view (owner only) — to request an immediate run without waiting for the trigger. The worker picks the request up on its next poll (`CHAT_SCHEDULES_POLL_SECONDS`) and runs the schedule as usual — **even if it is disabled**, so you can test a schedule before enabling it. The same is available via `POST /api/v1/chat/schedules/<id>/run`.
 
 ## Run sessions
 

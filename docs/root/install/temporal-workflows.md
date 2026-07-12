@@ -43,6 +43,15 @@ Interactive chat requires per-action confirmation before mutating tools run. A h
 
 The same permission gates the chat UI's optional "Bypass confirmations" mode and the `agent_chat` scheduled query action (see the [scheduled queries documentation](scheduled-queries.html)).
 
+## Run visibility in the UI
+
+The scheduled query detail page shows a **Workflow runs** panel for queries with a `temporal` action: the most recent workflow executions (status, start/close time), and per run an expandable breakdown of its activities — status, attempt count (retries), retry state, failure messages (including the previous attempt's failure while retrying), and input/result previews (pretty-printed, syntax-highlighted JSON, truncated server-side). The data is read live from Temporal:
+
+- `GET /api/v1/scheduled-queries/<id>/workflow-runs` lists recent runs via a visibility query on the workflow ID prefix (`seizu:<workflow>:<scheduled_query_id>:`).
+- `GET /api/v1/scheduled-queries/<id>/workflow-runs/<workflow_id>/<run_id>` folds the run's event history (plus pending-activity state for in-flight runs) into the activity breakdown.
+
+Both are gated by `scheduled_queries:read` and refuse workflow IDs not minted for that scheduled query by a registered workflow. Activity **input/result previews** carry query-result rows and activity outputs — more than the scheduled-query definition — so they are included only for callers who also hold `scheduled_queries:write` (only `seizu-admin` among the built-in roles); readers get status, timing, attempts, and failure detail without payloads. The **web service** therefore needs `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE` reachable; when Temporal is down the endpoints return 503 and the panel shows an error. Queries without a temporal action return an empty list (and 404 on run detail) without contacting Temporal, so deployments that don't use Temporal are unaffected. The dev server keeps history in memory, so runs disappear on its restart; for deeper digging (full event payloads, worker state) the Temporal Web UI remains the tool of choice.
+
 ## The cve_repo_report workflow
 
 Input: the scheduled query's result rows, each carrying at least a `repo` key (repository fullname). Per repository, sequentially:
