@@ -12,6 +12,7 @@ import {
   CardContent,
   Chip,
   Grid,
+  Snackbar,
   Typography,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
@@ -21,6 +22,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ForumIcon from '@mui/icons-material/Forum';
 import HistoryIcon from '@mui/icons-material/History';
 import PersonIcon from '@mui/icons-material/Person';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -439,7 +441,8 @@ function ScheduledChatView() {
   const { fromLabel } = (location.state ?? {}) as BackState;
   const { currentUser } = useCurrentUserState();
   const { schedule, loading, error, refresh } = useChatSchedule(id ?? null);
-  const { updateSchedule, deleteSchedule } = useChatSchedules(false);
+  const { updateSchedule, deleteSchedule, runSchedule } =
+    useChatSchedules(false);
   const fetchSessions = useScheduledChatSessions();
 
   const [sessions, setSessions] = useState<ScheduledChatSession[] | null>(null);
@@ -448,6 +451,7 @@ function ScheduledChatView() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -482,7 +486,29 @@ function ScheduledChatView() {
     }
   };
 
+  const handleRunNow = async () => {
+    if (!schedule) return;
+    try {
+      await runSchedule(schedule.scheduled_chat_id);
+      setRunMessage(
+        `Run requested for "${schedule.name}". The worker will pick it up on its next poll.`,
+      );
+    } catch {
+      setRunMessage('Failed to request run. Please try again.');
+    }
+  };
+
   const menuActions: RowMenuAction[] = [
+    {
+      key: 'run',
+      label: 'Run now',
+      icon: <PlayArrowIcon fontSize="small" />,
+      onClick: () => void handleRunNow(),
+      disabled: !canEdit,
+      tooltip: canEdit
+        ? 'Runs on the worker’s next poll, even if disabled'
+        : 'Only the schedule owner can run this scheduled chat.',
+    },
     {
       key: 'history',
       label: 'View history',
@@ -610,6 +636,13 @@ function ScheduledChatView() {
         Delete scheduled chat <strong>{schedule?.name}</strong>? This cannot be
         undone.
       </ConfirmDeleteDialog>
+
+      <Snackbar
+        open={runMessage !== null}
+        autoHideDuration={6000}
+        onClose={() => setRunMessage(null)}
+        message={runMessage}
+      />
     </>
   );
 }

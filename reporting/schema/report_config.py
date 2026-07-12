@@ -280,6 +280,67 @@ class ScheduledQueryRunRequestedResponse(BaseModel):
     run_requested_at: str
 
 
+class WorkflowRunSummary(BaseModel):
+    """A Temporal workflow execution started by a scheduled query's temporal action."""
+
+    workflow_id: str
+    run_id: str
+    workflow_name: str
+    # Lower-cased Temporal WorkflowExecutionStatus: running, completed, failed,
+    # canceled, terminated, continued_as_new, timed_out, or unknown.
+    status: str
+    start_time: str | None = None
+    close_time: str | None = None
+    history_length: int | None = None
+
+
+class WorkflowRunListResponse(BaseModel):
+    runs: list[WorkflowRunSummary]
+
+
+class WorkflowRunActivity(BaseModel):
+    """One activity execution within a workflow run, derived from its history.
+
+    Temporal records retries as a single activity execution whose final
+    attempt count reflects how many activity tasks ran; ``attempts`` plus the
+    failure fields therefore carry the per-task success/failure/retry story.
+    """
+
+    activity_id: str
+    activity_type: str
+    # scheduled, running, cancel_requested, paused, completed, failed,
+    # timed_out, or canceled.
+    status: str
+    attempts: int = 1
+    maximum_attempts: int | None = None
+    scheduled_at: str | None = None
+    started_at: str | None = None
+    closed_at: str | None = None
+    # Lower-cased Temporal RetryState on terminal failure/timeout, e.g.
+    # maximum_attempts_reached or non_retryable_failure.
+    retry_state: str | None = None
+    # Terminal failure summary (message chain).
+    failure: str | None = None
+    # Failure that caused the most recent retry (previous attempt's failure).
+    last_attempt_failure: str | None = None
+    input_preview: str | None = None
+    result_preview: str | None = None
+
+
+class WorkflowRunDetail(BaseModel):
+    """A workflow run with its activity breakdown."""
+
+    workflow_id: str
+    run_id: str
+    workflow_name: str
+    status: str
+    start_time: str | None = None
+    close_time: str | None = None
+    # Workflow-level terminal failure summary, when the run failed.
+    failure: str | None = None
+    activities: list[WorkflowRunActivity] = Field(default_factory=list)
+
+
 class ActionConfigFieldDef(BaseModel):
     """Describes a single field in an action module's config schema."""
 

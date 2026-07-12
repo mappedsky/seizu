@@ -108,6 +108,7 @@ describe('ScheduledChatView', () => {
       createSchedule: jest.fn(),
       updateSchedule: jest.fn(),
       deleteSchedule: jest.fn(),
+      runSchedule: jest.fn(),
     });
     mockUseScheduledChatSessions.mockReturnValue(
       jest.fn().mockResolvedValue([
@@ -171,6 +172,32 @@ describe('ScheduledChatView', () => {
     expect(screen.getByText('Summarize new critical CVEs')).toBeInTheDocument();
     expect(screen.getByText('v3')).toBeInTheDocument();
     expect(screen.getByText('user-1')).toBeInTheDocument();
+  });
+
+  it('Run now requests a run and shows a confirmation snackbar', async () => {
+    const runSchedule = jest.fn().mockResolvedValue(undefined);
+    mockUseChatSchedules.mockReturnValue({
+      schedules: [],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+      createSchedule: jest.fn(),
+      updateSchedule: jest.fn(),
+      deleteSchedule: jest.fn(),
+      runSchedule,
+    });
+
+    render(<ScheduledChatView />, { wrapper: Wrapper });
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Run now' }));
+    await act(async () => {});
+
+    expect(runSchedule).toHaveBeenCalledWith('sc1');
+    expect(
+      screen.getByText(/run requested for "daily cve digest"/i),
+    ).toBeInTheDocument();
   });
 
   it('expands a run to show the transcript with a details section', async () => {

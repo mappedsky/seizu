@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from reporting.authnz import CurrentUser, require_permission
@@ -14,8 +14,10 @@ from reporting.schema.report_config import (
     ScheduledQueryRunRequestedResponse,
     ScheduledQueryVersion,
     ScheduledQueryVersionListResponse,
+    WorkflowRunDetail,
+    WorkflowRunListResponse,
 )
-from reporting.services import report_store
+from reporting.services import report_store, temporal_runs
 from reporting.services.query_validator import validate_query
 from reporting.services.scheduled_query_validation import validate_action_configs
 
@@ -137,6 +139,60 @@ async def run_scheduled_query(
         extra={"type": "AUDIT", "scheduled_query_id": sq_id, "user": current.user.user_id},
     )
     return ScheduledQueryRunRequestedResponse(scheduled_query_id=sq_id, run_requested_at=run_requested_at)
+
+
+@router.get(
+    "/api/v1/scheduled-queries/{sq_id}/workflow-runs",
+    response_model=WorkflowRunListResponse,
+)
+async def list_scheduled_query_workflow_runs(
+    sq_id: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_READ)),
+) -> WorkflowRunListResponse:
+    """List recent Temporal workflow runs started by this query's temporal action.
+
+    Returns an empty list without contacting Temporal when the query has no
+    temporal action, so the endpoint is safe on deployments where Temporal
+    isn't configured.
+    """
+    item = await report_store.get_scheduled_query(sq_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Scheduled query not found")
+    if not any(action.get("action_type") == "temporal" for action in item.actions):
+        return WorkflowRunListResponse(runs=[])
+    try:
+        runs = await temporal_runs.list_workflow_runs(sq_id, limit=limit)
+    except temporal_runs.TemporalUnavailableError:
+        raise HTTPException(status_code=503, detail="Temporal is unavailable")
+    return WorkflowRunListResponse(runs=runs)
+
+
+@router.get(
+    "/api/v1/scheduled-queries/{sq_id}/workflow-runs/{workflow_id}/{run_id}",
+    response_model=WorkflowRunDetail,
+)
+async def get_scheduled_query_workflow_run(
+    sq_id: str,
+    workflow_id: str,
+    run_id: str,
+    current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_READ)),
+) -> WorkflowRunDetail:
+    """Return one workflow run's activity breakdown (status, attempts, failures).
+
+    Workflow ids not minted for this scheduled query are treated as not found,
+    so the endpoint can't read arbitrary workflows in the namespace.
+    """
+    item = await report_store.get_scheduled_query(sq_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Scheduled query not found")
+    try:
+        detail = await temporal_runs.get_workflow_run_detail(sq_id, workflow_id, run_id)
+    except temporal_runs.TemporalUnavailableError:
+        raise HTTPException(status_code=503, detail="Temporal is unavailable")
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return detail
 
 
 @router.get(

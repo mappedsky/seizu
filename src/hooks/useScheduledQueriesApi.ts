@@ -74,6 +74,43 @@ export interface ScheduledQueryRequest {
   comment?: string | null;
 }
 
+export interface WorkflowRunSummary {
+  workflow_id: string;
+  run_id: string;
+  workflow_name: string;
+  status: string;
+  start_time: string | null;
+  close_time: string | null;
+  history_length: number | null;
+}
+
+export interface WorkflowRunActivity {
+  activity_id: string;
+  activity_type: string;
+  status: string;
+  attempts: number;
+  maximum_attempts: number | null;
+  scheduled_at: string | null;
+  started_at: string | null;
+  closed_at: string | null;
+  retry_state: string | null;
+  failure: string | null;
+  last_attempt_failure: string | null;
+  input_preview: string | null;
+  result_preview: string | null;
+}
+
+export interface WorkflowRunDetail {
+  workflow_id: string;
+  run_id: string;
+  workflow_name: string;
+  status: string;
+  start_time: string | null;
+  close_time: string | null;
+  failure: string | null;
+  activities: WorkflowRunActivity[];
+}
+
 function getApiHeaders(accessToken: string | null): Record<string, string> {
   const headers: Record<string, string> = {};
   if (accessToken) {
@@ -200,6 +237,70 @@ export function useScheduledQueryVersionsList(sqId: string | null): {
   }, [sqId, accessToken, auth_required]);
 
   return { versions, loading, error };
+}
+
+export function useScheduledQueryWorkflowRuns(
+  id: string | null,
+  enabled: boolean,
+): {
+  runs: WorkflowRunSummary[] | null;
+  error: Error | null;
+} {
+  const { accessToken } = useContext(AuthContext);
+  const { auth_required } = useContext(AuthConfigContext);
+  const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    if (!id || !enabled) return undefined;
+    if (auth_required && !accessToken) return undefined;
+
+    let cancelled = false;
+    fetch(`/api/v1/scheduled-queries/${encodeURIComponent(id)}/workflow-runs`, {
+      headers: getApiHeaders(accessToken),
+    })
+      .then((res) => {
+        if (!res.ok)
+          throw new Error(`Failed to load workflow runs: ${res.status}`);
+        return res.json();
+      })
+      .then((data: { runs: WorkflowRunSummary[] }) => {
+        if (!cancelled) setRuns(data.runs ?? []);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, enabled, accessToken, auth_required]);
+
+  return { runs, error };
+}
+
+export function useWorkflowRunDetail(): (
+  sqId: string,
+  workflowId: string,
+  runId: string,
+) => Promise<WorkflowRunDetail> {
+  const { accessToken } = useContext(AuthContext);
+
+  return useCallback(
+    async (
+      sqId: string,
+      workflowId: string,
+      runId: string,
+    ): Promise<WorkflowRunDetail> => {
+      const res = await fetch(
+        `/api/v1/scheduled-queries/${encodeURIComponent(sqId)}/workflow-runs/${encodeURIComponent(workflowId)}/${encodeURIComponent(runId)}`,
+        { headers: getApiHeaders(accessToken) },
+      );
+      if (!res.ok)
+        throw new Error(`Failed to load workflow run: ${res.status}`);
+      return res.json();
+    },
+    [accessToken],
+  );
 }
 
 export function useScheduledQueriesMutations(): {
