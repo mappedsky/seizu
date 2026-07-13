@@ -4,6 +4,172 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-13
+
+The headline of this release is a **LangGraph-backed AI chat assistant** with
+MCP tool integration, plus everything built on top of it over the following
+seven weeks: recurring **scheduled chats**, **Temporal workflow**
+orchestration, a **sandboxed code-execution** tool, and an end-to-end
+**automated CVE dependency remediation** pipeline that opens PRs from an
+AI coding agent. Also: run-now for scheduled queries/chats, minute-granularity
+structured schedules, and live panel previews in the report editor.
+
+This is an additive, opt-in release — no required configuration changes and
+no removed functionality. Chat and everything built on it are off by default
+(`CHAT_ENABLED=false`); see [Upgrade notes](#upgrade-notes-310) for what to
+set to turn it on, and the one API behavior change worth knowing about before
+you deploy.
+
+### Added
+
+**Chat assistant** (#173)
+- `POST /api/v1/chat/stream` (SSE, Vercel AI SDK UI Message Stream) and
+  `GET /api/v1/chat/history` back a new chat UI at `/app/chat`. Multi-provider
+  LLM support via LiteLLM (`CHAT_LLM_PROVIDER`/`CHAT_LLM_MODEL`), progressive
+  MCP tool/skill disclosure, Markdoc-rendered responses, and a user-approval
+  ("confirmation") flow for mutating tool calls, grouped per LLM turn.
+- New permissions: `chat:use` (Viewer+), `chat:tools:call` / `chat:skills:call`
+  (Editor+) — gate the endpoint and tool/skill execution on top of each tool's
+  own underlying permission.
+- Gated end-to-end by `CHAT_ENABLED` (default **off**); once enabled,
+  `CHAT_LLM_PROVIDER` defaults to keyless `mock` echo mode until a real
+  provider is configured.
+
+**Scheduled chats & headless agent runs** (#191, #192)
+- Recurring headless agent runs (prompt + trigger, no Cypher) managed from a
+  new `/app/scheduled-chats` page, with full version history and a run-session
+  viewer. Hourly/daily/monthly schedules and watch-scan triggers.
+- Headless runs execute as the schedule's *creator*, under their own RBAC.
+  Confirmation bypass is gated by the new `chat:bypass_permissions`
+  permission (Editor+) and AUDIT-logged per call.
+- New permissions: `chat:schedule` (Editor+, owner-scoped CRUD),
+  `chat:schedule:read_all` (Admin, cross-user visibility).
+- Dedicated detail pages for both scheduled chats and scheduled queries
+  (`/app/scheduled-chats/:id`, `/app/scheduled-queries/:id`), replacing the
+  old list-page modal.
+
+**Temporal workflows** (#191, #212)
+- New `temporal` scheduled-query action starts a named, deterministic
+  Temporal workflow with the query results; `python -m reporting.temporal_worker`
+  hosts workflow/activity code. Ships with `cve_repo_report` (per-repo CVE
+  assessment chats) and `cve_dependency_remediation` (below).
+  `TEMPORAL_ENABLED_WORKFLOWS` allowlists dispatchable workflows.
+- Scheduled query detail pages now show past workflow runs with a per-activity
+  breakdown (status, attempts, retries, failures, input/result previews);
+  payload previews require `scheduled_queries:write`.
+
+**Sandbox delegation** (#198)
+- `sandbox__delegate`, a chat-only built-in that lets the agent delegate code
+  execution and file operations (`run_python`, `run_bash`, `read_file`,
+  `write_file`, `list_files`) to an ephemeral, network-isolated E2B sandbox,
+  with the run's own tool calls surfaced live in the chat UI. Gated by
+  `SANDBOX_ENABLED` (default **off**) and the new `sandbox:delegate`
+  permission (Editor+).
+
+**Automated CVE dependency remediation** (#201, #205, #210)
+- The `cve_dependency_remediation` Temporal workflow runs a headless coding
+  agent (Claude Code, Codex, or opencode) in ephemeral sandboxes to upgrade a
+  vulnerable dependency — including any compatibility code changes — and open
+  a PR, with two-sandbox credential isolation so the GitHub token never shares
+  a VM with untrusted agent/repo code.
+- Post-push, the workflow watches the PR's CI and, on upgrade-caused failures,
+  runs bounded fix-mode agent sessions or posts a triage comment for unrelated
+  failures.
+- Optional fork mode (`REMEDIATION_USE_FORK`) for orgs that don't want the bot
+  writing branches directly into target repositories.
+- No per-user permission and no single enable flag — reachable only through an
+  admin-managed scheduled query's `temporal` action, and only runs when
+  `REMEDIATION_GITHUB_TOKEN` + an agent API key are configured.
+
+**Scheduling improvements** (#206, #209)
+- **Run now**: `POST /api/v1/scheduled-queries/{id}/run` and
+  `POST /api/v1/chat/schedules/{id}/run` trigger an immediate run on the next
+  worker poll, even when the job is disabled. Surfaced as a row action, a
+  `seizu scheduled-queries run <id>` CLI command, and an MCP builtin.
+- **Structured schedules** for scheduled queries, extended to minute
+  granularity: the `schedule` field (`interval`/`hourly`/`daily`/`monthly`,
+  all UTC) generalizes the scheduled-chats scheduling model. The legacy
+  `frequency` field still works but is deprecated; editing a legacy query in
+  the UI migrates it to an equivalent schedule on save.
+
+**Report editing** (#195)
+- Report edit mode now renders **live panels** reflecting unsaved edits
+  (Cypher/params/settings) instead of static skeletons, using the same
+  ad-hoc, read-only query path every report editor already has access to.
+
+**Other**
+- `GET /api/v1/graph/schema` now also returns index metadata (#173).
+- New `GET /api/v1/sync-metadata/values` backs autocomplete for watch-scan
+  fields (#191).
+- Report authoring skillset seeded for the chat agent (staged
+  clone-review-apply-cleanup workflow for report changes) (#200).
+- Tagged development release publishing: dev-tagged builds now publish
+  matching GHCR images for the full app, server, and CLI (#199).
+
+### Changed
+
+- `POST /api/v1/query/{adhoc,report,history}` now return **400** with
+  `{"errors": [...], "warnings": [...]}` for Neo4j `ClientError`s (bad Cypher,
+  constraint violations, etc.), instead of the previous **500** with
+  `{"error", "code", "details"}`. Other Neo4j errors still return 500
+  unchanged (#191).
+- Dependabot now only opens PRs for security advisories, not routine version
+  bumps (#189).
+
+### Security
+
+- Bumped `cryptography`, `pyjwt`, `python-multipart`, `starlette`, and
+  `aiohttp` to patched versions, closing several HIGH-severity advisories
+  (SSRF, DoS, algorithm-confusion/forgery) (#194).
+- Bumped `langsmith`, `pydantic-settings`, `vite`, `ws`, `markdown-it`, and
+  `@babel/core` to patched versions (#197).
+- Bumped `joserfc` 1.6.5 → 1.6.8 (#202) and `starlette` 1.0.0 → 1.0.1 (#181).
+
+### Configuration
+
+This release adds a large family of new, all-optional settings for chat,
+scheduled chats, Temporal, sandbox delegation, and CVE remediation — see
+`.env.example` / `reporting/settings.py` for the full list. The ones worth
+knowing before you deploy:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHAT_ENABLED` | `false` | Registers chat routes/UI/checkpoint storage |
+| `CHAT_LLM_PROVIDER` | `mock` | `mock` = keyless echo; any other value routes through LiteLLM |
+| `CHAT_SCHEDULES_ENABLED` | `true` | Scheduled chats routes/UI/worker (no-op unless `CHAT_ENABLED=true`) |
+| `SANDBOX_ENABLED` | `false` | `sandbox__delegate` chat tool |
+| `TEMPORAL_WORKER_ENABLED` | `true` | Gates the separate `seizu-temporal-worker` process only |
+| `REMEDIATION_GITHUB_TOKEN` | — | Enables CVE dependency remediation once set (+ an agent API key) |
+
+New docker-compose services (dev only, not profile-gated): `temporal`,
+`minio` (+ `minio-create-bucket`), `postgres-create-chat-checkpoint-db`,
+`seizu-scheduled-chats`, `seizu-temporal-worker`. `make up` now pulls and
+starts these by default.
+
+### Upgrade notes {#upgrade-notes-310}
+
+1. **Chat is off by default.** `CHAT_ENABLED=false` means upgrading changes
+   nothing for existing deployments — no new nav item, no new routes, no
+   checkpoint storage initialized. To turn it on, set `CHAT_ENABLED=true`;
+   `CHAT_LLM_PROVIDER` defaults to keyless, deterministic `mock` echo mode
+   until you also configure a real provider, so enabling it is still safe to
+   do before wiring up an LLM.
+2. **Built-in roles already carry the new chat permissions**, inert until you
+   enable the feature: once `CHAT_ENABLED=true`, Viewer gets `chat:use`;
+   Editor additionally gets `chat:tools:call`, `chat:skills:call`,
+   `chat:bypass_permissions`, `chat:schedule`, and `sandbox:delegate`; Admin
+   additionally gets `chat:schedule:read_all`. If you use custom (non-built-in)
+   roles, review whether they should include these before enabling chat.
+3. **If you parse query-endpoint error responses**, note the shape/status
+   change for Neo4j `ClientError`s described above.
+4. **SQL backend**: new tables/columns are created/added automatically on
+   startup (inline `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations,
+   consistent with the existing pattern) — no manual migration step.
+5. To enable **CVE dependency remediation**, set `REMEDIATION_GITHUB_TOKEN`
+   and an agent API key, then add a `temporal` action (workflow
+   `cve_dependency_remediation`) to a watch-scan scheduled query. Everyone
+   else is unaffected.
+
 ## [3.0.0] - 2026-05-23
 
 The headline of this release is a security-hardening rewrite of the browser

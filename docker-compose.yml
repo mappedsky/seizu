@@ -620,8 +620,8 @@ services:
       - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
       - DYNAMODB_REGION=us-east-1
       - DYNAMODB_CREATE_TABLE=true
-      # Chat assistant — set CHAT_ENABLED=false in .env to disable the feature
-      # (routes + checkpoint init + UI). Defaults to true when unset.
+      # Chat assistant — set CHAT_ENABLED=true in .env to enable the feature
+      # (routes + checkpoint init + UI). Defaults to false when unset.
       - CHAT_ENABLED
       - CHAT_LLM_PROVIDER
       - CHAT_LLM_MODEL

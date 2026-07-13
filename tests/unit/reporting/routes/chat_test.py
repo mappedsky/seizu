@@ -75,6 +75,11 @@ class FakeDetailChatGraph(FakeChatGraph):
         yield {"kind": "token", "content": "Schema has CVEs."}
 
 
+@pytest.fixture(autouse=True)
+def _chat_enabled(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", True)
+
+
 def _current_user(permissions: frozenset[str] = ALL_PERMISSIONS) -> CurrentUser:
     return CurrentUser(user=_FAKE_USER, jwt_claims={}, permissions=permissions)
 
