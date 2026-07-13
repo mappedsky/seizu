@@ -477,7 +477,7 @@ SQL_DATABASE_PASSWORD = str_env("SQL_DATABASE_PASSWORD", "")
 # Master switch for the chat assistant. When false the chat routes are not
 # registered, checkpoint storage is not initialized, and the frontend hides the
 # Chat UI (surfaced via GET /api/v1/config -> features.chat).
-CHAT_ENABLED = bool_env("CHAT_ENABLED", True)
+CHAT_ENABLED = bool_env("CHAT_ENABLED", False)
 
 # LLM provider sentinel for the chat assistant. "mock" keeps local/dev chat
 # deterministic and keyless; any other value routes through LiteLLM, so the

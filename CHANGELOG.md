@@ -15,8 +15,10 @@ AI coding agent. Also: run-now for scheduled queries/chats, minute-granularity
 structured schedules, and live panel previews in the report editor.
 
 This is an additive, opt-in release — no required configuration changes and
-no removed functionality. See [Upgrade notes](#upgrade-notes-310) for the one
-behavior change worth knowing about before you deploy.
+no removed functionality. Chat and everything built on it are off by default
+(`CHAT_ENABLED=false`); see [Upgrade notes](#upgrade-notes-310) for what to
+set to turn it on, and the one API behavior change worth knowing about before
+you deploy.
 
 ### Added
 
@@ -29,8 +31,9 @@ behavior change worth knowing about before you deploy.
 - New permissions: `chat:use` (Viewer+), `chat:tools:call` / `chat:skills:call`
   (Editor+) — gate the endpoint and tool/skill execution on top of each tool's
   own underlying permission.
-- Gated end-to-end by `CHAT_ENABLED` (default **on**, `CHAT_LLM_PROVIDER`
-  defaults to keyless `mock` echo mode) — see upgrade notes.
+- Gated end-to-end by `CHAT_ENABLED` (default **off**); once enabled,
+  `CHAT_LLM_PROVIDER` defaults to keyless `mock` echo mode until a real
+  provider is configured.
 
 **Scheduled chats & headless agent runs** (#191, #192)
 - Recurring headless agent runs (prompt + trigger, no Cypher) managed from a
@@ -131,9 +134,9 @@ knowing before you deploy:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CHAT_ENABLED` | `true` | Registers chat routes/UI/checkpoint storage |
+| `CHAT_ENABLED` | `false` | Registers chat routes/UI/checkpoint storage |
 | `CHAT_LLM_PROVIDER` | `mock` | `mock` = keyless echo; any other value routes through LiteLLM |
-| `CHAT_SCHEDULES_ENABLED` | `true` | Scheduled chats routes/UI/worker (requires `CHAT_ENABLED`) |
+| `CHAT_SCHEDULES_ENABLED` | `true` | Scheduled chats routes/UI/worker (no-op unless `CHAT_ENABLED=true`) |
 | `SANDBOX_ENABLED` | `false` | `sandbox__delegate` chat tool |
 | `TEMPORAL_WORKER_ENABLED` | `true` | Gates the separate `seizu-temporal-worker` process only |
 | `REMEDIATION_GITHUB_TOKEN` | — | Enables CVE dependency remediation once set (+ an agent API key) |
@@ -145,17 +148,18 @@ starts these by default.
 
 ### Upgrade notes {#upgrade-notes-310}
 
-1. **Chat is on by default in safe mode.** `CHAT_ENABLED=true` +
-   `CHAT_LLM_PROVIDER=mock` means every upgraded deployment gets a visible
-   Chat nav item and a working (keyless, deterministic-echo) chat UI, with no
-   outbound LLM calls, until you configure a real provider. Set
-   `CHAT_ENABLED=false` to hide it entirely.
-2. **Existing built-in roles pick up new chat capabilities automatically**:
-   Viewer gets `chat:use`; Editor additionally gets `chat:tools:call`,
-   `chat:skills:call`, `chat:bypass_permissions`, `chat:schedule`, and
-   `sandbox:delegate`; Admin additionally gets `chat:schedule:read_all`. If
-   you use custom (non-built-in) roles, review whether they should include
-   these.
+1. **Chat is off by default.** `CHAT_ENABLED=false` means upgrading changes
+   nothing for existing deployments — no new nav item, no new routes, no
+   checkpoint storage initialized. To turn it on, set `CHAT_ENABLED=true`;
+   `CHAT_LLM_PROVIDER` defaults to keyless, deterministic `mock` echo mode
+   until you also configure a real provider, so enabling it is still safe to
+   do before wiring up an LLM.
+2. **Built-in roles already carry the new chat permissions**, inert until you
+   enable the feature: once `CHAT_ENABLED=true`, Viewer gets `chat:use`;
+   Editor additionally gets `chat:tools:call`, `chat:skills:call`,
+   `chat:bypass_permissions`, `chat:schedule`, and `sandbox:delegate`; Admin
+   additionally gets `chat:schedule:read_all`. If you use custom (non-built-in)
+   roles, review whether they should include these before enabling chat.
 3. **If you parse query-endpoint error responses**, note the shape/status
    change for Neo4j `ClientError`s described above.
 4. **SQL backend**: new tables/columns are created/added automatically on

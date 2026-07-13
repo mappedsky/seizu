@@ -1,3 +1,4 @@
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -7,6 +8,11 @@ from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledC
 from reporting.schema.report_config import User
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _chat_enabled(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", True)
 
 _FAKE_USER = User(
     user_id="test-user-id",
