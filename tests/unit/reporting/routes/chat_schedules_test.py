@@ -14,6 +14,7 @@ _NOW = "2024-01-01T00:00:00+00:00"
 def _chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
 
+
 _FAKE_USER = User(
     user_id="test-user-id",
     sub="sub",
