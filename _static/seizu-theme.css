@@ -1,0 +1,270 @@
+/*
+ * Seizu documentation theme overrides.
+ *
+ * The splash page is a custom template with its own embedded art direction.
+ * These styles target Shibuya-rendered documentation pages only.
+ */
+
+html.light,
+html.dark {
+  --brand-space: #0a0f22;
+  --brand-paper: #f5f6fb;
+  --brand-starlight: #8fb4ff;
+  --brand-starlight-dark: #3a5aa5;
+  --brand-ember: #f5c16c;
+  --brand-ember-dark: #c77b2a;
+  --brand-aurora: #7ad4b3;
+  --brand-aurora-dark: #2e8866;
+  --brand-pulsar: #c9a8ff;
+  --brand-pulsar-dark: #7352b8;
+  --brand-flare: #f08b7b;
+  --brand-flare-dark: #b5463a;
+  --brand-beacon: #5dd1f0;
+  --brand-beacon-dark: #1f7fa3;
+}
+
+html.light {
+  --sy-c-background: #ffffff;
+  --sy-c-background-contrast: var(--brand-space);
+  --sy-c-background-dropback: rgba(10, 15, 34, 0.08);
+  --sy-c-surface: var(--brand-paper);
+  --sy-c-overlay: #ffffff;
+  --sy-c-border: rgba(10, 15, 34, 0.14);
+  --sy-c-divider: rgba(10, 15, 34, 0.12);
+  --sy-c-text: #172036;
+  --sy-c-heading: var(--brand-space);
+  --sy-c-bold: var(--brand-space);
+  --sy-c-light: #52617c;
+  --sy-c-link: var(--brand-starlight-dark);
+  --sy-c-link-hover: #25427f;
+  --sy-c-foot-background: var(--brand-space);
+  --sy-c-foot-divider: rgba(143, 180, 255, 0.18);
+  --sy-c-foot-text: rgba(245, 246, 251, 0.78);
+
+  --accent-1: #fbfdff;
+  --accent-2: #f2f6ff;
+  --accent-3: rgba(143, 180, 255, 0.12);
+  --accent-4: rgba(143, 180, 255, 0.18);
+  --accent-5: rgba(143, 180, 255, 0.25);
+  --accent-6: rgba(143, 180, 255, 0.34);
+  --accent-7: rgba(58, 90, 165, 0.42);
+  --accent-8: rgba(58, 90, 165, 0.58);
+  --accent-9: var(--brand-starlight-dark);
+  --accent-10: #2f4d91;
+  --accent-11: var(--brand-starlight-dark);
+  --accent-12: var(--brand-space);
+  --accent-a2: rgba(143, 180, 255, 0.08);
+  --accent-a3: rgba(143, 180, 255, 0.12);
+  --accent-a4: rgba(143, 180, 255, 0.18);
+  --accent-a8: rgba(58, 90, 165, 0.52);
+  --accent-a9: rgba(58, 90, 165, 0.72);
+  --accent-a11: var(--brand-starlight-dark);
+  --accent-contrast: #ffffff;
+
+  --code-block-background: #f0f3fb;
+  --code-block-caption-background: rgba(143, 180, 255, 0.12);
+  --code-block-highlight: rgba(245, 193, 108, 0.20);
+}
+
+html.dark {
+  --sy-c-background: var(--brand-space);
+  --sy-c-background-contrast: var(--brand-paper);
+  --sy-c-background-dropback: rgba(0, 0, 0, 0.36);
+  --sy-c-surface: rgba(143, 180, 255, 0.06);
+  --sy-c-overlay: #111832;
+  --sy-c-border: rgba(143, 180, 255, 0.20);
+  --sy-c-divider: rgba(143, 180, 255, 0.14);
+  --sy-c-text: #e8edf8;
+  --sy-c-heading: var(--brand-paper);
+  --sy-c-bold: #ffffff;
+  --sy-c-light: #aab8d6;
+  --sy-c-link: var(--brand-starlight);
+  --sy-c-link-hover: #b8ceff;
+  --sy-c-foot-background: #070b18;
+  --sy-c-foot-divider: rgba(143, 180, 255, 0.14);
+  --sy-c-foot-text: rgba(245, 246, 251, 0.72);
+
+  --accent-1: #0d1328;
+  --accent-2: #111936;
+  --accent-3: rgba(143, 180, 255, 0.08);
+  --accent-4: rgba(143, 180, 255, 0.12);
+  --accent-5: rgba(143, 180, 255, 0.18);
+  --accent-6: rgba(143, 180, 255, 0.25);
+  --accent-7: rgba(143, 180, 255, 0.34);
+  --accent-8: rgba(143, 180, 255, 0.52);
+  --accent-9: var(--brand-starlight);
+  --accent-10: #a8c4ff;
+  --accent-11: var(--brand-starlight);
+  --accent-12: #dbe6ff;
+  --accent-a2: rgba(143, 180, 255, 0.08);
+  --accent-a3: rgba(143, 180, 255, 0.12);
+  --accent-a4: rgba(143, 180, 255, 0.18);
+  --accent-a8: rgba(143, 180, 255, 0.52);
+  --accent-a9: rgba(143, 180, 255, 0.72);
+  --accent-a11: var(--brand-starlight);
+  --accent-contrast: var(--brand-space);
+
+  --code-block-background: rgba(143, 180, 255, 0.06);
+  --code-block-caption-background: rgba(143, 180, 255, 0.10);
+  --code-block-highlight: rgba(245, 193, 108, 0.16);
+}
+
+html.light,
+html.dark {
+  --docsearch-primary-color: var(--accent-9);
+  --docsearch-highlight-color: var(--accent-11);
+  --docsearch-focus-color: var(--accent-a8);
+}
+
+body {
+  background: var(--sy-c-background);
+}
+
+.sy-head {
+  border-bottom: 1px solid var(--sy-c-divider);
+}
+
+.sy-head-blur {
+  background: color-mix(in srgb, var(--sy-c-background) 88%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.sy-head-brand strong {
+  color: var(--sy-c-heading);
+  font-weight: 800;
+}
+
+.sy-head-socials a:hover,
+.theme-switch:hover,
+.sy-head-links a:hover {
+  color: var(--sy-c-link-hover);
+}
+
+.globaltoc .caption {
+  color: var(--brand-ember-dark);
+  border-top-color: var(--sy-c-divider);
+}
+
+html.dark .globaltoc .caption {
+  color: var(--brand-ember);
+}
+
+.globaltoc > ul a.current,
+.globaltoc li.toctree-l2.current,
+.localtoc > ul li.active > a {
+  color: var(--sy-c-link);
+}
+
+.globaltoc li.toctree-l2.current {
+  border-left-color: var(--brand-ember-dark);
+}
+
+html.dark .globaltoc li.toctree-l2.current {
+  border-left-color: var(--brand-ember);
+}
+
+.yue a {
+  color: var(--sy-c-link);
+  border-bottom-color: color-mix(in srgb, var(--sy-c-link) 42%, transparent);
+}
+
+.yue a:hover {
+  color: var(--sy-c-link-hover);
+  border-bottom-color: var(--sy-c-link-hover);
+}
+
+.yue h1,
+.yue h2,
+.yue h3 {
+  color: var(--sy-c-heading);
+}
+
+.yue h2 {
+  border-bottom-color: var(--sy-c-divider);
+}
+
+.yue h2::before,
+.yue h3::before {
+  color: var(--brand-ember-dark);
+}
+
+html.dark .yue h2::before,
+html.dark .yue h3::before {
+  color: var(--brand-ember);
+}
+
+.yue code:not(pre code) {
+  color: var(--sy-c-heading);
+  background: var(--accent-a3);
+  border: 1px solid var(--accent-a4);
+}
+
+.yue .highlight,
+.yue .highlight pre,
+.yue div[class^="highlight"] {
+  background: var(--code-block-background);
+}
+
+.yue .highlight,
+.yue .literal-block-wrapper {
+  border-color: var(--sy-c-border);
+}
+
+.yue table {
+  border-color: var(--sy-c-border);
+}
+
+.yue thead {
+  background: var(--accent-a3);
+}
+
+.yue th {
+  color: var(--sy-c-heading);
+}
+
+.yue tbody tr:nth-child(odd) {
+  background: color-mix(in srgb, var(--sy-c-surface) 72%, transparent);
+}
+
+.yue tbody tr:hover {
+  background: var(--accent-a3);
+}
+
+.yue blockquote,
+.yue .admonition,
+.yue details {
+  border-color: var(--sy-c-border);
+  background: var(--sy-c-surface);
+}
+
+.yue .admonition-title {
+  color: var(--sy-c-heading);
+}
+
+.searchbox {
+  border-color: var(--sy-c-border);
+  background: var(--sy-c-surface);
+}
+
+.searchbox:focus-within {
+  border-color: var(--sy-c-link);
+  box-shadow: 0 0 0 3px var(--accent-a3);
+}
+
+.navigation {
+  border-top-color: var(--sy-c-divider);
+}
+
+.navigation a:hover {
+  color: var(--sy-c-link-hover);
+}
+
+.sy-foot {
+  background: var(--sy-c-foot-background);
+  color: var(--sy-c-foot-text);
+  border-top: 1px solid var(--sy-c-foot-divider);
+}
+
+.sy-foot a:hover {
+  color: var(--brand-starlight);
+}

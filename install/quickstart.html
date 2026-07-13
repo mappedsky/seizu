@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Quickstart - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Backend Installation &amp; Configuration" href="backend.html" /><link rel="prev" title="Seizu (星図)" href="../index.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Quickstart"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#running-on-a-vm-or-remote-host">Running on a VM or remote host</a></li>
+<li><a class="reference internal" href="#seeding-reports">Seeding reports</a></li>
+<li><a class="reference internal" href="#loading-cve-data">Loading CVE data</a></li>
+<li><a class="reference internal" href="#loading-github-data">Loading GitHub data</a></li>
+<li><a class="reference internal" href="#enriching-cve-metadata">Enriching CVE metadata</a></li>
+<li><a class="reference internal" href="#testing-authentication">Testing authentication</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Quickstart</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="quickstart">
+<h1>Quickstart<a class="headerlink" href="#quickstart" title="Link to this heading">#</a></h1>
+<p>A full docker-compose setup is included that can start neo4j, dynamodb, telegraf, seizu (and its workers), and can provide a quick way of running cartography to load your neo4j database with data.</p>
+<p>First clone the seizu repo:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">git<span class="w"> </span>clone<span class="w"> </span>https://github.com/mappedsky/seizu
+</span><span data-line="2"><span class="nb">cd</span><span class="w"> </span>seizu
+</span></pre></div>
+</div>
+<p>Start the stack:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>up
+</span></pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">up</span></code> streams logs to your terminal. Once fully started, the UI will be accessible at: http://localhost:3000</p>
+<p>The backend API (and MCP server) is accessible at: http://localhost:8080</p>
+<section id="running-on-a-vm-or-remote-host">
+<h2>Running on a VM or remote host<a class="headerlink" href="#running-on-a-vm-or-remote-host" title="Link to this heading">#</a></h2>
+<p>If the docker-compose stack is running on a virtual machine or remote host rather than your local machine, you must forward the relevant ports over SSH before the UI and MCP clients can reach the stack. Only ports 3000 and 8080 are exposed to the host by the default compose configuration:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Port</p></th>
+<th class="head"><p>Service</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>3000</p></td>
+<td><p>Frontend dev server (UI)</p></td>
+</tr>
+<tr class="row-odd"><td><p>8080</p></td>
+<td><p>Backend API and MCP server</p></td>
+</tr>
+<tr class="row-even"><td><p>9000</p></td>
+<td><p>Authentik OIDC provider (only when the <code class="docutils literal notranslate"><span class="pre">auth</span></code> profile is active)</p></td>
+</tr>
+<tr class="row-odd"><td><p>8888</p></td>
+<td><p>Claude MCP OAuth callback (only when using Claude with auth enabled)</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Forward ports with SSH local port forwarding:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># Basic stack (no auth)</span>
+</span><span data-line="2">ssh<span class="w"> </span>-L<span class="w"> </span><span class="m">3000</span>:localhost:3000<span class="w"> </span>-L<span class="w"> </span><span class="m">8080</span>:localhost:8080<span class="w"> </span>user@vm-host
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># With Authentik auth enabled</span>
+</span><span data-line="5">ssh<span class="w"> </span>-L<span class="w"> </span><span class="m">3000</span>:localhost:3000<span class="w"> </span>-L<span class="w"> </span><span class="m">8080</span>:localhost:8080<span class="w"> </span>-L<span class="w"> </span><span class="m">9000</span>:localhost:9000<span class="w"> </span>user@vm-host
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># With Authentik auth enabled and Claude running on the VM</span>
+</span><span data-line="8">ssh<span class="w"> </span>-L<span class="w"> </span><span class="m">3000</span>:localhost:3000<span class="w"> </span>-L<span class="w"> </span><span class="m">8080</span>:localhost:8080<span class="w"> </span>-L<span class="w"> </span><span class="m">9000</span>:localhost:9000<span class="w"> </span>-L<span class="w"> </span><span class="m">8888</span>:localhost:8888<span class="w"> </span>user@vm-host
+</span></pre></div>
+</div>
+<p>Add <code class="docutils literal notranslate"><span class="pre">-N</span></code> to open the tunnels without starting a shell, or <code class="docutils literal notranslate"><span class="pre">-f</span> <span class="pre">-N</span></code> to background them. Once the tunnels are up, http://localhost:3000 and http://localhost:8080 resolve to the remote stack as if it were running locally.</p>
+</section>
+<section id="seeding-reports">
+<h2>Seeding reports<a class="headerlink" href="#seeding-reports" title="Link to this heading">#</a></h2>
+<p>The default quickstart stack uses DynamoDB Local as Seizu’s report store. After starting the stack for the first time, seed the example reports from the YAML config:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>seed_dashboard
+</span></pre></div>
+</div>
+<p>This reads <code class="docutils literal notranslate"><span class="pre">.config/dev/seizu/reporting-dashboard.yaml</span></code>, creates each report in the configured report store, and sets the dashboard pointer. In the default quickstart stack, that store is DynamoDB Local; after resetting the DynamoDB volume, re-run <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">seed_dashboard</span></code> to repopulate.</p>
+<p>To reset the database and reseed:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>drop_db
+</span><span data-line="2">make<span class="w"> </span>up
+</span><span data-line="3">make<span class="w"> </span>seed_dashboard
+</span></pre></div>
+</div>
+</section>
+<section id="loading-cve-data">
+<h2>Loading CVE data<a class="headerlink" href="#loading-cve-data" title="Link to this heading">#</a></h2>
+<p>The quickstart configuration is based around the NIST CVE data. Load the full CVE database:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>sync_cve
+</span></pre></div>
+</div>
+</section>
+<section id="loading-github-data">
+<h2>Loading GitHub data<a class="headerlink" href="#loading-github-data" title="Link to this heading">#</a></h2>
+<p>To sync GitHub organization and repository data into the graph, create a <a class="reference external" href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens">GitHub Personal Access Token</a>. Use a <strong>classic</strong> PAT so that all data is syncable — fine-grained tokens cannot read GitHub Packages. For a complete sync, grant these scopes:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">repo</span></code> (or <code class="docutils literal notranslate"><span class="pre">public_repo</span></code> for public repositories only) — repository files, commit history, dependency manifests, collaborators, and branch protection rules</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">read:org</span></code> — organization membership and team data</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">read:user</span></code> — user profile information</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">user:email</span></code> — user email addresses</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">security_events</span></code> <em>(optional)</em> — Dependabot alerts for private repositories</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">read:packages</span></code> <em>(optional)</em> — GitHub Container Registry packages, image manifests, layers, tags, and SLSA attestations</p></li>
+</ul>
+<p>For the full set of supported permissions — including fine-grained token and GitHub App alternatives — see Cartography’s <a class="reference external" href="https://cartography-cncf.github.io/cartography/modules/github/config.html">GitHub module configuration docs</a>.</p>
+<p>Cartography reads its GitHub configuration as a <strong>base64-encoded JSON object</strong>, not a bare token, so <code class="docutils literal notranslate"><span class="pre">CARTOGRAPHY_GITHUB_TOKEN</span></code> must hold that encoded value. Build it from your token and organization name (replace both placeholders):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s&#39;</span><span class="w"> </span><span class="s1">&#39;{&quot;organization&quot;:[{&quot;token&quot;:&quot;&lt;your_github_pat&gt;&quot;,&quot;url&quot;:&quot;https://api.github.com/graphql&quot;,&quot;name&quot;:&quot;&lt;your_org_name&gt;&quot;}]}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>base64<span class="w"> </span><span class="p">|</span><span class="w"> </span>tr<span class="w"> </span>-d<span class="w"> </span><span class="s1">&#39;\n&#39;</span>
+</span></pre></div>
+</div>
+<p>Put the resulting string in <code class="docutils literal notranslate"><span class="pre">.env</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">CARTOGRAPHY_GITHUB_TOKEN</span><span class="o">=&lt;</span><span class="n">base64_value_from_above</span><span class="o">&gt;</span>
+</span></pre></div>
+</div>
+<p>Then run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>sync_github
+</span></pre></div>
+</div>
+</section>
+<section id="enriching-cve-metadata">
+<h2>Enriching CVE metadata<a class="headerlink" href="#enriching-cve-metadata" title="Link to this heading">#</a></h2>
+<p>Other modules — GitHub, for example — create references to CVEs in the graph without the full CVE details. <code class="docutils literal notranslate"><span class="pre">sync_cve_metadata</span></code> enriches those referenced CVEs with data from the NIST NVD database, so run it <strong>after</strong> the module that introduced the references:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>sync_github<span class="w">          </span><span class="c1"># creates CVE references</span>
+</span><span data-line="2">make<span class="w"> </span>sync_cve_metadata<span class="w">    </span><span class="c1"># enriches them</span>
+</span></pre></div>
+</div>
+<p>Setting a free <a class="reference external" href="https://nvd.nist.gov/developers/request-an-api-key">NVD API key</a> in <code class="docutils literal notranslate"><span class="pre">.env</span></code> is optional but strongly recommended — it makes the sync considerably faster. With a key, the module fetches the individual referenced CVEs; without one, it falls back to pulling an entire year of CVE data at a time.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">NIST_NVD_TOKEN</span><span class="o">=&lt;</span><span class="n">your_nvd_api_key</span><span class="o">&gt;</span>
+</span></pre></div>
+</div>
+</section>
+<section id="testing-authentication">
+<h2>Testing authentication<a class="headerlink" href="#testing-authentication" title="Link to this heading">#</a></h2>
+<p>The stack includes an embedded <a class="reference external" href="https://goauthentik.io/">Authentik</a> OIDC provider. To enable it, use <code class="docutils literal notranslate"><span class="pre">auth_enable_bootstrap</span></code>, which generates <code class="docutils literal notranslate"><span class="pre">SESSION_TOKEN_ENCRYPTION_KEY</span></code> and <code class="docutils literal notranslate"><span class="pre">REPORT_QUERY_SIGNING_SECRET</span></code> into your <code class="docutils literal notranslate"><span class="pre">.env</span></code> file (skipping either if already set) and then enables auth:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>auth_enable_bootstrap<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>down<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>up
+</span></pre></div>
+</div>
+<p>If you have already run <code class="docutils literal notranslate"><span class="pre">auth_enable_bootstrap</span></code> before and just want to re-enable auth without regenerating secrets:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>auth_enable<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>down<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>up
+</span></pre></div>
+</div>
+<p>On first run, Authentik takes about two minutes to initialize. Once ready, visit http://localhost:3000 and log in with one of the seeded Seizu users:</p>
+<ul class="simple">
+<li><p><strong>Admin:</strong> <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code> / <code class="docutils literal notranslate"><span class="pre">seizu</span></code></p></li>
+<li><p><strong>Editor:</strong> <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> / <code class="docutils literal notranslate"><span class="pre">seizu</span></code></p></li>
+<li><p><strong>Viewer:</strong> <code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code> / <code class="docutils literal notranslate"><span class="pre">seizu</span></code></p></li>
+</ul>
+<p>To disable auth and return to the default unauthenticated mode:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>auth_disable<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>down<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>up
+</span></pre></div>
+</div>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="../index.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Home</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="backend.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Backend Installation &amp; Configuration</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

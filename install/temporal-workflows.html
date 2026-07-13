@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Temporal Workflows - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Sandbox Delegation" href="sandbox.html" /><link rel="prev" title="Scheduled Chats" href="chat-schedules.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Temporal Workflows"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dashboard.html">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#purpose">Purpose</a></li>
+<li><a class="reference internal" href="#architecture">Architecture</a></li>
+<li><a class="reference internal" href="#identity-and-permissions">Identity and permissions</a></li>
+<li><a class="reference internal" href="#confirmation-bypass-model">Confirmation bypass model</a></li>
+<li><a class="reference internal" href="#run-visibility-in-the-ui">Run visibility in the UI</a></li>
+<li><a class="reference internal" href="#the-cve-repo-report-workflow">The cve_repo_report workflow</a></li>
+<li><a class="reference internal" href="#the-cve-dependency-remediation-workflow">The cve_dependency_remediation workflow</a><ul>
+<li><a class="reference internal" href="#phase-isolated-credentials">Phase-isolated credentials</a></li>
+<li><a class="reference internal" href="#fork-based-pull-requests">Fork-based pull requests</a></li>
+<li><a class="reference internal" href="#github-token-setup">GitHub token setup</a></li>
+<li><a class="reference internal" href="#behavior-and-access-control">Behavior and access control</a></li>
+<li><a class="reference internal" href="#ci-watch-and-fix">CI watch and fix</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#configuration">Configuration</a><ul>
+<li><a class="reference internal" href="#ephemeral-credential-proxy-sandbox">Ephemeral credential-proxy sandbox</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#local-development">Local development</a></li>
+<li><a class="reference internal" href="#verifying-the-remediation-flow">Verifying the remediation flow</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Temporal Workflows</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="temporal-workflows">
+<h1>Temporal Workflows<a class="headerlink" href="#temporal-workflows" title="Link to this heading">#</a></h1>
+<section id="purpose">
+<h2>Purpose<a class="headerlink" href="#purpose" title="Link to this heading">#</a></h2>
+<p>Scheduled query actions like <code class="docutils literal notranslate"><span class="pre">slack</span></code> or <code class="docutils literal notranslate"><span class="pre">sqs</span></code> are fire-and-forget. The <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action instead hands the query results to a durable, multi-step <a class="reference external" href="https://temporal.io/">Temporal</a> workflow executed by a dedicated Seizu worker. The first built-in workflow, <code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code>, runs an AI chat session per affected repository that evaluates newly discovered CVEs and creates or updates a versioned findings report.</p>
+</section>
+<section id="architecture">
+<h2>Architecture<a class="headerlink" href="#architecture" title="Link to this heading">#</a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu-scheduled-queries ── temporal action ──&gt; Temporal server (task queue: seizu-workflows)
+</span><span data-line="2">                                                        │
+</span><span data-line="3">                                                        ▼
+</span><span data-line="4">                                              seizu-temporal-worker
+</span><span data-line="5">                                     (workflows + activities: headless AI chat
+</span><span data-line="6">                                      sessions, skill rendering, report tools)
+</span></pre></div>
+</div>
+<ul class="simple">
+<li><p>The <strong>scheduled query worker</strong> dispatches matching query results to the <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action, which starts a workflow run. The workflow ID embeds the scheduled query ID and run marker, so redelivery of the same run is idempotent.</p></li>
+<li><p>The <strong>Temporal server</strong> in local development is the lightweight CLI dev server (<code class="docutils literal notranslate"><span class="pre">temporal</span> <span class="pre">server</span> <span class="pre">start-dev</span></code>, in-memory). The Web UI is at <code class="docutils literal notranslate"><span class="pre">http://localhost:8233</span></code>.</p></li>
+<li><p>The <strong>Seizu temporal worker</strong> (<code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">reporting.temporal_worker</span></code>) hosts the workflow and activity code. Activities own all I/O: resolving the creator’s identity, rendering skills, driving the chat agent, and storing results.</p></li>
+</ul>
+</section>
+<section id="identity-and-permissions">
+<h2>Identity and permissions<a class="headerlink" href="#identity-and-permissions" title="Link to this heading">#</a></h2>
+<p>A workflow runs <strong>as the user who created the scheduled query</strong>. The worker resolves that user’s permissions from the last role claim observed on one of their authenticated requests (stored on the user profile), through the same RBAC resolution the request path uses. Consequences:</p>
+<ul class="simple">
+<li><p>Every tool call the AI session makes is checked against the creator’s permissions, exactly as in interactive chat (including the <code class="docutils literal notranslate"><span class="pre">chat:tools:call</span></code> gate).</p></li>
+<li><p>If the creator is archived, workflow sessions fail and stop.</p></li>
+<li><p>Role claims are snapshots updated only by an authenticated Seizu request.
+A downgrade at the identity provider therefore does <strong>not</strong> immediately
+revoke headless permissions: the lag is unbounded until the creator next
+authenticates. During that interval a previously authorized
+<code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code> grant may still be used. Operators must archive
+the Seizu user or disable their scheduled queries when immediate revocation
+is required.</p></li>
+</ul>
+</section>
+<section id="confirmation-bypass-model">
+<h2>Confirmation bypass model<a class="headerlink" href="#confirmation-bypass-model" title="Link to this heading">#</a></h2>
+<p>Interactive chat requires per-action confirmation before mutating tools run. A headless workflow has no approver, so confirmations are governed by the <strong><code class="docutils literal notranslate"><span class="pre">chat:bypass_permissions</span></code></strong> permission (granted to <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> and <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code> by default):</p>
+<ul class="simple">
+<li><p>When the scheduled query’s creator holds the permission, the workflow’s AI sessions run with confirmations bypassed; every bypassed tool execution is audit-logged by <code class="docutils literal notranslate"><span class="pre">mcp_runtime</span></code>.</p></li>
+<li><p>When the creator does not hold it, confirmation-gated tools fail closed for the run; the headless system-prompt addendum tells the model to note the block in its summary and move on.</p></li>
+<li><p>Chat-safe gating (<code class="docutils literal notranslate"><span class="pre">chat_safe_only</span></code>) and the creator’s RBAC permissions are enforced on top, unchanged.</p></li>
+</ul>
+<p>The same permission gates the chat UI’s optional “Bypass confirmations” mode and the <code class="docutils literal notranslate"><span class="pre">agent_chat</span></code> scheduled query action (see the <a class="reference internal" href="#scheduled-queries.html"><span class="xref myst">scheduled queries documentation</span></a>).</p>
+</section>
+<section id="run-visibility-in-the-ui">
+<h2>Run visibility in the UI<a class="headerlink" href="#run-visibility-in-the-ui" title="Link to this heading">#</a></h2>
+<p>The scheduled query detail page shows a <strong>Workflow runs</strong> panel for queries with a <code class="docutils literal notranslate"><span class="pre">temporal</span></code> action: the most recent workflow executions (status, start/close time), and per run an expandable breakdown of its activities — status, attempt count (retries), retry state, failure messages (including the previous attempt’s failure while retrying), and input/result previews (pretty-printed, syntax-highlighted JSON, truncated server-side). The data is read live from Temporal:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/api/v1/scheduled-queries/&lt;id&gt;/workflow-runs</span></code> lists recent runs via a visibility query on the workflow ID prefix (<code class="docutils literal notranslate"><span class="pre">seizu:&lt;workflow&gt;:&lt;scheduled_query_id&gt;:</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GET</span> <span class="pre">/api/v1/scheduled-queries/&lt;id&gt;/workflow-runs/&lt;workflow_id&gt;/&lt;run_id&gt;</span></code> folds the run’s event history (plus pending-activity state for in-flight runs) into the activity breakdown.</p></li>
+</ul>
+<p>Both are gated by <code class="docutils literal notranslate"><span class="pre">scheduled_queries:read</span></code> and refuse workflow IDs not minted for that scheduled query by a registered workflow. Activity <strong>input/result previews</strong> carry query-result rows and activity outputs — more than the scheduled-query definition — so they are included only for callers who also hold <code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code> (only <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code> among the built-in roles); readers get status, timing, attempts, and failure detail without payloads. The <strong>web service</strong> therefore needs <code class="docutils literal notranslate"><span class="pre">TEMPORAL_ADDRESS</span></code>/<code class="docutils literal notranslate"><span class="pre">TEMPORAL_NAMESPACE</span></code> reachable; when Temporal is down the endpoints return 503 and the panel shows an error. Queries without a temporal action return an empty list (and 404 on run detail) without contacting Temporal, so deployments that don’t use Temporal are unaffected. The dev server keeps history in memory, so runs disappear on its restart; for deeper digging (full event payloads, worker state) the Temporal Web UI remains the tool of choice.</p>
+</section>
+<section id="the-cve-repo-report-workflow">
+<h2>The cve_repo_report workflow<a class="headerlink" href="#the-cve-repo-report-workflow" title="Link to this heading">#</a></h2>
+<p>Input: the scheduled query’s result rows, each carrying at least a <code class="docutils literal notranslate"><span class="pre">repo</span></code> key (repository fullname). Per repository, sequentially:</p>
+<ol class="arabic simple">
+<li><p>Renders the <code class="docutils literal notranslate"><span class="pre">cve_response/cve_repo_assessment</span></code> skill with the repository name and its CVE rows.</p></li>
+<li><p>Creates a workflow chat session owned by the creator and runs the full chat agent with the rendered skill as the first message. Workflow sessions are excluded from the interactive chat sidebar and cannot be continued through the chat API.</p></li>
+<li><p>The agent creates the report <code class="docutils literal notranslate"><span class="pre">CVE</span> <span class="pre">Findings</span> <span class="pre">–</span> <span class="pre">{repo}</span></code> if missing and appends a new version with a dated markdown findings summary. Reports are versioned; prior findings are preserved.</p></li>
+</ol>
+<p>A failing repository records an error in the workflow result without aborting the remaining repositories.</p>
+<p>The CVE rows originate in the graph and are an untrusted prompt input. Seizu
+JSON-encodes and HTML-escapes them inside an <code class="docutils literal notranslate"><span class="pre">&lt;untrusted_cve_data&gt;</span></code> block, then
+prepends an instruction that the block is evidence rather than executable
+instructions. Keep this boundary when adding fields or workflows. It reduces
+prompt-injection risk but does not make graph data trusted; retain normal RBAC,
+chat-safe tool filtering, result limits, and bypass audit logging.</p>
+<p>Temporal activities use the same <code class="docutils literal notranslate"><span class="pre">run_headless_chat()</span></code> entry point as scheduled
+chats. They therefore share token/cost accounting, role-specific model
+selection, degradation behavior, terminal statuses, and the final budget
+ledger. Temporal remains optional: scheduled chats and interactive chat do not
+require a Temporal server.</p>
+<p>The seeded scheduled query <strong>New CVEs affecting repositories</strong> watches the
+mappedsky GitHub organization sync and selects open <code class="docutils literal notranslate"><span class="pre">SecurityIssue</span></code> nodes whose
+ISO-8601 <code class="docutils literal notranslate"><span class="pre">created_at</span></code> value falls within the scan window. It then joins
+their existing <code class="docutils literal notranslate"><span class="pre">CVEMetadata</span></code> records to produce per-repository rows. This
+detects a newly observed repository exposure even when the CVE itself was
+published earlier.</p>
+</section>
+<section id="the-cve-dependency-remediation-workflow">
+<h2>The cve_dependency_remediation workflow<a class="headerlink" href="#the-cve-dependency-remediation-workflow" title="Link to this heading">#</a></h2>
+<p>Where <code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code> <em>assesses</em>, <code class="docutils literal notranslate"><span class="pre">cve_dependency_remediation</span></code> <em>fixes</em>: per
+(repository, vulnerable dependency package) group, the workflow activity drives
+an ephemeral sandbox directly (no chat session, no MCP tool) and runs a
+headless coding-agent CLI (<code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_PROVIDER</span></code>: Claude Code by default,
+<code class="docutils literal notranslate"><span class="pre">codex</span></code>, or <code class="docutils literal notranslate"><span class="pre">opencode</span></code> — the last is multi-provider, so it can drive DeepSeek and
+others). The agent works on a bot-owned branch keyed on
+the target version (<code class="docutils literal notranslate"><span class="pre">seizu/dependency-update/{ecosystem}-{package}-{version}</span></code>,
+Dependabot-style; a short CVE-set hash replaces the version when no fixed
+version is known): it upgrades the dependency in every affected manifest —
+including any code changes needed for compatibility, not just a version bump —
+and writes the PR title and body. The agent does <strong>not</strong> run the test suite (the
+sandbox usually lacks its dependencies); CI runs the tests on the pull request.
+The workflow then pushes the branch and opens (or updates) the pull request.</p>
+<p>Before the agent runs, a guard checks whether an open PR already exists for the
+branch and, if so, skips the run entirely (status <code class="docutils literal notranslate"><span class="pre">skipped</span></code>) — so repeated
+syncs that re-select the same pending fix don’t re-run the expensive agent or
+force-push over a PR under review. Because the branch is version-keyed, a
+<em>later</em> fix that needs a higher version gets its own branch and PR instead of
+colliding with (or clobbering) the earlier one.</p>
+<p>Two deliberate policies shape the result:</p>
+<ul class="simple">
+<li><p><strong>Least-change upgrades.</strong> The agent targets the smallest released version
+that clears every vulnerable range, preferring the current version family
+(same major, then same minor); it crosses a major version only when no fixed
+release exists in the current family.</p></li>
+<li><p><strong>Routine-looking PRs.</strong> The agent is prompted to present the change as an
+ordinary dependency bump (<code class="docutils literal notranslate"><span class="pre">Bump</span> <span class="pre">requests</span> <span class="pre">from</span> <span class="pre">2.31.0</span> <span class="pre">to</span> <span class="pre">2.32.4</span></code>) without CVE
+identifiers — a Dependabot-style convention. This is prompt guidance only,
+not enforced: CVE ids are public and discoverable from the repo’s dependency
+manifest anyway, so it is a nicety rather than a security control.</p></li>
+</ul>
+<section id="phase-isolated-credentials">
+<h3>Phase-isolated credentials<a class="headerlink" href="#phase-isolated-credentials" title="Link to this heading">#</a></h3>
+<p>The run is split into four sandbox commands, each receiving only the
+environment it needs (per-command env injection — secrets are never set on the
+sandbox itself):</p>
+<ol class="arabic simple">
+<li><p><strong>install</strong> — install <code class="docutils literal notranslate"><span class="pre">gh</span></code> and the coding-agent CLI. <em>No secrets</em>: npm
+packages execute third-party postinstall scripts. The step is idempotent
+(<code class="docutils literal notranslate"><span class="pre">command</span> <span class="pre">-v</span> <span class="pre">…</span> <span class="pre">||</span></code>), so with a prebuilt template (see below) it is a near
+no-op, and on a plain base image it installs the tools.</p></li>
+<li><p><strong>setup</strong> — clone the repository and create the work branch. <em>GitHub token
+only</em>, supplied to <code class="docutils literal notranslate"><span class="pre">gh</span> <span class="pre">auth</span> <span class="pre">setup-git</span></code>, which configures git to authenticate
+through <code class="docutils literal notranslate"><span class="pre">gh</span></code>’s credential helper reading the token from this command’s
+environment. No token is written to disk and none is embedded in the clone
+URL, so nothing token-derived persists into the agent phase.</p></li>
+<li><p><strong>agent</strong> — run the coding-agent CLI with permission prompts disabled.
+<em>Provider API key only</em> — <strong>no GitHub token exists anywhere in the sandbox
+during this phase</strong>, so a prompt-injected agent (repository contents and
+advisory text are untrusted input) has no token to exfiltrate and no
+ability to push.</p></li>
+<li><p><strong>push</strong> — verify the agent committed changes, force-push the bot-owned
+branch, and create or find the PR. <em>GitHub token only.</em></p></li>
+</ol>
+<p>Still keep branch protection on — nothing lands without human PR review — and
+scope the token as described in <a class="reference internal" href="#github-token-setup"><span class="xref myst">GitHub token setup</span></a>.
+Workflow-supplied values (repo, branch names) are strictly validated and reach
+the phase scripts only via environment variables; tokens are masked in all
+captured output.</p>
+</section>
+<section id="fork-based-pull-requests">
+<h3>Fork-based pull requests<a class="headerlink" href="#fork-based-pull-requests" title="Link to this heading">#</a></h3>
+<p>By default the push phase writes the work branch into the target repository,
+which requires <code class="docutils literal notranslate"><span class="pre">contents:write</span></code> there. With <code class="docutils literal notranslate"><span class="pre">REMEDIATION_USE_FORK=true</span></code> the
+worker instead ensures a bot-owned fork of each target repository — created on
+demand through the GitHub API, under <code class="docutils literal notranslate"><span class="pre">REMEDIATION_FORK_ORG</span></code> when set, else the
+token user’s account — the push sandbox pushes the branch to that fork, and
+the PR is opened cross-repo (<code class="docutils literal notranslate"><span class="pre">fork-owner:branch</span></code> → target base branch). The
+token no longer needs write access to the target repositories — but this mode
+requires a different kind of token and account; see
+<a class="reference internal" href="#github-token-setup"><span class="xref myst">GitHub token setup</span></a>. Before each push the fork’s base
+branch is best-effort synced with upstream (GitHub’s “sync fork” API) so the
+shallow push finds its ancestor objects; CI-fix runs clone and push the PR
+branch on the fork. The credential phase isolation above is identical in both
+modes.</p>
+<p>Two operational caveats: the token owner must be able to fork the target (a
+repository cannot be forked into the account that already owns it), and many
+organizations restrict GitHub Actions on PRs from forks (no secrets, or
+<code class="docutils literal notranslate"><span class="pre">approve-first</span></code> policies) — if the CI watch keeps reporting <code class="docutils literal notranslate"><span class="pre">no_checks</span></code> on
+fork PRs, check the target’s Actions fork policy.</p>
+</section>
+<section id="github-token-setup">
+<h3>GitHub token setup<a class="headerlink" href="#github-token-setup" title="Link to this heading">#</a></h3>
+<p>Which token to use — and where it needs access — differs between direct
+(branch) mode and fork mode. In both modes <code class="docutils literal notranslate"><span class="pre">REMEDIATION_GITHUB_TOKEN</span></code> is used
+by the setup phase (clone), the push phase (push + <code class="docutils literal notranslate"><span class="pre">gh</span> <span class="pre">pr</span> <span class="pre">create</span></code>), and
+worker-side by the CI watch and fork management; it is never present while the
+coding agent runs.</p>
+<p><strong>Direct mode (default)</strong> — work branches are pushed into the target
+repositories, so the token needs write access there. Use a <strong>fine-grained
+PAT</strong>, minimally scoped:</p>
+<ol class="arabic simple">
+<li><p>Create the PAT with <strong>resource owner</strong> = the user/org that owns the target
+repositories, and grant <strong>repository access</strong> to only the repositories the
+workflow should remediate. (Organizations may require fine-grained PAT
+approval: <em>Org settings → Third-party access → Personal access tokens</em>.)</p></li>
+<li><p>Repository permissions:</p>
+<ul class="simple">
+<li><p><strong>Contents: Read and write</strong> — clone and push the work branches.</p></li>
+<li><p><strong>Pull requests: Read and write</strong> — open PRs; read PR state for the CI
+watch.</p></li>
+<li><p><strong>Issues: Read and write</strong> — the CI watch posts triage comments through
+the issue-comments API.</p></li>
+<li><p><strong>Checks: Read</strong> and <strong>Commit statuses: Read</strong> — the CI watch polls
+check runs and legacy commit statuses.</p></li>
+<li><p><strong>Actions: Read</strong> — job-log tails for the fix agent’s failure context
+(optional; the watch degrades gracefully without it).</p></li>
+<li><p><strong>Workflows: Read and write</strong> — only if remediation/fix commits may
+touch <code class="docutils literal notranslate"><span class="pre">.github/workflows/</span></code> files; GitHub rejects pushes modifying
+workflow files without it.</p></li>
+<li><p>Metadata: Read is added automatically.</p></li>
+</ul>
+</li>
+<li><p>Keep branch protection on — nothing merges without human review.</p></li>
+</ol>
+<p>A classic PAT with <code class="docutils literal notranslate"><span class="pre">repo</span></code> scope also works for direct mode but grants far
+more than needed.</p>
+<p><strong>Fork mode</strong> — a fine-grained PAT cannot span this flow across owners: it
+has a single resource owner, so it cannot both write to the bot’s forks and
+open PRs on targets under a different owner (and creating a fork additionally
+requires its <strong>Administration: write</strong> permission, since a fork is a
+repository creation). Use a dedicated <strong>machine account</strong> with a <strong>classic
+PAT</strong> instead:</p>
+<ol class="arabic simple">
+<li><p>Create a machine account used only for this automation (e.g.
+<code class="docutils literal notranslate"><span class="pre">myorg-remediation-bot</span></code>) — the standard pattern for classic-PAT bots,
+explicitly permitted by GitHub’s terms of service. Forks accumulate under
+it, or under <code class="docutils literal notranslate"><span class="pre">REMEDIATION_FORK_ORG</span></code> if you point that at an org the
+account can create repositories in.</p></li>
+<li><p>Logged in as the machine account, create a <strong>classic</strong> PAT with scope
+<strong><code class="docutils literal notranslate"><span class="pre">public_repo</span></code></strong> (all targets public) or <strong><code class="docutils literal notranslate"><span class="pre">repo</span></code></strong> (any target private);
+add <strong><code class="docutils literal notranslate"><span class="pre">workflow</span></code></strong> if fixes may modify <code class="docutils literal notranslate"><span class="pre">.github/workflows/</span></code> files. Classic
+scopes are coarse — <code class="docutils literal notranslate"><span class="pre">repo</span></code>/<code class="docutils literal notranslate"><span class="pre">public_repo</span></code> covers forking, pushing to the
+bot’s own forks, opening cross-repo PRs, and everything the CI watch reads
+and posts.</p></li>
+<li><p>For private targets, grant the machine account read (pull) access on each
+target repository and enable the target org’s <em>Allow forking of private
+repositories</em> setting.</p></li>
+<li><p>Check the target org’s policies: classic PATs must be allowed by its
+personal access token policy, and with SAML SSO enforced the token must be
+authorized for the org.</p></li>
+</ol>
+<p>A GitHub App installation token also works in either mode if you have
+external tooling to mint and rotate it — Seizu just reads whatever token is
+in <code class="docutils literal notranslate"><span class="pre">REMEDIATION_GITHUB_TOKEN</span></code>.</p>
+<p>Whichever token you use, verify it before enabling the workflow with the
+<a class="reference internal" href="#verifying-the-remediation-flow"><span class="xref myst">smoke test</span></a>: <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">remediation_smoke</span> <span class="pre">SMOKE_REPO=org/repo</span></code> (add <code class="docutils literal notranslate"><span class="pre">SMOKE_FORK=1</span></code> for fork mode).</p>
+</section>
+<section id="behavior-and-access-control">
+<h3>Behavior and access control<a class="headerlink" href="#behavior-and-access-control" title="Link to this heading">#</a></h3>
+<p>Input rows must carry <code class="docutils literal notranslate"><span class="pre">repo</span></code> and <code class="docutils literal notranslate"><span class="pre">package</span></code> keys; multiple CVEs (or manifests)
+for the same package in one repository collapse into one run and one PR.
+Groups run sequentially to bound concurrent coding-agent spend, and the
+per-group activity uses <code class="docutils literal notranslate"><span class="pre">maximum_attempts=1</span></code>: a retry would repeat a very
+expensive run and risk duplicate PRs. Manual re-runs are safe — the
+deterministic branch name means the run updates the existing PR instead of
+opening another. A failing group records an error without aborting the rest.</p>
+<p>There is no per-user permission and no dedicated enable flag for this
+workflow: it has direct, fixed targets and is reachable only through scheduled
+queries, which are admin-managed (<code class="docutils literal notranslate"><span class="pre">scheduled_queries:write</span></code>). It runs only
+when configured (<code class="docutils literal notranslate"><span class="pre">REMEDIATION_GITHUB_TOKEN</span></code> plus an agent API key); operators
+turn it off by disabling the scheduled query, removing the configuration,
+dropping <code class="docutils literal notranslate"><span class="pre">cve_dependency_remediation</span></code> from <code class="docutils literal notranslate"><span class="pre">TEMPORAL_ENABLED_WORKFLOWS</span></code> (while
+keeping other workflows), or removing the <code class="docutils literal notranslate"><span class="pre">temporal</span></code> module from
+<code class="docutils literal notranslate"><span class="pre">SCHEDULED_QUERY_MODULES</span></code> entirely. The scheduled
+query’s creator is still resolved before each run, so archived users hard-stop
+their automations, and each run is audit-logged against them.</p>
+<p>The seeded scheduled query <strong>New CVE dependencies requiring remediation</strong> uses
+the same watch-scan trigger and <code class="docutils literal notranslate"><span class="pre">SecurityIssue.created_at</span></code> window as the
+assessment query, additionally requires <code class="docutils literal notranslate"><span class="pre">dependency_package_name</span></code>, and returns
+per-dependency rows (ecosystem, manifest path, vulnerable range, patched
+version) that the remediation prompt is built from.</p>
+</section>
+<section id="ci-watch-and-fix">
+<h3>CI watch and fix<a class="headerlink" href="#ci-watch-and-fix" title="Link to this heading">#</a></h3>
+<p>Pushing a PR is not the end of the run: the upgrade can break the repository’s
+CI. After each freshly pushed PR, the workflow watches the PR’s check suite
+(check runs plus legacy commit statuses) with durable Temporal timers — a
+short read-only GitHub API activity polls every <code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_POLL_SECONDS</span></code>
+until the checks settle or <code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_MAX_WAIT_SECONDS</span></code> elapses (<code class="docutils literal notranslate"><span class="pre">0</span></code>
+disables the watch). Checks that sit in <em>queued</em> longer than
+<code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_QUEUED_STUCK_SECONDS</span></code> (no runner coming — offline self-hosted
+runner, disabled app) are ignored rather than waited on, as are cancelled and
+stale runs; a PR that gets merged or closed mid-watch ends it. A <code class="docutils literal notranslate"><span class="pre">skipped</span></code>
+remediation (the guard found an existing open PR) is not re-watched — the run
+that pushed it already was.</p>
+<p>When every non-ignored check has finished and at least one failed, the
+workflow runs a CI-fix activity (at most <code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_FIX_MAX_ATTEMPTS</span></code>
+coding-agent runs per PR; <code class="docutils literal notranslate"><span class="pre">0</span></code> → watch and record only). The fix run reuses the
+same phase-isolated two-sandbox flow against the existing PR branch, with the
+failing checks’ output summaries, annotations, and log tails in the prompt as
+untrusted data. The agent triages each failure:</p>
+<ul class="simple">
+<li><p><strong>Caused by the upgrade</strong> → it fixes the code/tests and commits; only its
+new commits are extracted and fast-forward pushed from a fresh push sandbox,
+which re-triggers CI and resumes the watch.</p></li>
+<li><p><strong>Unrelated to the upgrade</strong> (flaky test, failure already on the base
+branch, infrastructure error) → it writes a PR-comment file explaining why,
+per check; the worker posts it through the GitHub API (the agent still has
+no credentials), and the watch ends. The agent’s text is never posted
+verbatim: it is rendered into a fixed template as a block quote, with
+<code class="docutils literal notranslate"><span class="pre">&#64;</span></code>-mentions and line-leading slash commands neutralized and its length
+capped, so a prompt-injected agent cannot ping people or drive
+slash-command bots under the bot identity.</p></li>
+</ul>
+<p>The per-dependency workflow result records the outcome in <code class="docutils literal notranslate"><span class="pre">ci_status</span></code>
+(<code class="docutils literal notranslate"><span class="pre">passed</span></code>, <code class="docutils literal notranslate"><span class="pre">fixed</span></code>, <code class="docutils literal notranslate"><span class="pre">failures_commented</span></code>, <code class="docutils literal notranslate"><span class="pre">ci_failed</span></code>, <code class="docutils literal notranslate"><span class="pre">fix_failed</span></code>,
+<code class="docutils literal notranslate"><span class="pre">timed_out</span></code>, <code class="docutils literal notranslate"><span class="pre">no_checks</span></code>, <code class="docutils literal notranslate"><span class="pre">merged</span></code>, <code class="docutils literal notranslate"><span class="pre">pr_closed</span></code>, or <code class="docutils literal notranslate"><span class="pre">error</span></code>) with detail in
+<code class="docutils literal notranslate"><span class="pre">ci_detail</span></code>.</p>
+</section>
+</section>
+<section id="configuration">
+<h2>Configuration<a class="headerlink" href="#configuration" title="Link to this heading">#</a></h2>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_ADDRESS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">localhost:7233</span></code></p></td>
+<td><p>Temporal frontend (gRPC) address. <code class="docutils literal notranslate"><span class="pre">temporal:7233</span></code> in docker compose.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_NAMESPACE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">default</span></code></p></td>
+<td><p>Namespace workflows run in.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_TASK_QUEUE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">seizu-workflows</span></code></p></td>
+<td><p>Task queue shared by the action module and the worker.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_WORKER_ENABLED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Set <code class="docutils literal notranslate"><span class="pre">false</span></code> to disable the worker process.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_WORKFLOW_MAX_RESULT_ROWS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">200</span></code></p></td>
+<td><p>Cap on result rows forwarded into a workflow.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_ENABLED_WORKFLOWS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (all)</p></td>
+<td><p>Comma-separated allowlist of workflows the temporal action may start. Enabling the temporal module otherwise makes every registered workflow dispatchable; this narrows it (e.g. <code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code> to allow assessment but not remediation). The workflow picker only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (picker) and the scheduled query worker (enforcement).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">600</span></code></p></td>
+<td><p>Per-repository AI chat activity timeout.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_PROVIDER</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">claude</span></code></p></td>
+<td><p>Coding-agent CLI: <code class="docutils literal notranslate"><span class="pre">claude</span></code> (Claude Code), <code class="docutils literal notranslate"><span class="pre">codex</span></code>, or <code class="docutils literal notranslate"><span class="pre">opencode</span></code>. <code class="docutils literal notranslate"><span class="pre">opencode</span></code> is multi-provider — set <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_MODEL</span></code> to a <code class="docutils literal notranslate"><span class="pre">provider/model</span></code> id (e.g. <code class="docutils literal notranslate"><span class="pre">deepseek/deepseek-v4-pro</span></code>) and it uses that provider’s key, reusing the same global <code class="docutils literal notranslate"><span class="pre">*_API_KEY</span></code> (e.g. <code class="docutils literal notranslate"><span class="pre">DEEPSEEK_API_KEY</span></code>) the chat assistant uses. For opencode, an explicit <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_API_KEY</span></code> must belong to the model’s provider — an Anthropic key with a <code class="docutils literal notranslate"><span class="pre">deepseek/…</span></code> model is exported as <code class="docutils literal notranslate"><span class="pre">DEEPSEEK_API_KEY</span></code> and fails auth.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_TEMPLATE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code> (official)</p></td>
+<td><p>E2B sandbox template. Empty → the provider’s official prebuilt template (E2B ships first-party <code class="docutils literal notranslate"><span class="pre">claude</span></code>/<code class="docutils literal notranslate"><span class="pre">codex</span></code>/<code class="docutils literal notranslate"><span class="pre">opencode</span></code> images with the CLI installed), which removes the per-run <code class="docutils literal notranslate"><span class="pre">npm</span> <span class="pre">install</span></code> and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). <code class="docutils literal notranslate"><span class="pre">none</span></code> → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (<code class="docutils literal notranslate"><span class="pre">SANDBOX_DOMAIN</span></code> set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_API_KEY</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>Static API key for the CLI, exported only to the agent phase. Empty → falls back to <code class="docutils literal notranslate"><span class="pre">ANTHROPIC_API_KEY</span></code> for <code class="docutils literal notranslate"><span class="pre">claude</span></code>. Prefer the key command below.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_API_KEY_COMMAND</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>Command run in the worker before each remediation; its stdout becomes that run’s agent API key. Use it to mint <strong>short-lived</strong> credentials from a broker (Vault, an LLM-gateway virtual-key issuer, …) instead of handing the sandbox a long-lived key. Takes precedence over the static key. <strong>Recommended for production:</strong> unlike the GitHub token (kept out of the agent sandbox), the agent’s provider key is present while it runs untrusted repo code with internet on, so a long-lived key is stealable — the worker logs a warning when a static key is used.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_BASE_URL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>LLM gateway/proxy base URL exported to the agent phase (<code class="docutils literal notranslate"><span class="pre">ANTHROPIC_BASE_URL</span></code> / <code class="docutils literal notranslate"><span class="pre">OPENAI_BASE_URL</span></code>); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. Mutually exclusive with the credential proxy below.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Run a short-lived LiteLLM proxy in its <strong>own</strong> sandbox holding the real provider key, and hand the agent sandbox only the proxy’s ephemeral per-run key with an in-memory spend cap (see below). All providers (<code class="docutils literal notranslate"><span class="pre">opencode</span></code> needs <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_MODEL</span></code> set).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">5</span></code></p></td>
+<td><p>USD spend cap (LiteLLM’s in-memory global <code class="docutils literal notranslate"><span class="pre">max_budget</span></code>) — bounds real-time abuse of the ephemeral key while the proxy is up.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_MODEL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>Model for the CLI. For <code class="docutils literal notranslate"><span class="pre">claude</span></code>/<code class="docutils literal notranslate"><span class="pre">codex</span></code> a bare model override (empty → the CLI’s default). For <code class="docutils literal notranslate"><span class="pre">opencode</span></code> it is <strong>required</strong> and takes the <code class="docutils literal notranslate"><span class="pre">provider/model</span></code> form (e.g. <code class="docutils literal notranslate"><span class="pre">deepseek/deepseek-v4-pro</span></code>), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_TIMEOUT_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1800</span></code></p></td>
+<td><p>Hard cap for one remediation run (all sandbox phases). Also caps each CI-fix run.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_MAX_WAIT_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">3600</span></code></p></td>
+<td><p>Total time the workflow watches one PR’s checks (including re-runs after a fix push). <code class="docutils literal notranslate"><span class="pre">0</span></code> disables the CI watch.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_POLL_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">120</span></code></p></td>
+<td><p>Interval between check-status polls.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_QUEUED_STUCK_SECONDS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1800</span></code></p></td>
+<td><p>A check still queued (never started) after this long is ignored by the watch instead of waited on.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_CI_FIX_MAX_ATTEMPTS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>Coding-agent CI-fix runs allowed per PR (each is a full sandbox agent session — this bounds spend). <code class="docutils literal notranslate"><span class="pre">0</span></code> → watch and record the outcome but never fix.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_GH_SHA256</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>Expected SHA-256 of the pinned <code class="docutils literal notranslate"><span class="pre">gh</span></code> linux_amd64 tarball. Set it (out of band) for an independent supply-chain pin, or bake <code class="docutils literal notranslate"><span class="pre">gh</span></code> into a pinned sandbox image — since the installed <code class="docutils literal notranslate"><span class="pre">gh</span></code> later handles the token. Empty → verify against the release’s own checksums (integrity only).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_GITHUB_HOST</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">github.com</span></code></p></td>
+<td><p>GitHub host the target repositories live on — <code class="docutils literal notranslate"><span class="pre">github.com</span></code> or a GitHub Enterprise Server hostname. Used for the clone URL and <code class="docutils literal notranslate"><span class="pre">gh</span></code> (<code class="docutils literal notranslate"><span class="pre">GH_HOST</span></code>/<code class="docutils literal notranslate"><span class="pre">GH_ENTERPRISE_TOKEN</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_GITHUB_TOKEN</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>GitHub token for the setup/push phases and the worker-side CI watch: a minimally-scoped fine-grained PAT in direct mode, a machine-account classic PAT in fork mode — see <a class="reference internal" href="#github-token-setup"><span class="xref myst">GitHub token setup</span></a>. Required (configured = enabled).</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_USE_FORK</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Push the work branch to a bot-owned fork (created on demand) and open cross-repo PRs instead of writing branches into the target repositories — see <a class="reference internal" href="#fork-based-pull-requests"><span class="xref myst">Fork-based pull requests</span></a>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_FORK_ORG</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&quot;&quot;</span></code></p></td>
+<td><p>Organization that owns the bot forks in fork mode; empty → forks live under the token user’s account.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">REMEDIATION_GIT_USER</span></code> / <code class="docutils literal notranslate"><span class="pre">REMEDIATION_GIT_EMAIL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">seizu-remediation-bot</span></code> / <code class="docutils literal notranslate"><span class="pre">seizu-remediation&#64;localhost</span></code></p></td>
+<td><p>git author identity for the remediation commits.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The remediation workflow also uses the sandbox provider configuration
+(<code class="docutils literal notranslate"><span class="pre">SANDBOX_API_KEY</span></code>, <code class="docutils literal notranslate"><span class="pre">SANDBOX_DOMAIN</span></code>; see <a class="reference internal" href="sandbox.html"><span class="std std-doc">Sandbox delegation</span></a>) —
+<code class="docutils literal notranslate"><span class="pre">SANDBOX_ENABLED</span></code> and the chat tool are not required.</p>
+<p>The worker also needs the chat configuration (<code class="docutils literal notranslate"><span class="pre">CHAT_LLM_*</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAT_CHECKPOINT_*</span></code>) for workflows that drive headless chat sessions (<code class="docutils literal notranslate"><span class="pre">cve_repo_report</span></code>); for that workflow, <code class="docutils literal notranslate"><span class="pre">CHAT_LLM_PROVIDER=mock</span></code> echoes input and cannot call tools, so exercising it end-to-end requires a real LLM provider. The <code class="docutils literal notranslate"><span class="pre">cve_dependency_remediation</span></code> workflow does not use the chat LLM at all — it needs the sandbox provider (<code class="docutils literal notranslate"><span class="pre">SANDBOX_API_KEY</span></code>/<code class="docutils literal notranslate"><span class="pre">SANDBOX_DOMAIN</span></code>) and <code class="docutils literal notranslate"><span class="pre">REMEDIATION_*</span></code> configuration instead.</p>
+<section id="ephemeral-credential-proxy-sandbox">
+<h3>Ephemeral credential-proxy sandbox<a class="headerlink" href="#ephemeral-credential-proxy-sandbox" title="Link to this heading">#</a></h3>
+<p>The agent’s provider key is the one credential that must be present while the agent runs untrusted repo code (the GitHub token is kept out entirely). <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_API_KEY_COMMAND</span></code> mitigates this with a short-lived per-run key, but for Anthropic/OpenAI the direct API has no short-lived token, so that needs an external LLM gateway. <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=true</span></code> runs that gateway self-contained: a <strong>separate</strong> sandbox boots a LiteLLM proxy seeded with the real key (the agent VM never sees it), and the agent sandbox is pointed at the proxy with only the proxy’s <strong>ephemeral master key</strong> — a random per-run key that exists only inside that sandbox. (Per-key minting via LiteLLM’s <code class="docutils literal notranslate"><span class="pre">/key/generate</span></code> needs a Postgres database we don’t provision, and a run uses a single key anyway; instead the proxy config sets an in-memory global spend cap from <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET</span></code>.) Because the proxy sandbox is torn down with the run, that key’s effective lifetime equals the run — a leak is worthless afterward, and the budget cap bounds real-time abuse while it’s up. All three providers support it (for <code class="docutils literal notranslate"><span class="pre">opencode</span></code>, set <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_MODEL</span></code> so the LiteLLM namespace can be derived from the model’s provider prefix), and it is mutually exclusive with <code class="docutils literal notranslate"><span class="pre">SANDBOX_AGENT_BASE_URL</span></code>.</p>
+<p>The proxy sandbox stays <strong>private</strong> (<code class="docutils literal notranslate"><span class="pre">allow_public_traffic:</span> <span class="pre">false</span></code>): the agent CLI reaches it using E2B’s traffic-access token sent as a custom request header, so the proxy port is never world-reachable. Each provider carries that header differently — Claude Code via <code class="docutils literal notranslate"><span class="pre">ANTHROPIC_CUSTOM_HEADERS</span></code>; codex via a written <code class="docutils literal notranslate"><span class="pre">~/.codex/config.toml</span></code> <code class="docutils literal notranslate"><span class="pre">model_provider</span></code> with <code class="docutils literal notranslate"><span class="pre">env_http_headers</span></code>; opencode via a written <code class="docutils literal notranslate"><span class="pre">&#64;ai-sdk/openai-compatible</span></code> provider block with <code class="docutils literal notranslate"><span class="pre">options.headers</span></code>. (A hypothetical provider with no header support would fall back to a public port gated only by the ephemeral key.)</p>
+<p>This path stands up LiteLLM inside a sandbox and depends on each CLI talking to it with a custom header and correct model routing; <strong>verify it against your CLI/LiteLLM versions with a real run before enabling in production</strong> (<code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">remediation_smoke</span> <span class="pre">SMOKE_PROXY=1</span></code> probes exactly this — it boots the private proxy, mints a key, and confirms a second sandbox can reach it via the traffic-access header). The LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape, header passthrough) is the fragile part.</p>
+</section>
+</section>
+<section id="local-development">
+<h2>Local development<a class="headerlink" href="#local-development" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">up</span></code> starts the <code class="docutils literal notranslate"><span class="pre">temporal</span></code> dev server and the <code class="docutils literal notranslate"><span class="pre">seizu-temporal-worker</span></code> service alongside the rest of the stack:</p>
+<ul class="simple">
+<li><p>Temporal Web UI: <code class="docutils literal notranslate"><span class="pre">http://localhost:8233</span></code> — inspect workflow runs (<code class="docutils literal notranslate"><span class="pre">seizu:cve_repo_report:&lt;scheduled_query_id&gt;:&lt;run</span> <span class="pre">marker&gt;</span></code>), activity retries, and results.</p></li>
+<li><p>The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.</p></li>
+</ul>
+<p>To add a workflow: define the workflow + activities under <code class="docutils literal notranslate"><span class="pre">reporting/temporal_workflows/</span></code>, register them in <code class="docutils literal notranslate"><span class="pre">reporting/temporal_worker.py</span></code>, and add a <code class="docutils literal notranslate"><span class="pre">WorkflowSpec</span></code> (name, description, input factory) to <code class="docutils literal notranslate"><span class="pre">WORKFLOW_REGISTRY</span></code>. The factory converts the common scheduled-query context into that workflow’s typed input; the description is surfaced in the action form’s workflow picker. Use <code class="docutils literal notranslate"><span class="pre">reporting.services.headless_chat.run_headless_chat</span></code> for AI sessions so identity, confirmation, and audit handling stay consistent.</p>
+</section>
+<section id="verifying-the-remediation-flow">
+<h2>Verifying the remediation flow<a class="headerlink" href="#verifying-the-remediation-flow" title="Link to this heading">#</a></h2>
+<p>Unit tests mock the sandbox, so they confirm the phase/credential logic but <strong>not</strong> that a coding-agent CLI, <code class="docutils literal notranslate"><span class="pre">gh</span></code>, and git actually authenticate and push inside a real sandbox. A couple things that are easy to miss:</p>
+<ul class="simple">
+<li><p><strong>The temporal worker does not hot-reload.</strong> <code class="docutils literal notranslate"><span class="pre">seizu-temporal-worker</span></code> runs <code class="docutils literal notranslate"><span class="pre">python</span> <span class="pre">-m</span> <span class="pre">reporting.temporal_worker</span></code> with no <code class="docutils literal notranslate"><span class="pre">--reload</span></code>, so it imports the remediation code once at startup. After changing <code class="docutils literal notranslate"><span class="pre">sandbox_remediation.py</span></code> (or any workflow code), restart it or the next run silently uses the old code: <code class="docutils literal notranslate"><span class="pre">docker</span> <span class="pre">compose</span> <span class="pre">restart</span> <span class="pre">seizu-temporal-worker</span></code> (dev, bind-mounted) or rebuild the image (if not bind-mounted).</p></li>
+<li><p><strong>A public target repo hides auth failures until push.</strong> Cloning a public repo is anonymous, so the GitHub token is first exercised on <code class="docutils literal notranslate"><span class="pre">git</span> <span class="pre">push</span></code>. When testing, always push a branch — a successful clone proves nothing about the token.</p></li>
+</ul>
+<p>To smoke-test the sandbox side directly (auth, gh, git, and the two-sandbox patch handoff) without running the full workflow, use the bundled <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">remediation_smoke</span> <span class="pre">SMOKE_REPO=org/repo</span></code> (<code class="docutils literal notranslate"><span class="pre">scripts/remediation_smoke.py</span></code>). It opens two real E2B sandboxes with the configured <code class="docutils literal notranslate"><span class="pre">SANDBOX_*</span></code>/<code class="docutils literal notranslate"><span class="pre">REMEDIATION_*</span></code> settings and reproduces the credential-sensitive mechanics: an <em>agent sandbox</em> installs <code class="docutils literal notranslate"><span class="pre">gh</span></code>, clones (token), makes a throwaway commit <strong>with no token in the environment</strong> (standing in for the coding agent), and extracts the change as a base64 git diff; a fresh <em>push sandbox</em> (which never ran the “agent”) applies the patch and pushes the branch with the token. It then deletes the branch. It does not run a real coding agent or open a PR; a <code class="docutils literal notranslate"><span class="pre">SMOKE</span> <span class="pre">PASS</span></code> line confirms the handoff and auth end-to-end. In direct mode, check the token’s write access first with <code class="docutils literal notranslate"><span class="pre">gh</span> <span class="pre">api</span> <span class="pre">repos/&lt;org&gt;/&lt;repo&gt;</span> <span class="pre">--jq</span> <span class="pre">.permissions</span></code> — <code class="docutils literal notranslate"><span class="pre">push</span></code> must be <code class="docutils literal notranslate"><span class="pre">true</span></code>; see <a class="reference internal" href="#github-token-setup"><span class="xref myst">GitHub token setup</span></a> for the full permission list per mode.</p>
+<p>With <code class="docutils literal notranslate"><span class="pre">REMEDIATION_USE_FORK=true</span></code> (or <code class="docutils literal notranslate"><span class="pre">SMOKE_FORK=1</span></code> to force it for one run) the smoke test exercises the fork path instead: it ensures the bot fork through the real <code class="docutils literal notranslate"><span class="pre">ensure_fork</span></code> (creation, readiness poll, <code class="docutils literal notranslate"><span class="pre">REMEDIATION_FORK_ORG</span></code>), and the push sandbox syncs the fork’s base branch (merge-upstream) and pushes — then deletes — the branch on the <strong>fork</strong>. <code class="docutils literal notranslate"><span class="pre">SMOKE_REPO</span></code> then only needs read/fork access, not push; cross-repo PR creation itself is not exercised (the smoke test never opens PRs).</p>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="chat-schedules.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Scheduled Chats</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="sandbox.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Sandbox Delegation</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>

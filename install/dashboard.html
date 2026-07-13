@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="violet" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Dashboard Configuration - Seizu Documentation documentation</title><link rel="shortcut icon" href="../_static/favicon.svg"/><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="CLI" href="cli.html" /><link rel="prev" title="Backend Installation &amp; Configuration" href="backend.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/seizu-theme.css?v=c235780b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Dashboard Configuration"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      <img class="light-logo" src="../_static/logo-horizontal-black.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <img class="dark-logo" src="../_static/logo-horizontal-white.svg" alt="Seizu Documentation" height="28" loading="lazy" />
+      <strong>Seizu Documentation</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Installation &amp; Configuration</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="backend.html">Backend Installation &amp; Configuration</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Dashboard Configuration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cli.html">CLI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="security.html">Security Guidance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="query-console.html">Query Console</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scheduled-queries.html">Scheduled Queries</a></li>
+<li class="toctree-l1"><a class="reference internal" href="chat-schedules.html">Scheduled Chats</a></li>
+<li class="toctree-l1"><a class="reference internal" href="temporal-workflows.html">Temporal Workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sandbox.html">Sandbox Delegation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-toolsets.html">MCP Toolsets</a></li>
+<li class="toctree-l1"><a class="reference internal" href="mcp-skillsets.html">MCP Skillsets</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Development</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../dev/dependencies.html">Managing dependencies</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/test.html">Running Tests</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/query-validation.html">Query validation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../dev/contributing.html">Contributing</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Get In Touch</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../contact/security.html">Security</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../contact/code-of-conduct.html">Contributor Covenant Code of Conduct</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#navigation-sections">Navigation Sections</a></li>
+<li><a class="reference internal" href="#configuration-storage">Configuration Storage</a></li>
+<li><a class="reference internal" href="#managing-reports">Managing Reports</a><ul>
+<li><a class="reference internal" href="#reports-list">Reports list</a></li>
+<li><a class="reference internal" href="#pinning-reports-to-the-sidebar">Pinning reports to the sidebar</a></li>
+<li><a class="reference internal" href="#creating-a-report">Creating a report</a></li>
+<li><a class="reference internal" href="#version-history">Version history</a></li>
+<li><a class="reference internal" href="#editing-a-report">Editing a report</a></li>
+<li><a class="reference internal" href="#deleting-a-report">Deleting a report</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#panels">Panels</a><ul>
+<li><a class="reference internal" href="#panel-layout">Panel layout</a></li>
+<li><a class="reference internal" href="#count">count</a><ul>
+<li><a class="reference internal" href="#example">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#progress">progress</a><ul>
+<li><a class="reference internal" href="#id1">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#pie">pie</a><ul>
+<li><a class="reference internal" href="#id2">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#bar">bar</a><ul>
+<li><a class="reference internal" href="#id3">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#table">table</a><ul>
+<li><a class="reference internal" href="#id4">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#vertical-table">vertical-table</a><ul>
+<li><a class="reference internal" href="#id5">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#graph">graph</a><ul>
+<li><a class="reference internal" href="#id6">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#markdown">markdown</a><ul>
+<li><a class="reference internal" href="#variables">Variables</a></li>
+<li><a class="reference internal" href="#variables-in-link-and-image-urls">Variables in link and image URLs</a></li>
+<li><a class="reference internal" href="#conditionals">Conditionals</a></li>
+<li><a class="reference internal" href="#other-markdoc-features">Other Markdoc features</a></li>
+<li><a class="reference internal" href="#id7">Example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#named-queries">Named Queries</a></li>
+<li><a class="reference internal" href="#inputs">Inputs</a><ul>
+<li><a class="reference internal" href="#autocomplete">autocomplete</a><ul>
+<li><a class="reference internal" href="#id8">Example</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#text">text</a><ul>
+<li><a class="reference internal" href="#id9">Example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#details-data">Details Data</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Seizu Documentation</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Dashboard Configuration</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue" role="main">
+          <section id="dashboard-configuration">
+<h1>Dashboard Configuration<a class="headerlink" href="#dashboard-configuration" title="Link to this heading">#</a></h1>
+<section id="navigation-sections">
+<h2>Navigation Sections<a class="headerlink" href="#navigation-sections" title="Link to this heading">#</a></h2>
+<p>Seizu’s navigation supports a dashboard and an arbitrary number of reports.
+The dashboard is the landing page, and is meant as a general overview of the data in your graph.
+Reports are topic-specific views of your graph data.</p>
+<p>Both the dashboard and reports use a list of rows, which contain a list of panels; both are grid-based.
+Rows are rendered in the order specified, and panels within rows are also rendered in the order specified.</p>
+</section>
+<section id="configuration-storage">
+<h2>Configuration Storage<a class="headerlink" href="#configuration-storage" title="Link to this heading">#</a></h2>
+<p>Report and dashboard configurations are stored in the configured report store, not in the YAML configuration file. The report store supports DynamoDB and SQL backends.
+The YAML file contains a top-level <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict (used only by <code class="docutils literal notranslate"><span class="pre">scheduled_queries</span></code> references), <code class="docutils literal notranslate"><span class="pre">scheduled_queries</span></code>, a <code class="docutils literal notranslate"><span class="pre">dashboard</span></code> pointer, a <code class="docutils literal notranslate"><span class="pre">reports</span></code> section, a <code class="docutils literal notranslate"><span class="pre">toolsets</span></code> section, and a <code class="docutils literal notranslate"><span class="pre">skillsets</span></code> section — all used to seed the report store.
+Each report has its own <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict for named Cypher strings used by its panels.</p>
+<p>To populate the report store from the YAML file during initial setup or development, use the CLI directly:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">seizu<span class="w"> </span>seed<span class="w"> </span>--config<span class="w"> </span>path/to/reporting-dashboard.yaml
+</span></pre></div>
+</div>
+<p>When working from the source checkout, <code class="docutils literal notranslate"><span class="pre">make</span> <span class="pre">seed_dashboard</span></code> is a development shortcut that seeds the bundled quickstart config:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">make<span class="w"> </span>seed_dashboard
+</span></pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">dashboard</span></code> key in the YAML file is a string that names a report in the <code class="docutils literal notranslate"><span class="pre">reports</span></code> section to use as the default dashboard:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">dashboard</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dashboard</span><span class="w">   </span><span class="c1"># pointer to the &quot;dashboard&quot; entry in reports</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="nt">reports</span><span class="p">:</span>
+</span><span data-line="4"><span class="w">  </span><span class="nt">dashboard</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Dashboard</span>
+</span><span data-line="6"><span class="w">    </span><span class="nt">queries</span><span class="p">:</span>
+</span><span data-line="7"><span class="w">      </span><span class="nt">cves-total</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="8"><span class="w">        </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="9"><span class="w">        </span><span class="no">RETURN count(c.id) AS total</span>
+</span><span data-line="10"><span class="w">    </span><span class="nt">rows</span><span class="p">:</span>
+</span><span data-line="11"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Overview</span>
+</span><span data-line="12"><span class="w">        </span><span class="nt">panels</span><span class="p">:</span>
+</span><span data-line="13"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-total</span><span class="w">       </span><span class="c1"># reference to a named query in this report&#39;s queries dict</span>
+</span><span data-line="14"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">count</span>
+</span><span data-line="15"><span class="w">            </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Total CVEs</span>
+</span><span data-line="16"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span><span data-line="17"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span><span class="w">               </span><span class="c1"># direct Cypher string — no named reference needed</span>
+</span><span data-line="18"><span class="w">              </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="19"><span class="w">              </span><span class="no">RETURN count(c.id) AS total</span>
+</span><span data-line="20"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">count</span>
+</span><span data-line="21"><span class="w">            </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Total CVEs (direct)</span>
+</span><span data-line="22"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+<p>To change the dashboard at runtime, use the Reports list in the UI (see below) or call the API directly:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span data-line="1">curl<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>/api/v1/reports/&lt;report_id&gt;/dashboard
+</span></pre></div>
+</div>
+</section>
+<section id="managing-reports">
+<h2>Managing Reports<a class="headerlink" href="#managing-reports" title="Link to this heading">#</a></h2>
+<p>Reports can be created, edited, and deleted at runtime through the Seizu UI without modifying the YAML file or restarting the service.</p>
+<blockquote>
+<div><p><strong>Permissions:</strong> Creating and editing reports requires the <code class="docutils literal notranslate"><span class="pre">reports:write</span></code> permission (<code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> or <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code>). New reports and clones start as private drafts visible only to their owner. Owners with <code class="docutils literal notranslate"><span class="pre">reports:write</span></code> can publish or unpublish their own reports; publishing updates report metadata and does not create a new version. Deleting reports requires <code class="docutils literal notranslate"><span class="pre">reports:delete</span></code>. Setting the default dashboard requires <code class="docutils literal notranslate"><span class="pre">reports:set_dashboard</span></code> and the selected report must be public. Pinning reports requires <code class="docutils literal notranslate"><span class="pre">reports:write</span></code>. Restoring a historical version also requires <code class="docutils literal notranslate"><span class="pre">reports:write</span></code>. Users with only the <code class="docutils literal notranslate"><span class="pre">seizu-viewer</span></code> role can view public reports and history but will not see the <strong>New report</strong> button, and write/delete/restore actions in the <strong>⋮</strong> menu and version view will be disabled.</p>
+</div></blockquote>
+<section id="reports-list">
+<h3>Reports list<a class="headerlink" href="#reports-list" title="Link to this heading">#</a></h3>
+<p>Navigate to <strong>Reports</strong> in the sidebar to view all reports. From the list you can:</p>
+<ul class="simple">
+<li><p>Click a report name to view it.</p></li>
+<li><p>Open the <strong>⋮</strong> menu on any row to <strong>Edit</strong>, <strong>View history</strong>, <strong>Publish</strong> / <strong>Unpublish</strong>, <strong>Set as dashboard</strong>, <strong>Pin to sidebar</strong> / <strong>Unpin from sidebar</strong>, or <strong>Delete</strong> a report.</p></li>
+<li><p>A <strong>Draft</strong> or <strong>Public</strong> badge shows the report visibility.</p></li>
+<li><p>A <strong>Pinned</strong> badge is shown inline on reports that are pinned to the sidebar.</p></li>
+<li><p>A <strong>Dashboard</strong> badge is shown inline on whichever report is currently set as the dashboard.</p></li>
+</ul>
+</section>
+<section id="pinning-reports-to-the-sidebar">
+<h3>Pinning reports to the sidebar<a class="headerlink" href="#pinning-reports-to-the-sidebar" title="Link to this heading">#</a></h3>
+<p>Pinning a report adds it as a direct link under <strong>Reports</strong> in the navigation sidebar, so it can be reached in one click without going through the Reports list. Only pinned reports appear in the sidebar — the full list is always accessible via the <strong>Reports</strong> navigation item.</p>
+<p>To pin or unpin a report, open the <strong>⋮</strong> menu on its row in the Reports list and choose <strong>Pin to sidebar</strong> or <strong>Unpin from sidebar</strong>. This requires the <code class="docutils literal notranslate"><span class="pre">reports:write</span></code> permission.</p>
+</section>
+<section id="creating-a-report">
+<h3>Creating a report<a class="headerlink" href="#creating-a-report" title="Link to this heading">#</a></h3>
+<p>Click <strong>New report</strong> on the Reports list page, enter a name, and confirm. An empty report is created immediately and opened in edit mode so you can start adding rows and panels.</p>
+</section>
+<section id="version-history">
+<h3>Version history<a class="headerlink" href="#version-history" title="Link to this heading">#</a></h3>
+<p>Every save creates a new numbered version; the full history is always available. To access it:</p>
+<ul class="simple">
+<li><p>Click <strong>History</strong> (top-right when viewing a report), or</p></li>
+<li><p>Choose <strong>View history</strong> from the ⋮ menu in the Reports list.</p></li>
+</ul>
+<p>The history page lists all versions newest-first, showing the version number, save date, author, and save comment. The current (latest) version is labeled <strong>current</strong>.</p>
+<p>Click a version number to open a read-only view of that version. From the version view you can:</p>
+<ul class="simple">
+<li><p>Use the <strong>← v_N_</strong> / <strong>v_N_ →</strong> buttons in the toolbar to step through older and newer versions without returning to the list.</p></li>
+<li><p>Click <strong>Restore this version</strong> to save the historical config as a new latest version. The button is disabled when viewing the current version, or when you do not have the <code class="docutils literal notranslate"><span class="pre">reports:write</span></code> permission.</p></li>
+</ul>
+<p>Restoring a version never deletes history — it creates a new version whose config matches the restored one.</p>
+</section>
+<section id="editing-a-report">
+<h3>Editing a report<a class="headerlink" href="#editing-a-report" title="Link to this heading">#</a></h3>
+<p>Click <strong>Edit report</strong> (top-right when viewing a report) or choose <strong>Edit</strong> from the ⋮ menu in the Reports list. Edit mode provides:</p>
+<ul class="simple">
+<li><p><strong>Named Queries</strong> — a collapsible section for defining reusable Cypher strings that panels can reference by key.</p></li>
+<li><p><strong>Rows</strong> — add, rename, and delete rows. Rows hold panels in a horizontal grid.</p></li>
+<li><p><strong>Panels</strong> — within each row, drag a panel by its body to reposition it, or grab the bottom-right resize handle to change both width and height. The pencil and trash icons open the panel editor or remove the panel. When a report has multiple rows, the move icon opens a row picker for moving a panel to another row.</p></li>
+<li><p><strong>Add panel</strong> — opens the panel editor where you select the panel type and fill in the relevant fields. The form adapts to show only the fields applicable to the chosen type, and exposes Width and Height sliders plus the Cypher / settings specific to that type.</p></li>
+<li><p><strong>Live previews</strong> — panels render with live data reflecting your unsaved edits, so editing a panel’s Cypher or settings updates its preview in place. Previews run the panel’s resolved query through the read-only ad-hoc query path and so require the <code class="docutils literal notranslate"><span class="pre">query:execute</span></code> permission (held by <code class="docutils literal notranslate"><span class="pre">seizu-editor</span></code> and <code class="docutils literal notranslate"><span class="pre">seizu-admin</span></code>); editors without it see lightweight placeholders instead. <code class="docutils literal notranslate"><span class="pre">auto_height</span></code> panels grow to fit their content in edit mode just as they do when viewing.</p></li>
+</ul>
+<p>Drag and resize changes are saved with the next report version.</p>
+<p>Click <strong>Save version</strong> to commit your changes. Every save creates a new numbered version; existing versions are never overwritten.</p>
+</section>
+<section id="deleting-a-report">
+<h3>Deleting a report<a class="headerlink" href="#deleting-a-report" title="Link to this heading">#</a></h3>
+<p>Choose <strong>Delete</strong> from the ⋮ menu in the Reports list and confirm. This permanently removes the report and all its versions. If the report is pinned, unpin it first. If the report is currently set as the dashboard, set another public report as the dashboard before deleting it.</p>
+</section>
+</section>
+<section id="panels">
+<h2>Panels<a class="headerlink" href="#panels" title="Link to this heading">#</a></h2>
+<p>Seizu supports various panel types that can be used to visualize graph data.
+See <a class="reference internal" href="#schema.html#panel"><span class="xref myst">the Panel schema</span></a> for more detailed info about specific fields.</p>
+<section id="panel-layout">
+<h3>Panel layout<a class="headerlink" href="#panel-layout" title="Link to this heading">#</a></h3>
+<p>Panels are positioned and sized on a 12-column grid (each row of the grid is 48 px tall). Every panel type accepts the same layout fields:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>w</p></td>
+<td><p>Width in grid columns (1–12).</p></td>
+</tr>
+<tr class="row-odd"><td><p>h</p></td>
+<td><p>Height in grid rows. When unset, a per-type default is used (e.g. 4 for <code class="docutils literal notranslate"><span class="pre">count</span></code>, 8 for charts, 10 for tables).</p></td>
+</tr>
+<tr class="row-even"><td><p>x</p></td>
+<td><p>Optional column index (0-based). When unset, panels pack left-to-right within the row.</p></td>
+</tr>
+<tr class="row-odd"><td><p>y</p></td>
+<td><p>Optional row index within the row’s grid. Reserved for future multi-row layouts; usually <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>min_h</p></td>
+<td><p>Optional minimum height in grid rows. Enforced when the user resizes the panel.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">markdown</span></code> and <code class="docutils literal notranslate"><span class="pre">vertical-table</span></code> panel types also accept <code class="docutils literal notranslate"><span class="pre">auto_height</span></code> (boolean). When <code class="docutils literal notranslate"><span class="pre">true</span></code>, the panel renders at its natural content height instead of filling the assigned grid cell — useful for short, content-driven panels where clipping or scrolling looks wrong.</p>
+</section>
+<section id="count">
+<h3>count<a class="headerlink" href="#count" title="Link to this heading">#</a></h3>
+<p>To simply display a count of a particular query, use a <code class="docutils literal notranslate"><span class="pre">count</span></code> panel.</p>
+<p><img alt="a count panel example" src="../_images/count-panel.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. The query must return the count as <code class="docutils literal notranslate"><span class="pre">total</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>details_cypher</p></td>
+<td><p>A cypher to use for displaying a table view of the data, in a details view. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Supports the same return formats as the <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-odd"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">count</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="example">
+<h4>Example<a class="headerlink" href="#example" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves</span>
+</span><span data-line="2"><span class="w">          </span><span class="nt">details_cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-details</span>
+</span><span data-line="3"><span class="w">          </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Total CVEs</span>
+</span><span data-line="4"><span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">count</span>
+</span><span data-line="5"><span class="w">          </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="progress">
+<h3>progress<a class="headerlink" href="#progress" title="Link to this heading">#</a></h3>
+<p>To display a progress wheel, and x/y display of a particular query, use a <code class="docutils literal notranslate"><span class="pre">progress</span></code> panel.
+By default, this panel will color the progress data based on a threshold of &lt;70% error, &gt;70% &lt;100% primary, 100% success.</p>
+<p><img alt="a progress panel example" src="../_images/progress-panel.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. The query must return the counts as <code class="docutils literal notranslate"><span class="pre">numerator</span></code> and <code class="docutils literal notranslate"><span class="pre">denominator</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>details_cypher</p></td>
+<td><p>A cypher to use for displaying a table view of the data, in a details view. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Supports the same return formats as the <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-odd"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">progress</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>threshold</p></td>
+<td><p>The lower threshold percentage to consider this result an error. Set to <code class="docutils literal notranslate"><span class="pre">0</span></code> to disable threshold. Default: <code class="docutils literal notranslate"><span class="pre">70</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id1">
+<h4>Example<a class="headerlink" href="#id1" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-by-severity</span>
+</span><span data-line="2"><span class="w">          </span><span class="nt">details_cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-by-severity-details</span>
+</span><span data-line="3"><span class="w">          </span><span class="nt">params</span><span class="p">:</span>
+</span><span data-line="4"><span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">severity</span>
+</span><span data-line="5"><span class="w">              </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CRITICAL</span>
+</span><span data-line="6"><span class="w">          </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Critical CVEs</span>
+</span><span data-line="7"><span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">progress</span>
+</span><span data-line="8"><span class="w">          </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+</span><span data-line="9"><span class="w">          </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="pie">
+<h3>pie<a class="headerlink" href="#pie" title="Link to this heading">#</a></h3>
+<p>To display a pie graph, use a <code class="docutils literal notranslate"><span class="pre">pie</span></code> panel.</p>
+<p><img alt="a pie panel example" src="../_images/pie-panel.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. The query must return rows with keys <code class="docutils literal notranslate"><span class="pre">id</span></code> and <code class="docutils literal notranslate"><span class="pre">value</span></code>; example: <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">{id:</span> <span class="pre">c.base_severity,</span> <span class="pre">value:</span> <span class="pre">count(c.id)}</span> <span class="pre">AS</span> <span class="pre">details</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>details_cypher</p></td>
+<td><p>A cypher to use for displaying a table view of the data, in a details view. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Supports the same return formats as the <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-odd"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">pie</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>pie_settings</p></td>
+<td><p>An object of settings specific to pie panels.</p></td>
+</tr>
+<tr class="row-even"><td><p>pie_settings.legend</p></td>
+<td><p>Orientation of the legend. <code class="docutils literal notranslate"><span class="pre">row</span></code> or <code class="docutils literal notranslate"><span class="pre">column</span></code>. If legend is not set, no legend will be shown, and arc labels will be shown instead.</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id2">
+<h4>Example<a class="headerlink" href="#id2" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-by-severity-as-rows</span>
+</span><span data-line="2"><span class="w">          </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Critical CVEs</span>
+</span><span data-line="3"><span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">pie</span>
+</span><span data-line="4"><span class="w">          </span><span class="nt">pie_settings</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">            </span><span class="nt">legend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">column</span>
+</span><span data-line="6"><span class="w">          </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="bar">
+<h3>bar<a class="headerlink" href="#bar" title="Link to this heading">#</a></h3>
+<p>To display a bar graph, use a <code class="docutils literal notranslate"><span class="pre">bar</span></code> panel.</p>
+<p><img alt="a bar panel example" src="../_images/bar-panel.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. The query must return rows with keys <code class="docutils literal notranslate"><span class="pre">id</span></code> and <code class="docutils literal notranslate"><span class="pre">value</span></code>; example: <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">{id:</span> <span class="pre">c.base_severity,</span> <span class="pre">value:</span> <span class="pre">count(c.id)}</span> <span class="pre">AS</span> <span class="pre">details</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>details_cypher</p></td>
+<td><p>A cypher to use for displaying a table view of the data, in a details view. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Supports the same return formats as the <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-odd"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">bar</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>bar_settings</p></td>
+<td><p>An object of settings specific to bar panels.</p></td>
+</tr>
+<tr class="row-even"><td><p>bar_settings.legend</p></td>
+<td><p>Orientation of the legend. <code class="docutils literal notranslate"><span class="pre">row</span></code> or <code class="docutils literal notranslate"><span class="pre">column</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id3">
+<h4>Example<a class="headerlink" href="#id3" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-by-severity-as-rows</span>
+</span><span data-line="2"><span class="w">          </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Critical CVEs</span>
+</span><span data-line="3"><span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">bar</span>
+</span><span data-line="4"><span class="w">          </span><span class="nt">bar_settings</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">            </span><span class="nt">legend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">column</span>
+</span><span data-line="6"><span class="w">          </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="table">
+<h3>table<a class="headerlink" href="#table" title="Link to this heading">#</a></h3>
+<p>To display rows in a paged table, use a <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p>
+<p><img alt="a table panel example" src="../_images/cypher-table.png" /></p>
+<p>The table panel auto-detects columns from the query results. It supports three return formats:</p>
+<ul class="simple">
+<li><p><strong>Named columns</strong> — <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">n.name</span> <span class="pre">AS</span> <span class="pre">name,</span> <span class="pre">n.org</span> <span class="pre">AS</span> <span class="pre">org</span></code> (explicit <code class="docutils literal notranslate"><span class="pre">columns</span></code> config maps to these)</p></li>
+<li><p><strong>Map</strong> — <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">{name:</span> <span class="pre">n.name,</span> <span class="pre">org:</span> <span class="pre">n.org}</span></code> (or with any alias, e.g. <code class="docutils literal notranslate"><span class="pre">AS</span> <span class="pre">row</span></code>)</p></li>
+<li><p><strong>Node</strong> — <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">n</span></code> (properties are unwrapped automatically)</p></li>
+</ul>
+<p>When <code class="docutils literal notranslate"><span class="pre">columns</span></code> is specified in the panel config, those column names are read directly from the record keys.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Columns are auto-detected from the result; no specific return alias is required.</p></td>
+</tr>
+<tr class="row-odd"><td><p>columns</p></td>
+<td><p>Optional list of <code class="docutils literal notranslate"><span class="pre">{name,</span> <span class="pre">label}</span></code> objects to explicitly define which columns to show and their display labels. When omitted, columns are derived from the first result row.</p></td>
+</tr>
+<tr class="row-even"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-odd"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">table</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id4">
+<h4>Example<a class="headerlink" href="#id4" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CVEs</span>
+</span><span data-line="2"><span class="w">        </span><span class="nt">panels</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-search</span>
+</span><span data-line="4"><span class="w">            </span><span class="nt">params</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">              </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cveId</span>
+</span><span data-line="6"><span class="w">                </span><span class="nt">input_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-id-autocomplete-input</span>
+</span><span data-line="7"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+</span><span data-line="8"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="vertical-table">
+<h3>vertical-table<a class="headerlink" href="#vertical-table" title="Link to this heading">#</a></h3>
+<p>To display rows in a less-dense, vertical per-row view, use a <code class="docutils literal notranslate"><span class="pre">vertical-table</span></code> panel.
+Note: the caption per-row is set via the <code class="docutils literal notranslate"><span class="pre">table_id</span></code> field, and if unset, will display <code class="docutils literal notranslate"><span class="pre">undefined</span></code></p>
+<p><img alt="a vertical table panel example" src="../_images/vertical-table.png" /></p>
+<p>Supports the same return formats as the <code class="docutils literal notranslate"><span class="pre">table</span></code> panel (named columns, map, or bare node).</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. Columns are auto-detected from the result; no specific return alias is required.</p></td>
+</tr>
+<tr class="row-odd"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-even"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">vertical-table</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-even"><td><p>table_id</p></td>
+<td><p>The attribute in the result row to use as a caption for each row. If not set, row captions will show as <code class="docutils literal notranslate"><span class="pre">undefined</span></code>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+<tr class="row-even"><td><p>auto_height</p></td>
+<td><p>When <code class="docutils literal notranslate"><span class="pre">true</span></code>, the panel grows to fit its content rather than scrolling within a fixed grid cell.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id5">
+<h4>Example<a class="headerlink" href="#id5" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CVEs</span>
+</span><span data-line="2"><span class="w">        </span><span class="nt">panels</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-search</span>
+</span><span data-line="4"><span class="w">            </span><span class="nt">params</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">              </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cveId</span>
+</span><span data-line="6"><span class="w">                </span><span class="nt">input_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-id-autocomplete-input</span>
+</span><span data-line="7"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">vertical-table</span>
+</span><span data-line="8"><span class="w">            </span><span class="nt">table_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">id</span>
+</span><span data-line="9"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="graph">
+<h3>graph<a class="headerlink" href="#graph" title="Link to this heading">#</a></h3>
+<p>To display graph data as an interactive node-link diagram, use a <code class="docutils literal notranslate"><span class="pre">graph</span></code> panel.</p>
+<p><img alt="a graph panel example" src="../_images/graph-panel.png" /></p>
+<p>The panel has three tabs:</p>
+<ul class="simple">
+<li><p><strong>Graph</strong> — interactive node-link visualization. Only shown when the query returns graph-compatible data (see formats below).</p></li>
+<li><p><strong>Table</strong> — tabular view of the raw results. Always available. Columns are auto-detected from the result shape.</p></li>
+<li><p><strong>Raw</strong> — JSON dump of the full API response. Always available.</p></li>
+</ul>
+<p>Clicking a node or relationship opens a collapsible detail panel on the right showing its properties. Clicking the canvas background deselects and returns to a graph summary view. The detail panel can also be toggled via the info icon at the top of the toggle handle.</p>
+<p>The <strong>Graph</strong> tab supports two query return formats:</p>
+<p><strong>Option 1 — explicit map</strong> (full control over labels and grouping):</p>
+<div class="highlight-cypher notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="k">MATCH</span><span class="w"> </span><span class="p">(</span><span class="n">org</span><span class="p">:</span><span class="n">GitHubOrganization</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">OWNER</span><span class="o">]-&gt;</span><span class="p">(</span><span class="n">repo</span><span class="p">:</span><span class="n">GitHubRepository</span><span class="p">)</span>
+</span><span data-line="2"><span class="k">WITH</span>
+</span><span data-line="3"><span class="w">  </span><span class="k">collect</span><span class="p">(</span><span class="k">DISTINCT</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="n">id</span><span class="p">(</span><span class="n">org</span><span class="p">),</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="n">org</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">group</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;Org&#39;</span><span class="p">})</span><span class="w"> </span><span class="err">+</span>
+</span><span data-line="4"><span class="w">  </span><span class="k">collect</span><span class="p">(</span><span class="k">DISTINCT</span><span class="w"> </span><span class="p">{</span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="n">id</span><span class="p">(</span><span class="n">repo</span><span class="p">),</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="n">repo</span><span class="p">.</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">group</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;Repository&#39;</span><span class="p">})</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">nodes</span><span class="p">,</span>
+</span><span data-line="5"><span class="w">  </span><span class="k">collect</span><span class="p">({</span><span class="n">source</span><span class="p">:</span><span class="w"> </span><span class="n">id</span><span class="p">(</span><span class="n">org</span><span class="p">),</span><span class="w"> </span><span class="n">target</span><span class="p">:</span><span class="w"> </span><span class="n">id</span><span class="p">(</span><span class="n">repo</span><span class="p">),</span><span class="w"> </span><span class="n">type</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;OWNER&#39;</span><span class="p">})</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">links</span>
+</span><span data-line="6"><span class="k">RETURN</span><span class="w"> </span><span class="p">{</span><span class="n">nodes</span><span class="p">:</span><span class="w"> </span><span class="n">nodes</span><span class="p">,</span><span class="w"> </span><span class="n">links</span><span class="p">:</span><span class="w"> </span><span class="n">links</span><span class="p">}</span>
+</span></pre></div>
+</div>
+<p><strong>Option 2 — <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">path</span></code></strong> (simplest; labels use the <code class="docutils literal notranslate"><span class="pre">node_label</span></code> property, defaulting to <code class="docutils literal notranslate"><span class="pre">name</span></code> then node id):</p>
+<div class="highlight-cypher notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="k">MATCH</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">(:</span><span class="n">GitHubOrganization</span><span class="p">)</span><span class="o">-[</span><span class="p">:</span><span class="n">OWNER</span><span class="o">]-&gt;</span><span class="p">(:</span><span class="n">GitHubRepository</span><span class="p">)</span>
+</span><span data-line="2"><span class="k">RETURN</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="m">100</span>
+</span></pre></div>
+</div>
+<p>If the query does not return graph-compatible data (e.g. <code class="docutils literal notranslate"><span class="pre">RETURN</span> <span class="pre">n</span></code> or a plain property query), the Graph tab is hidden and the Table tab is shown by default.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>cypher</p></td>
+<td><p>A cypher query to use for this panel. Either a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict, or a direct Cypher string. See formats above.</p></td>
+</tr>
+<tr class="row-odd"><td><p>params</p></td>
+<td><p>A list of parameters to pass into the query. See <a class="reference internal" href="#schema.html#panelparam"><span class="xref myst">the PanelParam schema</span></a> for more info.</p></td>
+</tr>
+<tr class="row-even"><td><p>caption</p></td>
+<td><p>The caption to show as the title of this panel.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">graph</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-even"><td><p>graph_settings</p></td>
+<td><p>An object of settings specific to graph panels.</p></td>
+</tr>
+<tr class="row-odd"><td><p>graph_settings.node_label</p></td>
+<td><p>The node property to display as the node label. Defaults to <code class="docutils literal notranslate"><span class="pre">label</span></code> (explicit map) or <code class="docutils literal notranslate"><span class="pre">name</span></code> then node id (path format).</p></td>
+</tr>
+<tr class="row-even"><td><p>graph_settings.node_color_by</p></td>
+<td><p>The node property to use for color grouping. Defaults to <code class="docutils literal notranslate"><span class="pre">group</span></code> (explicit map) or the first label (path format).</p></td>
+</tr>
+<tr class="row-odd"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id6">
+<h4>Example<a class="headerlink" href="#id6" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">github-org-repos</span>
+</span><span data-line="2"><span class="w">          </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">GitHub Repositories</span>
+</span><span data-line="3"><span class="w">          </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">graph</span>
+</span><span data-line="4"><span class="w">          </span><span class="nt">graph_settings</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">            </span><span class="nt">node_label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">name</span>
+</span><span data-line="6"><span class="w">            </span><span class="nt">node_color_by</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">group</span>
+</span><span data-line="7"><span class="w">          </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="markdown">
+<h3>markdown<a class="headerlink" href="#markdown" title="Link to this heading">#</a></h3>
+<p>To render markdown, use a <code class="docutils literal notranslate"><span class="pre">markdown</span></code> panel.</p>
+<p><img alt="a markdown panel example showing rendered Markdoc content with a table" src="../_images/markdown-panel.png" /></p>
+<p>Markdown panels are rendered with <a class="reference external" href="https://markdoc.dev/">Markdoc</a>, a Markdown-based authoring framework with first-class support for variables and tags.
+Standard Markdown works as you’d expect — <strong>bold</strong>, <em>italic</em>, headings, ordered and unordered lists, links, code spans, fenced code blocks, and tables.
+Tables render using MUI components with themed borders and a highlighted header row.
+Heading levels in the Markdown source are shifted down by one (<code class="docutils literal notranslate"><span class="pre">##</span></code> renders as <code class="docutils literal notranslate"><span class="pre">&lt;h3&gt;</span></code>, etc.) so they fit naturally within the panel hierarchy.</p>
+<p>The WYSIWYG editor recognizes Markdoc variable syntax and displays each variable as an inline chip. Use the <strong>Insert variable</strong> button in the editor toolbar to insert a reference to one of the report’s inputs.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>markdown</p></td>
+<td><p>The markdown content to render. Supports Markdoc variables, tags, and standard Markdown (headings, lists, links, code, tables).</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td><p>The type of panel. <code class="docutils literal notranslate"><span class="pre">markdown</span></code>, for this panel type.</p></td>
+</tr>
+<tr class="row-even"><td><p>w, h, x, y, min_h</p></td>
+<td><p>Layout fields. See <a class="reference internal" href="#panel-layout"><span class="xref myst">Panel layout</span></a>.</p></td>
+</tr>
+<tr class="row-odd"><td><p>auto_height</p></td>
+<td><p>When <code class="docutils literal notranslate"><span class="pre">true</span></code>, the panel grows to fit its content rather than scrolling within a fixed grid cell.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="variables">
+<h4>Variables<a class="headerlink" href="#variables" title="Link to this heading">#</a></h4>
+<p>Report inputs are exposed as Markdoc variables. Reference an input by its <code class="docutils literal notranslate"><span class="pre">input_id</span></code>, prefixed with <code class="docutils literal notranslate"><span class="pre">$</span></code>:</p>
+<div class="highlight-markdown notranslate"><div class="highlight"><pre><span></span><span data-line="1">Showing CVEs at severity {% $cve-severity-autocomplete-input %} or higher.
+</span></pre></div>
+</div>
+<p>The compact form <code class="docutils literal notranslate"><span class="pre">{%$input_id%}</span></code> (no whitespace) is also accepted, and is what the <strong>Insert variable</strong> toolbar produces. Use the compact form inside markdown link URLs — markdown-it’s link parser bails on URLs that contain spaces, so the spaced form <code class="docutils literal notranslate"><span class="pre">{%</span> <span class="pre">$...</span> <span class="pre">%}</span></code> would prevent <code class="docutils literal notranslate"><span class="pre">[label](https://example.com/{%</span> <span class="pre">$foo</span> <span class="pre">%})</span></code> from being recognized as a link at all.</p>
+<p>When the user changes the input, the markdown re-renders with the new value. Inputs that are unset (cleared, or with no default) are omitted from the variables map — see <a class="reference internal" href="#conditionals"><span class="std std-ref">Conditionals</span></a> for how to branch on this.</p>
+</section>
+<section id="variables-in-link-and-image-urls">
+<h4>Variables in link and image URLs<a class="headerlink" href="#variables-in-link-and-image-urls" title="Link to this heading">#</a></h4>
+<p>Variables can be interpolated into the <code class="docutils literal notranslate"><span class="pre">href</span></code> of a link or the <code class="docutils literal notranslate"><span class="pre">src</span></code> of an image:</p>
+<div class="highlight-markdown notranslate"><div class="highlight"><pre><span></span><span data-line="1">[<span class="nt">{%$github_org%}</span>](<span class="na">https://github.com/{%$github_org%}</span>)
+</span><span data-line="2">
+</span><span data-line="3">![<span class="nt">logo</span>](<span class="na">https://cdn.example.com/{%$customer%}/logo.png</span>)
+</span></pre></div>
+</div>
+<p>A few rules apply:</p>
+<ul class="simple">
+<li><p>Use the <strong>compact form</strong> <code class="docutils literal notranslate"><span class="pre">{%$name%}</span></code> inside the URL (markdown-it cannot parse a URL that contains spaces).</p></li>
+<li><p>If you prefer the spaced form, wrap the URL in angle brackets: <code class="docutils literal notranslate"><span class="pre">[label](&lt;https://github.com/{%</span> <span class="pre">$foo</span> <span class="pre">%}&gt;)</span></code>. Both produce the same output.</p></li>
+<li><p><strong>URLs whose value came from variable substitution are validated against an allowlist</strong> of <code class="docutils literal notranslate"><span class="pre">http://</span></code>, <code class="docutils literal notranslate"><span class="pre">https://</span></code>, <code class="docutils literal notranslate"><span class="pre">mailto:</span></code>, <code class="docutils literal notranslate"><span class="pre">tel:</span></code>, plus relative URLs (no scheme) and safe image data URIs (<code class="docutils literal notranslate"><span class="pre">data:image/{gif,png,jpeg,webp}</span></code>). Anything else — including custom OS protocol handlers like <code class="docutils literal notranslate"><span class="pre">slack://</span></code>, <code class="docutils literal notranslate"><span class="pre">vscode://</span></code>, or any future scheme — resolves to <code class="docutils literal notranslate"><span class="pre">#</span></code>. The allowlist applies only when a variable changed the URL; static editor-authored URLs (e.g., <code class="docutils literal notranslate"><span class="pre">[chat](slack://channel-id)</span></code> with no variables) pass through unchanged.</p></li>
+</ul>
+</section>
+<section id="conditionals">
+<h4>Conditionals<a class="headerlink" href="#conditionals" title="Link to this heading">#</a></h4>
+<p>Markdoc’s <code class="docutils literal notranslate"><span class="pre">{%</span> <span class="pre">if</span> <span class="pre">%}</span></code> / <code class="docutils literal notranslate"><span class="pre">{%</span> <span class="pre">else</span> <span class="pre">/%}</span></code> / <code class="docutils literal notranslate"><span class="pre">{%</span> <span class="pre">/if</span> <span class="pre">%}</span></code> tags let you show different content based on whether an input is set or matches a value:</p>
+<div class="highlight-markdown notranslate"><div class="highlight"><pre><span></span><span data-line="1">{% if not($org) %}
+</span><span data-line="2">Select a GitHub organization to view its repositories.
+</span><span data-line="3">{% else /%}
+</span><span data-line="4">Repositories owned by <span class="gs">**{% $org %}**</span>:
+</span><span data-line="5">{% /if %}
+</span></pre></div>
+</div>
+<p>Markdoc’s truthiness rules differ from JavaScript: only <code class="docutils literal notranslate"><span class="pre">null</span></code>, <code class="docutils literal notranslate"><span class="pre">undefined</span></code>, and <code class="docutils literal notranslate"><span class="pre">false</span></code> are falsy — empty strings and <code class="docutils literal notranslate"><span class="pre">0</span></code> are truthy. Seizu omits unset/empty inputs from the variables map so <code class="docutils literal notranslate"><span class="pre">not($input_id)</span></code> evaluates to <code class="docutils literal notranslate"><span class="pre">true</span></code> when the input is cleared.</p>
+<p>You can also compare values:</p>
+<div class="highlight-markdown notranslate"><div class="highlight"><pre><span></span><span data-line="1">{% if equals($severity, &quot;CRITICAL&quot;) %}
+</span><span data-line="2"><span class="gs">**Action required**</span>: critical findings present.
+</span><span data-line="3">{% /if %}
+</span></pre></div>
+</div>
+</section>
+<section id="other-markdoc-features">
+<h4>Other Markdoc features<a class="headerlink" href="#other-markdoc-features" title="Link to this heading">#</a></h4>
+<p>Markdoc supports a richer authoring vocabulary than vanilla Markdown — function calls (<code class="docutils literal notranslate"><span class="pre">equals</span></code>, <code class="docutils literal notranslate"><span class="pre">and</span></code>, <code class="docutils literal notranslate"><span class="pre">or</span></code>, <code class="docutils literal notranslate"><span class="pre">not</span></code>, <code class="docutils literal notranslate"><span class="pre">default</span></code>), the <code class="docutils literal notranslate"><span class="pre">{%</span> <span class="pre">partial</span> <span class="pre">%}</span></code> tag for content reuse, and custom tag schemas. Seizu does not register any custom tags or partials by default; you get the standard Markdoc surface plus the <code class="docutils literal notranslate"><span class="pre">$input_id</span></code> variables described above.</p>
+<p>For the full Markdoc syntax reference and feature list, see the <a class="reference external" href="https://markdoc.dev/docs">Markdoc documentation</a>.</p>
+</section>
+<section id="id7">
+<h4>Example<a class="headerlink" href="#id7" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">markdown</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="2"><span class="w">              </span><span class="no">## CVE info</span>
+</span><span data-line="3"><span class="w">              </span><span class="no">{% if not($cve-severity-autocomplete-input) %}</span>
+</span><span data-line="4"><span class="w">              </span><span class="no">Select a CVE severity to filter the list below.</span>
+</span><span data-line="5"><span class="w">              </span><span class="no">{% else /%}</span>
+</span><span data-line="6"><span class="w">              </span><span class="no">Showing **{% $cve-severity-autocomplete-input %}** CVEs:</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="w">              </span><span class="no">1. [CVE-2021-44228](https://security.snyk.io/vuln/SNYK-JAVA-ORGAPACHELOGGINGLOG4J-2314720): Remote Code Execution (RCE), affects log4j versions below 2.15.0</span>
+</span><span data-line="9"><span class="w">              </span><span class="no">1. [CVE-2021-45046](https://security.snyk.io/vuln/SNYK-JAVA-ORGAPACHELOGGINGLOG4J-2320014): Remote Code Execution (RCE), affects log4j versions below 2.16.0</span>
+</span><span data-line="10"><span class="w">              </span><span class="no">1. [CVE-2021-45105](https://security.snyk.io/vuln/SNYK-JAVA-ORGAPACHELOGGINGLOG4J-2321524): Denial of Service (DoS), affects log4j versions below 2.17.0</span>
+</span><span data-line="11"><span class="w">              </span><span class="no">{% /if %}</span>
+</span><span data-line="12">
+</span><span data-line="13"><span class="w">              </span><span class="no">## Recommended action</span>
+</span><span data-line="14"><span class="w">              </span><span class="no">Upgrade to log4j 2.17.1 or higher.</span>
+</span><span data-line="15"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">markdown</span>
+</span><span data-line="16"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">12</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+</section>
+<section id="named-queries">
+<h2>Named Queries<a class="headerlink" href="#named-queries" title="Link to this heading">#</a></h2>
+<p>Reports can define a <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict of named Cypher strings.
+Panel <code class="docutils literal notranslate"><span class="pre">cypher</span></code> and <code class="docutils literal notranslate"><span class="pre">details_cypher</span></code> fields are resolved against this dict at render time.
+If the field value is not a key in the dict, it is used as a literal Cypher string — allowing panels to embed queries directly without adding them to the <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict first.</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">reports</span><span class="p">:</span>
+</span><span data-line="2"><span class="w">  </span><span class="nt">dashboard</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Dashboard</span>
+</span><span data-line="4"><span class="w">    </span><span class="nt">queries</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">      </span><span class="nt">cves-total</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="6"><span class="w">        </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="7"><span class="w">        </span><span class="no">RETURN count(c.id) AS total</span>
+</span><span data-line="8"><span class="w">    </span><span class="nt">rows</span><span class="p">:</span>
+</span><span data-line="9"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Overview</span>
+</span><span data-line="10"><span class="w">        </span><span class="nt">panels</span><span class="p">:</span>
+</span><span data-line="11"><span class="w">          </span><span class="c1"># Named reference — resolved from the queries dict above</span>
+</span><span data-line="12"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-total</span>
+</span><span data-line="13"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">count</span>
+</span><span data-line="14"><span class="w">            </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Total CVEs</span>
+</span><span data-line="15"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span><span data-line="16"><span class="w">          </span><span class="c1"># Direct Cypher string — no entry in queries needed</span>
+</span><span data-line="17"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="18"><span class="w">              </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="19"><span class="w">              </span><span class="no">RETURN count(c.id) AS total</span>
+</span><span data-line="20"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">count</span>
+</span><span data-line="21"><span class="w">            </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Total CVEs (direct)</span>
+</span><span data-line="22"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span></pre></div>
+</div>
+</section>
+<section id="inputs">
+<h2>Inputs<a class="headerlink" href="#inputs" title="Link to this heading">#</a></h2>
+<p>Reports can define inputs that can be used to pass parameters into queries used in panels in the report.
+These will be rendered at the top of the report, in the order specified in the configuration.</p>
+<section id="autocomplete">
+<h3>autocomplete<a class="headerlink" href="#autocomplete" title="Link to this heading">#</a></h3>
+<p>An <code class="docutils literal notranslate"><span class="pre">autocomplete</span></code> input can be used to use results queried from the graph as inputs to panels.
+End-users can select through a dropdown list of the values, or can type to search/autocomplete a value.</p>
+<p><img alt="an autocomplete input example" src="../_images/autocomplete-input.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>input_id</p></td>
+<td><p>An ID for this input, that can be referenced from the params section of a panel.</p></td>
+</tr>
+<tr class="row-odd"><td><p>cypher</p></td>
+<td><p>A cypher query used to return the relevant data. This is <strong>not</strong> a reference to a query, but the actual query to run. It’s recommended to use <code class="docutils literal notranslate"><span class="pre">DISTINCT</span></code> for the values returned. The query must return the data as <code class="docutils literal notranslate"><span class="pre">value</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>default</p></td>
+<td><p>A dictionary with the default <code class="docutils literal notranslate"><span class="pre">label</span></code> and <code class="docutils literal notranslate"><span class="pre">value</span></code> for the input, when not set.</p></td>
+</tr>
+<tr class="row-odd"><td><p>type</p></td>
+<td><p>The type of input. <code class="docutils literal notranslate"><span class="pre">autocomplete</span></code>, for this input type.</p></td>
+</tr>
+<tr class="row-even"><td><p>size</p></td>
+<td><p>The width of this input.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id8">
+<h4>Example<a class="headerlink" href="#id8" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">input_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-severity-autocomplete-input</span>
+</span><span data-line="2"><span class="w">        </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;-</span>
+</span><span data-line="3"><span class="w">          </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="4"><span class="w">          </span><span class="no">RETURN DISTINCT c.base_severity AS value</span>
+</span><span data-line="5"><span class="w">        </span><span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CVE Severity</span>
+</span><span data-line="6"><span class="w">        </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">autocomplete</span>
+</span><span data-line="7"><span class="w">        </span><span class="nt">size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="text">
+<h3>text<a class="headerlink" href="#text" title="Link to this heading">#</a></h3>
+<p>A <code class="docutils literal notranslate"><span class="pre">text</span></code> input can be used for user-defined input for panel query parameters.
+Panel re-renders are debounced: connected panels only update 300 ms after the user stops typing, rather than on every keystroke.</p>
+<p><img alt="an text input example" src="../_images/text-input.png" /></p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Field</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>input_id</p></td>
+<td><p>An ID for this input, that can be referenced from the params section of a panel.</p></td>
+</tr>
+<tr class="row-odd"><td><p>default</p></td>
+<td><p>A dictionary with the default <code class="docutils literal notranslate"><span class="pre">value</span></code> for the input, when not set.</p></td>
+</tr>
+<tr class="row-even"><td><p>type</p></td>
+<td><p>The type of input. <code class="docutils literal notranslate"><span class="pre">text</span></code>, for this input type.</p></td>
+</tr>
+<tr class="row-odd"><td><p>size</p></td>
+<td><p>The width of this input.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<section id="id9">
+<h4>Example<a class="headerlink" href="#id9" title="Link to this heading">#</a></h4>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">input_id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cve-id-regex</span>
+</span><span data-line="2"><span class="w">        </span><span class="nt">label</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Regex</span>
+</span><span data-line="3"><span class="w">        </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">text</span>
+</span><span data-line="4"><span class="w">        </span><span class="nt">size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+</section>
+<section id="details-data">
+<h2>Details Data<a class="headerlink" href="#details-data" title="Link to this heading">#</a></h2>
+<p>All panel types with a <code class="docutils literal notranslate"><span class="pre">cypher</span></code> query have an info button that shows extra details about the panel, such as the query used, the parameters to the query, metrics that may be pushed with it, etc.
+For <code class="docutils literal notranslate"><span class="pre">count</span></code>, <code class="docutils literal notranslate"><span class="pre">progress</span></code>, <code class="docutils literal notranslate"><span class="pre">pie</span></code>, <code class="docutils literal notranslate"><span class="pre">bar</span></code>, <code class="docutils literal notranslate"><span class="pre">graph</span></code>, and <code class="docutils literal notranslate"><span class="pre">vertical-table</span></code> panels, the info button appears in the top-right corner of the panel and is only visible on hover.
+For <code class="docutils literal notranslate"><span class="pre">table</span></code> panels the info button is always visible, inline with the panel header.
+Non-table panel types that also have a <code class="docutils literal notranslate"><span class="pre">details_cypher</span></code> configured will show a data drill-down table as the first tab in the details view.</p>
+<p><img alt="a details view example" src="../_images/details-view.png" /></p>
+<p>Use <code class="docutils literal notranslate"><span class="pre">details_cypher</span></code> when a summary panel should let users inspect the rows behind the aggregate. The details query can be a key from the report’s <code class="docutils literal notranslate"><span class="pre">queries</span></code> dict or a direct Cypher string. It receives the same <code class="docutils literal notranslate"><span class="pre">params</span></code> as the panel query and supports the same return formats as a <code class="docutils literal notranslate"><span class="pre">table</span></code> panel.</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="nt">reports</span><span class="p">:</span>
+</span><span data-line="2"><span class="w">  </span><span class="nt">dashboard</span><span class="p">:</span>
+</span><span data-line="3"><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Dashboard</span>
+</span><span data-line="4"><span class="w">    </span><span class="nt">queries</span><span class="p">:</span>
+</span><span data-line="5"><span class="w">      </span><span class="nt">cves-severity-fraction</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="6"><span class="w">        </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="7"><span class="w">        </span><span class="no">WITH COUNT(DISTINCT c.id) AS denominator</span>
+</span><span data-line="8"><span class="w">        </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="9"><span class="w">        </span><span class="no">WHERE c.base_severity = $base_severity</span>
+</span><span data-line="10"><span class="w">        </span><span class="no">RETURN count(DISTINCT c.id) AS numerator, denominator</span>
+</span><span data-line="11"><span class="w">      </span><span class="nt">cves-severity-fraction-details</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">|-</span>
+</span><span data-line="12"><span class="w">        </span><span class="no">MATCH (c:CVE)</span>
+</span><span data-line="13"><span class="w">        </span><span class="no">WHERE c.base_severity = $base_severity</span>
+</span><span data-line="14"><span class="w">        </span><span class="no">RETURN c AS details</span>
+</span><span data-line="15"><span class="w">    </span><span class="nt">rows</span><span class="p">:</span>
+</span><span data-line="16"><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Progress panels</span>
+</span><span data-line="17"><span class="w">        </span><span class="nt">panels</span><span class="p">:</span>
+</span><span data-line="18"><span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-severity-fraction</span>
+</span><span data-line="19"><span class="w">            </span><span class="nt">details_cypher</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">cves-severity-fraction-details</span>
+</span><span data-line="20"><span class="w">            </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">progress</span>
+</span><span data-line="21"><span class="w">            </span><span class="nt">params</span><span class="p">:</span>
+</span><span data-line="22"><span class="w">              </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">base_severity</span>
+</span><span data-line="23"><span class="w">                </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CRITICAL</span>
+</span><span data-line="24"><span class="w">            </span><span class="nt">caption</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Critical CVEs</span>
+</span><span data-line="25"><span class="w">            </span><span class="nt">w</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</span><span data-line="26"><span class="w">            </span><span class="nt">h</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4</span>
+</span><span data-line="27"><span class="w">            </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="backend.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Backend Installation &amp; Configuration</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="cli.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">CLI</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2022-2026, Seizu Project Authors</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+  <a href="https://github.com/mappedsky/seizu" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/shibuya.js?v=50760d75"></script></body>
+</html>
