@@ -27,6 +27,18 @@ async def test_config_features_chat_disabled_by_default(mocker):
     assert ret.json()["features"]["chat"] is False
 
 
+async def test_config_serves_dependent_action_schemas(mocker):
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/config")
+    dependent = ret.json()["scheduled_query_action_dependent_schemas"]
+    assert dependent["temporal"]["discriminator"] == "workflow"
+    cartography_fields = {f["name"] for f in dependent["temporal"]["schemas"]["cartography_sync"]}
+    assert {"modules", "pipeline"} <= cartography_fields
+    # Workflows without their own config fields have no sub-schema.
+    assert "cve_repo_report" not in dependent["temporal"]["schemas"]
+
+
 async def test_config_features_reflect_chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
     app = _make_app()

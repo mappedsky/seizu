@@ -97,7 +97,19 @@ export interface ActionConfigFieldDef {
   warning?: string;
 }
 
+// Extra fields rendered when the discriminator field of an action's config
+// takes one of the keyed values (e.g. the temporal action's per-workflow
+// config fields, keyed by the selected workflow).
+export interface ActionConfigDependentSchema {
+  discriminator: string;
+  schemas: Record<string, ActionConfigFieldDef[]>;
+}
+
 export interface SeizuConfig {
   scheduled_query_action_types: string[];
   scheduled_query_action_schemas: Record<string, ActionConfigFieldDef[]>;
+  scheduled_query_action_dependent_schemas: Record<
+    string,
+    ActionConfigDependentSchema
+  >;
 }

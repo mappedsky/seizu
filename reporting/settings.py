@@ -274,6 +274,30 @@ TEMPORAL_ENABLED_WORKFLOWS = list_env("TEMPORAL_ENABLED_WORKFLOWS", [])
 TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
 
 # ---------------------------------------------------------------------------
+# Cartography syncs (cartography_sync workflow)
+# ---------------------------------------------------------------------------
+
+# The cartography_sync Temporal workflow runs cartography intel-module syncs
+# as a staged pipeline. The workflow itself runs in the main temporal worker;
+# its per-module activities run on a separate task queue served by the
+# dedicated cartography sync worker image (Dockerfile.cartography, service
+# seizu-cartography-worker), which holds only cartography intel credentials.
+# Task queue the sync worker polls; the workflow dispatches its module
+# activities there.
+CARTOGRAPHY_TASK_QUEUE = str_env("CARTOGRAPHY_TASK_QUEUE", "seizu-cartography")
+# Which registry modules (cartography_sync/registry.py) scheduled syncs may
+# run. Empty or unset → all registered modules; comma-separated names narrow
+# the allowlist (e.g. "aws,github,cve"). Set on the web service (config
+# validation + UI options) and the scheduled query worker (dispatch).
+CARTOGRAPHY_ENABLED_MODULES = list_env("CARTOGRAPHY_ENABLED_MODULES", [])
+# Default per-module-run subprocess timeout (seconds); overridable per
+# scheduled query via the workflow's timeout_minutes config field.
+CARTOGRAPHY_MODULE_TIMEOUT_SECONDS = int_env("CARTOGRAPHY_MODULE_TIMEOUT_SECONDS", 3600)
+# Temporal retry attempts for one module-run activity (config errors never
+# retry).
+CARTOGRAPHY_SYNC_RETRY_ATTEMPTS = int_env("CARTOGRAPHY_SYNC_RETRY_ATTEMPTS", 2)
+
+# ---------------------------------------------------------------------------
 # CVE dependency remediation (cve_dependency_remediation workflow)
 # ---------------------------------------------------------------------------
 

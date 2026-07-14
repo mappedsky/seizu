@@ -23,10 +23,14 @@ def _schemas():
     }
 
 
-def _patch_schemas(mocker):
+def _patch_schemas(mocker, validators=None):
     mocker.patch(
         "reporting.scheduled_query_modules.get_action_schemas",
         return_value=_schemas(),
+    )
+    mocker.patch(
+        "reporting.scheduled_query_modules.get_action_validators",
+        return_value=validators or {},
     )
 
 
@@ -63,6 +67,33 @@ def test_required_boolean_must_be_true(mocker):
 
 def test_valid_config_passes(mocker):
     _patch_schemas(mocker)
+    error = validate_action_configs(
+        [
+            {
+                "action_type": "temporal",
+                "action_config": {"workflow": "cve_repo_report", "accept_confirmation_bypass": True},
+            }
+        ]
+    )
+    assert error is None
+
+
+def test_module_validator_hook_reports_error(mocker):
+    _patch_schemas(mocker, validators={"temporal": lambda config: "custom rule violated"})
+    error = validate_action_configs(
+        [
+            {
+                "action_type": "temporal",
+                "action_config": {"workflow": "cve_repo_report", "accept_confirmation_bypass": True},
+            }
+        ]
+    )
+    assert error is not None
+    assert "custom rule violated" in error
+
+
+def test_module_validator_hook_passes(mocker):
+    _patch_schemas(mocker, validators={"temporal": lambda config: None})
     error = validate_action_configs(
         [
             {

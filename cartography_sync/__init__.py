@@ -1,0 +1,8 @@
+"""Cartography sync worker package.
+
+Shared by the Seizu reporting app (config validation, workflow input) and the
+dedicated cartography sync image's thin Temporal worker. The sync image ships
+only this package, so nothing here may import ``reporting.*`` (which pulls in
+pydantic settings); ``registry`` and ``shared`` must stay stdlib-only, and
+``activities``/``worker`` may additionally use ``temporalio``.
+"""

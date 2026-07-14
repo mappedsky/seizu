@@ -11,6 +11,7 @@ def validate_action_configs(actions: list[dict[str, Any]]) -> str | None:
     Returns an error message string if validation fails, or None if valid.
     """
     schemas = scheduled_query_modules.get_action_schemas()
+    validators = scheduled_query_modules.get_action_validators()
     for action in actions:
         action_type = action.get("action_type", "")
         action_config = action.get("action_config", {})
@@ -27,4 +28,9 @@ def validate_action_configs(actions: list[dict[str, Any]]) -> str | None:
             # checked, not merely present.
             if field.type == "boolean" and value is not True:
                 return f"Action type '{action_type}' requires '{field.name}' to be accepted."
+        validator = validators.get(action_type)
+        if validator is not None:
+            error = validator(action_config)
+            if error is not None:
+                return f"Action type '{action_type}': {error}"
     return None

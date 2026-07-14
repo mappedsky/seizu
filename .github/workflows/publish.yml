@@ -188,3 +188,23 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - name: Extract metadata (tags, labels) for the cartography sync worker image
+        id: meta-cartography
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}-cartography
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=match,pattern=server-v(.*),group=1
+            type=match,pattern=dev-v(.*),group=1
+            type=match,pattern=server-dev-v(.*),group=1
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push cartography sync worker
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          file: Dockerfile.cartography
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-cartography.outputs.tags }}
+          labels: ${{ steps.meta-cartography.outputs.labels }}

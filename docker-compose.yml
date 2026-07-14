@@ -316,6 +316,13 @@ services:
       - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
       # Allowlist of workflows the temporal action may dispatch (empty → all).
       - TEMPORAL_ENABLED_WORKFLOWS
+      # Cartography syncs — the cartography_sync input factory runs here at
+      # dispatch: it validates the stored config against the enabled-modules
+      # allowlist and fills the task queue/timeout/retries into the input.
+      - CARTOGRAPHY_TASK_QUEUE
+      - CARTOGRAPHY_ENABLED_MODULES
+      - CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
+      - CARTOGRAPHY_SYNC_RETRY_ATTEMPTS
       # The cve_dependency_remediation input factory runs here at dispatch: it
       # reads the run timeout and the CI-watch knobs into the workflow input.
       - REMEDIATION_TIMEOUT_SECONDS
@@ -697,6 +704,11 @@ services:
       # from Temporal.
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE
+      # Cartography syncs — which registry modules the cartography_sync
+      # workflow may be configured with (empty → all), and the default
+      # per-module timeout shown in the scheduled-query dialog.
+      - CARTOGRAPHY_ENABLED_MODULES
+      - CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
       # In dev the project is bind-mounted here; the production image copies
       # the frontend build to /build via the Dockerfile nodebuilder stage.
       - STATIC_FOLDER=/home/seizu/seizu/build
@@ -763,5 +775,47 @@ services:
     networks:
       credentials:
           ipv4_address: "169.254.169.2"
+      stats:
+      database:
+  # Dedicated cartography sync worker: the upstream cartography CLI plus the
+  # thin Temporal activity worker (cartography_sync/). The cartography_sync
+  # workflow (running in seizu-temporal-worker) dispatches its per-module
+  # activities to this worker's task queue. Holds only cartography intel
+  # credentials — no LLM keys, report-store creds, or remediation tokens.
+  seizu-cartography-worker:
+    image: ghcr.io/mappedsky/seizu-cartography
+    build:
+      context: .
+      dockerfile: Dockerfile.cartography
+    restart: on-failure
+    user: "10001:10001"
+    init: true
+    depends_on:
+      temporal:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./.compose/cartography/aws-config:/srv/cartography/.aws/config
+      - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml
+      - ./.compose/cartography/kube.config:/etc/cartography/kube.config
+      # Dev live-reload parity with the other workers.
+      - ./cartography_sync:/opt/seizu/cartography_sync
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE
+      - CARTOGRAPHY_TASK_QUEUE
+      - CARTOGRAPHY_NEO4J_URI=bolt://neo4j:7687
+      - "STATSD_ENABLED=true"
+      - STATSD_HOST=telegraf
+      - GITHUB_TOKEN=${CARTOGRAPHY_GITHUB_TOKEN}
+      - NIST_NVD_TOKEN
+      - CROWDSTRIKE_CLIENT_ID
+      - CROWDSTRIKE_CLIENT_SECRET
+      - PAGERDUTY_API_KEY
+      - OKTA_API_KEY
+    networks:
+      credentials:
+          ipv4_address: "169.254.169.3"
       stats:
       database:

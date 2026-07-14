@@ -31,6 +31,7 @@ Documentation
 * `Scheduled query documentation <https://mappedsky.github.io/seizu/install/scheduled-queries.html>`_
 * `Scheduled chat documentation <https://mappedsky.github.io/seizu/install/chat-schedules.html>`_
 * `Temporal workflow documentation <https://mappedsky.github.io/seizu/install/temporal-workflows.html>`_
+* `Scheduled cartography sync documentation <https://mappedsky.github.io/seizu/install/cartography-sync.html>`_
 * `Sandbox delegation documentation <https://mappedsky.github.io/seizu/install/sandbox.html>`_
 * `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
 * `MCP Skillsets documentation <https://mappedsky.github.io/seizu/install/mcp-skillsets.html>`_
@@ -49,6 +50,7 @@ Documentation
     install/scheduled-queries
     install/chat-schedules
     install/temporal-workflows
+    install/cartography-sync
     install/sandbox
     install/mcp-toolsets
     install/mcp-skillsets

@@ -162,7 +162,7 @@ DynamoDB key design: per report `#METADATA`/`#LATEST`/`VERSION#<n>`; per schedul
 
 ### Cartography Data Sync
 
-`nostart` profile; entrypoint is already `cartography` (don't prefix it): `make sync_cve / sync_aws / sync_github / sync_crowdstrike / sync_k8s`.
+Manual runs: `nostart` profile; entrypoint is already `cartography` (don't prefix it): `make sync_cve / sync_aws / sync_github / sync_crowdstrike / sync_k8s`. Scheduled runs go through the `cartography_sync` Temporal workflow (see Temporal Workflows) executed by the dedicated `seizu-cartography-worker` service — a separate image (`Dockerfile.cartography`: upstream cartography + the top-level stdlib-only `cartography_sync/` package's thin activity worker) on its own task queue, holding only cartography intel credentials. `cartography_sync/registry.py` is the security boundary: per-module typed flag allowlists, fixed credential env-var names/paths, argv-list exec (never a shell), scrubbed subprocess env; the activity re-validates and rebuilds argv worker-side, so forged Temporal payloads can't escape the allowlist. The sync worker must not import `reporting.*` (that pulls pydantic settings) — it reads plain env vars (`CARTOGRAPHY_NEO4J_URI`, `CARTOGRAPHY_TASK_QUEUE`, …). Docs: `docs/root/install/cartography-sync.md`.
 
 ### Scheduled Query Action Plugins
 
@@ -204,9 +204,11 @@ Recurring headless agent runs (prompt + trigger, no Cypher) managed from the top
 
 ### Temporal Workflows
 
-The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a named workflow (from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py`) with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above). Built-ins: `cve_repo_report` (per-repo CVE assessment chats) and `cve_dependency_remediation` (per repo+package sandbox remediation runs opening dependency-upgrade PRs — see Sandbox remediation; `maximum_attempts=1`, timeout `REMEDIATION_TIMEOUT_SECONDS`). `TEMPORAL_ENABLED_WORKFLOWS` allowlists which registered workflows the temporal action may dispatch (empty → all); the action gates both its schema picker (`enabled_workflow_names()`) and dispatch (`get_enabled_workflow_spec()`).
+The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a named workflow (from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py`) with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above). Built-ins: `cve_repo_report` (per-repo CVE assessment chats), `cve_dependency_remediation` (per repo+package sandbox remediation runs opening dependency-upgrade PRs — see Sandbox remediation; `maximum_attempts=1`, timeout `REMEDIATION_TIMEOUT_SECONDS`), and `cartography_sync` (staged cartography sync pipeline; activities run on the dedicated sync worker's queue — see Cartography Data Sync). `TEMPORAL_ENABLED_WORKFLOWS` allowlists which registered workflows the temporal action may dispatch (empty → all); the action gates both its schema picker (`enabled_workflow_names()`) and dispatch (`get_enabled_workflow_spec()`).
 
-Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMPORAL_WORKER_ENABLED`, `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`, `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS`; `AGENT_CHAT_MAX_RESULT_ROWS`, `AGENT_CHAT_TIMEOUT_SECONDS`. Docs: `docs/root/install/temporal-workflows.md`.
+A `WorkflowSpec` may declare per-workflow scheduled-query config: `config_fields` (extra `ActionConfigFieldDef`s served via `GET /api/v1/config` as `scheduled_query_action_dependent_schemas` and rendered as a dependent sub-form in `ScheduledQueryDialog` once the workflow is selected), `config_validator` (run on save through the `ModuleInterface.validate_action_config` hook), and `requires_rows=False` for workflows whose schedule query is only a trigger (dispatched even on empty results; the full `action_config` reaches the `input_factory` via `WorkflowInputContext.action_config`).
+
+Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMPORAL_WORKER_ENABLED`, `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS`, `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS`; `AGENT_CHAT_MAX_RESULT_ROWS`, `AGENT_CHAT_TIMEOUT_SECONDS`; `CARTOGRAPHY_TASK_QUEUE`, `CARTOGRAPHY_ENABLED_MODULES`, `CARTOGRAPHY_MODULE_TIMEOUT_SECONDS`, `CARTOGRAPHY_SYNC_RETRY_ATTEMPTS`. Docs: `docs/root/install/temporal-workflows.md`, `docs/root/install/cartography-sync.md`.
 
 ### Docker Services
 
@@ -217,6 +219,7 @@ Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMP
 | `seizu-scheduled-queries` | Scheduled query worker |
 | `seizu-scheduled-chats` | Scheduled chats worker (headless agent runs) |
 | `seizu-temporal-worker` | Temporal workflow worker |
+| `seizu-cartography-worker` | Cartography sync activity worker (own image + task queue) |
 | `temporal` | Temporal dev server (`server start-dev`, in-memory; UI `:8233`) |
 | `neo4j` | Graph database |
 | `dynamodb` | DynamoDB Local (default backend) |
