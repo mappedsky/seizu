@@ -1,37 +1,33 @@
-# Based on: https://github.com/rkdarst/sphinx-actions-test/blob/master/.github/workflows/sphinx-build.yml
-
 name: sphinx
 on:
   push:
     branches:
       - 'master'
 
-env:
-  DEFAULT_BRANCH: "master"
-
 # Deny all permissions by default; grant only what each job needs.
 permissions: {}
 
+# Only one Pages deployment at a time; let in-flight runs finish so a
+# deployed commit is never rolled back by a cancelled newer run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  build-and-deploy:
-    name: Build and gh-pages
+  build:
+    name: Build docs
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       # https://github.com/marketplace/actions/checkout
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-          lfs: true
       # https://github.com/marketplace/actions/setup-python
-      # ^-- This gives info on matrix testing.
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       # https://docs.github.com/en/actions/guides/building-and-testing-python#caching-dependencies
-      # ^-- How to set up caching for pip on Ubuntu
       - name: Cache pip
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -40,75 +36,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
             ${{ runner.os }}-
-
-      # Build
       - name: Build Sphinx docs
         run: |
           make docs
-
-      # Clone and set up the old gh-pages branch
-      - name: Clone old gh-pages
-        if: ${{ github.event_name == 'push' }}
-        run: |
-          set -x
-          git fetch
-          ( git branch gh-pages remotes/origin/gh-pages && git clone . --branch=gh-pages _gh-pages/ ) || mkdir _gh-pages
-          rm -rf _gh-pages/.git/
-          mkdir -p _gh-pages/branch/
-      # If a push and default branch, copy build to _gh-pages/ as the "main"
-      # deployment.
-      - name: Copy new build (default branch)
-        if: |
-          contains(github.event_name, 'push') &&
-          contains(github.ref, env.DEFAULT_BRANCH)
-        run: |
-          set -x
-          # Delete everything under _gh-pages/ that is from the
-          # primary branch deployment.  Eicludes the other branches
-          # _gh-pages/branch-* paths, and not including
-          # _gh-pages itself.
-          find _gh-pages/ -mindepth 1 ! -path '_gh-pages/branch*' -delete
-          rsync -a generated/docs/ _gh-pages/
-      # If a push and not on default branch, then copy the build to
-      # _gh-pages/branch/$brname (transforming '/' into '--')
-      - name: Copy new build (branch)
-        if: |
-          contains(github.event_name, 'push') &&
-          !contains(github.ref, env.DEFAULT_BRANCH)
-        run: |
-          set -x
-          brname="${{github.ref}}"
-          brname="${brname##refs/heads/}"
-          brdir=${brname//\//--}   # replace '/' with '--'
-          rm -rf   _gh-pages/branch/${brdir}
-          rsync -a generated/docs/ _gh-pages/branch/${brdir}
-      # Go through each branch in _gh-pages/branch/, if it's not a
-      # ref, then delete it.
-      - name: Delete old feature branches
-        if: ${{ github.event_name == 'push' }}
-        run: |
-          set -x
-          for brdir in `ls _gh-pages/branch/` ; do
-              brname=${brdir//--/\/}   # replace '--' with '/'
-              if ! git show-ref remotes/origin/$brname ; then
-                  echo "Removing $brdir"
-                  rm -r _gh-pages/branch/$brdir/
-              fi
-          done
-
-      # Add the .nojekyll file
-      - name: nojekyll
-        if: ${{ github.event_name == 'push' }}
-        run: |
-          touch _gh-pages/.nojekyll
-
-      # Deploy
-      # https://github.com/peaceiris/actions-gh-pages
-      - name: Deploy
-        uses: peaceiris/actions-gh-pages@068dc23d9710f1ba62e86896f84735d869951305 # v3.8.0
-        if: ${{ github.event_name == 'push' }}
+      # Ensures the Pages site exists and its source is "GitHub Actions".
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          publish_branch: gh-pages
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: _gh-pages/
-          force_orphan: true
+          path: generated/docs/
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
