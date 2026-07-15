@@ -52,8 +52,11 @@ async def _run_worker() -> None:
     client = await Client.connect(address, namespace=namespace)
     worker = Worker(client, task_queue=task_queue, activities=[run_cartography_module])
     logger.info(
-        "Cartography sync worker started",
-        extra={"address": address, "namespace": namespace, "task_queue": task_queue},
+        "Cartography sync worker started: address=%s namespace=%s task_queue=%s enabled_modules=%s",
+        address,
+        namespace,
+        task_queue,
+        os.environ.get("CARTOGRAPHY_ENABLED_MODULES") or "(all)",
     )
     async with worker:
         await shutdown_event.wait()

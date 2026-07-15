@@ -121,6 +121,19 @@ async def test_neo4j_auth_flags_added_without_password_in_argv(sync_env, monkeyp
     assert "NEO4J_PASSWORD" in result.output_tail.split()
 
 
+async def test_subprocess_output_is_mirrored_to_log_with_module_prefix(sync_env, caplog):
+    sync_env('echo "line one"; echo "line two"')
+    with caplog.at_level("INFO", logger="cartography_sync.activities"):
+        await ActivityEnvironment().run(run_cartography_module, CartographyModuleActivityInput(module="cve", params={}))
+    mirrored = [r.getMessage() for r in caplog.records if r.getMessage().startswith("cartography[cve]")]
+    assert "cartography[cve] line one" in mirrored
+    assert "cartography[cve] line two" in mirrored
+    # Lifecycle messages carry the run context inline (the thin worker's
+    # plain formatter drops `extra` fields).
+    lifecycle = [r.getMessage() for r in caplog.records if "cartography sync" in r.getMessage().lower()]
+    assert any("module=cve" in m and "workflow=" in m for m in lifecycle)
+
+
 async def test_timeout_terminates_subprocess(sync_env):
     sync_env("sleep 30")
     with pytest.raises(ApplicationError) as excinfo:

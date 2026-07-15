@@ -128,12 +128,35 @@ class _TailBuffer:
         return self._data.decode("utf-8", errors="replace")
 
 
-async def _drain(stream: asyncio.StreamReader, tail: _TailBuffer) -> None:
+# Pathologically long unterminated output lines are flushed at this size.
+_LOG_LINE_MAX_BYTES = 8 * 1024
+
+
+def _log_subprocess_line(module: str, raw: bytes) -> None:
+    text = raw.decode("utf-8", errors="replace").rstrip()
+    if text:
+        logger.info("cartography[%s] %s", module, text)
+
+
+async def _drain(stream: asyncio.StreamReader, tail: _TailBuffer, module: str) -> None:
+    """Capture subprocess output into the tail buffer and mirror it to the
+    worker log line-by-line, attributed to its module (parallel runs
+    interleave)."""
+    pending = b""
     while True:
         chunk = await stream.read(4096)
         if not chunk:
+            if pending:
+                _log_subprocess_line(module, pending)
             return
         tail.write(chunk)
+        pending += chunk
+        *lines, pending = pending.split(b"\n")
+        for line in lines:
+            _log_subprocess_line(module, line)
+        if len(pending) > _LOG_LINE_MAX_BYTES:
+            _log_subprocess_line(module, pending)
+            pending = b""
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -169,8 +192,16 @@ async def run_cartography_module(input: CartographyModuleActivityInput) -> Carto
 async def _run_subprocess(
     input: CartographyModuleActivityInput, argv: list[str], env: dict[str, str]
 ) -> CartographyModuleResult:
+    # Context rides in the message itself: the thin worker uses plain stdlib
+    # logging, which does not render `extra` fields (they are still attached
+    # for deployments that ship a structured formatter).
+    info = activity.info()
+    run_context = f"module={input.module} workflow={info.workflow_id} attempt={info.attempt}"
     logger.info(
-        "Starting cartography sync",
+        "Starting cartography sync: %s timeout=%ss argv=%s",
+        run_context,
+        input.timeout_seconds,
+        argv,
         extra={"type": "AUDIT", "cartography_module": input.module, "argv": argv},
     )
     started = time.monotonic()
@@ -182,7 +213,7 @@ async def _run_subprocess(
     )
     tail = _TailBuffer()
     assert process.stdout is not None  # PIPE above guarantees a reader
-    drain_task = asyncio.create_task(_drain(process.stdout, tail))
+    drain_task = asyncio.create_task(_drain(process.stdout, tail, input.module))
     timed_out = False
     try:
         try:
@@ -193,6 +224,7 @@ async def _run_subprocess(
         await drain_task
     except asyncio.CancelledError:
         # Activity cancellation (or worker shutdown): don't orphan the sync.
+        logger.warning("Cartography sync canceled, terminating subprocess: %s", run_context)
         await _terminate(process)
         raise
     finally:
@@ -201,6 +233,12 @@ async def _run_subprocess(
 
     duration = time.monotonic() - started
     if timed_out:
+        logger.error(
+            "Cartography sync timed out: %s after=%ss",
+            run_context,
+            input.timeout_seconds,
+            extra={"type": "AUDIT", "cartography_module": input.module},
+        )
         raise ApplicationError(
             f"cartography {input.module} timed out after {input.timeout_seconds}s:"
             f" …{tail.text()[-_FAILURE_EXCERPT_MAX_CHARS:]}",
@@ -208,12 +246,21 @@ async def _run_subprocess(
         )
     exit_code = process.returncode or 0
     if exit_code != 0:
+        logger.error(
+            "Cartography sync failed: %s exit_code=%s duration=%ss",
+            run_context,
+            exit_code,
+            round(duration, 1),
+            extra={"type": "AUDIT", "cartography_module": input.module},
+        )
         raise ApplicationError(
             f"cartography {input.module} exited {exit_code}: …{tail.text()[-_FAILURE_EXCERPT_MAX_CHARS:]}",
             type=MODULE_FAILED,
         )
     logger.info(
-        "Cartography sync completed",
+        "Cartography sync completed: %s exit_code=0 duration=%ss",
+        run_context,
+        round(duration, 1),
         extra={"type": "AUDIT", "cartography_module": input.module, "duration_seconds": round(duration, 1)},
     )
     return CartographyModuleResult(

@@ -75,10 +75,15 @@ class CartographySyncWorkflow:
         stage_results: list[CartographyStageResult] = []
         had_failure = False
         stopped = False
-        for stage in input.stages:
+        for stage_number, stage in enumerate(input.stages, start=1):
+            modules = [run.module for run in stage.runs]
             if stopped:
+                workflow.logger.info(
+                    "Skipping stage %d/%d (%s): earlier stage failed", stage_number, len(input.stages), modules
+                )
                 stage_results.append(self._skipped_stage(stage))
                 continue
+            workflow.logger.info("Starting stage %d/%d: %s", stage_number, len(input.stages), modules)
             settled = await asyncio.gather(
                 *[self._run_module(input, run.module, run.params) for run in stage.runs],
                 return_exceptions=True,
@@ -92,6 +97,12 @@ class CartographySyncWorkflow:
                     results.append(CartographyModuleResult(module=run.module, status="failed", output_tail=failure))
                 else:
                     results.append(outcome)
+            workflow.logger.info(
+                "Finished stage %d/%d: %s",
+                stage_number,
+                len(input.stages),
+                [(r.module, r.status) for r in results],
+            )
             stage_results.append(CartographyStageResult(results=results))
             if had_failure and input.stop_on_failure:
                 stopped = True
@@ -146,6 +157,12 @@ class CartographySyncWorkflow:
             except WorkflowAlreadyStartedError:
                 # An overlapping run of this module holds the mutex; wait for
                 # it (bounded) rather than racing it on update tags.
+                workflow.logger.info(
+                    "Module %s blocked by an overlapping run; waited %ss of %ss",
+                    module,
+                    waited,
+                    input.module_wait_seconds,
+                )
                 if waited >= input.module_wait_seconds:
                     raise ApplicationError(
                         f"another run of cartography module '{module}' was still in progress after waiting {waited}s",
