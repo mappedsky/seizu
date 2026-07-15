@@ -36,6 +36,9 @@ class CartographySyncInput:
     # dispatches its module activities there (cross-queue).
     activity_task_queue: str = "seizu-cartography"
     module_timeout_seconds: int = 3600
+    # How long a module run may wait for its per-module sync lock (held by an
+    # overlapping run of the same module from any pipeline) before failing.
+    lock_wait_seconds: int = 3600
     heartbeat_timeout_seconds: int = 120
     retry_attempts: int = 2
     # When True, a failed module run skips all remaining stages (for pipelines
@@ -49,8 +52,9 @@ class CartographyModuleActivityInput:
     module: str
     params: dict[str, Any] = field(default_factory=dict)
     # Local subprocess watchdog; the activity's start_to_close timeout is set
-    # slightly above this by the workflow.
+    # above lock_wait + timeout by the workflow.
     timeout_seconds: int = 3600
+    lock_wait_seconds: int = 3600
 
 
 @dataclass

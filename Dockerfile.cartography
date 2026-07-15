@@ -5,12 +5,15 @@
 #
 # The image deliberately ships only the stdlib-only cartography_sync package —
 # no reporting code, settings, or non-cartography credentials belong here.
-FROM ghcr.io/cartography-cncf/cartography:latest
+# Pinned by tag + digest: the registry's flag allowlist is reviewed against
+# this exact CLI, so upgrades must be deliberate (Dependabot bumps the pin).
+FROM ghcr.io/cartography-cncf/cartography:0.139.0@sha256:1942e7eb57bd51cff5046108b80e2556f1c68ecd863b8f952084f44988e2777c
 
 USER root
-# Match the temporalio version pinned in uv.lock (dataclass payloads are
-# JSON-serialized, but keeping the SDKs aligned avoids surprises).
-RUN pip install --no-cache-dir temporalio==1.28.0
+# temporalio matches the version pinned in uv.lock (dataclass payloads are
+# JSON-serialized, but keeping the SDKs aligned avoids surprises); neo4j
+# matches uv.lock's major and backs the per-module sync lock.
+RUN pip install --no-cache-dir temporalio==1.28.0 neo4j==6.2.0
 
 COPY cartography_sync /opt/seizu/cartography_sync
 ENV PYTHONPATH=/opt/seizu

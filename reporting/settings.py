@@ -293,6 +293,11 @@ CARTOGRAPHY_ENABLED_MODULES = list_env("CARTOGRAPHY_ENABLED_MODULES", [])
 # Default per-module-run subprocess timeout (seconds); overridable per
 # scheduled query via the workflow's timeout_minutes config field.
 CARTOGRAPHY_MODULE_TIMEOUT_SECONDS = int_env("CARTOGRAPHY_MODULE_TIMEOUT_SECONDS", 3600)
+# How long a module run may wait (seconds) on the per-module Neo4j sync lock
+# that serializes overlapping runs of the same module across pipelines,
+# schedules, and ticks (concurrent same-module syncs race on cartography's
+# update tags and can delete each other's data).
+CARTOGRAPHY_LOCK_WAIT_SECONDS = int_env("CARTOGRAPHY_LOCK_WAIT_SECONDS", 3600)
 # Temporal retry attempts for one module-run activity (config errors never
 # retry).
 CARTOGRAPHY_SYNC_RETRY_ATTEMPTS = int_env("CARTOGRAPHY_SYNC_RETRY_ATTEMPTS", 2)

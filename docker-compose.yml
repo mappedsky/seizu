@@ -753,7 +753,8 @@ services:
       proxy:
     command: bun run start
   cartography:
-    image: ghcr.io/cartography-cncf/cartography
+    # Keep this pin aligned with Dockerfile.cartography (Dependabot bumps both).
+    image: ghcr.io/cartography-cncf/cartography:0.139.0@sha256:1942e7eb57bd51cff5046108b80e2556f1c68ecd863b8f952084f44988e2777c
     user: "10001:10001"
     init: true
     # We call cartography directly, so make sure it doesn't try to start on up
@@ -805,6 +806,9 @@ services:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE
       - CARTOGRAPHY_TASK_QUEUE
+      # The credential-bearing worker re-enforces the module allowlist itself
+      # (a forged Temporal payload bypasses the web/dispatcher checks).
+      - CARTOGRAPHY_ENABLED_MODULES
       - CARTOGRAPHY_NEO4J_URI=bolt://neo4j:7687
       - "STATSD_ENABLED=true"
       - STATSD_HOST=telegraf

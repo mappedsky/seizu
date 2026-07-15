@@ -10,6 +10,7 @@ Env vars:
 - ``TEMPORAL_ADDRESS`` (default ``localhost:7233``)
 - ``TEMPORAL_NAMESPACE`` (default ``default``)
 - ``CARTOGRAPHY_TASK_QUEUE`` (default ``seizu-cartography``)
+- ``CARTOGRAPHY_ENABLED_MODULES`` (worker-side module allowlist; empty → all)
 - ``CARTOGRAPHY_NEO4J_URI`` (required; e.g. ``bolt://neo4j:7687``)
 - ``CARTOGRAPHY_NEO4J_USER`` / ``NEO4J_PASSWORD`` (optional Neo4j auth)
 - ``CARTOGRAPHY_BIN`` (default ``cartography``)

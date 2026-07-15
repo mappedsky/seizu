@@ -1,11 +1,17 @@
 """The run_cartography_module Temporal activity (sync-worker side).
 
-Runs one cartography intel-module sync as a subprocess. Security posture:
-argv is rebuilt here from the registry after re-validating the payload's
-``module`` + ``params`` (Temporal payloads cross the network — never trust a
-pre-built command), the subprocess is exec'd from an argv list (no shell),
-and its environment is scrubbed down to a minimal base plus the env vars the
-module's registry entry declares.
+Runs one cartography sync stage as a subprocess. Security posture: argv is
+rebuilt here from the registry after re-validating the payload's ``module`` +
+``params`` (Temporal payloads cross the network — never trust a pre-built
+command), the operator allowlist (``CARTOGRAPHY_ENABLED_MODULES``) is
+re-enforced on this credential-bearing worker, the subprocess is exec'd from
+an argv list (no shell), and its environment is scrubbed down to a minimal
+base plus the env vars the module's registry entry declares.
+
+Concurrency: overlapping runs of the same module (across stages, schedules,
+ticks, and worker replicas) race on cartography's update tags and can delete
+each other's data, so every run holds a per-module Neo4j advisory lock
+(``sync_lock.SyncLock``) for the duration of the subprocess.
 """
 
 import asyncio
@@ -19,6 +25,7 @@ from temporalio.exceptions import ApplicationError
 from cartography_sync.registry import MODULE_REGISTRY, validate_module_params
 from cartography_sync.registry import build_module_argv as _build_registry_argv
 from cartography_sync.shared import CartographyModuleActivityInput, CartographyModuleResult
+from cartography_sync.sync_lock import LockTimeoutError, SyncLock
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +65,34 @@ def _subprocess_env(module: str) -> dict[str, str]:
     return env
 
 
+def _check_module_enabled(module: str) -> None:
+    """Re-enforce the operator allowlist on this credential-bearing worker.
+
+    The web app and dispatcher validate configs against
+    CARTOGRAPHY_ENABLED_MODULES too, but a forged Temporal payload bypasses
+    them — the worker that holds the credentials must reject disabled modules
+    itself. Internal stages (create-indexes, analysis) are always allowed.
+    """
+    raw = os.environ.get("CARTOGRAPHY_ENABLED_MODULES", "").strip()
+    if not raw:
+        return
+    spec = MODULE_REGISTRY.get(module)
+    if spec is not None and spec.internal:
+        return
+    enabled = {name.strip() for name in raw.split(",") if name.strip()}
+    if module not in enabled:
+        raise ApplicationError(
+            f"cartography module '{module}' is not in this worker's CARTOGRAPHY_ENABLED_MODULES allowlist",
+            type=CONFIG_ERROR,
+            non_retryable=True,
+        )
+
+
 def _build_argv(input: CartographyModuleActivityInput) -> list[str]:
     errors = validate_module_params(input.module, input.params)
     if errors:
         raise ApplicationError("; ".join(errors), type=CONFIG_ERROR, non_retryable=True)
+    _check_module_enabled(input.module)
     neo4j_uri = os.environ.get("CARTOGRAPHY_NEO4J_URI")
     if not neo4j_uri:
         raise ApplicationError(
@@ -121,11 +152,47 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 async def run_cartography_module(input: CartographyModuleActivityInput) -> CartographyModuleResult:
     argv = _build_argv(input)
     env = _subprocess_env(input.module)
+
+    async def _heartbeat_loop() -> None:
+        # Time-based, not output-based: cartography can be silent for long
+        # stretches while a large sync stays healthy. Also covers the wait on
+        # the per-module lock.
+        while True:
+            activity.heartbeat(input.module)
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    info = activity.info()
+    lock = SyncLock(
+        uri=os.environ["CARTOGRAPHY_NEO4J_URI"],
+        key=f"cartography-module:{input.module}",
+        # Stable across retries of one scheduled activity, so a retry can
+        # reclaim its own crashed attempt's unexpired lock.
+        owner=f"{info.workflow_id}:{info.activity_id}",
+        # The expiry only reclaims locks from crashed workers, so it must
+        # outlive the longest legitimate run.
+        ttl_seconds=input.timeout_seconds + 120,
+        wait_timeout_seconds=input.lock_wait_seconds,
+        user=os.environ.get("CARTOGRAPHY_NEO4J_USER"),
+        password=os.environ.get("NEO4J_PASSWORD"),
+    )
+    try:
+        async with lock:
+            return await _run_subprocess(input, argv, env)
+    except LockTimeoutError as exc:
+        # Retryable: the overlapping run holding the lock may finish.
+        raise ApplicationError(str(exc), type=MODULE_FAILED) from exc
+    finally:
+        heartbeat_task.cancel()
+
+
+async def _run_subprocess(
+    input: CartographyModuleActivityInput, argv: list[str], env: dict[str, str]
+) -> CartographyModuleResult:
     logger.info(
         "Starting cartography sync",
         extra={"type": "AUDIT", "cartography_module": input.module, "argv": argv},
     )
-
     started = time.monotonic()
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -136,15 +203,6 @@ async def run_cartography_module(input: CartographyModuleActivityInput) -> Carto
     tail = _TailBuffer()
     assert process.stdout is not None  # PIPE above guarantees a reader
     drain_task = asyncio.create_task(_drain(process.stdout, tail))
-
-    async def _heartbeat_loop() -> None:
-        # Time-based, not output-based: cartography can be silent for long
-        # stretches while a large sync stays healthy.
-        while True:
-            activity.heartbeat(input.module)
-            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
-
-    heartbeat_task = asyncio.create_task(_heartbeat_loop())
     timed_out = False
     try:
         try:
@@ -158,7 +216,6 @@ async def run_cartography_module(input: CartographyModuleActivityInput) -> Carto
         await _terminate(process)
         raise
     finally:
-        heartbeat_task.cancel()
         if not drain_task.done():
             drain_task.cancel()
 

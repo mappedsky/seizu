@@ -33,21 +33,32 @@ Because cartography bumps `SyncMetadata` on completion, scheduled syncs compose 
 1. Create a scheduled query with a trivial query such as `RETURN 1` — the query is only the trigger; the workflow consumes no result rows.
 2. Add a `temporal` action and pick the `cartography_sync` workflow. Extra fields appear:
    - **Modules** — a list of intel modules, run one at a time in order (one stage each). The common case.
-   - **Pipeline (JSON)** — the full staged form, mutually exclusive with Modules: stages run sequentially, runs within a stage in parallel, and each run may set the module's allowlisted params:
+   - **Pipeline (JSON)** — the full staged form, mutually exclusive with Modules: stages run sequentially, runs within a stage in parallel, and each run may set the module's allowlisted params. Put dependency-sensitive modules in later stages — `cve_metadata` enriches CVEs produced by earlier modules, so it must follow them:
 
      ```json
      {"stages": [
        {"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},
                  {"module": "github"}]},
-       {"runs": [{"module": "cve"}, {"module": "cve_metadata"}]}
+       {"runs": [{"module": "cve_metadata"}]}
      ]}
      ```
 
    - **Stop on failure** — skip remaining stages when a module run fails (for pipelines whose later stages depend on earlier data). Off by default: failures are recorded and the pipeline continues.
    - **Per-module timeout (minutes)** — a run past it is terminated and marked failed.
-3. Save. The config is validated against the module registry at save time; invalid modules or params are rejected with a specific error.
+3. Save. The config is validated against the module registry at save time; invalid modules, disallowed params, and duplicate modules within a stage are rejected with a specific error.
 
-Run history (per-stage activity status, retries, failure output) appears in the scheduled query's **Workflow runs** panel and the Temporal Web UI. One schedule tick starts at most one workflow run (the workflow ID embeds the run marker); overlapping ticks of a long sync can still run concurrently, so keep the schedule interval longer than the expected sync duration.
+Every pipeline is automatically wrapped in two implicit stages mirroring cartography's own execution model: `create-indexes` runs once before any ingestion, and `analysis` runs once after all of it — parallel module runs never repeat them, and analysis never runs mid-ingestion. Each subprocess executes exactly one `--selected-modules` stage.
+
+Run history (per-stage activity status, retries, failure output) appears in the scheduled query's **Workflow runs** panel and the Temporal Web UI. One schedule tick starts at most one workflow run (the workflow ID embeds the run marker).
+
+## Concurrency control
+
+Cartography warns that concurrent jobs for the same resource type race on their update tags and can delete each other's freshly loaded data. Scheduled syncs enforce serialization rather than relying on interval tuning:
+
+- **Within a stage**: a module may appear at most once per stage (rejected at save time).
+- **Across everything else** — stages, schedules, overlapping ticks of one long-running schedule, and sync-worker replicas: every module run holds a per-module advisory lock (a `SeizuSyncLock` node in Neo4j, the resource being protected) for the duration of its subprocess. An overlapping run of the same module waits up to `CARTOGRAPHY_LOCK_WAIT_SECONDS`, then fails with a lock-timeout error (retryable). Locks carry an expiry above the run timeout, so a crashed worker can never wedge a module.
+
+Different modules still run concurrently — the lock key is the module name (conservatively treating e.g. two `aws` runs with different `aws_requested_syncs` subsets as conflicting).
 
 ## Supported modules
 
@@ -64,7 +75,9 @@ The registry (`cartography_sync/registry.py`) defines each module's CLI mapping.
 | `okta` | `OKTA_API_KEY` | `okta_org_id` |
 | `pagerduty` | `PAGERDUTY_API_KEY` | — |
 
-`CARTOGRAPHY_ENABLED_MODULES` narrows which modules schedules may use (empty → all). Adding a module means adding a registry entry (name, flags, credential env vars) — a code change by design, so the allowlist stays reviewed.
+`CARTOGRAPHY_ENABLED_MODULES` narrows which modules schedules may use (empty → all). It is enforced three times: at save time, at dispatch, and again by the sync worker itself — the worker holds the credentials, so it rejects disabled modules even for a forged Temporal payload. Adding a module means adding a registry entry (name, flags, credential env vars) — a code change by design, so the allowlist stays reviewed.
+
+The registry is reviewed against a specific cartography release, so the sync image pins the upstream by tag **and digest** (`Dockerfile.cartography`; Dependabot bumps it deliberately). After bumping the pin, run `make cartography_contract_test` — it verifies inside the image that every registry flag still exists in that release's CLI.
 
 ## Settings
 
@@ -73,6 +86,7 @@ On the **web service** and **scheduled query worker** (see `.env.example`):
 - `CARTOGRAPHY_TASK_QUEUE` (default `seizu-cartography`)
 - `CARTOGRAPHY_ENABLED_MODULES` (default: all registered)
 - `CARTOGRAPHY_MODULE_TIMEOUT_SECONDS` (default 3600)
+- `CARTOGRAPHY_LOCK_WAIT_SECONDS` (default 3600; see Concurrency control)
 - `CARTOGRAPHY_SYNC_RETRY_ATTEMPTS` (default 2; configuration errors never retry)
 
 The workflow must also be dispatchable: leave `TEMPORAL_ENABLED_WORKFLOWS` empty or include `cartography_sync`.
@@ -80,6 +94,7 @@ The workflow must also be dispatchable: leave `TEMPORAL_ENABLED_WORKFLOWS` empty
 The **sync worker** reads plain env vars (it does not use Seizu settings):
 
 - `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `CARTOGRAPHY_TASK_QUEUE`
+- `CARTOGRAPHY_ENABLED_MODULES` (the worker-side allowlist; keep it aligned with the web/dispatcher value)
 - `CARTOGRAPHY_NEO4J_URI` (required) and, when Neo4j auth is on, `CARTOGRAPHY_NEO4J_USER` + `NEO4J_PASSWORD` (the password rides only in the subprocess environment, never in argv)
 - the intel-module credentials from the table above
 - `CARTOGRAPHY_BIN` (default `cartography`; used by tests)
@@ -94,7 +109,8 @@ Schedule configuration reaches a shell-adjacent surface (the cartography CLI), s
 4. **Worker-side re-validation.** The activity payload carries `module` + `params`, never a command; the worker re-validates against the registry and rebuilds argv itself, so a forged Temporal payload cannot escape the allowlist.
 5. **Environment scrubbing.** The cartography subprocess sees a minimal base environment plus only the env vars its module's registry entry declares.
 6. **Secrets isolation.** The sync container holds only cartography intel credentials — no LLM keys, GitHub remediation token, or report-store credentials — and the reporting workers never receive the intel credentials.
-7. **Operator gates and RBAC.** `TEMPORAL_ENABLED_WORKFLOWS`, `CARTOGRAPHY_ENABLED_MODULES`, and the usual `scheduled_queries:write` (admin-managed) requirement for creating or editing schedules.
+7. **Operator gates and RBAC.** `TEMPORAL_ENABLED_WORKFLOWS`, `CARTOGRAPHY_ENABLED_MODULES` (enforced at save, at dispatch, and again by the credential-bearing sync worker), and the usual `scheduled_queries:write` (admin-managed) requirement for creating or editing schedules.
+8. **Reviewed, pinned CLI.** The image pins cartography by tag + digest so the flag allowlist can't drift against an unreviewed upstream; `make cartography_contract_test` re-verifies the registry against the pinned CLI.
 
 ## Local development
 

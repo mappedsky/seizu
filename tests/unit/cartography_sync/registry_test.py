@@ -8,8 +8,17 @@ from cartography_sync.registry import (
 
 
 def test_cve_argv_contains_selected_modules_and_fixed_flags():
+    # Exactly one sync stage per subprocess: create-indexes and analysis are
+    # separate (internal) pipeline stages, never repeated per module.
     argv = build_module_argv("cve", {})
-    assert argv == ["--selected-modules=create-indexes,cve,analysis", "--cve-enabled"]
+    assert argv == ["--selected-modules=cve", "--cve-enabled"]
+
+
+def test_internal_stages_are_registered_and_flagged():
+    assert MODULE_REGISTRY["create-indexes"].internal is True
+    assert MODULE_REGISTRY["analysis"].internal is True
+    assert build_module_argv("create-indexes", {}) == ["--selected-modules=create-indexes"]
+    assert build_module_argv("analysis", {}) == ["--selected-modules=analysis"]
 
 
 def test_aws_defaults_apply_sync_all_profiles():
@@ -93,4 +102,4 @@ def test_registry_entries_are_well_formed():
             assert flag.type in ("boolean", "number", "string", "enum")
         # Every module builds a valid default argv.
         argv = build_module_argv(name, {})
-        assert argv[0] == f"--selected-modules=create-indexes,{name},analysis"
+        assert argv[0] == f"--selected-modules={name}"

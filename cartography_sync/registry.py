@@ -47,7 +47,7 @@ class FlagSpec:
 
 @dataclass(frozen=True)
 class CartographyModuleSpec:
-    """One cartography intel module runnable from a scheduled sync."""
+    """One cartography sync stage runnable from a scheduled sync."""
 
     name: str  # the --selected-modules name
     description: str
@@ -61,6 +61,9 @@ class CartographyModuleSpec:
     # Env vars copied into the subprocess only when present (e.g. AWS SDK
     # credential/region configuration supplied by the operator).
     optional_env: tuple[str, ...] = ()
+    # Internal stages (create-indexes, analysis) are added to every pipeline
+    # by the workflow input builder and cannot be selected in user config.
+    internal: bool = False
 
 
 _AWS_OPTIONAL_ENV = (
@@ -79,6 +82,20 @@ _AWS_OPTIONAL_ENV = (
 
 
 MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
+    # Internal stages: cartography's own execution model runs create-indexes
+    # before ingestion and analysis after it. The workflow input builder adds
+    # these once per pipeline (first/last stage) so parallel module runs don't
+    # each repeat them — subprocesses run exactly one --selected-modules stage.
+    "create-indexes": CartographyModuleSpec(
+        name="create-indexes",
+        description="Creates cartography's Neo4j indexes (implicit first stage of every pipeline).",
+        internal=True,
+    ),
+    "analysis": CartographyModuleSpec(
+        name="analysis",
+        description="Cartography's post-ingestion analysis jobs (implicit last stage of every pipeline).",
+        internal=True,
+    ),
     "aws": CartographyModuleSpec(
         name="aws",
         description="AWS asset inventory (uses the mounted AWS config/credentials).",
@@ -114,7 +131,10 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
     ),
     "cve_metadata": CartographyModuleSpec(
         name="cve_metadata",
-        description="CVE metadata enrichment from the NIST NVD API.",
+        description=(
+            "CVE metadata enrichment from the NIST NVD API. Must run after"
+            " CVE-producing modules (e.g. github) — place it in a later stage."
+        ),
         fixed_argv=("--cve-metadata-nist-api-key-env-var=NIST_NVD_TOKEN",),
         required_env=("NIST_NVD_TOKEN",),
     ),
@@ -215,7 +235,10 @@ def build_module_argv(module: str, params: dict[str, object]) -> list[str]:
     if errors:
         raise ValueError("; ".join(errors))
     spec = MODULE_REGISTRY[module]
-    argv = [f"--selected-modules=create-indexes,{module},analysis", *spec.fixed_argv]
+    # Exactly one sync stage per subprocess: create-indexes and analysis are
+    # separate pipeline stages (see the internal registry entries), so
+    # parallel module runs never repeat them or run analysis mid-ingestion.
+    argv = [f"--selected-modules={module}", *spec.fixed_argv]
     for flag in spec.flags:
         value = params.get(flag.name, flag.default)
         if value is None:

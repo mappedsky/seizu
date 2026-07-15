@@ -95,12 +95,13 @@ class CartographySyncWorkflow:
                 module=module,
                 params=params,
                 timeout_seconds=input.module_timeout_seconds,
+                lock_wait_seconds=input.lock_wait_seconds,
             ),
             result_type=CartographyModuleResult,
             task_queue=input.activity_task_queue,
-            # Slightly above the activity's own subprocess watchdog so the
-            # in-activity timeout (with its output excerpt) wins.
-            start_to_close_timeout=timedelta(seconds=input.module_timeout_seconds + 60),
+            # Above the activity's own lock-wait + subprocess watchdog so the
+            # in-activity failures (with their output excerpts) win.
+            start_to_close_timeout=timedelta(seconds=input.lock_wait_seconds + input.module_timeout_seconds + 60),
             heartbeat_timeout=timedelta(seconds=input.heartbeat_timeout_seconds),
             retry_policy=RetryPolicy(
                 maximum_attempts=max(1, input.retry_attempts),

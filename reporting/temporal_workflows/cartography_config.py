@@ -24,9 +24,11 @@ from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
 from reporting.temporal_workflows import WorkflowInputContext
 
+# cve_metadata enriches CVEs produced by earlier modules, so it gets its own
+# later stage in the example (cartography's documented ordering requirement).
 _PIPELINE_EXAMPLE = (
     '{"stages": [{"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},'
-    ' {"module": "github"}]}, {"runs": [{"module": "cve"}]}]}'
+    ' {"module": "github"}]}, {"runs": [{"module": "cve_metadata"}]}]}'
 )
 
 
@@ -44,15 +46,18 @@ class CartographyPipelineConfig(BaseModel):
 
 
 def enabled_module_names() -> list[str]:
-    """Registry modules the operator has enabled (sorted).
+    """User-selectable registry modules the operator has enabled (sorted).
 
     ``CARTOGRAPHY_ENABLED_MODULES`` empty → every registered module; otherwise
-    only configured names that exist in the registry.
+    only configured names that exist in the registry. Internal stages
+    (create-indexes, analysis) are never user-selectable — the input builder
+    adds them to every pipeline.
     """
+    selectable = {name for name, spec in MODULE_REGISTRY.items() if not spec.internal}
     configured = settings.CARTOGRAPHY_ENABLED_MODULES
     if not configured:
-        return sorted(MODULE_REGISTRY)
-    return sorted(name for name in configured if name in MODULE_REGISTRY)
+        return sorted(selectable)
+    return sorted(name for name in configured if name in selectable)
 
 
 def config_fields() -> list[ActionConfigFieldDef]:
@@ -100,6 +105,9 @@ def config_fields() -> list[ActionConfigFieldDef]:
 
 
 def _run_errors(position: str, run: CartographyModuleRunConfig) -> list[str]:
+    spec = MODULE_REGISTRY.get(run.module)
+    if spec is not None and spec.internal:
+        return [f"{position}: '{run.module}' is added to every pipeline automatically and cannot be configured"]
     if run.module not in enabled_module_names():
         return [f"{position}: module '{run.module}' is not enabled (enabled: {enabled_module_names()})"]
     return [f"{position}: {error}" for error in validate_module_params(run.module, run.params)]
@@ -136,8 +144,17 @@ def _parse_stages(action_config: dict[str, Any]) -> tuple[list[CartographyStage]
     stages = []
     for stage_index, stage in enumerate(parsed.stages, start=1):
         runs = []
+        seen_modules: set[str] = set()
         for run_index, run in enumerate(stage.runs, start=1):
             errors.extend(_run_errors(f"pipeline stage {stage_index} run {run_index}", run))
+            if run.module in seen_modules:
+                # Concurrent runs of one module race on cartography's update
+                # tags and can delete each other's data — never allow it.
+                errors.append(
+                    f"pipeline stage {stage_index}: module '{run.module}' appears more than once in the stage"
+                    " (concurrent same-module syncs race; put repeats in separate stages)"
+                )
+            seen_modules.add(run.module)
             runs.append(CartographyModuleRun(module=run.module, params=dict(run.params)))
         stages.append(CartographyStage(runs=runs))
     return stages, errors
@@ -172,11 +189,20 @@ def build_input(context: WorkflowInputContext) -> CartographySyncInput:
         timeout_seconds = int(timeout_minutes) * 60
     else:
         timeout_seconds = settings.CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
+    # Mirror cartography's own execution model at the pipeline level: indexes
+    # once before any ingestion, analysis once after all of it (each
+    # subprocess runs exactly one --selected-modules stage).
+    stages = [
+        CartographyStage(runs=[CartographyModuleRun(module="create-indexes")]),
+        *stages,
+        CartographyStage(runs=[CartographyModuleRun(module="analysis")]),
+    ]
     return CartographySyncInput(
         scheduled_query_id=context.scheduled_query_id,
         stages=stages,
         activity_task_queue=settings.CARTOGRAPHY_TASK_QUEUE,
         module_timeout_seconds=timeout_seconds,
+        lock_wait_seconds=settings.CARTOGRAPHY_LOCK_WAIT_SECONDS,
         retry_attempts=settings.CARTOGRAPHY_SYNC_RETRY_ATTEMPTS,
         stop_on_failure=context.action_config.get("stop_on_failure") is True,
     )

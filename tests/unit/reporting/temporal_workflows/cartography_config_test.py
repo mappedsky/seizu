@@ -32,6 +32,28 @@ def test_enabled_modules_honors_allowlist(mocker):
     assert cartography_config.enabled_module_names() == ["cve", "github"]
 
 
+def test_enabled_modules_never_include_internal_stages(mocker):
+    assert "create-indexes" not in cartography_config.enabled_module_names()
+    assert "analysis" not in cartography_config.enabled_module_names()
+    # Not even when an operator lists them explicitly.
+    mocker.patch("reporting.settings.CARTOGRAPHY_ENABLED_MODULES", ["cve", "analysis"])
+    assert cartography_config.enabled_module_names() == ["cve"]
+
+
+def test_internal_stages_rejected_in_user_config():
+    error = cartography_config.validate_config({"modules": ["analysis"]})
+    assert "automatically" in error
+
+
+def test_duplicate_module_within_stage_rejected():
+    pipeline = json.dumps({"stages": [{"runs": [{"module": "cve"}, {"module": "cve"}]}]})
+    error = cartography_config.validate_config({"pipeline": pipeline})
+    assert "more than once" in error
+    # The same module in separate (sequential) stages is fine.
+    pipeline = json.dumps({"stages": [{"runs": [{"module": "cve"}]}, {"runs": [{"module": "cve"}]}]})
+    assert cartography_config.validate_config({"pipeline": pipeline}) is None
+
+
 def test_validate_requires_exactly_one_of_modules_or_pipeline():
     assert "exactly one" in cartography_config.validate_config({})
     both = {"modules": ["cve"], "pipeline": '{"stages": []}'}
@@ -83,7 +105,13 @@ def test_validate_timeout_bounds():
 def test_build_input_modules_become_sequential_stages(mocker):
     mocker.patch("reporting.settings.CARTOGRAPHY_TASK_QUEUE", "carto-q")
     result = cartography_config.build_input(_context(modules=["aws", "cve"], timeout_minutes=30))
-    assert [run.module for stage in result.stages for run in stage.runs] == ["aws", "cve"]
+    # Indexes once before ingestion, analysis once after all of it.
+    assert [run.module for stage in result.stages for run in stage.runs] == [
+        "create-indexes",
+        "aws",
+        "cve",
+        "analysis",
+    ]
     assert all(len(stage.runs) == 1 for stage in result.stages)
     assert result.activity_task_queue == "carto-q"
     assert result.module_timeout_seconds == 30 * 60
@@ -95,7 +123,10 @@ def test_build_input_pipeline_preserves_stage_grouping():
         {"stages": [{"runs": [{"module": "aws"}, {"module": "github"}]}, {"runs": [{"module": "cve"}]}]}
     )
     result = cartography_config.build_input(_context(pipeline=pipeline, stop_on_failure=True))
-    assert [len(stage.runs) for stage in result.stages] == [2, 1]
+    # create-indexes + the two user stages + analysis.
+    assert [len(stage.runs) for stage in result.stages] == [1, 2, 1, 1]
+    assert result.stages[0].runs[0].module == "create-indexes"
+    assert result.stages[-1].runs[0].module == "analysis"
     assert result.stop_on_failure is True
 
 

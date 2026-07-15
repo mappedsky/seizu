@@ -153,8 +153,13 @@ async def test_handle_results_dispatches_rowless_workflow_without_results(mocker
     args, kwargs = client.start_workflow.await_args
     assert args[0] == "cartography_sync"
     workflow_input = args[1]
-    # The action_config reached the input factory: one stage per module.
-    assert [run.module for stage in workflow_input.stages for run in stage.runs] == ["cve"]
+    # The action_config reached the input factory: one stage per module,
+    # wrapped by the implicit create-indexes/analysis stages.
+    assert [run.module for stage in workflow_input.stages for run in stage.runs] == [
+        "create-indexes",
+        "cve",
+        "analysis",
+    ]
     assert workflow_input.scheduled_query_id == "sq-1"
     assert kwargs["id"] == f"seizu:cartography_sync:sq-1:{_NOW}"
 
