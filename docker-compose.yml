@@ -322,6 +322,7 @@ services:
       - CARTOGRAPHY_TASK_QUEUE
       - CARTOGRAPHY_ENABLED_MODULES
       - CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
+      - CARTOGRAPHY_MODULE_WAIT_SECONDS
       - CARTOGRAPHY_SYNC_RETRY_ATTEMPTS
       # The cve_dependency_remediation input factory runs here at dispatch: it
       # reads the run timeout and the CI-watch knobs into the workflow input.

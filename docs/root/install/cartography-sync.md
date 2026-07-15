@@ -56,9 +56,9 @@ Run history (per-stage activity status, retries, failure output) appears in the 
 Cartography warns that concurrent jobs for the same resource type race on their update tags and can delete each other's freshly loaded data. Scheduled syncs enforce serialization rather than relying on interval tuning:
 
 - **Within a stage**: a module may appear at most once per stage (rejected at save time).
-- **Across everything else** — stages, schedules, overlapping ticks of one long-running schedule, and sync-worker replicas: every module run holds a per-module advisory lock (a `SeizuSyncLock` node in Neo4j, the resource being protected) for the duration of its subprocess. An overlapping run of the same module waits up to `CARTOGRAPHY_LOCK_WAIT_SECONDS`, then fails with a lock-timeout error (retryable). Locks carry an expiry above the run timeout, so a crashed worker can never wedge a module.
+- **Across everything else** — stages, schedules, overlapping ticks of one long-running schedule, and sync-worker replicas: every module run executes as a `cartography_module` child workflow whose **fixed workflow ID** (`seizu-cartography-module:{module}`) is the mutex. Temporal allows one open workflow per ID, so an overlapping run of the same module waits (the pipeline retries the start every 30s, up to `CARTOGRAPHY_MODULE_WAIT_SECONDS`) and then records a busy failure rather than racing. A crashed or terminated run releases the mutex the instant Temporal closes its workflow — no external lock state anywhere, exact release timing, and the wait is visible in the runs UI and the Temporal Web UI.
 
-Different modules still run concurrently — the lock key is the module name (conservatively treating e.g. two `aws` runs with different `aws_requested_syncs` subsets as conflicting).
+Different modules still run concurrently — the mutex is per module name (conservatively treating e.g. two `aws` runs with different `aws_requested_syncs` subsets as conflicting).
 
 ## Supported modules
 
@@ -86,7 +86,7 @@ On the **web service** and **scheduled query worker** (see `.env.example`):
 - `CARTOGRAPHY_TASK_QUEUE` (default `seizu-cartography`)
 - `CARTOGRAPHY_ENABLED_MODULES` (default: all registered)
 - `CARTOGRAPHY_MODULE_TIMEOUT_SECONDS` (default 3600)
-- `CARTOGRAPHY_LOCK_WAIT_SECONDS` (default 3600; see Concurrency control)
+- `CARTOGRAPHY_MODULE_WAIT_SECONDS` (default 3600; see Concurrency control)
 - `CARTOGRAPHY_SYNC_RETRY_ATTEMPTS` (default 2; configuration errors never retry)
 
 The workflow must also be dispatchable: leave `TEMPORAL_ENABLED_WORKFLOWS` empty or include `cartography_sync`.

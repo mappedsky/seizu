@@ -36,9 +36,9 @@ class CartographySyncInput:
     # dispatches its module activities there (cross-queue).
     activity_task_queue: str = "seizu-cartography"
     module_timeout_seconds: int = 3600
-    # How long a module run may wait for its per-module sync lock (held by an
-    # overlapping run of the same module from any pipeline) before failing.
-    lock_wait_seconds: int = 3600
+    # How long a module run may wait for an overlapping run of the same
+    # module (from any pipeline/schedule/tick) to finish before failing.
+    module_wait_seconds: int = 3600
     heartbeat_timeout_seconds: int = 120
     retry_attempts: int = 2
     # When True, a failed module run skips all remaining stages (for pipelines
@@ -48,13 +48,30 @@ class CartographySyncInput:
 
 
 @dataclass
+class CartographyModuleRunRequest:
+    """Input of the cartography_module child workflow (one module run).
+
+    The child's fixed workflow ID (``seizu-cartography-module:{module}``) is
+    the per-module mutex: Temporal allows one open workflow per ID, so
+    overlapping runs of one module serialize on it and a crashed run releases
+    it the moment Temporal closes the workflow — no external lock state.
+    """
+
+    module: str
+    params: dict[str, Any] = field(default_factory=dict)
+    timeout_seconds: int = 3600
+    activity_task_queue: str = "seizu-cartography"
+    heartbeat_timeout_seconds: int = 120
+    retry_attempts: int = 2
+
+
+@dataclass
 class CartographyModuleActivityInput:
     module: str
     params: dict[str, Any] = field(default_factory=dict)
     # Local subprocess watchdog; the activity's start_to_close timeout is set
-    # above lock_wait + timeout by the workflow.
+    # slightly above this by the child workflow.
     timeout_seconds: int = 3600
-    lock_wait_seconds: int = 3600
 
 
 @dataclass

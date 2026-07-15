@@ -8,10 +8,10 @@ re-enforced on this credential-bearing worker, the subprocess is exec'd from
 an argv list (no shell), and its environment is scrubbed down to a minimal
 base plus the env vars the module's registry entry declares.
 
-Concurrency: overlapping runs of the same module (across stages, schedules,
-ticks, and worker replicas) race on cartography's update tags and can delete
-each other's data, so every run holds a per-module Neo4j advisory lock
-(``sync_lock.SyncLock``) for the duration of the subprocess.
+Concurrency: overlapping runs of the same module race on cartography's update
+tags and can delete each other's data — serialization is enforced upstream by
+the cartography_module child workflow's fixed workflow ID (one open workflow
+per module), so this activity only ever runs one-at-a-time per module.
 """
 
 import asyncio
@@ -25,7 +25,6 @@ from temporalio.exceptions import ApplicationError
 from cartography_sync.registry import MODULE_REGISTRY, validate_module_params
 from cartography_sync.registry import build_module_argv as _build_registry_argv
 from cartography_sync.shared import CartographyModuleActivityInput, CartographyModuleResult
-from cartography_sync.sync_lock import LockTimeoutError, SyncLock
 
 logger = logging.getLogger(__name__)
 
@@ -155,33 +154,14 @@ async def run_cartography_module(input: CartographyModuleActivityInput) -> Carto
 
     async def _heartbeat_loop() -> None:
         # Time-based, not output-based: cartography can be silent for long
-        # stretches while a large sync stays healthy. Also covers the wait on
-        # the per-module lock.
+        # stretches while a large sync stays healthy.
         while True:
             activity.heartbeat(input.module)
             await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop())
-    info = activity.info()
-    lock = SyncLock(
-        uri=os.environ["CARTOGRAPHY_NEO4J_URI"],
-        key=f"cartography-module:{input.module}",
-        # Stable across retries of one scheduled activity, so a retry can
-        # reclaim its own crashed attempt's unexpired lock.
-        owner=f"{info.workflow_id}:{info.activity_id}",
-        # The expiry only reclaims locks from crashed workers, so it must
-        # outlive the longest legitimate run.
-        ttl_seconds=input.timeout_seconds + 120,
-        wait_timeout_seconds=input.lock_wait_seconds,
-        user=os.environ.get("CARTOGRAPHY_NEO4J_USER"),
-        password=os.environ.get("NEO4J_PASSWORD"),
-    )
     try:
-        async with lock:
-            return await _run_subprocess(input, argv, env)
-    except LockTimeoutError as exc:
-        # Retryable: the overlapping run holding the lock may finish.
-        raise ApplicationError(str(exc), type=MODULE_FAILED) from exc
+        return await _run_subprocess(input, argv, env)
     finally:
         heartbeat_task.cancel()
 

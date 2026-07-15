@@ -21,7 +21,7 @@ from reporting.temporal_workflows.activities import (
     run_dependency_remediation,
     run_repo_cve_chat,
 )
-from reporting.temporal_workflows.cartography_sync import CartographySyncWorkflow
+from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
 from reporting.temporal_workflows.cve_dependency_remediation import CveDependencyRemediationWorkflow
 from reporting.temporal_workflows.cve_repo_report import CveRepoReportWorkflow
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
@@ -42,7 +42,12 @@ async def _run_worker() -> None:
         worker = Worker(
             client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
-            workflows=[CveRepoReportWorkflow, CveDependencyRemediationWorkflow, CartographySyncWorkflow],
+            workflows=[
+                CveRepoReportWorkflow,
+                CveDependencyRemediationWorkflow,
+                CartographySyncWorkflow,
+                CartographyModuleWorkflow,
+            ],
             activities=[run_repo_cve_chat, run_dependency_remediation, get_pr_ci_status, run_dependency_ci_fix],
         )
         logger.info(

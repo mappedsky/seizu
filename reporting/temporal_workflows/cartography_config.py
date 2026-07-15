@@ -202,7 +202,7 @@ def build_input(context: WorkflowInputContext) -> CartographySyncInput:
         stages=stages,
         activity_task_queue=settings.CARTOGRAPHY_TASK_QUEUE,
         module_timeout_seconds=timeout_seconds,
-        lock_wait_seconds=settings.CARTOGRAPHY_LOCK_WAIT_SECONDS,
+        module_wait_seconds=settings.CARTOGRAPHY_MODULE_WAIT_SECONDS,
         retry_attempts=settings.CARTOGRAPHY_SYNC_RETRY_ATTEMPTS,
         stop_on_failure=context.action_config.get("stop_on_failure") is True,
     )
