@@ -81,4 +81,4 @@ thinking models have enough output room to emit the final structured plan.
 Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`,
 and `failure`. The transcript metadata includes the final budget ledger.
 
-The worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`); see `.env.example`. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.
+The worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`); see the [chat assistant documentation](chat.html). Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.
