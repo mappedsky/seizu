@@ -114,7 +114,7 @@ Schedule configuration reaches a shell-adjacent surface (the cartography CLI), s
 
 ## Local development
 
-The `seizu-cartography-worker` compose service starts with `make up` and builds `Dockerfile.cartography` locally. Populate the cartography token vars in `.env` for the modules you want (the `cve` module needs no credentials and is the easiest smoke test). Then create the scheduled query above, hit **Run now**, and watch:
+The `seizu-cartography-worker` compose service starts with `make up` and builds `Dockerfile.cartography` locally (`make build_cartography_worker` rebuilds it on demand, e.g. after bumping the pin or the temporalio version). Populate the cartography token vars in `.env` for the modules you want (the `cve` module needs no credentials and is the easiest smoke test). Then create the scheduled query above, hit **Run now**, and watch:
 
 - `docker compose logs -f seizu-cartography-worker` — the sync subprocess output
 - the Temporal Web UI at `http://localhost:8233` — workflow + activity state

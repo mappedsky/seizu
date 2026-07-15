@@ -46,6 +46,8 @@ make generate_client LANG=go
 make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
 make sqlmodel_enable / sqlmodel_disable
+make build_cartography_worker     # build the cartography sync-worker image
+make cartography_contract_test    # verify registry flags against the pinned CLI
 ```
 
 ## Adjacent Services Configuration

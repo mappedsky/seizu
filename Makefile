@@ -34,8 +34,7 @@ test_query_validator_live: config_setup
 # Verifies every cartography_sync registry flag exists in the pinned image's
 # CLI — run after bumping the Dockerfile.cartography pin.
 .PHONY: cartography_contract_test
-cartography_contract_test:
-	docker compose build seizu-cartography-worker
+cartography_contract_test: build_cartography_worker
 	docker run --rm --network none --entrypoint python ghcr.io/mappedsky/seizu-cartography -m cartography_sync.contract_check
 
 .PHONY: remediation_smoke
@@ -74,6 +73,12 @@ lock_update:
 rebuild:
 	docker compose build seizu
 	docker compose run --rm --no-deps seizu-node bun run build
+
+# Build the cartography sync-worker image (Dockerfile.cartography: pinned
+# upstream cartography + the cartography_sync activity worker).
+.PHONY: build_cartography_worker
+build_cartography_worker:
+	docker compose build seizu-cartography-worker
 
 .PHONY: drop_db
 drop_db: down
