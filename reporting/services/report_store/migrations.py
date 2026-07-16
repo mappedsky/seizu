@@ -8,9 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from reporting import settings
-from reporting.utils.sql import build_database_url
-
 
 def _upgrade(connection: Connection, config: Config) -> None:
     config.attributes["connection"] = connection
@@ -19,15 +16,10 @@ def _upgrade(connection: Connection, config: Config) -> None:
 
 async def run_schema_migrations(engine: AsyncEngine) -> None:
     root = Path(__file__).resolve().parents[2]
-    url = build_database_url(
-        settings.SQL_DATABASE_URL,
-        user=settings.SQL_DATABASE_USER,
-        password=settings.SQL_DATABASE_PASSWORD,
-    )
-    if url.get_backend_name() == "postgresql":
-        url = url.set(drivername="postgresql+asyncpg")
-    elif url.get_backend_name() == "sqlite":
-        url = url.set(drivername="sqlite+aiosqlite")
+    # The engine is the authoritative connection target. Reading settings
+    # again breaks callers that supply an engine directly (including tests)
+    # and risks migrating a different database than the one initialized.
+    url = engine.url
     config = Config()
     config.set_main_option("script_location", str(root / "migrations"))
     config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
