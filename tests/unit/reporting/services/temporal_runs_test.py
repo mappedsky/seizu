@@ -78,6 +78,10 @@ def test_workflow_id_matches():
     assert temporal_runs.workflow_id_matches(_SQ_ID, _WORKFLOW_ID)
     # Timestamp segment may itself contain colons.
     assert temporal_runs.workflow_id_matches("sq1", "seizu:cve_repo_report:sq1:2024-01-01T00:00:00+00:00")
+    assert temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z",
+    )
 
 
 def test_workflow_id_matches_rejects_foreign_ids():
@@ -87,6 +91,14 @@ def test_workflow_id_matches_rejects_foreign_ids():
     # Workflow-name segment must be a registered workflow.
     assert not temporal_runs.workflow_id_matches(_SQ_ID, f"seizu:not_a_registered_workflow:{_SQ_ID}:x")
     assert not temporal_runs.workflow_id_matches(_SQ_ID, "seizu:cve_repo_report")
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z:activity:1:cartography_sync",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-not-a-schedule-time",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +124,14 @@ async def test_list_workflow_runs(mocker):
             close_time=None,
             history_length=None,
         ),
+        SimpleNamespace(
+            id=f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z",
+            run_id="run-3",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=24,
+        ),
     ]
     _, captured = _mock_client(mocker, executions=executions)
 
@@ -121,11 +141,12 @@ async def test_list_workflow_runs(mocker):
     # One STARTS_WITH clause per registered workflow.
     assert f'WorkflowId STARTS_WITH "seizu:cve_repo_report:{_SQ_ID}:"' in captured["query"]
     assert f'WorkflowId STARTS_WITH "seizu:cve_dependency_remediation:{_SQ_ID}:"' in captured["query"]
-    assert [r.status for r in runs] == ["failed", "unknown"]
+    assert [r.status for r in runs] == ["failed", "unknown", "completed"]
     assert runs[0].workflow_name == "cve_repo_report"
     assert runs[0].start_time == "2024-01-01T00:00:00+00:00"
     assert runs[0].history_length == 42
     assert runs[1].start_time is None
+    assert runs[2].workflow_name == "configured"
 
 
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):

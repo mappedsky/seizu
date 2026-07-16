@@ -19,6 +19,7 @@ pays for it when the endpoints are actually used.
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -82,7 +83,17 @@ def workflow_id_matches(sq_id: str, workflow_id: str) -> bool:
     set the run listing queries — so detail reads can never reach beyond the
     surface the list exposes.
     """
-    if workflow_id == f"seizu-workflow:{sq_id}" or workflow_id.startswith(f"seizu-workflow:{sq_id}:manual:"):
+    configured_id = f"seizu-workflow:{sq_id}"
+    if workflow_id == configured_id or workflow_id.startswith(f"{configured_id}:manual:"):
+        return True
+    # Temporal Schedule actions append the nominal schedule time to the
+    # configured workflow ID. Keep this strict so child workflow IDs (which
+    # append ``:activity:...``) and similarly prefixed definitions cannot be
+    # used to escape the run-detail authorization boundary.
+    if re.fullmatch(
+        rf"{re.escape(configured_id)}-\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}(?:\.\d+)?Z",
+        workflow_id,
+    ):
         return True
     parts = workflow_id.split(":", 3)
     return len(parts) == 4 and parts[0] == "seizu" and parts[1] in WORKFLOW_REGISTRY and parts[2] == sq_id

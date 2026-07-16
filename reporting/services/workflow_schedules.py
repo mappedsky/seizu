@@ -29,7 +29,7 @@ from reporting import settings
 from reporting.schema.report_config import ScheduledQueryItem
 from reporting.schema.reporting_config import ScheduleSpec
 from reporting.services import report_store
-from reporting.services.schedule_spec import run_requested
+from reporting.services.schedule_spec import run_requested, schedule_due
 from reporting.temporal_workflows.shared import ConfiguredWorkflowInvocation
 
 logger = logging.getLogger(__name__)
@@ -81,10 +81,32 @@ def _calendar(spec: ScheduleSpec) -> list[ScheduleCalendarSpec]:
     ]
 
 
+def _interval_anchor(item: ScheduledQueryItem) -> datetime:
+    """Return the stable phase anchor for interval-based schedules.
+
+    The legacy scheduler measured intervals from the preceding run instead of
+    fixed wall-clock boundaries. Re-anchoring on the recorded completion also
+    prevents a restart from creating an immediate run followed by an
+    epoch-aligned run a few minutes later.
+    """
+    value = item.last_run_at or item.updated_at or item.created_at
+    anchor = datetime.fromisoformat(value)
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=UTC)
+    return anchor.astimezone(UTC)
+
+
+def _interval_spec(item: ScheduledQueryItem, every: timedelta) -> TemporalScheduleSpec:
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    offset = (_interval_anchor(item) - epoch) % every
+    return TemporalScheduleSpec(intervals=[ScheduleIntervalSpec(every=every, offset=offset)])
+
+
 def _temporal_spec(item: ScheduledQueryItem) -> TemporalScheduleSpec:
     if item.watch_scans:
-        return TemporalScheduleSpec(
-            intervals=[ScheduleIntervalSpec(every=timedelta(seconds=settings.WORKFLOW_WATCH_POLL_SECONDS))]
+        return _interval_spec(
+            item,
+            timedelta(seconds=settings.WORKFLOW_WATCH_POLL_SECONDS),
         )
     spec = item.schedule
     if spec is None and item.frequency is not None:
@@ -94,12 +116,23 @@ def _temporal_spec(item: ScheduledQueryItem) -> TemporalScheduleSpec:
         # schedule so run-now remains available and reconciliation is uniform.
         return TemporalScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(days=36500))])
     if spec.type == "interval":
-        return TemporalScheduleSpec(
-            intervals=[ScheduleIntervalSpec(every=timedelta(minutes=spec.interval_minutes or 1))]
-        )
+        return _interval_spec(item, timedelta(minutes=spec.interval_minutes or 1))
     if spec.type == "hourly":
-        return TemporalScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=spec.interval_hours or 1))])
+        return _interval_spec(item, timedelta(hours=spec.interval_hours or 1))
     return TemporalScheduleSpec(calendars=_calendar(spec), time_zone_name="UTC")
+
+
+def _trigger_immediately(item: ScheduledQueryItem, now: datetime | None = None) -> bool:
+    if not item.enabled:
+        return False
+    if item.watch_scans:
+        return True
+    spec = item.schedule
+    if spec is None and item.frequency is not None:
+        spec = ScheduleSpec(type="interval", interval_minutes=item.frequency)
+    if spec is None or spec.type not in ("interval", "hourly"):
+        return False
+    return schedule_due(spec, item.last_run_at, item.created_at, now=now)
 
 
 def build_schedule(item: ScheduledQueryItem) -> Schedule:
@@ -131,14 +164,7 @@ async def reconcile(item: ScheduledQueryItem) -> None:
         await client.create_schedule(
             schedule_id(item.scheduled_query_id),
             schedule,
-            trigger_immediately=bool(
-                item.enabled
-                and (
-                    item.watch_scans
-                    or item.frequency is not None
-                    or (item.schedule and item.schedule.type in ("interval", "hourly"))
-                )
-            ),
+            trigger_immediately=_trigger_immediately(item),
         )
     except ScheduleAlreadyRunningError:
         await handle.update(lambda _input: ScheduleUpdate(schedule=schedule))

@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from reporting.schema.report_config import ScheduledQueryItem
 from reporting.services import workflow_schedules
 
@@ -23,6 +25,50 @@ def test_build_interval_schedule_uses_buffer_one():
     assert schedule.spec.intervals[0].every.total_seconds() == 900
     assert schedule.policy.overlap.name == "BUFFER_ONE"
     assert schedule.state.paused is False
+
+
+def test_interval_schedule_is_anchored_to_last_run():
+    schedule = workflow_schedules.build_schedule(
+        _item(
+            schedule={"type": "hourly", "interval_hours": 12},
+            last_run_at="2026-07-16T11:49:08+00:00",
+        )
+    )
+
+    interval = schedule.spec.intervals[0]
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    expected = (datetime(2026, 7, 16, 11, 49, 8, tzinfo=UTC) - epoch) % timedelta(hours=12)
+    assert interval.every == timedelta(hours=12)
+    assert interval.offset == expected
+
+
+def test_interval_schedule_without_run_is_anchored_to_definition_update():
+    schedule = workflow_schedules.build_schedule(
+        _item(
+            schedule={"type": "interval", "interval_minutes": 15},
+            updated_at="2026-01-01T00:07:00+00:00",
+        )
+    )
+
+    assert schedule.spec.intervals[0].offset == timedelta(minutes=7)
+
+
+def test_recent_interval_run_does_not_trigger_immediately():
+    item = _item(
+        schedule={"type": "hourly", "interval_hours": 12},
+        last_run_at="2026-07-16T11:49:08+00:00",
+    )
+
+    assert workflow_schedules._trigger_immediately(item, now=datetime(2026, 7, 16, 12, tzinfo=UTC)) is False
+
+
+def test_overdue_interval_run_triggers_immediately():
+    item = _item(
+        schedule={"type": "hourly", "interval_hours": 12},
+        last_run_at="2026-07-16T11:49:08+00:00",
+    )
+
+    assert workflow_schedules._trigger_immediately(item, now=datetime(2026, 7, 17, tzinfo=UTC)) is True
 
 
 def test_disabled_schedule_is_paused():
