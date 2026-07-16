@@ -20,11 +20,13 @@ import {
   Select,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteOutlineIcon from '@mui/icons-material/Delete';
 import DragIndicatorIcon from '@mui/icons-material/DragIndicator';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import {
   DndContext,
   KeyboardSensor,
@@ -170,8 +172,7 @@ function ConfigField({
         multiline={field.type === 'text'}
         minRows={field.type === 'text' ? 3 : undefined}
         helperText={
-          field.description ??
-          (field.type === 'string_list' ? 'Comma-separated values' : undefined)
+          field.type === 'string_list' ? 'Comma-separated values' : undefined
         }
         onChange={(event) => {
           if (field.type === 'number') {
@@ -185,6 +186,22 @@ function ConfigField({
         fullWidth
         size="small"
       />
+    );
+  }
+  if (field.description) {
+    control = (
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
+        <Box sx={{ flex: 1, minWidth: 0 }}>{control}</Box>
+        <Tooltip title={field.description} placement="top" arrow describeChild>
+          <IconButton
+            aria-label={`Help for ${field.label}`}
+            size="small"
+            sx={{ mt: field.type === 'boolean' ? 0 : 0.5 }}
+          >
+            <HelpOutlineIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
     );
   }
   return field.warning ? (

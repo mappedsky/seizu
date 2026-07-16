@@ -26,6 +26,7 @@ const schemas: Record<string, ActionConfigFieldDef[]> = {
       label: 'Message',
       type: 'string',
       required: true,
+      description: 'Message written for every matching query result.',
     },
   ],
 };
@@ -110,4 +111,32 @@ it('edits named inputs and serializes ordered activity parameters', async () => 
         activity.parameters.message,
     ),
   ).toEqual(['updated first', 'second']);
+});
+
+it('shows activity descriptions in accessible tooltips instead of inline help text', async () => {
+  render(
+    <WorkflowDialog
+      open
+      initial={initial}
+      activityTypes={['log']}
+      activitySchemas={schemas}
+      dependentSchemas={{}}
+      onClose={jest.fn()}
+      onSave={jest.fn().mockResolvedValue(undefined)}
+    />,
+  );
+
+  expect(
+    screen.queryByText('Message written for every matching query result.'),
+  ).not.toBeInTheDocument();
+
+  fireEvent.mouseOver(
+    screen.getAllByRole('button', { name: 'Help for Message' })[0],
+  );
+
+  expect(
+    await screen.findByRole('tooltip', {
+      name: 'Message written for every matching query result.',
+    }),
+  ).toBeInTheDocument();
 });
