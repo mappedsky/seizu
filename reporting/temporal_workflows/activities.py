@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from html import escape
+from typing import Any
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -146,7 +147,7 @@ async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredQue
 
 
 @activity.defn
-async def execute_configured_activity(input: ConfiguredActivityInput) -> dict[str, object]:
+async def execute_configured_activity(input: ConfiguredActivityInput) -> dict[str, Any]:
     module = scheduled_query_modules.get_module(input.activity_type)
     action = ScheduledQueryAction(
         action_type=input.activity_type,
@@ -160,7 +161,7 @@ async def execute_configured_activity(input: ConfiguredActivityInput) -> dict[st
 
 
 @activity.defn
-async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> object:
+async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
     spec = get_enabled_workflow_spec(input.workflow_name)
     if spec is None:
         raise ApplicationError(

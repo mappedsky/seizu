@@ -1,8 +1,10 @@
 import logging
 import re
+from typing import Any, get_type_hints
 
 import pytest
 from neo4j import Record
+from temporalio.converter import DataConverter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -15,6 +17,7 @@ from reporting.services.sandbox_remediation import RemediationRunResult
 from reporting.temporal_workflows import WorkflowSpec
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
+    execute_configured_activity,
     execute_configured_query,
     get_pr_ci_status,
     run_dependency_ci_fix,
@@ -33,6 +36,20 @@ from reporting.temporal_workflows.shared import (
 )
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+def test_configured_activity_results_use_converter_safe_type_hints():
+    assert get_type_hints(execute_configured_activity)["return"] == dict[str, Any]
+    assert get_type_hints(build_code_workflow_input)["return"] is Any
+
+
+async def test_configured_activity_result_round_trips_through_temporal_converter():
+    converter = DataConverter.default
+    payloads = await converter.encode([{"status": "completed", "rows": 1}])
+
+    result = (await converter.decode(payloads, [dict[str, Any]]))[0]
+
+    assert result == {"status": "completed", "rows": 1}
 
 
 async def test_execute_configured_query_converts_neo4j_records(mocker):
