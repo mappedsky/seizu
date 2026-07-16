@@ -1396,6 +1396,37 @@ async def test_record_scheduled_query_result_not_found(patch_table, store):
     assert patch_table.update_item.call_count == 0
 
 
+async def test_set_workflow_schedule_sync_status_updates_metadata_and_list(patch_table, store):
+    await store.set_workflow_schedule_sync_status(
+        "sq1",
+        "error",
+        error="Temporal unavailable",
+        synced_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert patch_table.update_item.call_count == 2
+    keys = [call.kwargs["Key"] for call in patch_table.update_item.call_args_list]
+    assert {key["PK"] for key in keys} == {"SQ#sq1", "SCHEDULED_QUERY_LIST"}
+    values = patch_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+    assert values[":status"] == "error"
+    assert values[":error"] == "Temporal unavailable"
+
+
+async def test_request_scheduled_query_run_success_and_missing(patch_table, store):
+    requested_at = await store.request_scheduled_query_run("sq1")
+    assert requested_at is not None
+    assert patch_table.update_item.call_count == 2
+
+    import botocore.exceptions
+
+    patch_table.update_item.reset_mock()
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "missing"}},
+        "UpdateItem",
+    )
+    assert await store.request_scheduled_query_run("missing") is None
+
+
 # ---------------------------------------------------------------------------
 # Toolsets
 # ---------------------------------------------------------------------------

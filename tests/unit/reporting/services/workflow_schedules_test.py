@@ -1,4 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+from temporalio.client import ScheduleAlreadyRunningError
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from reporting.schema.report_config import ScheduledQueryItem
 from reporting.services import workflow_schedules
@@ -25,6 +29,22 @@ def test_build_interval_schedule_uses_buffer_one():
     assert schedule.spec.intervals[0].every.total_seconds() == 900
     assert schedule.policy.overlap.name == "BUFFER_ONE"
     assert schedule.state.paused is False
+
+
+async def test_get_client_connects_once(mocker):
+    workflow_schedules._client = None
+    client = object()
+    connect = mocker.patch.object(
+        workflow_schedules.Client,
+        "connect",
+        new=mocker.AsyncMock(return_value=client),
+    )
+    try:
+        assert await workflow_schedules.get_client() is client
+        assert await workflow_schedules.get_client() is client
+        connect.assert_awaited_once()
+    finally:
+        workflow_schedules._client = None
 
 
 def test_interval_schedule_is_anchored_to_last_run():
@@ -111,3 +131,119 @@ async def test_reconcile_all_marks_items_when_temporal_is_unavailable(mocker):
         "error",
         error="offline",
     )
+
+
+def test_calendar_and_placeholder_schedules():
+    daily = workflow_schedules.build_schedule(
+        _item(schedule={"type": "daily", "days_of_week": [0, 6], "hour": 9, "minute": 30})
+    )
+    assert [value.start for value in daily.spec.calendars[0].day_of_week] == [1, 0]
+    monthly = workflow_schedules.build_schedule(
+        _item(schedule={"type": "monthly", "days_of_month": [15, 31], "hour": 2})
+    )
+    assert {value.start for value in monthly.spec.calendars[0].day_of_month} == {15, 28, 29, 30, 31}
+    placeholder = workflow_schedules.build_schedule(_item())
+    assert placeholder.state.paused is True
+    assert placeholder.spec.intervals[0].every == timedelta(days=36500)
+    legacy = workflow_schedules.build_schedule(_item(frequency=10))
+    assert legacy.spec.intervals[0].every == timedelta(minutes=10)
+
+
+async def test_reconcile_creates_and_marks_synced(mocker):
+    client = mocker.Mock()
+    client.get_schedule_handle.return_value = mocker.Mock()
+    client.create_schedule = mocker.AsyncMock()
+    mocker.patch.object(workflow_schedules, "get_client", new=mocker.AsyncMock(return_value=client))
+    status = mocker.patch.object(
+        workflow_schedules.report_store,
+        "set_workflow_schedule_sync_status",
+        new=mocker.AsyncMock(),
+    )
+    await workflow_schedules.reconcile(_item(schedule={"type": "hourly", "interval_hours": 2}))
+    assert client.create_schedule.await_args.kwargs["trigger_immediately"] is True
+    assert status.await_args.args[:2] == ("workflow-1", "synced")
+
+
+async def test_reconcile_updates_existing_schedule(mocker):
+    handle = mocker.Mock(update=mocker.AsyncMock())
+    client = mocker.Mock()
+    client.get_schedule_handle.return_value = handle
+    client.create_schedule = mocker.AsyncMock(side_effect=ScheduleAlreadyRunningError())
+    mocker.patch.object(workflow_schedules, "get_client", new=mocker.AsyncMock(return_value=client))
+    mocker.patch.object(
+        workflow_schedules.report_store,
+        "set_workflow_schedule_sync_status",
+        new=mocker.AsyncMock(),
+    )
+    await workflow_schedules.reconcile(_item(schedule={"type": "hourly", "interval_hours": 2}))
+    update = handle.update.await_args.args[0](None)
+    assert update.schedule.spec.intervals[0].every == timedelta(hours=2)
+
+
+async def test_reconcile_by_id_handles_missing_manual_and_error(mocker):
+    get = mocker.patch.object(
+        workflow_schedules.report_store,
+        "get_scheduled_query",
+        new=mocker.AsyncMock(return_value=None),
+    )
+    reconcile = mocker.patch.object(workflow_schedules, "reconcile", new=mocker.AsyncMock())
+    await workflow_schedules.reconcile_by_id("missing")
+    reconcile.assert_not_awaited()
+
+    item = _item(run_requested_at="2026-01-02T00:00:00+00:00")
+    get.return_value = item
+    run = mocker.patch.object(workflow_schedules, "run_now", new=mocker.AsyncMock())
+    lock = mocker.patch.object(
+        workflow_schedules.report_store,
+        "acquire_scheduled_query_lock",
+        new=mocker.AsyncMock(),
+    )
+    await workflow_schedules.reconcile_by_id("workflow-1")
+    run.assert_awaited_once_with("workflow-1", request_key=item.run_requested_at)
+    lock.assert_awaited_once()
+
+    reconcile.side_effect = RuntimeError("bad sync")
+    status = mocker.patch.object(
+        workflow_schedules.report_store,
+        "set_workflow_schedule_sync_status",
+        new=mocker.AsyncMock(),
+    )
+    await workflow_schedules.reconcile_by_id("workflow-1")
+    status.assert_awaited_once_with("workflow-1", "error", error="bad sync")
+
+
+async def test_reconcile_all_and_delete(mocker):
+    item = _item()
+    mocker.patch.object(
+        workflow_schedules.report_store,
+        "list_scheduled_queries",
+        new=mocker.AsyncMock(return_value=[]),
+    )
+    get_client = mocker.patch.object(workflow_schedules, "get_client", new=mocker.AsyncMock())
+    await workflow_schedules.reconcile_all()
+    get_client.assert_not_awaited()
+
+    workflow_schedules.report_store.list_scheduled_queries.return_value = [item]
+    reconcile = mocker.patch.object(workflow_schedules, "reconcile_by_id", new=mocker.AsyncMock())
+    await workflow_schedules.reconcile_all()
+    reconcile.assert_awaited_once_with("workflow-1")
+
+    handle = mocker.Mock(delete=mocker.AsyncMock())
+    get_client.return_value = mocker.Mock(get_schedule_handle=mocker.Mock(return_value=handle))
+    await workflow_schedules.delete_schedule("workflow-1")
+    handle.delete.assert_awaited_once()
+    get_client.side_effect = RuntimeError("offline")
+    await workflow_schedules.delete_schedule("workflow-1")
+
+
+async def test_run_now_success_and_existing(mocker):
+    handle = SimpleNamespace(result_run_id="run-1")
+    client = mocker.Mock(start_workflow=mocker.AsyncMock(return_value=handle))
+    mocker.patch.object(workflow_schedules, "get_client", new=mocker.AsyncMock(return_value=client))
+    workflow_id, run_id = await workflow_schedules.run_now("workflow-1", request_key="request")
+    assert workflow_id.endswith(":manual:request")
+    assert run_id == "run-1"
+
+    client.start_workflow.side_effect = WorkflowAlreadyStartedError(workflow_id, "seizu_configured_workflow")
+    client.get_workflow_handle.return_value = handle
+    assert await workflow_schedules.run_now("workflow-1", request_key="request") == (workflow_id, "run-1")

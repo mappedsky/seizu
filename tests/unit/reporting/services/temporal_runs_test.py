@@ -101,6 +101,31 @@ def test_workflow_id_matches_rejects_foreign_ids():
     )
 
 
+async def test_get_client_caches_and_wraps_connection_errors(mocker):
+    temporal_runs._client = None
+    client = object()
+    connect = mocker.patch("temporalio.client.Client.connect", new=AsyncMock(return_value=client))
+    assert await temporal_runs._get_client() is client
+    assert await temporal_runs._get_client() is client
+    connect.assert_awaited_once()
+    temporal_runs._client = None
+    connect.side_effect = RuntimeError("offline")
+    try:
+        await temporal_runs._get_client()
+        raise AssertionError("expected unavailable")
+    except temporal_runs.TemporalUnavailableError:
+        pass
+    finally:
+        temporal_runs._client = None
+
+
+def test_small_visibility_helpers():
+    assert temporal_runs.workflow_id_matches(_SQ_ID, f"seizu-workflow:{_SQ_ID}:manual:request")
+    assert temporal_runs._event_time(history_pb.HistoryEvent()) is None
+    assert temporal_runs._failure_summary(None) is None
+    assert temporal_runs._retry_state_label(0) is None
+
+
 # ---------------------------------------------------------------------------
 # list_workflow_runs
 # ---------------------------------------------------------------------------
@@ -466,6 +491,95 @@ async def test_get_workflow_run_detail_without_payload_previews(mocker):
     assert activity.last_attempt_failure == "attempt 1 crashed"
     assert activity.input_preview is None
     assert activity.result_preview is None
+
+
+async def test_get_workflow_run_detail_terminal_event_variants(mocker):
+    child_ids = ["child-timeout", "child-canceled", "child-terminated"]
+    events = [
+        _event(
+            1,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="timed", activity_type=common_pb.ActivityType(name="task")
+            ),
+        ),
+        _event(
+            2,
+            activity_task_timed_out_event_attributes=history_pb.ActivityTaskTimedOutEventAttributes(
+                scheduled_event_id=1,
+                failure=failure_pb.Failure(message="late"),
+                retry_state=enums_pb.RetryState.RETRY_STATE_TIMEOUT,
+            ),
+        ),
+        _event(
+            3,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="canceled", activity_type=common_pb.ActivityType(name="task")
+            ),
+        ),
+        _event(
+            4,
+            activity_task_cancel_requested_event_attributes=history_pb.ActivityTaskCancelRequestedEventAttributes(
+                scheduled_event_id=3
+            ),
+        ),
+        _event(
+            5,
+            activity_task_canceled_event_attributes=history_pb.ActivityTaskCanceledEventAttributes(
+                scheduled_event_id=3
+            ),
+        ),
+    ]
+    event_id = 6
+    terminal_attrs = [
+        (
+            "child_workflow_execution_timed_out_event_attributes",
+            history_pb.ChildWorkflowExecutionTimedOutEventAttributes,
+        ),
+        (
+            "child_workflow_execution_canceled_event_attributes",
+            history_pb.ChildWorkflowExecutionCanceledEventAttributes,
+        ),
+        (
+            "child_workflow_execution_terminated_event_attributes",
+            history_pb.ChildWorkflowExecutionTerminatedEventAttributes,
+        ),
+    ]
+    for child_id, (field, attr_type) in zip(child_ids, terminal_attrs, strict=True):
+        initiated_id = event_id
+        events.append(
+            _event(
+                initiated_id,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=child_id,
+                        workflow_type=common_pb.WorkflowType(name="child"),
+                    )
+                ),
+            )
+        )
+        events.append(_event(event_id + 1, **{field: attr_type(initiated_event_id=initiated_id)}))
+        event_id += 2
+    events.append(
+        _event(
+            event_id,
+            workflow_execution_terminated_event_attributes=history_pb.WorkflowExecutionTerminatedEventAttributes(
+                reason="stopped"
+            ),
+        )
+    )
+    handle = _mock_handle(events, status=temporalio.client.WorkflowExecutionStatus.TERMINATED)
+    _mock_client(mocker, handle=handle)
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
+    assert detail is not None
+    assert detail.failure == "stopped"
+    statuses = {activity.activity_id: activity.status for activity in detail.activities}
+    assert statuses == {
+        "timed": "timed_out",
+        "canceled": "canceled",
+        "child-timeout": "timed_out",
+        "child-canceled": "canceled",
+        "child-terminated": "terminated",
+    }
 
 
 async def test_payload_preview_truncates_and_survives_garbage():

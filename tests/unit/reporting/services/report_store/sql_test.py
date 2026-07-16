@@ -1210,6 +1210,41 @@ async def test_create_scheduled_query(store, mocker):
     assert result.updated_by == "user@example.com"
 
 
+async def test_scheduled_query_runtime_state_methods(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sq1",
+    )
+    await store.create_scheduled_query(**_SQ_KWARGS)
+
+    requested_at = await store.request_scheduled_query_run("sq1")
+    assert requested_at is not None
+    assert await store.request_scheduled_query_run("missing") is None
+
+    await store.record_scheduled_query_result("sq1", "failure", "boom")
+    failed = await store.get_scheduled_query("sq1")
+    assert failed is not None
+    assert failed.last_run_status == "failure"
+    assert failed.last_errors[0]["error"] == "boom"
+    await store.record_scheduled_query_result("sq1", "success")
+    succeeded = await store.get_scheduled_query("sq1")
+    assert succeeded is not None
+    assert succeeded.last_errors == []
+    await store.record_scheduled_query_result("missing", "success")
+
+    await store.set_workflow_schedule_sync_status(
+        "sq1",
+        "error",
+        error="offline",
+        synced_at="2026-01-01T00:00:00+00:00",
+    )
+    synced = await store.get_scheduled_query("sq1")
+    assert synced is not None
+    assert synced.schedule_sync_status == "error"
+    assert synced.schedule_sync_error == "offline"
+    await store.set_workflow_schedule_sync_status("missing", "synced")
+
+
 async def test_list_scheduled_queries_returns_created(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",
