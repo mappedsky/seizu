@@ -1,9 +1,10 @@
-import { GlobalRegistrator } from '@happy-dom/global-registrator';
-// Set a desktop viewport so MUI media queries (e.g. breakpoints.down('lg'))
-// don't fire and hide components during tests.
-GlobalRegistrator.register({ width: 1920, height: 1080 });
-
 import '@testing-library/jest-dom';
+import { cleanup } from '@testing-library/react';
+
+// React Testing Library's automatic cleanup does not reliably register under
+// Bun. Explicit global teardown prevents mounted components, dialogs, and
+// hooks from leaking into later tests or test files.
+afterEach(cleanup);
 
 import { TextEncoder, TextDecoder } from 'util';
 

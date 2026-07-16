@@ -1,2 +1,2 @@
 [test]
-preload = ["./src/setupTests.ts"]
+preload = ["./src/registerTestDom.ts", "./src/setupTests.ts"]
