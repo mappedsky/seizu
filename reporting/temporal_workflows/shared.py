@@ -43,7 +43,11 @@ class ConfiguredWorkflowDefinition:
 @dataclass
 class ConfiguredQueryResult:
     input_id: str
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    # ``Any`` is intentional for replay compatibility. Before the query
+    # activity normalized Neo4j Records, Temporal encoded each Record as a
+    # positional JSON list. Existing histories must remain decodable after the
+    # worker upgrade; new activity results always contain plain dictionaries.
+    rows: list[Any] = field(default_factory=list)
     truncated: bool = False
 
 
@@ -71,6 +75,38 @@ class CodeWorkflowInputRequest:
     workflow_name: str
     parameters: dict[str, Any]
     rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+def normalize_configured_rows(
+    rows: list[Any],
+    return_attribute: str = "details",
+) -> list[dict[str, Any]]:
+    """Normalize query rows, including pre-fix Temporal history payloads.
+
+    Neo4j ``Record`` objects were previously serialized by Temporal as lists
+    of positional values. Most scheduled queries return one named map (usually
+    ``details``), so a single value can be reconstructed losslessly using the
+    activity's configured return attribute. Multiple positional values cannot
+    recover their original column names; retain them under ``_values`` while
+    exposing the first value under the configured attribute.
+    """
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            normalized.append(row)
+        elif isinstance(row, list):
+            if len(row) == 1:
+                normalized.append({return_attribute: row[0]})
+            else:
+                normalized.append(
+                    {
+                        return_attribute: row[0] if row else None,
+                        "_values": row,
+                    }
+                )
+        else:
+            normalized.append({return_attribute: row})
+    return normalized
 
 
 @dataclass

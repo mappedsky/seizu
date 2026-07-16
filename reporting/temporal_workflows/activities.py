@@ -135,8 +135,9 @@ async def load_configured_workflow(
 
 @activity.defn
 async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredQueryResult:
-    rows = await run_query_with_retry(input.cypher, input.parameters)
-    truncated = len(rows) > input.max_rows
+    records = await run_query_with_retry(input.cypher, input.parameters)
+    rows = [dict(record) for record in records]
+    truncated = len(records) > input.max_rows
     return ConfiguredQueryResult(
         input_id=input.input_id,
         rows=rows[: input.max_rows],

@@ -2,6 +2,7 @@ import logging
 import re
 
 import pytest
+from neo4j import Record
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -14,6 +15,7 @@ from reporting.services.sandbox_remediation import RemediationRunResult
 from reporting.temporal_workflows import WorkflowSpec
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
+    execute_configured_query,
     get_pr_ci_status,
     run_dependency_ci_fix,
     run_dependency_remediation,
@@ -22,6 +24,7 @@ from reporting.temporal_workflows.activities import (
 from reporting.temporal_workflows.shared import (
     CiFixInput,
     CodeWorkflowInputRequest,
+    ConfiguredQueryInput,
     DependencyRemediationInput,
     PrCiCheck,
     PrCiStatusInput,
@@ -30,6 +33,22 @@ from reporting.temporal_workflows.shared import (
 )
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+async def test_execute_configured_query_converts_neo4j_records(mocker):
+    mocker.patch(
+        "reporting.temporal_workflows.activities.run_query_with_retry",
+        mocker.AsyncMock(return_value=[Record([("details", {"id": "CVE-1"})])]),
+    )
+
+    result = await execute_configured_query(
+        ConfiguredQueryInput(
+            input_id="findings",
+            cypher="RETURN {id: 'CVE-1'} AS details",
+        )
+    )
+
+    assert result.rows == [{"details": {"id": "CVE-1"}}]
 
 
 async def test_build_code_workflow_input_preserves_legacy_projection(mocker):

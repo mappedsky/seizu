@@ -1,3 +1,5 @@
+from temporalio.converter import DataConverter
+
 from reporting.temporal_workflows import (
     WORKFLOW_REGISTRY,
     WorkflowInputContext,
@@ -6,10 +8,36 @@ from reporting.temporal_workflows import (
     get_workflow_spec,
 )
 from reporting.temporal_workflows.shared import (
+    ConfiguredQueryResult,
     CveDependencyRemediationInput,
     group_rows_by_repo,
     group_rows_by_repo_package,
+    normalize_configured_rows,
 )
+
+
+def test_normalize_configured_rows_recovers_legacy_record_payload():
+    assert normalize_configured_rows(
+        [[{"id": "CVE-1"}]],
+        "payload",
+    ) == [{"payload": {"id": "CVE-1"}}]
+
+
+async def test_configured_query_result_decodes_pre_fix_temporal_payload():
+    converter = DataConverter.default
+    payloads = await converter.encode(
+        [
+            {
+                "input_id": "findings",
+                "rows": [[{"id": "CVE-1"}]],
+                "truncated": False,
+            }
+        ]
+    )
+    result = (await converter.decode(payloads, [ConfiguredQueryResult]))[0]
+
+    assert isinstance(result, ConfiguredQueryResult)
+    assert result.rows == [[{"id": "CVE-1"}]]
 
 
 def test_registry_contains_cve_repo_report():

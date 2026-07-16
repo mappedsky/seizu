@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
         ConfiguredActivityInput,
         ConfiguredWorkflowInvocation,
         ConfiguredWorkflowResult,
+        normalize_configured_rows,
     )
 
 
@@ -56,7 +57,14 @@ class ConfiguredWorkflow:
             query_results = {result.input_id: result.rows for result in settled}
             activity_results: list[Any] = []
             for position, configured_activity in enumerate(definition.activities, start=1):
-                rows = query_results.get(configured_activity.input_id or "", [])
+                return_attribute = configured_activity.parameters.get(
+                    "query_return_attribute",
+                    "details",
+                )
+                rows = normalize_configured_rows(
+                    query_results.get(configured_activity.input_id or "", []),
+                    return_attribute if isinstance(return_attribute, str) else "details",
+                )
                 if configured_activity.type == "workflow":
                     if configured_activity.requires_rows and not rows:
                         activity_results.append({"status": "skipped", "reason": "input returned no rows"})
