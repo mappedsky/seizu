@@ -89,7 +89,7 @@ class ModuleInterface:
 async def load_modules() -> None:
     global _MODULES
 
-    for module_name in settings.SCHEDULED_QUERY_MODULES:
+    for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
         # fromlist is required here, or the module will not be loaded.
         # The actual valud of fromlist doesn't matter. We're using this rather
         # than importlib to be able to handle the type checking properly.
@@ -105,12 +105,12 @@ def get_module_names() -> list[str]:
 def get_configured_action_names() -> list[str]:
     """Return the action_name() for all available modules.
 
-    Includes built-in modules plus those listed in SCHEDULED_QUERY_MODULES.
+    Includes built-in modules plus those listed in WORKFLOW_ACTIVITY_MODULES.
     Imports without calling setup(), so this is safe to call from the web process.
     """
     seen = set()
     names = []
-    for module_name in _BUILTIN_MODULES + list(settings.SCHEDULED_QUERY_MODULES):
+    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
         if module_name in seen:
             continue
         seen.add(module_name)
@@ -125,18 +125,20 @@ def get_configured_action_names() -> list[str]:
 def get_module(action_name: str) -> ModuleInterface:
     global _MODULES
 
+    if action_name == "temporal" and "workflow" in _MODULES:
+        return _MODULES["workflow"]
     return _MODULES[action_name]
 
 
 def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
     """Return action_config_schema() for all available modules.
 
-    Includes built-in modules plus those listed in SCHEDULED_QUERY_MODULES.
+    Includes built-in modules plus those listed in WORKFLOW_ACTIVITY_MODULES.
     Imports without calling setup(), so this is safe to call from the web process.
     """
     seen: set = set()
     schemas: dict[str, list[ActionConfigFieldDef]] = {}
-    for module_name in _BUILTIN_MODULES + list(settings.SCHEDULED_QUERY_MODULES):
+    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
         if module_name in seen:
             continue
         seen.add(module_name)
@@ -145,6 +147,8 @@ def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
             schemas[module.action_name()] = module.action_config_schema()
         except Exception:
             pass
+    if "workflow" in schemas:
+        schemas.setdefault("temporal", schemas["workflow"])
     return schemas
 
 
@@ -155,7 +159,7 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
     """
     seen: set = set()
     validators: dict[str, Callable[[dict[str, Any]], str | None]] = {}
-    for module_name in _BUILTIN_MODULES + list(settings.SCHEDULED_QUERY_MODULES):
+    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
         if module_name in seen:
             continue
         seen.add(module_name)
@@ -166,4 +170,6 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
                 validators[module.action_name()] = validator
         except Exception:
             pass
+    if "workflow" in validators:
+        validators.setdefault("temporal", validators["workflow"])
     return validators

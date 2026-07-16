@@ -215,7 +215,14 @@ async def create_scheduled_query(
     enabled: bool,
     actions: list[dict[str, Any]],
     created_by: str,
+    inputs: dict[str, Any] | None = None,
+    activities: list[dict[str, Any]] | None = None,
 ) -> ScheduledQueryItem:
+    kwargs: dict[str, Any] = {}
+    if inputs is not None:
+        kwargs["inputs"] = inputs
+    if activities is not None:
+        kwargs["activities"] = activities
     return await get_store().create_scheduled_query(
         name=name,
         cypher=cypher,
@@ -226,6 +233,7 @@ async def create_scheduled_query(
         enabled=enabled,
         actions=actions,
         created_by=created_by,
+        **kwargs,
     )
 
 
@@ -241,7 +249,14 @@ async def update_scheduled_query(
     actions: list[dict[str, Any]],
     updated_by: str,
     comment: str | None = None,
+    inputs: dict[str, Any] | None = None,
+    activities: list[dict[str, Any]] | None = None,
 ) -> ScheduledQueryItem | None:
+    kwargs: dict[str, Any] = {}
+    if inputs is not None:
+        kwargs["inputs"] = inputs
+    if activities is not None:
+        kwargs["activities"] = activities
     return await get_store().update_scheduled_query(
         sq_id=sq_id,
         name=name,
@@ -254,6 +269,22 @@ async def update_scheduled_query(
         actions=actions,
         updated_by=updated_by,
         comment=comment,
+        **kwargs,
+    )
+
+
+async def set_workflow_schedule_sync_status(
+    workflow_id: str,
+    status: str,
+    *,
+    error: str | None = None,
+    synced_at: str | None = None,
+) -> None:
+    await get_store().set_workflow_schedule_sync_status(
+        workflow_id,
+        status,
+        error=error,
+        synced_at=synced_at,
     )
 
 

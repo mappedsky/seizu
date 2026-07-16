@@ -6,9 +6,8 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 Seizu (星図) is a configuration-driven reporting platform for Neo4j graph data. Four runtimes:
 - **FastAPI web app** (`reporting/`) — serves the React frontend and REST API (ASGI, Gunicorn + UvicornWorker).
-- **Scheduled query worker** (`reporting/scheduled_queries.py`) — runs Cypher on a schedule with pluggable action plugins (SQS, Slack, log, statsd, temporal); reads from the database, not the YAML config. Triggers (mutually exclusive, enforced by `validate_exclusive_triggers` in `seizu_schema`): a structured `ScheduleSpec` (interval-minutes/hourly/daily/monthly at hour:minute UTC, shared due-logic in `reporting/services/schedule_spec.py`), the deprecated `frequency` (minutes), or `watch_scans`; `POST /api/v1/scheduled-queries/<id>/run` sets `run_requested_at`, which the worker treats as a trigger on its next poll (runs even when disabled).
+- **Temporal workflow worker** (`reporting/temporal_worker.py`) — owns configurable workflow schedules and runs named Cypher inputs followed by ordered activity modules (SQS, Slack, log, statsd, or a code-defined workflow). Temporal Schedules provide durable interval/hourly/daily/monthly and watch-poll triggers. The old scheduled-query worker/API are compatibility aliases only.
 - **Scheduled chats worker** (`reporting/scheduled_chats.py`) — runs recurring headless agent sessions managed from the Scheduled Chats page (see Scheduled Chats).
-- **Temporal worker** (`reporting/temporal_worker.py`) — hosts Temporal workflows/activities started by the `temporal` scheduled query action (see the Temporal Workflows section).
 
 ## Running Commands with Docker
 
@@ -102,7 +101,7 @@ FastAPI, Python 3.12, Gunicorn + UvicornWorker (ASGI). All I/O is async (neo4j a
 
 The route definitions in `reporting/routes/` are the source of truth. Don't maintain an endpoint list here — read the live spec instead: Swagger UI at `/api/docs`, raw spec at `/api/openapi.json`, or regenerate the checked-in copy with `make generate_openapi` (writes `schema/openapi.json`, no running server needed).
 
-Conventions worth knowing up front: all paths are under `/api/v1/*` (except `/healthcheck`, `/api/openapi.json`, `/api/docs`); versioned entities (reports, roles, scheduled-queries, toolsets, tools) expose `GET .../<id>/versions` and `GET .../<id>/versions/<n>`, and reports additionally accept `POST /api/v1/reports/<id>/versions` to save a new version. The browser-only BFF auth routes live under `/api/v1/auth/*` — see the Authentication section.
+Conventions worth knowing up front: all paths are under `/api/v1/*` (except `/healthcheck`, `/api/openapi.json`, `/api/docs`); versioned entities (reports, roles, workflows, toolsets, tools) expose `GET .../<id>/versions` and `GET .../<id>/versions/<n>`, and reports additionally accept `POST /api/v1/reports/<id>/versions` to save a new version. The browser-only BFF auth routes live under `/api/v1/auth/*` — see the Authentication section.
 
 ### CLI (`seizu_cli/`)
 
@@ -166,9 +165,9 @@ DynamoDB key design: per report `#METADATA`/`#LATEST`/`VERSION#<n>`; per schedul
 
 Manual runs: `nostart` profile; entrypoint is already `cartography` (don't prefix it): `make sync_cve / sync_aws / sync_github / sync_crowdstrike / sync_k8s`. Scheduled runs go through the `cartography_sync` Temporal workflow (see Temporal Workflows) executed by the dedicated `seizu-cartography-worker` service — a separate image (`Dockerfile.cartography`: upstream cartography pinned by tag+digest + the top-level `cartography_sync/` package's thin activity worker; after bumping the pin run `make cartography_contract_test`) on its own task queue, holding only cartography intel credentials. `cartography_sync/registry.py` is the security boundary: per-module typed flag allowlists, fixed credential env-var names/paths, argv-list exec (never a shell), scrubbed subprocess env; the activity re-validates params, re-enforces `CARTOGRAPHY_ENABLED_MODULES`, and rebuilds argv worker-side, so forged Temporal payloads can't escape the allowlist. Each subprocess runs exactly one `--selected-modules` stage — the input builder wraps every pipeline with implicit `create-indexes` (first) and `analysis` (last) stages, and each module run is a `cartography_module` child workflow whose fixed workflow ID (`seizu-cartography-module:{module}`) is the per-module mutex (concurrent same-module syncs race on cartography's update tags; the pipeline waits up to `CARTOGRAPHY_MODULE_WAIT_SECONDS`, and `temporal_runs.py` folds child-workflow events into the runs UI). The sync worker must not import `reporting.*` (that pulls pydantic settings) — it reads plain env vars (`CARTOGRAPHY_NEO4J_URI`, `CARTOGRAPHY_TASK_QUEUE`, …); `registry`/`shared` stay stdlib-only, `activities`/`worker` may use temporalio. Docs: `docs/root/install/cartography-sync.md`.
 
-### Scheduled Query Action Plugins
+### Workflow Activity Plugins
 
-In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`; optional `warning` renders an alert above the field, and a **required boolean must be `True`** to validate — used for explicit acknowledgements). Optional `required_permission()` gates who may *configure* the action (enforced in `validate_action_configs`, hidden in the UI; served as `scheduled_query_action_permissions`). Schemas served via `GET /api/v1/config` as `scheduled_query_action_schemas`.
+In `reporting/scheduled_query_modules/`; implement `ModuleInterface`. Modules are configured by `WORKFLOW_ACTIVITY_MODULES` and execute as Temporal activities in the order stored by the top-level configurable workflow. Required: `action_name()`, `setup()`, `handle_results(scheduled_query_id, action, results)`, `action_config_schema()` → `List[ActionConfigFieldDef]` (types: `string`, `text`, `number`, `boolean`, `string_list`, `select`; optional `warning` renders an alert above the field, and a **required boolean must be `True`** to validate — used for explicit acknowledgements). The former `temporal` module is canonically named `workflow` and dispatches an awaited code-defined child workflow. Schemas are served via `GET /api/v1/config` as `workflow_activity_schemas`; scheduled-query keys remain compatibility aliases.
 
 ### Headless Agent Runs & Confirmation Bypass
 
@@ -206,7 +205,7 @@ Recurring headless agent runs (prompt + trigger, no Cypher) managed from the top
 
 ### Temporal Workflows
 
-The `temporal` action module (`reporting/scheduled_query_modules/temporal.py`) starts a named workflow (from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py`) with the query results; `reporting/temporal_worker.py` (`python -m reporting.temporal_worker`) executes them. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above). Built-ins: `cve_repo_report` (per-repo CVE assessment chats), `cve_dependency_remediation` (per repo+package sandbox remediation runs opening dependency-upgrade PRs — see Sandbox remediation; `maximum_attempts=1`, timeout `REMEDIATION_TIMEOUT_SECONDS`), and `cartography_sync` (staged cartography sync pipeline; activities run on the dedicated sync worker's queue — see Cartography Data Sync). `TEMPORAL_ENABLED_WORKFLOWS` allowlists which registered workflows the temporal action may dispatch (empty → all); the action gates both its schema picker (`enabled_workflow_names()`) and dispatch (`get_enabled_workflow_spec()`).
+`ConfiguredWorkflow` (`reporting/temporal_workflows/configured_workflow.py`) is the top-level, user-configurable pipeline. It evaluates named query inputs in parallel and executes activities sequentially. The `workflow` activity module starts a named code-defined child workflow from `WORKFLOW_REGISTRY` in `reporting/temporal_workflows/__init__.py` and awaits it. Workflow/activity code lives in `reporting/temporal_workflows/` — workflows are deterministic (dataclasses + pure helpers from `shared.py` only); **all I/O belongs in `activities.py`**, and AI sessions go through `headless_chat.run_headless_chat` (see above). Built-ins: `cve_repo_report`, `cve_dependency_remediation`, and `cartography_sync`. `TEMPORAL_ENABLED_WORKFLOWS` allowlists which registered code-defined workflows the `workflow` activity may dispatch.
 
 A `WorkflowSpec` may declare per-workflow scheduled-query config: `config_fields` (extra `ActionConfigFieldDef`s served via `GET /api/v1/config` as `scheduled_query_action_dependent_schemas` and rendered as a dependent sub-form in `ScheduledQueryDialog` once the workflow is selected), `config_validator` (run on save through the `ModuleInterface.validate_action_config` hook), and `requires_rows=False` for workflows whose schedule query is only a trigger (dispatched even on empty results; the full `action_config` reaches the `input_factory` via `WorkflowInputContext.action_config`).
 
@@ -218,9 +217,8 @@ Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMP
 |---------|------|
 | `seizu` | FastAPI backend + static frontend |
 | `seizu-node` | Bun dev server |
-| `seizu-scheduled-queries` | Scheduled query worker |
 | `seizu-scheduled-chats` | Scheduled chats worker (headless agent runs) |
-| `seizu-temporal-worker` | Temporal workflow worker |
+| `seizu-temporal-worker` | Configurable workflow scheduler + Temporal workflow/activity worker |
 | `seizu-cartography-worker` | Cartography sync activity worker (own image + task queue) |
 | `temporal` | Temporal dev server (`server start-dev`, in-memory; UI `:8233`) |
 | `neo4j` | Graph database |

@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Seizu reports over graph data loaded by [cartography](https://github.com/cartography-cncf/cartography). Running cartography by hand (`make sync_*`) works for development, but production deployments want syncs on a schedule, split across parallel runs, and ordered so data dependencies land first. The `cartography_sync` Temporal workflow provides that: a scheduled query's `temporal` action starts a staged pipeline of cartography intel-module runs, executed by a dedicated sync worker.
+Seizu reports over graph data loaded by [cartography](https://github.com/cartography-cncf/cartography). Running cartography by hand (`make sync_*`) works for development, but production deployments want syncs on a schedule, split across parallel runs, and ordered so data dependencies land first. The `cartography_sync` Temporal workflow provides that: a configurable workflow's `workflow` activity starts a staged pipeline of cartography intel-module runs, executed by a dedicated sync worker.
 
 ## Architecture
 
 ```
-seizu-scheduled-queries ── temporal action ──> Temporal server
-        (schedule trigger, e.g. RETURN 1)            │
+configurable workflow ── workflow activity ──> Temporal server
+              (input-free child workflow)            │
                                                      ▼
                                         seizu-temporal-worker
                                      (cartography_sync workflow:
@@ -30,8 +30,8 @@ Because cartography bumps `SyncMetadata` on completion, scheduled syncs compose 
 
 ## Configuring a scheduled sync
 
-1. Create a scheduled query with a trivial query such as `RETURN 1` — the query is only the trigger; the workflow consumes no result rows.
-2. Add a `temporal` action and pick the `cartography_sync` workflow. Extra fields appear:
+1. Create a workflow with the desired time or watch trigger. No query input is required.
+2. Add a `workflow` activity with no input and pick `cartography_sync`. Extra fields appear:
    - **Modules** — a list of intel modules, run one at a time in order (one stage each). The common case.
    - **Pipeline (JSON)** — the full staged form, mutually exclusive with Modules: stages run sequentially, runs within a stage in parallel, and each run may set the module's allowlisted params. Put dependency-sensitive modules in later stages — `cve_metadata` enriches CVEs produced by earlier modules, so it must follow them:
 

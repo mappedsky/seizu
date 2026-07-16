@@ -16,7 +16,7 @@ docker run --env-file <your-env-file> ghcr.io/mappedsky/seizu:latest
 
 Seizu also publishes Python wheels for environments where running without Docker is useful.
 
-The `seizu` package includes the FastAPI backend, scheduled query worker, CLI, shared schema models, and the generated frontend bundle. The packaged frontend includes the full Vite build output: `index.html`, JavaScript, CSS, manifest, favicon, and any other files emitted into `build/` at release time.
+The `seizu` package includes the FastAPI backend, Temporal workflow worker, CLI, shared schema models, and the generated frontend bundle. The packaged frontend includes the full Vite build output: `index.html`, JavaScript, CSS, manifest, favicon, and any other files emitted into `build/` at release time.
 
 ```bash
 python -m venv .venv
@@ -26,8 +26,8 @@ pip install seizu
 # Web/API process
 seizu-server
 
-# Scheduled query worker, usually run as a separate process
-seizu-scheduled-queries
+# Workflow scheduler and worker, usually run as a separate process
+seizu-temporal-worker
 ```
 
 The separately published `seizu-cli` package installs only the CLI and shared schema code:
@@ -293,9 +293,11 @@ The sandbox delegation feature lets the chat agent run Python code, execute shel
 
 ### Scheduled queries
 
-* ``ENABLE_SCHEDULED_QUERIES``: Whether or not scheduled queries should be enabled. Note that if the worker is not running, scheduled queries will not run, even if this is set to true; default: ``True``
-* ``SCHEDULED_QUERY_FREQUENCY``: The frequency in seconds for how often we'll attempt to run scheduled queries; default: ``20``
-* ``SCHEDULED_QUERY_MODULES``: A comma separated list of python import locations for available scheduled query modules; default: ``reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.statsd``
+* ``WORKFLOW_ACTIVITY_MODULES``: Comma-separated Python import locations for activities hosted by the Temporal worker; defaults to SQS, Slack, StatsD, and the code-defined ``workflow`` activity.
+* ``WORKFLOW_QUERY_MAX_ROWS``: Default maximum rows retained for each named query input; default: ``200``.
+* ``WORKFLOW_WATCH_POLL_SECONDS``: Temporal watch-schedule polling interval; default: ``20``.
+* ``WORKFLOW_RECONCILE_SECONDS``: How often stored desired state is reconciled to Temporal Schedules; default: ``30``.
+* ``SCHEDULED_QUERY_MODULES``: Deprecated compatibility fallback for ``WORKFLOW_ACTIVITY_MODULES``.
 
 ### StatsD configuration
 

@@ -11,7 +11,7 @@ Seizu includes:
 
 * A configuration-driven react/mui frontend, with support for a dashboard, arbitrary reports, using a row/panel based layout with various panel types for visualizing data
 * An interactive **Query Console** for running ad-hoc Cypher queries, with graph, table, and raw result views, and a collapsible database schema browser showing available node labels, relationship types, and property keys
-* A backend worker that can run queries on a schedule, or triggered by graph events, with action plugins that can use the results; for example, sending query results to a slack channel, or an sqs queue
+* Temporal-backed **Workflows** that run named Cypher inputs on a time or graph-event schedule and pass their results through an ordered activity pipeline
 * An **MCP server** at ``/api/v1/mcp`` that exposes user-defined Cypher-backed tools to LLM agents such as Claude
 * A built-in **chat assistant** — an LLM agent that answers questions about your graph using the same tools and skills, with confirmation-gated writes, and can run headlessly on a schedule
 * A mechanism of providing SSO for Neo4j, when Seizu is placed behind an OAuth2 proxy
@@ -30,7 +30,7 @@ Documentation
 * `Security guidance <https://mappedsky.github.io/seizu/install/security.html>`_
 * `Query Console <https://mappedsky.github.io/seizu/install/query-console.html>`_
 * `Chat assistant documentation <https://mappedsky.github.io/seizu/install/chat.html>`_
-* `Scheduled query documentation <https://mappedsky.github.io/seizu/install/scheduled-queries.html>`_
+* `Workflow documentation <https://mappedsky.github.io/seizu/install/workflows.html>`_
 * `Scheduled chat documentation <https://mappedsky.github.io/seizu/install/chat-schedules.html>`_
 * `Temporal workflow documentation <https://mappedsky.github.io/seizu/install/temporal-workflows.html>`_
 * `Scheduled cartography sync documentation <https://mappedsky.github.io/seizu/install/cartography-sync.html>`_
@@ -50,6 +50,7 @@ Documentation
     install/security
     install/query-console
     install/chat
+    install/workflows
     install/scheduled-queries
     install/chat-schedules
     install/temporal-workflows

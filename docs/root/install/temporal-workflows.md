@@ -2,26 +2,30 @@
 
 ## Purpose
 
-Scheduled query actions like `slack` or `sqs` are fire-and-forget. The `temporal` action instead hands the query results to a durable, multi-step [Temporal](https://temporal.io/) workflow executed by a dedicated Seizu worker. The first built-in workflow, `cve_repo_report`, runs an AI chat session per affected repository that evaluates newly discovered CVEs and creates or updates a versioned findings report.
+Seizu's configurable [Workflows](workflows.html) run on Temporal. Their ordered
+`workflow` activity can hand a named input's rows to a durable, code-defined
+child workflow. The first built-in child workflow, `cve_repo_report`, runs an
+AI chat session per affected repository that evaluates newly discovered CVEs
+and creates or updates a versioned findings report.
 
 ## Architecture
 
 ```
-seizu-scheduled-queries ── temporal action ──> Temporal server (task queue: seizu-workflows)
-                                                        │
-                                                        ▼
-                                              seizu-temporal-worker
-                                     (workflows + activities: headless AI chat
-                                      sessions, skill rendering, report tools)
+stored workflow ── Temporal Schedule ──> Temporal server (task queue: seizu-workflows)
+                                                │
+                                                ▼
+                                      seizu-temporal-worker
+                              (configurable parent + code-defined children
+                               + activities and schedule reconciliation)
 ```
 
-- The **scheduled query worker** dispatches matching query results to the `temporal` action, which starts a workflow run. The workflow ID embeds the scheduled query ID and run marker, so redelivery of the same run is idempotent.
+- A **Temporal Schedule** starts the configurable parent workflow. Its named queries run in parallel, activities run sequentially, and a `workflow` activity starts and awaits the selected child workflow.
 - The **Temporal server** in local development is the lightweight CLI dev server (`temporal server start-dev`, in-memory). The Web UI is at `http://localhost:8233`.
 - The **Seizu temporal worker** (`python -m reporting.temporal_worker`) hosts the workflow and activity code. Activities own all I/O: resolving the creator's identity, rendering skills, driving the chat agent, and storing results.
 
 ## Identity and permissions
 
-A workflow runs **as the user who created the scheduled query**. The worker resolves that user's permissions from the last role claim observed on one of their authenticated requests (stored on the user profile), through the same RBAC resolution the request path uses. Consequences:
+A workflow runs **as the user who created the workflow definition**. The worker resolves that user's permissions from the last role claim observed on one of their authenticated requests (stored on the user profile), through the same RBAC resolution the request path uses. Consequences:
 
 - Every tool call the AI session makes is checked against the creator's permissions, exactly as in interactive chat (including the `chat:tools:call` gate).
 - If the creator is archived, workflow sessions fail and stop.
@@ -30,14 +34,14 @@ A workflow runs **as the user who created the scheduled query**. The worker reso
   revoke headless permissions: the lag is unbounded until the creator next
   authenticates. During that interval a previously authorized
   `chat:bypass_permissions` grant may still be used. Operators must archive
-  the Seizu user or disable their scheduled queries when immediate revocation
+  the Seizu user or disable their workflows when immediate revocation
   is required.
 
 ## Confirmation bypass model
 
 Interactive chat requires per-action confirmation before mutating tools run. A headless workflow has no approver, so confirmations are governed by the **`chat:bypass_permissions`** permission (granted to `seizu-editor` and `seizu-admin` by default):
 
-- When the scheduled query's creator holds the permission, the workflow's AI sessions run with confirmations bypassed; every bypassed tool execution is audit-logged by `mcp_runtime`.
+- When the workflow's creator holds the permission, the workflow's AI sessions run with confirmations bypassed; every bypassed tool execution is audit-logged by `mcp_runtime`.
 - When the creator does not hold it, confirmation-gated tools fail closed for the run; the headless system-prompt addendum tells the model to note the block in its summary and move on.
 - Chat-safe gating (`chat_safe_only`) and the creator's RBAC permissions are enforced on top, unchanged.
 
@@ -45,12 +49,18 @@ The same permission gates the chat UI's optional "Bypass confirmations" mode and
 
 ## Run visibility in the UI
 
-The scheduled query detail page shows a **Workflow runs** panel for queries with a `temporal` action: the most recent workflow executions (status, start/close time), and per run an expandable breakdown of its activities — status, attempt count (retries), retry state, failure messages (including the previous attempt's failure while retrying), and input/result previews (pretty-printed, syntax-highlighted JSON, truncated server-side). The data is read live from Temporal:
+The workflow detail page shows recent Temporal parent and child executions.
+The canonical `/api/v1/workflows/<id>/runs` endpoints expose the execution and
+activity history; legacy scheduled-query run endpoints remain aliases.
 
-- `GET /api/v1/scheduled-queries/<id>/workflow-runs` lists recent runs via a visibility query on the workflow ID prefix (`seizu:<workflow>:<scheduled_query_id>:`).
-- `GET /api/v1/scheduled-queries/<id>/workflow-runs/<workflow_id>/<run_id>` folds the run's event history (plus pending-activity state for in-flight runs) into the activity breakdown.
+- `GET /api/v1/workflows/<id>/runs` lists recent parent and child runs using the definition's Temporal workflow-ID prefix.
+- `GET /api/v1/workflows/<id>/runs/<workflow_id>/<run_id>` folds the run's event history (plus pending-activity state for in-flight runs) into the activity breakdown.
 
-Both are gated by `scheduled_queries:read` and refuse workflow IDs not minted for that scheduled query by a registered workflow. Activity **input/result previews** carry query-result rows and activity outputs — more than the scheduled-query definition — so they are included only for callers who also hold `scheduled_queries:write` (only `seizu-admin` among the built-in roles); readers get status, timing, attempts, and failure detail without payloads. The **web service** therefore needs `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE` reachable; when Temporal is down the endpoints return 503 and the panel shows an error. Queries without a temporal action return an empty list (and 404 on run detail) without contacting Temporal, so deployments that don't use Temporal are unaffected. The dev server keeps history in memory, so runs disappear on its restart; for deeper digging (full event payloads, worker state) the Temporal Web UI remains the tool of choice.
+Both are gated by `workflows:read` and refuse workflow IDs outside the selected
+definition's prefix. The web service therefore needs
+`TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE` reachable. The dev server keeps
+history in memory, so runs disappear on restart; for full event payloads and
+worker state, use the Temporal Web UI.
 
 ## The cve_repo_report workflow
 
@@ -247,8 +257,8 @@ deterministic branch name means the run updates the existing PR instead of
 opening another. A failing group records an error without aborting the rest.
 
 There is no per-user permission and no dedicated enable flag for this
-workflow: it has direct, fixed targets and is reachable only through scheduled
-queries, which are admin-managed (`scheduled_queries:write`). It runs only
+workflow: it has direct, fixed targets and is reachable only through
+configurable workflows, which are admin-managed (`workflows:write`). It runs only
 when configured (`REMEDIATION_GITHUB_TOKEN` plus an agent API key); operators
 turn it off by disabling the scheduled query, removing the configuration,
 dropping `cve_dependency_remediation` from `TEMPORAL_ENABLED_WORKFLOWS` (while

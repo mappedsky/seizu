@@ -17,7 +17,7 @@ from reporting.schema.report_config import (
     WorkflowRunDetail,
     WorkflowRunListResponse,
 )
-from reporting.services import report_store, temporal_runs
+from reporting.services import report_store, temporal_runs, workflow_schedules, workflows
 from reporting.services.query_validator import validate_query
 from reporting.services.scheduled_query_validation import validate_action_configs
 
@@ -30,7 +30,12 @@ async def list_scheduled_queries(
     current: CurrentUser = Depends(require_permission(Permission.SCHEDULED_QUERIES_READ)),
 ) -> ScheduledQueryListResponse:
     """List all scheduled queries."""
-    return ScheduledQueryListResponse(scheduled_queries=await report_store.list_scheduled_queries())
+    items = await report_store.list_scheduled_queries()
+    return ScheduledQueryListResponse(
+        scheduled_queries=[
+            workflows.project_legacy_item(item) for item in items if workflows.legacy_representable(item)
+        ]
+    )
 
 
 @router.get("/api/v1/scheduled-queries/{sq_id}", response_model=ScheduledQueryItem)
@@ -42,7 +47,9 @@ async def get_scheduled_query(
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    return item
+    if not workflows.legacy_representable(item):
+        raise HTTPException(status_code=404, detail="Scheduled query not found")
+    return workflows.project_legacy_item(item)
 
 
 @router.post(
@@ -67,7 +74,7 @@ async def create_scheduled_query(
             },
             status_code=400,
         )
-    return await report_store.create_scheduled_query(
+    item = await report_store.create_scheduled_query(
         name=body.name,
         cypher=body.cypher,
         params=body.params,
@@ -78,6 +85,7 @@ async def create_scheduled_query(
         actions=body.actions,
         created_by=current.user.user_id,
     )
+    return workflows.project_legacy_item(item)
 
 
 @router.put("/api/v1/scheduled-queries/{sq_id}", response_model=ScheduledQueryItem)
@@ -114,7 +122,7 @@ async def update_scheduled_query(
     )
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    return item
+    return workflows.project_legacy_item(item)
 
 
 @router.post(
@@ -159,7 +167,7 @@ async def list_scheduled_query_workflow_runs(
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    if not any(action.get("action_type") == "temporal" for action in item.actions):
+    if not any(activity.type == "workflow" for activity in workflows.normalized_activities(item)):
         return WorkflowRunListResponse(runs=[])
     try:
         runs = await temporal_runs.list_workflow_runs(sq_id, limit=limit)
@@ -191,7 +199,7 @@ async def get_scheduled_query_workflow_run(
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    if not any(action.get("action_type") == "temporal" for action in item.actions):
+    if not any(activity.type == "workflow" for activity in workflows.normalized_activities(item)):
         raise HTTPException(status_code=404, detail="Workflow run not found")
     try:
         detail = await temporal_runs.get_workflow_run_detail(
@@ -220,7 +228,11 @@ async def list_scheduled_query_versions(
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
     versions = await report_store.list_scheduled_query_versions(sq_id)
-    return ScheduledQueryVersionListResponse(versions=versions)
+    return ScheduledQueryVersionListResponse(
+        versions=[
+            workflows.project_legacy_version(version) for version in versions if workflows.legacy_representable(version)
+        ]
+    )
 
 
 @router.get(
@@ -236,7 +248,9 @@ async def get_scheduled_query_version(
     v = await report_store.get_scheduled_query_version(sq_id, version)
     if not v:
         raise HTTPException(status_code=404, detail="Scheduled query version not found")
-    return v
+    if not workflows.legacy_representable(v):
+        raise HTTPException(status_code=404, detail="Scheduled query version not found")
+    return workflows.project_legacy_version(v)
 
 
 @router.delete(
@@ -251,4 +265,5 @@ async def delete_scheduled_query(
     ok = await report_store.delete_scheduled_query(sq_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
+    await workflow_schedules.delete_schedule(sq_id)
     return ScheduledQueryIdResponse(scheduled_query_id=sq_id)

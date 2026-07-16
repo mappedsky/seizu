@@ -84,6 +84,7 @@ _CHAT_SAFE_PERMISSIONS: frozenset[str] = frozenset(
         Permission.SKILLS_READ.value,
         Permission.SKILLS_RENDER.value,
         Permission.SCHEDULED_QUERIES_READ.value,
+        Permission.WORKFLOWS_READ.value,
         Permission.USERS_READ.value,
         Permission.ROLES_READ.value,
     }

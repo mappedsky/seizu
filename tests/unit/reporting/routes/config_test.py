@@ -37,6 +37,10 @@ async def test_config_serves_dependent_action_schemas(mocker):
     assert {"modules", "pipeline"} <= cartography_fields
     # Workflows without their own config fields have no sub-schema.
     assert "cve_repo_report" not in dependent["temporal"]["schemas"]
+    config = ret.json()
+    assert "workflow" in config["workflow_activity_types"]
+    assert "workflow" in config["workflow_activity_schemas"]
+    assert "workflow" not in config["scheduled_query_action_types"]
 
 
 async def test_config_features_reflect_chat_enabled(mocker):

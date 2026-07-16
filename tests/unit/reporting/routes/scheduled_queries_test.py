@@ -435,11 +435,16 @@ async def test_delete_scheduled_query_success(mocker):
         "reporting.routes.scheduled_queries.report_store.delete_scheduled_query",
         new=AsyncMock(return_value=True),
     )
+    delete_schedule = mocker.patch(
+        "reporting.routes.scheduled_queries.workflow_schedules.delete_schedule",
+        new=AsyncMock(),
+    )
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.delete(f"/api/v1/scheduled-queries/{_SQ_ID}")
     assert ret.status_code == 200
     assert ret.json()["scheduled_query_id"] == _SQ_ID
+    delete_schedule.assert_awaited_once_with(_SQ_ID)
 
 
 async def test_delete_scheduled_query_not_found(mocker):

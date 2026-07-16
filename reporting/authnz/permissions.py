@@ -61,6 +61,12 @@ class Permission(StrEnum):
     SCHEDULED_QUERIES_WRITE = "scheduled_queries:write"
     SCHEDULED_QUERIES_DELETE = "scheduled_queries:delete"
 
+    # Canonical configurable workflows. The scheduled_queries:* values above
+    # remain accepted aliases for one compatibility release.
+    WORKFLOWS_READ = "workflows:read"
+    WORKFLOWS_WRITE = "workflows:write"
+    WORKFLOWS_DELETE = "workflows:delete"
+
     # Users
     USERS_READ = "users:read"
 
@@ -87,6 +93,7 @@ VIEWER_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLS_READ,
         Permission.SKILLS_RENDER,
         Permission.SCHEDULED_QUERIES_READ,
+        Permission.WORKFLOWS_READ,
         Permission.CHAT_USE,
         Permission.USERS_READ,
         Permission.ROLES_READ,
@@ -115,6 +122,8 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
     | {
         Permission.SCHEDULED_QUERIES_WRITE,
         Permission.SCHEDULED_QUERIES_DELETE,
+        Permission.WORKFLOWS_WRITE,
+        Permission.WORKFLOWS_DELETE,
         Permission.TOOLSETS_WRITE,
         Permission.TOOLSETS_DELETE,
         Permission.TOOLS_WRITE,
@@ -162,8 +171,18 @@ async def resolve_permissions(jwt_claims: dict[str, Any]) -> frozenset[str]:
         return frozenset()
 
     if role_name in BUILTIN_ROLES:
-        return frozenset(p.value for p in BUILTIN_ROLES[role_name])
+        return _expand_workflow_permission_aliases(frozenset(p.value for p in BUILTIN_ROLES[role_name]))
 
     # User-defined role: single lookup by name.
     role = await report_store.get_role_by_name(role_name)
-    return frozenset(role.permissions) if role else frozenset()
+    return _expand_workflow_permission_aliases(frozenset(role.permissions) if role else frozenset())
+
+
+def _expand_workflow_permission_aliases(permissions: frozenset[str]) -> frozenset[str]:
+    expanded = set(permissions)
+    for suffix in ("read", "write", "delete"):
+        legacy = f"scheduled_queries:{suffix}"
+        canonical = f"workflows:{suffix}"
+        if legacy in expanded or canonical in expanded:
+            expanded.update((legacy, canonical))
+    return frozenset(expanded)

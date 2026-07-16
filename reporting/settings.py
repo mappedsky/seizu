@@ -223,20 +223,24 @@ OIDC_REFRESH_TOKEN_FALLBACK_TTL_SECONDS = int_env(
     30 * 24 * 60 * 60,
 )
 
-# Whether or not scheduled queries should be enabled.
-ENABLE_SCHEDULED_QUERIES = bool_env("ENABLE_SCHEDULED_QUERIES", True)
-# The frequency in seconds for how often we'll attempt to run scheduled queries
+# Legacy scheduler settings are retained as aliases for one compatibility
+# release. Configurable workflows are executed and scheduled by Temporal.
+ENABLE_SCHEDULED_QUERIES = bool_env("ENABLE_SCHEDULED_QUERIES", False)
 SCHEDULED_QUERY_FREQUENCY = int_env("SCHEDULED_QUERY_FREQUENCY", 20)
-# Scheduled query modules
-SCHEDULED_QUERY_MODULES = list_env(
-    "SCHEDULED_QUERY_MODULES",
-    [
-        "reporting.scheduled_query_modules.sqs",
-        "reporting.scheduled_query_modules.slack",
-        "reporting.scheduled_query_modules.statsd",
-        "reporting.scheduled_query_modules.temporal",
-    ],
+_DEFAULT_WORKFLOW_ACTIVITY_MODULES = [
+    "reporting.scheduled_query_modules.sqs",
+    "reporting.scheduled_query_modules.slack",
+    "reporting.scheduled_query_modules.statsd",
+    "reporting.scheduled_query_modules.workflow",
+]
+WORKFLOW_ACTIVITY_MODULES = list_env(
+    "WORKFLOW_ACTIVITY_MODULES",
+    list_env("SCHEDULED_QUERY_MODULES", _DEFAULT_WORKFLOW_ACTIVITY_MODULES),
 )
+SCHEDULED_QUERY_MODULES = WORKFLOW_ACTIVITY_MODULES
+WORKFLOW_QUERY_MAX_ROWS = int_env("WORKFLOW_QUERY_MAX_ROWS", 200)
+WORKFLOW_WATCH_POLL_SECONDS = int_env("WORKFLOW_WATCH_POLL_SECONDS", 20)
+WORKFLOW_RECONCILE_SECONDS = int_env("WORKFLOW_RECONCILE_SECONDS", 30)
 # NOTE: scheduled query module settings are defined within the modules themselves
 
 # Whether scheduled chats (recurring headless agent runs managed from the chat

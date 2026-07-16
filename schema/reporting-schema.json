@@ -1211,6 +1211,133 @@
             ],
             "title": "ToolsetDef",
             "type": "object"
+        },
+        "Workflow": {
+            "additionalProperties": false,
+            "description": "A versioned, configurable workflow executed by Temporal.",
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                },
+                "schedule": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/ScheduleSpec"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "watch_scans": {
+                    "items": {
+                        "$ref": "#/$defs/ScheduledQueryWatchScan"
+                    },
+                    "title": "Watch Scans",
+                    "type": "array"
+                },
+                "enabled": {
+                    "default": true,
+                    "title": "Enabled",
+                    "type": "boolean"
+                },
+                "inputs": {
+                    "additionalProperties": {
+                        "$ref": "#/$defs/WorkflowQueryInput"
+                    },
+                    "title": "Inputs",
+                    "type": "object"
+                },
+                "activities": {
+                    "items": {
+                        "$ref": "#/$defs/WorkflowActivity"
+                    },
+                    "title": "Activities",
+                    "type": "array"
+                }
+            },
+            "required": [
+                "name"
+            ],
+            "title": "Workflow",
+            "type": "object"
+        },
+        "WorkflowActivity": {
+            "additionalProperties": false,
+            "description": "One ordered activity in a configurable workflow.",
+            "properties": {
+                "type": {
+                    "description": "Registered activity type.",
+                    "title": "Type",
+                    "type": "string"
+                },
+                "input": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Input"
+                },
+                "parameters": {
+                    "additionalProperties": true,
+                    "title": "Parameters",
+                    "type": "object"
+                }
+            },
+            "required": [
+                "type"
+            ],
+            "title": "WorkflowActivity",
+            "type": "object"
+        },
+        "WorkflowQueryInput": {
+            "additionalProperties": false,
+            "description": "A named Cypher input evaluated at the start of a workflow run.",
+            "properties": {
+                "type": {
+                    "const": "query",
+                    "default": "query",
+                    "title": "Type",
+                    "type": "string"
+                },
+                "cypher": {
+                    "description": "The read-only Cypher query to execute.",
+                    "title": "Cypher",
+                    "type": "string"
+                },
+                "parameters": {
+                    "items": {
+                        "$ref": "#/$defs/ScheduledQueryParam"
+                    },
+                    "title": "Parameters",
+                    "type": "array"
+                },
+                "max_rows": {
+                    "anyOf": [
+                        {
+                            "minimum": 1,
+                            "type": "integer"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "title": "Max Rows"
+                }
+            },
+            "required": [
+                "cypher"
+            ],
+            "title": "WorkflowQueryInput",
+            "type": "object"
         }
     },
     "properties": {
@@ -1261,6 +1388,14 @@
                 "$ref": "#/$defs/ScheduledQuery"
             },
             "title": "Scheduled Queries",
+            "type": "array"
+        },
+        "workflows": {
+            "description": "Temporal-backed configurable workflows.",
+            "items": {
+                "$ref": "#/$defs/Workflow"
+            },
+            "title": "Workflows",
             "type": "array"
         },
         "toolsets": {

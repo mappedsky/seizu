@@ -286,65 +286,6 @@ services:
       start_period: 10s
     networks:
       database:
-  seizu-scheduled-queries:
-    image: ghcr.io/mappedsky/seizu
-    restart: on-failure
-    user: seizu
-    depends_on:
-      neo4j:
-        condition: service_healthy
-      dynamodb:
-        condition: service_healthy
-      temporal:
-        condition: service_healthy
-        required: false
-      postgres:
-        condition: service_healthy
-        required: false
-    environment:
-      - NEO4J_URI=bolt://neo4j:7687
-      - AWS_ACCESS_KEY_ID=fake
-      - AWS_SECRET_ACCESS_KEY=fake
-      - AWS_DEFAULT_REGION=us-east-1
-      - "SQS_CREATE_SCHEDULED_QUERY_QUEUES=true"
-      - SQS_URL=http://sqs:9324
-      - SCHEDULED_QUERY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd,reporting.scheduled_query_modules.temporal
-      - SLACK_OAUTH_BOT_TOKEN
-      - STATSD_HOST=telegraf
-      - STATSD_CONSTANT_TAGS
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
-      # Allowlist of workflows the temporal action may dispatch (empty → all).
-      - TEMPORAL_ENABLED_WORKFLOWS
-      # Cartography syncs — the cartography_sync input factory runs here at
-      # dispatch: it validates the stored config against the enabled-modules
-      # allowlist and fills the task queue/timeout/retries into the input.
-      - CARTOGRAPHY_TASK_QUEUE
-      - CARTOGRAPHY_ENABLED_MODULES
-      - CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
-      - CARTOGRAPHY_MODULE_WAIT_SECONDS
-      - CARTOGRAPHY_SYNC_RETRY_ATTEMPTS
-      # The cve_dependency_remediation input factory runs here at dispatch: it
-      # reads the run timeout and the CI-watch knobs into the workflow input.
-      - REMEDIATION_TIMEOUT_SECONDS
-      - REMEDIATION_CI_MAX_WAIT_SECONDS
-      - REMEDIATION_CI_POLL_SECONDS
-      - REMEDIATION_CI_QUEUED_STUCK_SECONDS
-      - REMEDIATION_CI_FIX_MAX_ATTEMPTS
-      - REPORT_STORE_BACKEND
-      - DYNAMODB_TABLE_NAME=seizu-reports
-      - DYNAMODB_ENDPOINT_URL=http://dynamodb:8000
-      - DYNAMODB_REGION=us-east-1
-      - DYNAMODB_CREATE_TABLE=true
-      - SQL_DATABASE_URL=${SQL_DATABASE_URL:-postgresql://postgres:5432/seizu}
-      - SQL_DATABASE_USER=${SQL_DATABASE_USER:-seizu}
-      - SQL_DATABASE_PASSWORD=${SQL_DATABASE_PASSWORD:-seizu}
-    command: python -m reporting.scheduled_queries
-    volumes:
-      - .:/home/seizu/seizu
-    networks:
-      stats:
-      database:
   seizu-scheduled-chats:
     image: ghcr.io/mappedsky/seizu
     restart: on-failure
@@ -472,6 +413,25 @@ services:
       - TEMPORAL_TASK_QUEUE
       - TEMPORAL_WORKER_ENABLED
       - TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
+      - TEMPORAL_ENABLED_WORKFLOWS
+      - WORKFLOW_QUERY_MAX_ROWS
+      - WORKFLOW_WATCH_POLL_SECONDS
+      - WORKFLOW_RECONCILE_SECONDS
+      - WORKFLOW_ACTIVITY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd,reporting.scheduled_query_modules.workflow
+      - "SQS_CREATE_SCHEDULED_QUERY_QUEUES=true"
+      - SQS_URL=http://sqs:9324
+      - SLACK_OAUTH_BOT_TOKEN
+      - STATSD_HOST=telegraf
+      - STATSD_CONSTANT_TAGS
+      - CARTOGRAPHY_TASK_QUEUE
+      - CARTOGRAPHY_ENABLED_MODULES
+      - CARTOGRAPHY_MODULE_TIMEOUT_SECONDS
+      - CARTOGRAPHY_MODULE_WAIT_SECONDS
+      - CARTOGRAPHY_SYNC_RETRY_ATTEMPTS
+      - REMEDIATION_CI_MAX_WAIT_SECONDS
+      - REMEDIATION_CI_POLL_SECONDS
+      - REMEDIATION_CI_QUEUED_STUCK_SECONDS
+      - REMEDIATION_CI_FIX_MAX_ATTEMPTS
       # Workflow chat sessions enforce the creator's stored role unless dev
       # mode is on; keep this aligned with the seizu service.
       - DEVELOPMENT_ONLY_REQUIRE_AUTH
@@ -569,6 +529,7 @@ services:
     volumes:
       - .:/home/seizu/seizu
     networks:
+      stats:
       database:
   seizu:
     image: ghcr.io/mappedsky/seizu

@@ -1,5 +1,11 @@
 # Scheduled Queries
 
+> **Deprecated compatibility API:** Scheduled Queries have been replaced by
+> [Workflows](workflows.html). Existing single-query definitions, REST paths,
+> CLI commands, permissions, and YAML seeds remain available for one
+> compatibility release when they can be represented without losing data.
+> New automation should use the Workflows UI and `/api/v1/workflows` API.
+
 ## Purpose
 
 Dashboards are a good visual representation of a system, for when you want to actively check something, but sometimes you want to be passively notified about changes in the graph data.
@@ -341,20 +347,9 @@ from reporting.utils.settings import str_env
 _SLACK_OAUTH_BOT_TOKEN = str_env("SLACK_OAUTH_BOT_TOKEN")
 ```
 
-## Run the Scheduled Queries Worker
+## Worker compatibility
 
-For packaged installs, run the worker with the installed console script:
-
-```bash
-seizu-scheduled-queries
-```
-
-When working from a source checkout, the equivalent module command is:
-
-```bash
-python -m reporting.scheduled_queries
-```
-
-In the Docker quickstart, Docker Compose runs the same worker as the `seizu-scheduled-queries` service.
-
-The worker runs continuously until terminated.
+The standalone scheduled-query worker is no longer deployed. Compatibility
+records are normalized and scheduled by `seizu-temporal-worker`; run-now
+requests are picked up by its reconciliation loop. The old Python entrypoint
+is retained only for a one-release rollback window.

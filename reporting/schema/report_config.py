@@ -3,7 +3,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from reporting.schema.reporting_config import ScheduleSpec, validate_exclusive_triggers
+from reporting.schema.reporting_config import (
+    ScheduleSpec,
+    Workflow,
+    WorkflowActivity,
+    WorkflowQueryInput,
+    validate_exclusive_triggers,
+)
 
 
 def _coerce_decimal(value: Any) -> Any:
@@ -181,6 +187,10 @@ class ScheduledQueryItem(BaseModel):
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
+    # Canonical workflow fields. Legacy scheduled-query records omit these and
+    # are normalized on read by reporting.services.workflows.
+    inputs: dict[str, Any] | None = None
+    activities: list[dict[str, Any]] | None = None
     current_version: int = 0
     created_at: str
     updated_at: str
@@ -194,6 +204,9 @@ class ScheduledQueryItem(BaseModel):
     # is newer than last_scheduled_at (even when the query is disabled, so
     # operators can test before enabling).
     run_requested_at: str | None = None
+    schedule_sync_status: Literal["synced", "pending", "error"] = "pending"
+    schedule_sync_error: str | None = None
+    schedule_synced_at: str | None = None
 
     @field_validator("current_version", mode="before")
     @classmethod
@@ -231,6 +244,8 @@ class ScheduledQueryVersion(BaseModel):
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
+    inputs: dict[str, Any] | None = None
+    activities: list[dict[str, Any]] | None = None
     created_at: str
     created_by: str
     comment: str | None = None
@@ -278,6 +293,69 @@ class ScheduledQueryRunRequestedResponse(BaseModel):
 
     scheduled_query_id: str
     run_requested_at: str
+
+
+class WorkflowItem(BaseModel):
+    """Canonical stored workflow returned by the REST API."""
+
+    workflow_id: str
+    name: str
+    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
+    schedule: ScheduleSpec | None = None
+    watch_scans: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+    activities: list[WorkflowActivity] = Field(default_factory=list)
+    current_version: int = 0
+    created_at: str
+    updated_at: str
+    created_by: str
+    updated_by: str | None = None
+    last_run_status: str | None = None
+    last_run_at: str | None = None
+    last_errors: list[dict[str, str]] = Field(default_factory=list)
+    schedule_sync_status: Literal["synced", "pending", "error"] = "pending"
+    schedule_sync_error: str | None = None
+    schedule_synced_at: str | None = None
+
+
+class WorkflowVersion(BaseModel):
+    """A point-in-time workflow definition."""
+
+    workflow_id: str
+    name: str
+    version: int
+    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
+    schedule: ScheduleSpec | None = None
+    watch_scans: list[dict[str, Any]] = Field(default_factory=list)
+    enabled: bool = True
+    activities: list[WorkflowActivity] = Field(default_factory=list)
+    created_at: str
+    created_by: str
+    comment: str | None = None
+
+
+class WorkflowListResponse(BaseModel):
+    workflows: list[WorkflowItem]
+
+
+class WorkflowVersionListResponse(BaseModel):
+    versions: list[WorkflowVersion]
+
+
+class WorkflowIdResponse(BaseModel):
+    workflow_id: str
+
+
+class CreateWorkflowRequest(Workflow):
+    """Request body for workflow create/update."""
+
+    comment: str | None = None
+
+
+class WorkflowRunRequestedResponse(BaseModel):
+    workflow_id: str
+    temporal_workflow_id: str
+    run_id: str | None = None
 
 
 class WorkflowRunSummary(BaseModel):

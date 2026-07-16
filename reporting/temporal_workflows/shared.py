@@ -9,6 +9,71 @@ from typing import Any
 
 
 @dataclass
+class ConfiguredWorkflowInvocation:
+    workflow_id: str
+    manual: bool = False
+
+
+@dataclass
+class ConfiguredQueryInput:
+    input_id: str
+    cypher: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+    max_rows: int = 200
+
+
+@dataclass
+class ConfiguredActivity:
+    type: str
+    input_id: str | None
+    parameters: dict[str, Any] = field(default_factory=dict)
+    requires_rows: bool = True
+
+
+@dataclass
+class ConfiguredWorkflowDefinition:
+    workflow_id: str
+    creator_user_id: str
+    version: int
+    inputs: list[ConfiguredQueryInput] = field(default_factory=list)
+    activities: list[ConfiguredActivity] = field(default_factory=list)
+    skipped_reason: str | None = None
+
+
+@dataclass
+class ConfiguredQueryResult:
+    input_id: str
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    truncated: bool = False
+
+
+@dataclass
+class ConfiguredWorkflowResult:
+    status: str
+    version: int = 0
+    skipped_reason: str | None = None
+    input_rows: dict[str, int] = field(default_factory=dict)
+    activity_results: list[Any] = field(default_factory=list)
+
+
+@dataclass
+class ConfiguredActivityInput:
+    workflow_id: str
+    activity_type: str
+    parameters: dict[str, Any]
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class CodeWorkflowInputRequest:
+    workflow_id: str
+    creator_user_id: str
+    workflow_name: str
+    parameters: dict[str, Any]
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class CveRepoReportInput:
     scheduled_query_id: str
     creator_user_id: str

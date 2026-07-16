@@ -104,6 +104,8 @@ class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    inputs: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    activities: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     current_version: int = 0
     created_at: str
     updated_at: str
@@ -114,6 +116,9 @@ class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
     last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     last_scheduled_at: str | None = None
     run_requested_at: str | None = None
+    schedule_sync_status: str = "pending"
+    schedule_sync_error: str | None = None
+    schedule_synced_at: str | None = None
 
 
 class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
@@ -129,6 +134,8 @@ class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    inputs: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
+    activities: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     created_at: str
     created_by: str
     comment: str | None = None
@@ -541,12 +548,13 @@ class SQLModelReportStore(ReportStore):
 
     async def initialize(self) -> None:
         """Create all tables if they do not already exist."""
+        engine = _get_engine()
         try:
-            async with _get_engine().begin() as conn:
+            async with engine.begin() as conn:
                 await conn.run_sync(SQLModel.metadata.create_all)
-                # TODO: replace these inline compatibility migrations with a
-                # real migration framework (for example Alembic) before adding
-                # more SQL schema drift here.
+                # Historical compatibility migrations remain for databases
+                # created before Alembic. New schema changes live in
+                # reporting/migrations and run immediately after this block.
                 if conn.dialect.name == "postgresql":
                     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_username VARCHAR"))
                     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR"))
@@ -654,6 +662,9 @@ class SQLModelReportStore(ReportStore):
                         "WHERE status = 'pending'"
                     )
                 )
+            from reporting.services.report_store.migrations import run_schema_migrations
+
+            await run_schema_migrations(engine)
             logger.info("SQL report store tables initialised")
         except IntegrityError:
             logger.info("SQL report store tables already exist")
@@ -943,6 +954,8 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
+                    inputs=r.inputs,
+                    activities=r.activities,
                     current_version=r.current_version,
                     created_at=r.created_at,
                     updated_at=r.updated_at,
@@ -953,6 +966,9 @@ class SQLModelReportStore(ReportStore):
                     last_errors=r.last_errors or [],
                     last_scheduled_at=r.last_scheduled_at,
                     run_requested_at=r.run_requested_at,
+                    schedule_sync_status=r.schedule_sync_status,
+                    schedule_sync_error=r.schedule_sync_error,
+                    schedule_synced_at=r.schedule_synced_at,
                 )
                 for r in rows
             ]
@@ -972,6 +988,8 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=record.watch_scans or [],
                 enabled=record.enabled,
                 actions=record.actions or [],
+                inputs=record.inputs,
+                activities=record.activities,
                 current_version=record.current_version,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
@@ -982,6 +1000,9 @@ class SQLModelReportStore(ReportStore):
                 last_errors=record.last_errors or [],
                 last_scheduled_at=record.last_scheduled_at,
                 run_requested_at=record.run_requested_at,
+                schedule_sync_status=record.schedule_sync_status,
+                schedule_sync_error=record.schedule_sync_error,
+                schedule_synced_at=record.schedule_synced_at,
             )
 
     async def create_scheduled_query(
@@ -995,6 +1016,8 @@ class SQLModelReportStore(ReportStore):
         enabled: bool,
         actions: list[dict[str, Any]],
         created_by: str,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem:
         sq_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -1010,6 +1033,8 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=watch_scans,
                 enabled=enabled,
                 actions=actions,
+                inputs=inputs,
+                activities=activities,
                 current_version=version,
                 created_at=now,
                 updated_at=now,
@@ -1028,6 +1053,8 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
+                    inputs=inputs,
+                    activities=activities,
                     created_at=now,
                     created_by=created_by,
                     comment=None,
@@ -1044,6 +1071,8 @@ class SQLModelReportStore(ReportStore):
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
+            inputs=inputs,
+            activities=activities,
             current_version=version,
             created_at=now,
             updated_at=now,
@@ -1068,6 +1097,8 @@ class SQLModelReportStore(ReportStore):
         actions: list[dict[str, Any]],
         updated_by: str,
         comment: str | None = None,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
@@ -1090,6 +1121,10 @@ class SQLModelReportStore(ReportStore):
             record.watch_scans = watch_scans
             record.enabled = enabled
             record.actions = actions
+            record.inputs = inputs
+            record.activities = activities
+            record.schedule_sync_status = "pending"
+            record.schedule_sync_error = None
             record.current_version = version
             record.updated_at = now
             record.updated_by = updated_by
@@ -1105,6 +1140,8 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
+                    inputs=inputs,
+                    activities=activities,
                     created_at=now,
                     created_by=updated_by,
                     comment=comment,
@@ -1121,6 +1158,8 @@ class SQLModelReportStore(ReportStore):
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
+            inputs=inputs,
+            activities=activities,
             current_version=version,
             created_at=original_created_at,
             updated_at=now,
@@ -1131,6 +1170,7 @@ class SQLModelReportStore(ReportStore):
             last_errors=orig_last_errors,
             last_scheduled_at=orig_last_scheduled_at,
             run_requested_at=orig_run_requested_at,
+            schedule_sync_status="pending",
         )
 
     async def list_scheduled_query_versions(self, sq_id: str) -> list[ScheduledQueryVersion]:
@@ -1157,6 +1197,8 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
+                    inputs=r.inputs,
+                    activities=r.activities,
                     created_at=r.created_at,
                     created_by=r.created_by,
                     comment=r.comment,
@@ -1189,6 +1231,8 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=row.watch_scans or [],
                 enabled=row.enabled,
                 actions=row.actions or [],
+                inputs=row.inputs,
+                activities=row.activities,
                 created_at=row.created_at,
                 created_by=row.created_by,
                 comment=row.comment,
@@ -1239,6 +1283,24 @@ class SQLModelReportStore(ReportStore):
             session.add(record)
             await session.commit()
         return now
+
+    async def set_workflow_schedule_sync_status(
+        self,
+        workflow_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledQueryRecord, workflow_id)
+            if record is None:
+                return
+            record.schedule_sync_status = status
+            record.schedule_sync_error = error
+            record.schedule_synced_at = synced_at
+            session.add(record)
+            await session.commit()
 
     async def delete_scheduled_query(self, sq_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:

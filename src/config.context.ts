@@ -112,4 +112,10 @@ export interface SeizuConfig {
     string,
     ActionConfigDependentSchema
   >;
+  workflow_activity_types?: string[];
+  workflow_activity_schemas?: Record<string, ActionConfigFieldDef[]>;
+  workflow_activity_dependent_schemas?: Record<
+    string,
+    ActionConfigDependentSchema
+  >;
 }

@@ -8,6 +8,7 @@ from datetime import UTC
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -85,6 +86,45 @@ async def test_initialize_creates_tables(mocker):
     assert "users" in table_names
     assert "skillsets" in table_names
     assert "skills" in table_names
+    await engine.dispose()
+
+
+async def test_initialize_migrates_legacy_scheduled_query_tables(mocker):
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE scheduled_queries ("
+                "scheduled_query_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, "
+                "cypher VARCHAR NOT NULL, params JSON NOT NULL, frequency INTEGER, "
+                "watch_scans JSON NOT NULL, enabled BOOLEAN NOT NULL, actions JSON NOT NULL, "
+                "current_version INTEGER NOT NULL, created_at VARCHAR NOT NULL, "
+                "updated_at VARCHAR NOT NULL, created_by VARCHAR NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE scheduled_query_versions ("
+                "scheduled_query_id VARCHAR NOT NULL, version INTEGER NOT NULL, "
+                "name VARCHAR NOT NULL, cypher VARCHAR NOT NULL, params JSON NOT NULL, "
+                "frequency INTEGER, watch_scans JSON NOT NULL, enabled BOOLEAN NOT NULL, "
+                "actions JSON NOT NULL, created_at VARCHAR NOT NULL, created_by VARCHAR NOT NULL, "
+                "PRIMARY KEY (scheduled_query_id, version))"
+            )
+        )
+    mocker.patch("reporting.services.report_store.sql._get_engine", return_value=engine)
+
+    await SQLModelReportStore().initialize()
+
+    async with engine.connect() as conn:
+        query_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_queries)"))}
+        version_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))}
+    assert {"inputs", "activities", "schedule_sync_status"} <= query_columns
+    assert {"inputs", "activities"} <= version_columns
     await engine.dispose()
 
 

@@ -11,7 +11,9 @@ from reporting.schema.report_config import User
 from reporting.services.headless_chat import HeadlessChatResult
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 from reporting.services.sandbox_remediation import RemediationRunResult
+from reporting.temporal_workflows import WorkflowSpec
 from reporting.temporal_workflows.activities import (
+    build_code_workflow_input,
     get_pr_ci_status,
     run_dependency_ci_fix,
     run_dependency_remediation,
@@ -19,6 +21,7 @@ from reporting.temporal_workflows.activities import (
 )
 from reporting.temporal_workflows.shared import (
     CiFixInput,
+    CodeWorkflowInputRequest,
     DependencyRemediationInput,
     PrCiCheck,
     PrCiStatusInput,
@@ -27,6 +30,30 @@ from reporting.temporal_workflows.shared import (
 )
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+async def test_build_code_workflow_input_preserves_legacy_projection(mocker):
+    spec = WorkflowSpec(
+        name="example",
+        description="test",
+        input_factory=lambda context: context.rows,
+    )
+    mocker.patch(
+        "reporting.temporal_workflows.activities.get_enabled_workflow_spec",
+        return_value=spec,
+    )
+
+    result = await build_code_workflow_input(
+        CodeWorkflowInputRequest(
+            workflow_id="workflow-1",
+            creator_user_id="user-1",
+            workflow_name="example",
+            parameters={"query_return_attribute": "payload", "max_rows": 1},
+            rows=[{"payload": {"id": 1}}, {"payload": {"id": 2}}, {"ignored": True}],
+        )
+    )
+
+    assert result == [{"id": 1}]
 
 
 def _current_user(permissions: frozenset[str] | None = None) -> CurrentUser:
@@ -543,7 +570,7 @@ async def test_run_dependency_ci_fix_requires_scheduled_queries_write(mocker):
     with pytest.raises(ApplicationError) as exc_info:
         await ActivityEnvironment().run(run_dependency_ci_fix, _ci_fix_input())
     assert exc_info.value.non_retryable is True
-    assert "scheduled_queries:write" in str(exc_info.value)
+    assert "workflows:write" in str(exc_info.value)
     run.assert_not_called()
 
 
@@ -560,5 +587,5 @@ async def test_remediation_requires_scheduled_queries_write_at_runtime(mocker):
     with pytest.raises(ApplicationError) as exc_info:
         await ActivityEnvironment().run(run_dependency_remediation, _remediation_input())
     assert exc_info.value.non_retryable is True
-    assert "scheduled_queries:write" in str(exc_info.value)
+    assert "workflows:write" in str(exc_info.value)
     run.assert_not_called()

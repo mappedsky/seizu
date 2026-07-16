@@ -620,6 +620,27 @@ class ScheduledQueryParam(BaseModel):
     )
 
 
+class WorkflowQueryInput(BaseModel):
+    """A named Cypher input evaluated at the start of a workflow run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["query"] = "query"
+    cypher: str = Field(description="The read-only Cypher query to execute.")
+    parameters: list[ScheduledQueryParam] = Field(default_factory=list)
+    max_rows: int | None = Field(default=None, ge=1)
+
+
+class WorkflowActivity(BaseModel):
+    """One ordered activity in a configurable workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(description="Registered activity type.")
+    input: str | None = Field(default=None)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
 class ScheduleSpec(BaseModel):
     """A structured time-based schedule. All times are UTC.
 
@@ -797,6 +818,34 @@ class ScheduledQuery(BaseModel):
         return self
 
 
+class Workflow(BaseModel):
+    """A versioned, configurable workflow executed by Temporal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    schedule: ScheduleSpec | None = None
+    watch_scans: list[ScheduledQueryWatchScan] = Field(default_factory=list)
+    enabled: bool = True
+    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
+    activities: list[WorkflowActivity] = Field(default_factory=list)
+
+    @field_validator("inputs")
+    @classmethod
+    def validate_input_ids(cls, value: dict[str, WorkflowQueryInput]) -> dict[str, WorkflowQueryInput]:
+        for input_id in value:
+            validate_lower_snake_id(input_id)
+        return value
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "Workflow":
+        validate_exclusive_triggers(None, self.schedule, self.watch_scans)
+        for position, activity in enumerate(self.activities, start=1):
+            if activity.input is not None and activity.input not in self.inputs:
+                raise ValueError(f"activity {position} references unknown input '{activity.input}'")
+        return self
+
+
 class ToolParamDef(BaseModel):
     """Definition of a single parameter accepted by a tool."""
 
@@ -956,6 +1005,19 @@ class ReportingConfig(BaseModel):
             """
         ],
     )
+
+    workflows: list[Workflow] = Field(
+        default_factory=list,
+        description="Temporal-backed configurable workflows.",
+    )
+
+    @model_validator(mode="after")
+    def exclusive_workflow_sections(self) -> "ReportingConfig":
+        if self.workflows and self.scheduled_queries:
+            raise ValueError(
+                "workflows and scheduled_queries cannot both be configured; scheduled_queries is deprecated"
+            )
+        return self
 
     toolsets: dict[str, ToolsetDef] = Field(
         default_factory=dict,

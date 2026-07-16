@@ -699,6 +699,8 @@ def _sq_from_item(item: dict) -> ScheduledQueryItem:
         watch_scans=item.get("watch_scans", []),
         enabled=item.get("enabled", True),
         actions=item.get("actions", []),
+        inputs=item.get("inputs"),
+        activities=item.get("activities"),
         current_version=item.get("current_version", 0),
         created_at=item["created_at"],
         updated_at=item["updated_at"],
@@ -709,6 +711,9 @@ def _sq_from_item(item: dict) -> ScheduledQueryItem:
         last_errors=item.get("last_errors", []),
         last_scheduled_at=item.get("last_scheduled_at"),
         run_requested_at=item.get("run_requested_at"),
+        schedule_sync_status=item.get("schedule_sync_status", "pending"),
+        schedule_sync_error=item.get("schedule_sync_error"),
+        schedule_synced_at=item.get("schedule_synced_at"),
     )
 
 
@@ -724,6 +729,8 @@ def _sq_version_from_item(item: dict) -> ScheduledQueryVersion:
         watch_scans=item.get("watch_scans", []),
         enabled=item.get("enabled", True),
         actions=item.get("actions", []),
+        inputs=item.get("inputs"),
+        activities=item.get("activities"),
         created_at=item["created_at"],
         created_by=item["created_by"],
         comment=item.get("comment"),
@@ -1344,6 +1351,8 @@ class DynamoDBReportStore(ReportStore):
         enabled: bool,
         actions: list[dict[str, Any]],
         created_by: str,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem:
         sq_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -1359,6 +1368,9 @@ class DynamoDBReportStore(ReportStore):
                 "watch_scans": _floats_to_decimal(watch_scans),
                 "enabled": enabled,
                 "actions": _floats_to_decimal(actions),
+                "inputs": _floats_to_decimal(inputs),
+                "activities": _floats_to_decimal(activities),
+                "schedule_sync_status": "pending",
                 "current_version": version,
                 "created_at": now,
                 "updated_at": now,
@@ -1386,6 +1398,8 @@ class DynamoDBReportStore(ReportStore):
                 "watch_scans": _floats_to_decimal(watch_scans),
                 "enabled": enabled,
                 "actions": _floats_to_decimal(actions),
+                "inputs": _floats_to_decimal(inputs),
+                "activities": _floats_to_decimal(activities),
                 "created_at": now,
                 "created_by": created_by,
                 "comment": None,
@@ -1412,6 +1426,8 @@ class DynamoDBReportStore(ReportStore):
         actions: list[dict[str, Any]],
         updated_by: str,
         comment: str | None = None,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem | None:
         def _op() -> ScheduledQueryItem | None:
             table = _get_table()
@@ -1438,6 +1454,10 @@ class DynamoDBReportStore(ReportStore):
                     "watch_scans": _floats_to_decimal(watch_scans),
                     "enabled": enabled,
                     "actions": _floats_to_decimal(actions),
+                    "inputs": _floats_to_decimal(inputs),
+                    "activities": _floats_to_decimal(activities),
+                    "schedule_sync_status": "pending",
+                    "schedule_sync_error": None,
                     "current_version": version,
                     "created_at": existing["created_at"],
                     "updated_at": now,
@@ -1465,6 +1485,8 @@ class DynamoDBReportStore(ReportStore):
                     "watch_scans": _floats_to_decimal(watch_scans),
                     "enabled": enabled,
                     "actions": _floats_to_decimal(actions),
+                    "inputs": _floats_to_decimal(inputs),
+                    "activities": _floats_to_decimal(activities),
                     "created_at": now,
                     "created_by": updated_by,
                     "comment": comment,
@@ -1616,6 +1638,36 @@ class DynamoDBReportStore(ReportStore):
             return now
 
         return await asyncio.to_thread(_op)
+
+    async def set_workflow_schedule_sync_status(
+        self,
+        workflow_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        def _op() -> None:
+            values = {
+                ":status": status,
+                ":error": error,
+                ":synced_at": synced_at,
+            }
+            expression = (
+                "SET schedule_sync_status = :status, schedule_sync_error = :error, schedule_synced_at = :synced_at"
+            )
+            table = _get_table()
+            for key in (
+                {"PK": _sq_pk(workflow_id), "SK": _SK_METADATA},
+                {"PK": _PK_SCHEDULED_QUERY_LIST, "SK": _sq_pk(workflow_id)},
+            ):
+                table.update_item(
+                    Key=key,
+                    UpdateExpression=expression,
+                    ExpressionAttributeValues=values,
+                )
+
+        await asyncio.to_thread(_op)
 
     async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
         def _op() -> list[ScheduledChatItem]:

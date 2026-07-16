@@ -82,11 +82,15 @@ def workflow_id_matches(sq_id: str, workflow_id: str) -> bool:
     set the run listing queries — so detail reads can never reach beyond the
     surface the list exposes.
     """
+    if workflow_id == f"seizu-workflow:{sq_id}" or workflow_id.startswith(f"seizu-workflow:{sq_id}:manual:"):
+        return True
     parts = workflow_id.split(":", 3)
     return len(parts) == 4 and parts[0] == "seizu" and parts[1] in WORKFLOW_REGISTRY and parts[2] == sq_id
 
 
 def _workflow_name(workflow_id: str) -> str:
+    if workflow_id.startswith("seizu-workflow:"):
+        return "configured"
     return workflow_id.split(":", 3)[1]
 
 
@@ -159,13 +163,15 @@ async def list_workflow_runs(sq_id: str, limit: int) -> list[WorkflowRunSummary]
 
     if '"' in sq_id or "\\" in sq_id:
         return []
-    query = " OR ".join(
-        f"WorkflowId STARTS_WITH {_quote(f'seizu:{name}:{sq_id}:')}" for name in sorted(WORKFLOW_REGISTRY)
-    )
+    prefixes = [f"seizu:{name}:{sq_id}:" for name in sorted(WORKFLOW_REGISTRY)]
+    prefixes.append(f"seizu-workflow:{sq_id}")
+    query = " OR ".join(f"WorkflowId STARTS_WITH {_quote(prefix)}" for prefix in prefixes)
     client = await _get_client()
     runs: list[WorkflowRunSummary] = []
     try:
         async for execution in client.list_workflows(query, limit=limit):
+            if not workflow_id_matches(sq_id, execution.id):
+                continue
             runs.append(
                 WorkflowRunSummary(
                     workflow_id=execution.id,

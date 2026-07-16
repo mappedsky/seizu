@@ -85,9 +85,9 @@ function DashboardSidebar({
         ]
       : []),
     {
-      href: '/app/scheduled-queries',
+      href: '/app/workflows',
       icon: Schedule,
-      title: 'Scheduled Queries',
+      title: 'Workflows',
     },
     ...(canScheduleChats
       ? [
