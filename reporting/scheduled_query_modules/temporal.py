@@ -26,11 +26,6 @@ from reporting.temporal_workflows import (
 logger = logging.getLogger(__name__)
 
 
-def _workflow_descriptions() -> str:
-    specs = [(name, get_workflow_spec(name)) for name in enabled_workflow_names()]
-    return " ".join(f"{name}: {spec.description}" for name, spec in specs if spec is not None)
-
-
 def action_name() -> str:
     return "temporal"
 
@@ -43,7 +38,7 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
             type="select",
             required=True,
             options=enabled_workflow_names(),
-            description=f"Temporal workflow to start with the query results. {_workflow_descriptions()}",
+            description="Code-defined child workflow to run.",
         ),
         ActionConfigFieldDef(
             name="max_rows",
@@ -51,14 +46,14 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
             type="number",
             required=False,
             default=settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS,
-            description="Result rows beyond this limit are dropped before starting the workflow (payload size cap).",
+            description="Maximum query rows passed to the child workflow.",
         ),
         ActionConfigFieldDef(
             name="query_return_attribute",
             label="Query return attribute",
             type="string",
             required=False,
-            description="Top-level attribute of each result row that contains the data map.",
+            description="Result field containing the data passed to the child workflow.",
             default="details",
         ),
     ]
