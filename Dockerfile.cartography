@@ -1,0 +1,22 @@
+# Dedicated cartography sync-worker image: the upstream cartography CLI plus
+# Seizu's thin Temporal activity worker (cartography_sync/). The
+# CartographySyncWorkflow runs in the main seizu-temporal-worker and
+# dispatches run_cartography_module activities to this worker's task queue.
+#
+# The image deliberately ships only the stdlib-only cartography_sync package —
+# no reporting code, settings, or non-cartography credentials belong here.
+# Pinned by tag + digest: the registry's flag allowlist is reviewed against
+# this exact CLI, so upgrades must be deliberate (Dependabot bumps the pin).
+FROM ghcr.io/cartography-cncf/cartography:0.139.0@sha256:58e96a4eb9fce008683720444c2902bdd69f9675fc2611b9cce3584594317b9a
+
+USER root
+# Match the temporalio version pinned in uv.lock (dataclass payloads are
+# JSON-serialized, but keeping the SDKs aligned avoids surprises).
+RUN pip install --no-cache-dir temporalio==1.28.0
+
+COPY cartography_sync /opt/seizu/cartography_sync
+ENV PYTHONPATH=/opt/seizu
+
+USER 10001
+ENTRYPOINT []
+CMD ["python", "-m", "cartography_sync.worker"]

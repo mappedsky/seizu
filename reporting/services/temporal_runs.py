@@ -7,7 +7,10 @@ no extra bookkeeping in the report store. Run details come from the workflow's
 event history: each activity execution is folded into a single
 ``WorkflowRunActivity`` carrying status, final attempt count (Temporal writes
 one ActivityTaskStarted event with the final attempt number), retry/failure
-detail, and truncated input/result previews.
+detail, and truncated input/result previews. Child workflow executions (e.g.
+cartography_module runs, whose fixed workflow IDs serve as per-module
+mutexes) fold into the same record shape, with repeated blocked start
+attempts aggregated as a "waiting" state.
 
 ``temporalio`` is imported lazily inside functions so the web process only
 pays for it when the endpoints are actually used.
@@ -254,10 +257,21 @@ async def _collect_activities(
     activities: dict[str, WorkflowRunActivity] = {}
     scheduled_event_activity: dict[int, str] = {}
     workflow_failure: str | None = None
+    # Child workflow executions (e.g. cartography_module runs) fold into the
+    # same record shape. Repeated start attempts against a taken child
+    # workflow ID (the per-module mutex wait) aggregate into one record, and a
+    # fresh record starts once the previous execution for that ID is terminal.
+    child_records: dict[str, WorkflowRunActivity] = {}  # child workflow id → open record
+    initiated_event_child: dict[int, str] = {}
+    _CHILD_TERMINAL = ("completed", "failed", "timed_out", "canceled", "terminated")
 
     def _for_scheduled_event(event_id: int) -> WorkflowRunActivity | None:
         activity_id = scheduled_event_activity.get(event_id)
         return activities.get(activity_id) if activity_id is not None else None
+
+    def _for_initiated_event(event_id: int) -> WorkflowRunActivity | None:
+        child_id = initiated_event_child.get(event_id)
+        return child_records.get(child_id) if child_id is not None else None
 
     async for event in handle.fetch_history_events():
         if event.HasField("activity_task_scheduled_event_attributes"):
@@ -321,6 +335,80 @@ async def _collect_activities(
             activity = _for_scheduled_event(cancel_requested.scheduled_event_id)
             if activity is not None:
                 activity.status = "cancel_requested"
+        elif event.HasField("start_child_workflow_execution_initiated_event_attributes"):
+            initiated = event.start_child_workflow_execution_initiated_event_attributes
+            initiated_event_child[event.event_id] = initiated.workflow_id
+            record = child_records.get(initiated.workflow_id)
+            if record is not None and record.status not in _CHILD_TERMINAL:
+                # A retry of the same start (mutex wait): fold into the record.
+                record.attempts += 1
+            else:
+                if record is not None:
+                    # Same child id run again later (e.g. one module in two
+                    # sequential stages): archive the closed record.
+                    activities[f"{initiated.workflow_id}#{event.event_id}"] = activities.pop(initiated.workflow_id)
+                record = WorkflowRunActivity(
+                    activity_id=initiated.workflow_id,
+                    activity_type=initiated.workflow_type.name,
+                    status="scheduled",
+                    scheduled_at=_event_time(event),
+                    input_preview=(
+                        _payload_preview(initiated.input.payloads if initiated.HasField("input") else [])
+                        if include_payload_previews
+                        else None
+                    ),
+                )
+                child_records[initiated.workflow_id] = record
+                activities[initiated.workflow_id] = record
+        elif event.HasField("start_child_workflow_execution_failed_event_attributes"):
+            start_failed = event.start_child_workflow_execution_failed_event_attributes
+            record = _for_initiated_event(start_failed.initiated_event_id)
+            if record is not None:
+                # WORKFLOW_ALREADY_EXISTS while waiting on the mutex; the
+                # parent retries, so this is a wait state, not a failure.
+                record.status = "waiting"
+                record.last_attempt_failure = "another run of this child workflow is in progress"
+        elif event.HasField("child_workflow_execution_started_event_attributes"):
+            child_started = event.child_workflow_execution_started_event_attributes
+            record = _for_initiated_event(child_started.initiated_event_id)
+            if record is not None:
+                record.status = "running"
+                record.started_at = _event_time(event)
+        elif event.HasField("child_workflow_execution_completed_event_attributes"):
+            child_completed = event.child_workflow_execution_completed_event_attributes
+            record = _for_initiated_event(child_completed.initiated_event_id)
+            if record is not None:
+                record.status = "completed"
+                record.closed_at = _event_time(event)
+                if include_payload_previews:
+                    record.result_preview = _payload_preview(
+                        child_completed.result.payloads if child_completed.HasField("result") else []
+                    )
+        elif event.HasField("child_workflow_execution_failed_event_attributes"):
+            child_failed = event.child_workflow_execution_failed_event_attributes
+            record = _for_initiated_event(child_failed.initiated_event_id)
+            if record is not None:
+                record.status = "failed"
+                record.closed_at = _event_time(event)
+                record.failure = _failure_summary(child_failed.failure if child_failed.HasField("failure") else None)
+        elif event.HasField("child_workflow_execution_timed_out_event_attributes"):
+            child_timed_out = event.child_workflow_execution_timed_out_event_attributes
+            record = _for_initiated_event(child_timed_out.initiated_event_id)
+            if record is not None:
+                record.status = "timed_out"
+                record.closed_at = _event_time(event)
+        elif event.HasField("child_workflow_execution_canceled_event_attributes"):
+            child_canceled = event.child_workflow_execution_canceled_event_attributes
+            record = _for_initiated_event(child_canceled.initiated_event_id)
+            if record is not None:
+                record.status = "canceled"
+                record.closed_at = _event_time(event)
+        elif event.HasField("child_workflow_execution_terminated_event_attributes"):
+            child_terminated = event.child_workflow_execution_terminated_event_attributes
+            record = _for_initiated_event(child_terminated.initiated_event_id)
+            if record is not None:
+                record.status = "terminated"
+                record.closed_at = _event_time(event)
         elif event.HasField("workflow_execution_failed_event_attributes"):
             failed_attrs = event.workflow_execution_failed_event_attributes
             workflow_failure = _failure_summary(failed_attrs.failure if failed_attrs.HasField("failure") else None)

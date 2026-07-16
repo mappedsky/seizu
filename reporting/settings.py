@@ -1,5 +1,6 @@
 from importlib import resources
 
+from cartography_sync.registry import parse_enabled_modules
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 
@@ -272,6 +273,36 @@ TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS",
 TEMPORAL_ENABLED_WORKFLOWS = list_env("TEMPORAL_ENABLED_WORKFLOWS", [])
 # Per-activity timeout in seconds for AI chat sessions run by workflows.
 TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS = int_env("TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS", 600)
+
+# ---------------------------------------------------------------------------
+# Cartography syncs (cartography_sync workflow)
+# ---------------------------------------------------------------------------
+
+# The cartography_sync Temporal workflow runs cartography intel-module syncs
+# as a staged pipeline. The workflow itself runs in the main temporal worker;
+# its per-module activities run on a separate task queue served by the
+# dedicated cartography sync worker image (Dockerfile.cartography, service
+# seizu-cartography-worker), which holds only cartography intel credentials.
+# Task queue the sync worker polls; the workflow dispatches its module
+# activities there.
+CARTOGRAPHY_TASK_QUEUE = str_env("CARTOGRAPHY_TASK_QUEUE", "seizu-cartography")
+# Which registry modules (cartography_sync/registry.py) scheduled syncs may
+# run. Empty or unset → all registered modules; comma-separated names narrow
+# the allowlist (e.g. "aws,github,cve"). Set on the web service (config
+# validation + UI options) and the scheduled query worker (dispatch).
+CARTOGRAPHY_ENABLED_MODULES = parse_enabled_modules(str_env("CARTOGRAPHY_ENABLED_MODULES"))
+# Default per-module-run subprocess timeout (seconds); overridable per
+# scheduled query via the workflow's timeout_minutes config field.
+CARTOGRAPHY_MODULE_TIMEOUT_SECONDS = int_env("CARTOGRAPHY_MODULE_TIMEOUT_SECONDS", 3600)
+# How long a module run may wait (seconds) for an overlapping run of the same
+# module to finish. Overlap across pipelines, schedules, ticks, and worker
+# replicas serializes on the cartography_module child workflow's fixed
+# workflow ID (concurrent same-module syncs race on cartography's update tags
+# and can delete each other's data).
+CARTOGRAPHY_MODULE_WAIT_SECONDS = int_env("CARTOGRAPHY_MODULE_WAIT_SECONDS", 3600)
+# Temporal retry attempts for one module-run activity (config errors never
+# retry).
+CARTOGRAPHY_SYNC_RETRY_ATTEMPTS = int_env("CARTOGRAPHY_SYNC_RETRY_ATTEMPTS", 2)
 
 # ---------------------------------------------------------------------------
 # CVE dependency remediation (cve_dependency_remediation workflow)

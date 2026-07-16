@@ -136,3 +136,49 @@ async def test_handle_results_truncates_rows(mocker):
 
     args, _kwargs = client.start_workflow.await_args
     assert len(args[1].rows) == 2
+
+
+async def test_handle_results_dispatches_rowless_workflow_without_results(mocker):
+    client = _patch_client(mocker)
+    mocker.patch(
+        "reporting.services.report_store.get_scheduled_query",
+        mocker.AsyncMock(return_value=_item()),
+    )
+
+    # cartography_sync has requires_rows=False: the query (e.g. RETURN 1) is
+    # only the trigger, so even an empty result set dispatches.
+    await temporal.handle_results("sq-1", _action(workflow="cartography_sync", modules=["cve"]), [])
+
+    client.start_workflow.assert_awaited_once()
+    args, kwargs = client.start_workflow.await_args
+    assert args[0] == "cartography_sync"
+    workflow_input = args[1]
+    # The action_config reached the input factory: one stage per module,
+    # wrapped by the implicit create-indexes/analysis stages.
+    assert [run.module for stage in workflow_input.stages for run in stage.runs] == [
+        "create-indexes",
+        "cve",
+        "analysis",
+    ]
+    assert workflow_input.scheduled_query_id == "sq-1"
+    assert kwargs["id"] == f"seizu:cartography_sync:sq-1:{_NOW}"
+
+
+async def test_handle_results_refuses_invalid_stored_config(mocker):
+    client = _patch_client(mocker)
+    mocker.patch(
+        "reporting.services.report_store.get_scheduled_query",
+        mocker.AsyncMock(return_value=_item()),
+    )
+
+    # A stored config that no longer validates (module since disabled or
+    # unknown) must not dispatch.
+    await temporal.handle_results("sq-1", _action(workflow="cartography_sync", modules=["gcp"]), [])
+
+    client.start_workflow.assert_not_called()
+
+
+def test_validate_action_config_delegates_to_workflow():
+    assert temporal.validate_action_config({"workflow": "cve_repo_report"}) is None
+    assert "exactly one" in temporal.validate_action_config({"workflow": "cartography_sync"})
+    assert temporal.validate_action_config({"workflow": "cartography_sync", "modules": ["cve"]}) is None

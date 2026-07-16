@@ -1,4 +1,4 @@
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from reporting import settings
@@ -59,6 +59,16 @@ class ModuleInterface:
         raw JSON textarea, and by the backend to validate submitted configs.
         """
         return []
+
+    @staticmethod
+    def validate_action_config(action_config: dict[str, Any]) -> str | None:
+        """
+        Optional module-specific validation beyond the generic required-field
+        checks (e.g. cross-field rules or nested structures). Returns an error
+        message string, or None when the config is valid. Called on scheduled
+        query create/update.
+        """
+        return None
 
     @staticmethod
     def handle_results(
@@ -136,3 +146,24 @@ def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
         except Exception:
             pass
     return schemas
+
+
+def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]:
+    """Return validate_action_config for available modules that define one.
+
+    Imports without calling setup(), so this is safe to call from the web process.
+    """
+    seen: set = set()
+    validators: dict[str, Callable[[dict[str, Any]], str | None]] = {}
+    for module_name in _BUILTIN_MODULES + list(settings.SCHEDULED_QUERY_MODULES):
+        if module_name in seen:
+            continue
+        seen.add(module_name)
+        try:
+            module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+            validator = getattr(module, "validate_action_config", None)
+            if validator is not None:
+                validators[module.action_name()] = validator
+        except Exception:
+            pass
+    return validators

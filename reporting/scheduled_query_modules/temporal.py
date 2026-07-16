@@ -20,6 +20,7 @@ from reporting.temporal_workflows import (
     enabled_workflow_names,
     get_enabled_workflow_spec,
     get_workflow_spec,
+    validate_workflow_action_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,24 @@ async def setup() -> None:
     return
 
 
+def validate_action_config(action_config: dict[str, Any]) -> str | None:
+    """Validate the selected workflow's own config fields (see WorkflowSpec)."""
+    return validate_workflow_action_config(action_config)
+
+
 async def handle_results(
     scheduled_query_id: str,
     action: ScheduledQueryAction,
     results: list[dict[str, Any]],
 ) -> None:
-    if not results:
+    spec = _validated_spec(scheduled_query_id, action)
+    if spec is None:
         return
-    await _start_workflow(scheduled_query_id, action, results)
+    # For row-consuming workflows an empty result set means nothing to do; for
+    # requires_rows=False workflows the query is only the trigger.
+    if not results and spec.requires_rows:
+        return
+    await _start_workflow(scheduled_query_id, spec, action, results)
 
 
 def _project_rows(
@@ -118,6 +129,7 @@ def _validated_spec(scheduled_query_id: str, action: ScheduledQueryAction) -> Wo
 
 async def _start_workflow(
     scheduled_query_id: str,
+    spec: WorkflowSpec,
     action: ScheduledQueryAction,
     results: list[dict[str, Any]],
 ) -> None:
@@ -125,10 +137,6 @@ async def _start_workflow(
     import temporalio.exceptions
 
     from reporting.services import report_store
-
-    spec = _validated_spec(scheduled_query_id, action)
-    if spec is None:
-        return
 
     item = await report_store.get_scheduled_query(scheduled_query_id)
     if item is None:
@@ -138,15 +146,25 @@ async def _start_workflow(
         )
         return
 
-    rows = _project_rows(scheduled_query_id, action, results)
-    workflow_input = spec.build_input(
-        WorkflowInputContext(
-            scheduled_query_id=scheduled_query_id,
-            creator_user_id=item.created_by,
-            rows=rows,
-            chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
+    rows = _project_rows(scheduled_query_id, action, results) if spec.requires_rows else []
+    try:
+        workflow_input = spec.build_input(
+            WorkflowInputContext(
+                scheduled_query_id=scheduled_query_id,
+                creator_user_id=item.created_by,
+                rows=rows,
+                chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
+                action_config=dict(action.action_config),
+            )
         )
-    )
+    except ValueError as exc:
+        # A stored config that no longer validates (e.g. the operator narrowed
+        # an allowlist after the schedule was saved) must not dispatch.
+        logger.error(
+            "Refusing to start workflow with invalid action config",
+            extra={"scheduled_query_id": scheduled_query_id, "workflow": spec.name, "error": str(exc)},
+        )
+        return
     # last_scheduled_at identifies this run (the lock sets it before the query
     # executes), making redelivery of the same run idempotent.
     workflow_id = f"seizu:{spec.name}:{scheduled_query_id}:{item.last_scheduled_at}"

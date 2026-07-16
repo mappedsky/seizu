@@ -28,7 +28,10 @@ import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ScheduleSpecEditor from 'src/components/ScheduleSpecEditor';
 import SyncMetadataAutocomplete from 'src/components/SyncMetadataAutocomplete';
-import { ActionConfigFieldDef } from 'src/config.context';
+import {
+  ActionConfigDependentSchema,
+  ActionConfigFieldDef,
+} from 'src/config.context';
 import {
   ScheduledQueryAction,
   ScheduledQueryItem,
@@ -247,6 +250,7 @@ export interface ScheduledQueryDialogProps {
   initial: ScheduledQueryItem | null;
   actionTypes: string[];
   actionSchemas: Record<string, ActionConfigFieldDef[]>;
+  dependentSchemas?: Record<string, ActionConfigDependentSchema>;
 }
 
 export default function ScheduledQueryDialog({
@@ -256,6 +260,7 @@ export default function ScheduledQueryDialog({
   initial,
   actionTypes,
   actionSchemas,
+  dependentSchemas = {},
 }: ScheduledQueryDialogProps) {
   const [name, setName] = useState(initial?.name ?? EMPTY_FORM.name);
   const [cypher, setCypher] = useState(initial?.cypher ?? EMPTY_FORM.cypher);
@@ -281,6 +286,14 @@ export default function ScheduledQueryDialog({
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Extra fields shown once the action's discriminator field (e.g. the
+  // temporal action's workflow select) takes a value with its own sub-schema.
+  const subSchemaFor = (a: ActionFormState): ActionConfigFieldDef[] => {
+    const dep = dependentSchemas[a.action_type];
+    if (!dep) return [];
+    return dep.schemas[String(a.action_config[dep.discriminator] ?? '')] ?? [];
+  };
 
   const handleClose = () => {
     setError(null);
@@ -309,7 +322,10 @@ export default function ScheduledQueryDialog({
         return;
       }
       const serialized: Record<string, unknown> = {};
-      const schema = actionSchemas[a.action_type] ?? [];
+      const schema = [
+        ...(actionSchemas[a.action_type] ?? []),
+        ...subSchemaFor(a),
+      ];
       const schemaMap = Object.fromEntries(schema.map((f) => [f.name, f]));
       for (const [key, val] of Object.entries(a.action_config)) {
         const fieldDef = schemaMap[key];
@@ -421,11 +437,29 @@ export default function ScheduledQueryDialog({
     val: unknown,
   ) =>
     setActions((as) =>
-      as.map((a, idx) =>
-        idx === i
-          ? { ...a, action_config: { ...a.action_config, [fieldName]: val } }
-          : a,
-      ),
+      as.map((a, idx) => {
+        if (idx !== i) {
+          return a;
+        }
+        const dep = dependentSchemas[a.action_type];
+        if (dep && fieldName === dep.discriminator) {
+          // Changing the discriminator swaps the sub-schema: drop the old
+          // sub-schema's values and seed the new one's defaults.
+          const config: Record<string, unknown> = { ...a.action_config };
+          const oldSub =
+            dep.schemas[String(config[dep.discriminator] ?? '')] ?? [];
+          for (const f of oldSub) {
+            delete config[f.name];
+          }
+          Object.assign(config, schemaDefaults(dep.schemas[String(val)] ?? []));
+          config[fieldName] = val;
+          return { ...a, action_config: config };
+        }
+        return {
+          ...a,
+          action_config: { ...a.action_config, [fieldName]: val },
+        };
+      }),
     );
 
   return (
@@ -654,6 +688,7 @@ export default function ScheduledQueryDialog({
             )}
             {actions.map((a, i) => {
               const schema = actionSchemas[a.action_type] ?? [];
+              const subSchema = subSchemaFor(a);
               return (
                 <Box
                   key={i}
@@ -670,7 +705,7 @@ export default function ScheduledQueryDialog({
                       display: 'flex',
                       alignItems: 'center',
                       gap: 1,
-                      mb: schema.length > 0 ? 1.5 : 0,
+                      mb: schema.length + subSchema.length > 0 ? 1.5 : 0,
                     }}
                   >
                     {actionTypes.length > 0 ? (
@@ -702,7 +737,7 @@ export default function ScheduledQueryDialog({
                       <RemoveCircleOutlineIcon fontSize="small" />
                     </IconButton>
                   </Box>
-                  {schema.length > 0 && (
+                  {schema.length + subSchema.length > 0 && (
                     <Box
                       sx={{
                         display: 'flex',
@@ -720,6 +755,33 @@ export default function ScheduledQueryDialog({
                           }
                         />
                       ))}
+                      {subSchema.length > 0 && (
+                        <>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ mt: 0.5 }}
+                          >
+                            {String(
+                              a.action_config[
+                                dependentSchemas[a.action_type]
+                                  ?.discriminator ?? ''
+                              ],
+                            )}{' '}
+                            options
+                          </Typography>
+                          {subSchema.map((field) => (
+                            <ActionConfigField
+                              key={field.name}
+                              field={field}
+                              value={a.action_config[field.name]}
+                              onChange={(val) =>
+                                updateActionConfigField(i, field.name, val)
+                              }
+                            />
+                          ))}
+                        </>
+                      )}
                     </Box>
                   )}
                 </Box>

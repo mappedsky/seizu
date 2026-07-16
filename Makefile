@@ -31,6 +31,12 @@ test_integration:
 test_query_validator_live: config_setup
 	docker compose run --rm seizu uv run --frozen --no-sync pytest tests/integration/reporting/services/query_validator_test.py -v
 
+# Verifies every cartography_sync registry flag exists in the pinned image's
+# CLI — run after bumping the Dockerfile.cartography pin.
+.PHONY: cartography_contract_test
+cartography_contract_test: build_cartography_worker
+	docker run --rm --network none --entrypoint python ghcr.io/mappedsky/seizu-cartography -m cartography_sync.contract_check
+
 .PHONY: remediation_smoke
 # Manual, real-network smoke test of the CVE remediation sandbox path. Runs in
 # the temporal worker service so it inherits the SANDBOX_*/REMEDIATION_* config.
@@ -67,6 +73,12 @@ lock_update:
 rebuild:
 	docker compose build seizu
 	docker compose run --rm --no-deps seizu-node bun run build
+
+# Build the cartography sync-worker image (Dockerfile.cartography: pinned
+# upstream cartography + the cartography_sync activity worker).
+.PHONY: build_cartography_worker
+build_cartography_worker:
+	docker compose build seizu-cartography-worker
 
 .PHONY: drop_db
 drop_db: down

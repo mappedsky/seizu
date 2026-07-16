@@ -631,6 +631,7 @@ function ScheduledQueryView() {
       string,
       ActionConfigFieldDef[]
     >,
+    scheduled_query_action_dependent_schemas: {},
   });
 
   useEffect(() => {
@@ -644,6 +645,8 @@ function ScheduledQueryView() {
               config.scheduled_query_action_types ?? [],
             scheduled_query_action_schemas:
               config.scheduled_query_action_schemas ?? {},
+            scheduled_query_action_dependent_schemas:
+              config.scheduled_query_action_dependent_schemas ?? {},
           });
         }
       })
@@ -792,6 +795,9 @@ function ScheduledQueryView() {
           }}
           actionTypes={actionConfig.scheduled_query_action_types}
           actionSchemas={actionConfig.scheduled_query_action_schemas}
+          dependentSchemas={
+            actionConfig.scheduled_query_action_dependent_schemas
+          }
         />
       ) : null}
 

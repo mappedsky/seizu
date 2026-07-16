@@ -269,6 +269,104 @@ async def test_get_workflow_run_detail_activities(mocker):
     assert failed.failure == "RuntimeError: boom; caused by: root cause"
 
 
+async def test_get_workflow_run_detail_folds_child_workflows(mocker):
+    child_id = "seizu-cartography-module:aws"
+    events = [
+        _event(
+            1,
+            start_child_workflow_execution_initiated_event_attributes=(
+                history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                    workflow_id=child_id,
+                    workflow_type=common_pb.WorkflowType(name="cartography_module"),
+                    input=_payloads({"module": "aws"}),
+                )
+            ),
+        ),
+        # The child workflow ID (the per-module mutex) is held by another run:
+        # the parent's start fails and it retries after a timer.
+        _event(
+            2,
+            start_child_workflow_execution_failed_event_attributes=(
+                history_pb.StartChildWorkflowExecutionFailedEventAttributes(initiated_event_id=1)
+            ),
+        ),
+        _event(
+            3,
+            start_child_workflow_execution_initiated_event_attributes=(
+                history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                    workflow_id=child_id,
+                    workflow_type=common_pb.WorkflowType(name="cartography_module"),
+                    input=_payloads({"module": "aws"}),
+                )
+            ),
+        ),
+        _event(
+            4,
+            child_workflow_execution_started_event_attributes=(
+                history_pb.ChildWorkflowExecutionStartedEventAttributes(initiated_event_id=3)
+            ),
+        ),
+        _event(
+            5,
+            child_workflow_execution_completed_event_attributes=(
+                history_pb.ChildWorkflowExecutionCompletedEventAttributes(
+                    initiated_event_id=3,
+                    result=_payloads({"module": "aws", "status": "completed"}),
+                )
+            ),
+        ),
+        # A second run of the same child id later in the pipeline gets its own
+        # record instead of overwriting the closed one.
+        _event(
+            6,
+            start_child_workflow_execution_initiated_event_attributes=(
+                history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                    workflow_id=child_id,
+                    workflow_type=common_pb.WorkflowType(name="cartography_module"),
+                )
+            ),
+        ),
+        _event(
+            7,
+            child_workflow_execution_started_event_attributes=(
+                history_pb.ChildWorkflowExecutionStartedEventAttributes(initiated_event_id=6)
+            ),
+        ),
+        _event(
+            8,
+            child_workflow_execution_failed_event_attributes=(
+                history_pb.ChildWorkflowExecutionFailedEventAttributes(
+                    initiated_event_id=6,
+                    failure=failure_pb.Failure(
+                        message="child failed",
+                        cause=failure_pb.Failure(message="cartography aws exited 1"),
+                    ),
+                )
+            ),
+        ),
+    ]
+    workflow_id = f"seizu:cartography_sync:{_SQ_ID}:2024-01-01T00:00:00+00:00"
+    handle = _mock_handle(events)
+    _mock_client(mocker, handle=handle)
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1")
+
+    assert detail is not None
+    assert len(detail.activities) == 2
+    archived, failed = detail.activities
+    # Blocked start attempts aggregate into one record's attempt count.
+    assert archived.activity_id == child_id
+    assert archived.activity_type == "cartography_module"
+    assert archived.attempts == 2
+    assert archived.status == "completed"
+    assert archived.last_attempt_failure == "another run of this child workflow is in progress"
+    assert archived.input_preview == '{"module": "aws"}'
+    assert archived.result_preview == '{"module": "aws", "status": "completed"}'
+    assert failed.status == "failed"
+    assert "child failed" in failed.failure
+    assert "cartography aws exited 1" in failed.failure
+
+
 async def test_get_workflow_run_detail_merges_pending(mocker):
     events = [
         _event(

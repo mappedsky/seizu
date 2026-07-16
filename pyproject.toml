@@ -85,10 +85,11 @@ select = ["E", "F", "W", "I", "UP"]
 ignore = ["E203", "E701"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["reporting", "seizu_cli", "seizu_schema"]
+known-first-party = ["cartography_sync", "reporting", "seizu_cli", "seizu_schema"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "cartography_sync",
     "reporting",
     "seizu_cli",
     "seizu_schema",
@@ -101,5 +102,5 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["reporting", "seizu_cli", "seizu_schema"]
+packages = ["cartography_sync", "reporting", "seizu_cli", "seizu_schema"]
 force-include = { "build" = "reporting/static_dist", "gunicorn.conf" = "reporting/gunicorn.conf", "logging.conf" = "reporting/logging.conf" }
