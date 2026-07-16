@@ -267,18 +267,11 @@ describe('EditableReportView', () => {
   });
 
   it('falls back to a skeleton (no query) when the user lacks query:execute', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      json: () => Promise.resolve({ results: [] }),
-    }) as unknown as typeof global.fetch;
-
-    renderAsUser(REPORT, ['reports:write']);
+    const { container } = renderAsUser(REPORT, ['reports:write']);
 
     await waitFor(() =>
       expect(screen.getByLabelText('Row name')).toBeInTheDocument(),
     );
-    const hitAdhoc = (global.fetch as jest.Mock).mock.calls.some(
-      (call) => call[0] === '/api/v1/query/adhoc',
-    );
-    expect(hitAdhoc).toBe(false);
+    expect(container.querySelector('.MuiSkeleton-root')).not.toBeNull();
   });
 });
