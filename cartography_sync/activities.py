@@ -22,7 +22,7 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from cartography_sync.registry import MODULE_REGISTRY, validate_module_params
+from cartography_sync.registry import MODULE_REGISTRY, parse_enabled_modules, validate_module_params
 from cartography_sync.registry import build_module_argv as _build_registry_argv
 from cartography_sync.shared import CartographyModuleActivityInput, CartographyModuleResult
 
@@ -72,13 +72,12 @@ def _check_module_enabled(module: str) -> None:
     them — the worker that holds the credentials must reject disabled modules
     itself. Internal stages (create-indexes, analysis) are always allowed.
     """
-    raw = os.environ.get("CARTOGRAPHY_ENABLED_MODULES", "").strip()
-    if not raw:
+    enabled = parse_enabled_modules(os.environ.get("CARTOGRAPHY_ENABLED_MODULES"))
+    if not enabled:
         return
     spec = MODULE_REGISTRY.get(module)
     if spec is not None and spec.internal:
         return
-    enabled = {name.strip() for name in raw.split(",") if name.strip()}
     if module not in enabled:
         raise ApplicationError(
             f"cartography module '{module}' is not in this worker's CARTOGRAPHY_ENABLED_MODULES allowlist",

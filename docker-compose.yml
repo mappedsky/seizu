@@ -755,7 +755,7 @@ services:
     command: bun run start
   cartography:
     # Keep this pin aligned with Dockerfile.cartography (Dependabot bumps both).
-    image: ghcr.io/cartography-cncf/cartography:0.139.0@sha256:1942e7eb57bd51cff5046108b80e2556f1c68ecd863b8f952084f44988e2777c
+    image: ghcr.io/cartography-cncf/cartography:0.139.0@sha256:58e96a4eb9fce008683720444c2902bdd69f9675fc2611b9cce3584594317b9a
     user: "10001:10001"
     init: true
     # We call cartography directly, so make sure it doesn't try to start on up

@@ -3,8 +3,22 @@ import pytest
 from cartography_sync.registry import (
     MODULE_REGISTRY,
     build_module_argv,
+    parse_enabled_modules,
     validate_module_params,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, []),
+        ("", []),
+        ("aws,github", ["aws", "github"]),
+        (" aws, github ,,aws ", ["aws", "github"]),
+    ],
+)
+def test_parse_enabled_modules(raw, expected):
+    assert parse_enabled_modules(raw) == expected
 
 
 def test_cve_argv_contains_selected_modules_and_fixed_flags():

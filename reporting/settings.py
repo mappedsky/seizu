@@ -1,5 +1,6 @@
 from importlib import resources
 
+from cartography_sync.registry import parse_enabled_modules
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 
@@ -289,7 +290,7 @@ CARTOGRAPHY_TASK_QUEUE = str_env("CARTOGRAPHY_TASK_QUEUE", "seizu-cartography")
 # run. Empty or unset → all registered modules; comma-separated names narrow
 # the allowlist (e.g. "aws,github,cve"). Set on the web service (config
 # validation + UI options) and the scheduled query worker (dispatch).
-CARTOGRAPHY_ENABLED_MODULES = list_env("CARTOGRAPHY_ENABLED_MODULES", [])
+CARTOGRAPHY_ENABLED_MODULES = parse_enabled_modules(str_env("CARTOGRAPHY_ENABLED_MODULES"))
 # Default per-module-run subprocess timeout (seconds); overridable per
 # scheduled query via the workflow's timeout_minutes config field.
 CARTOGRAPHY_MODULE_TIMEOUT_SECONDS = int_env("CARTOGRAPHY_MODULE_TIMEOUT_SECONDS", 3600)

@@ -32,6 +32,17 @@ def test_enabled_modules_honors_allowlist(mocker):
     assert cartography_config.enabled_module_names() == ["cve", "github"]
 
 
+def test_settings_allowlist_parser_strips_whitespace(monkeypatch):
+    from cartography_sync.registry import parse_enabled_modules
+
+    monkeypatch.setattr(
+        cartography_config.settings,
+        "CARTOGRAPHY_ENABLED_MODULES",
+        parse_enabled_modules(" cve, github ,,cve "),
+    )
+    assert cartography_config.enabled_module_names() == ["cve", "github"]
+
+
 def test_enabled_modules_never_include_internal_stages(mocker):
     assert "create-indexes" not in cartography_config.enabled_module_names()
     assert "analysis" not in cartography_config.enabled_module_names()

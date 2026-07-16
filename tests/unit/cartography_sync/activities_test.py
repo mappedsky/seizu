@@ -164,3 +164,12 @@ async def test_worker_side_enabled_modules_allowlist(sync_env, monkeypatch):
         run_cartography_module, CartographyModuleActivityInput(module="analysis", params={})
     )
     assert result.status == "completed"
+
+
+async def test_worker_side_allowlist_uses_shared_whitespace_parsing(sync_env, monkeypatch):
+    sync_env("echo ok")
+    monkeypatch.setenv("CARTOGRAPHY_ENABLED_MODULES", " cve , github ")
+    result = await ActivityEnvironment().run(
+        run_cartography_module, CartographyModuleActivityInput(module="cve", params={})
+    )
+    assert result.status == "completed"

@@ -29,6 +29,20 @@ ENUM = "enum"
 _FLAG_TYPES = (BOOLEAN, NUMBER, STRING, ENUM)
 
 
+def parse_enabled_modules(value: str | None) -> list[str]:
+    """Parse the shared comma-separated module allowlist.
+
+    Empty input means every registered module is enabled. Whitespace around
+    entries is insignificant, empty entries are ignored, and duplicates are
+    removed while preserving their first occurrence. Both the reporting
+    process and the credential-bearing sync worker use this parser so their
+    enforcement cannot diverge.
+    """
+    if not value:
+        return []
+    return list(dict.fromkeys(name for item in value.split(",") if (name := item.strip())))
+
+
 @dataclass(frozen=True)
 class FlagSpec:
     """One user-settable cartography CLI flag."""
