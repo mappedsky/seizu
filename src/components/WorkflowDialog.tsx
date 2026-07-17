@@ -90,10 +90,41 @@ function activityForm(activity: WorkflowActivity): ActivityForm {
 }
 
 function stageForms(initial: WorkflowItem | null): StageForm[] {
-  return (initial?.stages ?? []).map((stage) => ({
+  const forms = (initial?.stages ?? []).map((stage) => ({
     editorId: editorId('stage'),
     activities: stage.activities.map(activityForm),
   }));
+  return clearInvalidInputs(forms);
+}
+
+function nextOutputName(stages: StageForm[], stageIndex: number): string {
+  const used = new Set(
+    stages.flatMap((stage) =>
+      stage.activities.map((activity) => activity.output),
+    ),
+  );
+  let activityPosition = stages[stageIndex].activities.length + 1;
+  let output = `stage_${stageIndex + 1}_activity_${activityPosition}`;
+  while (used.has(output)) {
+    activityPosition += 1;
+    output = `stage_${stageIndex + 1}_activity_${activityPosition}`;
+  }
+  return output;
+}
+
+function clearInvalidInputs(stages: StageForm[]): StageForm[] {
+  const available = new Set<string>();
+  return stages.map((stage) => {
+    const activities = stage.activities.map((activity) => ({
+      ...activity,
+      input:
+        activity.input !== null && available.has(activity.input)
+          ? activity.input
+          : null,
+    }));
+    activities.forEach((activity) => available.add(activity.output));
+    return { ...stage, activities };
+  });
 }
 
 function schemaDefaults(
@@ -125,6 +156,12 @@ function ConfigField({
 }) {
   if (field.type === 'parameters') return null;
   const label = field.required ? `${field.label} *` : field.label;
+  const tooltip = [
+    field.description,
+    field.type === 'string_list' ? 'Enter comma-separated values.' : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
   let control: ReactNode;
   if (field.type === 'boolean') {
     control = (
@@ -167,9 +204,6 @@ function ConfigField({
         type={field.type === 'number' ? 'number' : 'text'}
         multiline={field.type === 'text'}
         minRows={field.type === 'text' ? 3 : undefined}
-        helperText={
-          field.type === 'string_list' ? 'Comma-separated values' : undefined
-        }
         onChange={(event) =>
           onChange(
             field.type === 'number'
@@ -184,11 +218,11 @@ function ConfigField({
       />
     );
   }
-  if (field.description) {
+  if (tooltip) {
     control = (
       <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>{control}</Box>
-        <Tooltip title={field.description} placement="top" arrow describeChild>
+        <Tooltip title={tooltip} placement="top" arrow describeChild>
           <IconButton aria-label={`Help for ${field.label}`} size="small">
             <HelpOutlineIcon fontSize="small" />
           </IconButton>
@@ -299,8 +333,13 @@ export default function WorkflowDialog({
     ]);
 
   const addActivity = (stageId: string) =>
-    setStages((current) =>
-      current.map((stage) =>
+    setStages((current) => {
+      const stageIndex = current.findIndex(
+        (stage) => stage.editorId === stageId,
+      );
+      if (stageIndex < 0) return current;
+      const output = nextOutputName(current, stageIndex);
+      return current.map((stage) =>
         stage.editorId === stageId
           ? {
               ...stage,
@@ -310,15 +349,15 @@ export default function WorkflowDialog({
                   editorId: editorId('activity'),
                   type: '',
                   input: null,
-                  output: '',
+                  output,
                   parameters: {},
                   queryParameters: [],
                 },
               ],
             }
           : stage,
-      ),
-    );
+      );
+    });
 
   const moveStage = (index: number, offset: number) =>
     setStages((current) => {
@@ -326,7 +365,7 @@ export default function WorkflowDialog({
       if (target < 0 || target >= current.length) return current;
       const next = [...current];
       [next[index], next[target]] = [next[target], next[index]];
-      return next;
+      return clearInvalidInputs(next);
     });
 
   const moveActivity = (
@@ -344,7 +383,7 @@ export default function WorkflowDialog({
       }));
       const [activity] = next[stageIndex].activities.splice(activityIndex, 1);
       next[targetStageIndex].activities.push(activity);
-      return next;
+      return clearInvalidInputs(next);
     });
 
   const reorderActivity = (
@@ -681,8 +720,10 @@ export default function WorkflowDialog({
                       aria-label={`Remove stage ${stageIndex + 1}`}
                       onClick={() =>
                         setStages((current) =>
-                          current.filter(
-                            (item) => item.editorId !== stage.editorId,
+                          clearInvalidInputs(
+                            current.filter(
+                              (item) => item.editorId !== stage.editorId,
+                            ),
                           ),
                         )
                       }
@@ -696,6 +737,7 @@ export default function WorkflowDialog({
                       ...subSchema(activity),
                     ];
                     const definition = activityDefinition(activity);
+                    const inputDisabled = availableOutputs.length === 0;
                     return (
                       <Box
                         key={activity.editorId}
@@ -767,39 +809,83 @@ export default function WorkflowDialog({
                                 event.target.value,
                               )
                             }
-                            helperText={`Produces ${schemaSummary(definition?.output_schema)}`}
-                            required
                             size="small"
                             sx={{ minWidth: 200 }}
                           />
-                          <FormControl size="small" sx={{ minWidth: 200 }}>
-                            <InputLabel>Input</InputLabel>
-                            <Select
-                              label="Input"
-                              value={activity.input ?? ''}
-                              onChange={(event) =>
-                                updateActivity(activity.editorId, (item) => ({
-                                  ...item,
-                                  input: event.target.value || null,
-                                }))
-                              }
+                          <Tooltip
+                            title={`Produces ${schemaSummary(definition?.output_schema)}.`}
+                            arrow
+                            describeChild
+                          >
+                            <IconButton
+                              aria-label="Help for Output name"
+                              size="small"
                             >
-                              <MenuItem value="">
-                                <em>No input</em>
-                              </MenuItem>
-                              {availableOutputs.map((output) => (
-                                <MenuItem key={output} value={output}>
-                                  {output}
-                                </MenuItem>
-                              ))}
-                              {activity.input &&
-                                !availableOutputs.includes(activity.input) && (
-                                  <MenuItem value={activity.input} disabled>
-                                    {activity.input} (not from an earlier stage)
+                              <HelpOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip
+                            title={
+                              inputDisabled
+                                ? 'Inputs can only reference outputs from earlier stages; none are available here.'
+                                : ''
+                            }
+                            arrow
+                            describeChild
+                          >
+                            <Box
+                              component="span"
+                              aria-label={
+                                inputDisabled ? 'Input unavailable' : undefined
+                              }
+                              tabIndex={inputDisabled ? 0 : undefined}
+                              sx={{ display: 'inline-flex', minWidth: 200 }}
+                            >
+                              <FormControl
+                                disabled={inputDisabled}
+                                size="small"
+                                fullWidth
+                              >
+                                <InputLabel
+                                  id={`${activity.editorId}-input-label`}
+                                >
+                                  Input
+                                </InputLabel>
+                                <Select
+                                  labelId={`${activity.editorId}-input-label`}
+                                  label="Input"
+                                  value={activity.input ?? ''}
+                                  onChange={(event) =>
+                                    updateActivity(
+                                      activity.editorId,
+                                      (item) => ({
+                                        ...item,
+                                        input: event.target.value || null,
+                                      }),
+                                    )
+                                  }
+                                >
+                                  <MenuItem value="">
+                                    <em>No input</em>
                                   </MenuItem>
-                                )}
-                            </Select>
-                          </FormControl>
+                                  {availableOutputs.map((output) => (
+                                    <MenuItem key={output} value={output}>
+                                      {output}
+                                    </MenuItem>
+                                  ))}
+                                  {activity.input &&
+                                    !availableOutputs.includes(
+                                      activity.input,
+                                    ) && (
+                                      <MenuItem value={activity.input} disabled>
+                                        {activity.input} (not from an earlier
+                                        stage)
+                                      </MenuItem>
+                                    )}
+                                </Select>
+                              </FormControl>
+                            </Box>
+                          </Tooltip>
                           <Box sx={{ flex: 1 }} />
                           <IconButton
                             aria-label={`Move activity ${activityIndex + 1} up`}
@@ -843,17 +929,19 @@ export default function WorkflowDialog({
                             aria-label={`Remove activity ${activityIndex + 1}`}
                             onClick={() =>
                               setStages((current) =>
-                                current.map((item) =>
-                                  item.editorId === stage.editorId
-                                    ? {
-                                        ...item,
-                                        activities: item.activities.filter(
-                                          (candidate) =>
-                                            candidate.editorId !==
-                                            activity.editorId,
-                                        ),
-                                      }
-                                    : item,
+                                clearInvalidInputs(
+                                  current.map((item) =>
+                                    item.editorId === stage.editorId
+                                      ? {
+                                          ...item,
+                                          activities: item.activities.filter(
+                                            (candidate) =>
+                                              candidate.editorId !==
+                                              activity.editorId,
+                                          ),
+                                        }
+                                      : item,
+                                  ),
                                 ),
                               )
                             }

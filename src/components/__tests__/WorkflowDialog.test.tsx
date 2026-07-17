@@ -135,6 +135,9 @@ it('edits staged activities and serializes query parameters and output reference
     screen.getByDisplayValue('RETURN $severity AS severity'),
   ).toBeInTheDocument();
   expect(screen.getAllByRole('group', { name: /Stage/ })).toHaveLength(2);
+  const inputSelectors = screen.getAllByRole('combobox', { name: 'Input' });
+  expect(inputSelectors[0]).toHaveAttribute('aria-disabled', 'true');
+  expect(inputSelectors[1]).not.toHaveAttribute('aria-disabled', 'true');
   expect(
     screen
       .getAllByRole('button', { name: 'Move activity 1 to previous stage' })
@@ -180,6 +183,9 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
   expect(
     screen.queryByText('Message written for every matching query result.'),
   ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText('Produces any JSON value.'),
+  ).not.toBeInTheDocument();
 
   fireEvent.mouseOver(
     screen.getAllByRole('button', { name: 'Help for Message' })[0],
@@ -188,6 +194,50 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
   expect(
     await screen.findByRole('tooltip', {
       name: 'Message written for every matching query result.',
+    }),
+  ).toBeInTheDocument();
+
+  expect(
+    screen
+      .getAllByRole('button', { name: 'Help for Output name' })[0]
+      .getAttribute('title'),
+  ).toBe('Produces any JSON value.');
+});
+
+it('generates unique output names and explains disabled inputs', async () => {
+  render(
+    <WorkflowDialog
+      open
+      initial={null}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      dependentSchemas={{}}
+      onClose={jest.fn()}
+      onSave={jest.fn().mockResolvedValue(undefined)}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add stage' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add activity' }));
+
+  expect(screen.getByDisplayValue('stage_1_activity_1')).toBeInTheDocument();
+  expect(screen.getByDisplayValue('stage_1_activity_2')).toBeInTheDocument();
+
+  const inputs = screen.getAllByRole('combobox', { name: 'Input' });
+  expect(inputs).toHaveLength(2);
+  inputs.forEach((input) =>
+    expect(input).toHaveAttribute('aria-disabled', 'true'),
+  );
+
+  fireEvent.mouseOver(
+    screen.getAllByLabelText('Input unavailable', {
+      selector: 'span',
+    })[0],
+  );
+  expect(
+    await screen.findByRole('tooltip', {
+      name: 'Inputs can only reference outputs from earlier stages; none are available here.',
     }),
   ).toBeInTheDocument();
 });
