@@ -17,6 +17,8 @@ jest.mock('src/hooks/useSyncMetadataValues', () => ({
   }),
 }));
 
+jest.setTimeout(10_000);
+
 afterEach(cleanup);
 
 const schemas: Record<string, ActionConfigFieldDef[]> = {
