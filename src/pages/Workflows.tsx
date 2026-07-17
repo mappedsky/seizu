@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Helmet } from 'react-helmet';
 import { useNavigate } from 'react-router-dom';
-import { Alert, Box, Button, Chip, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Tooltip, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
@@ -10,7 +10,12 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import SyncProblemIcon from '@mui/icons-material/SyncProblem';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import ListPageHeader from 'src/components/ListPageHeader';
-import ListTable, { ListTableColumn } from 'src/components/ListTable';
+import ListTable, {
+  ListTableColumn,
+  listTableActionColumnSx,
+  listTablePrimaryCellSx,
+  listTableTruncateSx,
+} from 'src/components/ListTable';
 import ListViewState from 'src/components/ListViewState';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import UserDisplay from 'src/components/UserDisplay';
@@ -41,6 +46,13 @@ function triggerLabel(item: WorkflowItem): string {
     return `Every ${item.schedule.interval_hours} hour(s)`;
   return item.schedule.type === 'daily' ? 'Daily schedule' : 'Monthly schedule';
 }
+
+const nameColumnSx = { ...listTablePrimaryCellSx, width: '28%' };
+const statusColumnSx = { width: 160 };
+const enabledColumnSx = { width: 120 };
+const versionColumnSx = { width: 96 };
+const updatedColumnSx = { width: 184 };
+const updatedByColumnSx = { width: 160 };
 
 export default function Workflows() {
   const navigate = useNavigate();
@@ -93,19 +105,48 @@ export default function Workflows() {
       {
         key: 'name',
         label: 'Name',
+        cellSx: nameColumnSx,
         render: (item) => (
           <Typography
-            sx={{
-              cursor: 'pointer',
-              '&:hover': { textDecoration: 'underline' },
-            }}
+            variant="body2"
+            sx={[
+              {
+                cursor: 'pointer',
+                fontWeight: 500,
+                '&:hover': { textDecoration: 'underline' },
+              },
+              listTableTruncateSx,
+            ]}
             onClick={() => navigate(`/app/workflows/${item.workflow_id}`)}
           >
             {item.name}
           </Typography>
         ),
       },
-      { key: 'trigger', label: 'Trigger', render: triggerLabel },
+      {
+        key: 'trigger',
+        label: 'Trigger',
+        render: (item) => (
+          <Box sx={{ alignItems: 'center', display: 'flex', gap: 0.5 }}>
+            <Typography variant="body2" sx={listTableTruncateSx}>
+              {triggerLabel(item)}
+            </Typography>
+            {item.schedule_sync_status !== 'synced' && (
+              <Tooltip
+                title={`Schedule ${item.schedule_sync_status}${item.schedule_sync_error ? `: ${item.schedule_sync_error}` : ''}`}
+              >
+                <SyncProblemIcon
+                  color={
+                    item.schedule_sync_status === 'error' ? 'error' : 'warning'
+                  }
+                  fontSize="small"
+                  sx={{ flexShrink: 0 }}
+                />
+              </Tooltip>
+            )}
+          </Box>
+        ),
+      },
       {
         key: 'pipeline',
         label: 'Pipeline',
@@ -115,45 +156,44 @@ export default function Workflows() {
       {
         key: 'status',
         label: 'Status',
+        cellSx: statusColumnSx,
         render: (item) => (
-          <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-            <Chip
-              size="small"
-              label={temporalStatusLabel(item.last_run_status)}
-              color={temporalStatusColor(item.last_run_status)}
-              variant="outlined"
-            />
-            <Chip
-              size="small"
-              label={item.enabled ? 'Enabled' : 'Disabled'}
-              color={item.enabled ? 'success' : 'default'}
-            />
-            {item.schedule_sync_status !== 'synced' && (
-              <Chip
-                size="small"
-                icon={<SyncProblemIcon />}
-                label={`Schedule ${item.schedule_sync_status}`}
-                color={
-                  item.schedule_sync_status === 'error' ? 'error' : 'warning'
-                }
-              />
-            )}
-          </Box>
+          <Chip
+            size="small"
+            label={temporalStatusLabel(item.last_run_status)}
+            color={temporalStatusColor(item.last_run_status)}
+            variant="outlined"
+          />
+        ),
+      },
+      {
+        key: 'enabled',
+        label: 'Enabled',
+        cellSx: enabledColumnSx,
+        render: (item) => (
+          <Chip
+            size="small"
+            label={item.enabled ? 'Enabled' : 'Disabled'}
+            color={item.enabled ? 'success' : 'default'}
+          />
         ),
       },
       {
         key: 'version',
         label: 'Version',
+        cellSx: versionColumnSx,
         render: (item) => item.current_version,
       },
       {
         key: 'updated',
         label: 'Latest Update',
+        cellSx: updatedColumnSx,
         render: (item) => new Date(item.updated_at).toLocaleString(),
       },
       {
         key: 'updated_by',
         label: 'Updated By',
+        cellSx: updatedByColumnSx,
         render: (item) => (
           <UserDisplay userId={item.updated_by ?? item.created_by} />
         ),
@@ -161,6 +201,7 @@ export default function Workflows() {
       {
         key: 'actions',
         label: '',
+        cellSx: listTableActionColumnSx,
         render: (item) => {
           const actions: RowMenuAction[] = [
             {
