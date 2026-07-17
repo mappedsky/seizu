@@ -20,6 +20,24 @@ jest.mock('src/hooks/useSyncMetadataValues', () => ({
 afterEach(cleanup);
 
 const schemas: Record<string, ActionConfigFieldDef[]> = {
+  query: [
+    {
+      name: 'cypher',
+      label: 'Cypher',
+      type: 'text',
+      required: true,
+    },
+    {
+      name: 'parameters',
+      label: 'Query parameters',
+      type: 'parameters',
+    },
+    {
+      name: 'max_rows',
+      label: 'Max rows',
+      type: 'number',
+    },
+  ],
   log: [
     {
       name: 'message',
@@ -34,27 +52,39 @@ const schemas: Record<string, ActionConfigFieldDef[]> = {
 const initial: WorkflowItem = {
   workflow_id: 'workflow-1',
   name: 'Notify',
-  inputs: {
-    findings: {
-      type: 'query',
-      cypher: 'RETURN $severity AS severity',
-      parameters: [{ name: 'severity', value: 'CRITICAL' }],
-      max_rows: 50,
-    },
-  },
   schedule: { type: 'interval', interval_minutes: 15 },
   watch_scans: [],
   enabled: true,
-  activities: [
+  stages: [
     {
-      type: 'log',
-      input: 'findings',
-      parameters: { message: 'first' },
+      activities: [
+        {
+          type: 'query',
+          input: null,
+          output: 'findings',
+          parameters: {
+            cypher: 'RETURN $severity AS severity',
+            parameters: [{ name: 'severity', value: 'CRITICAL' }],
+            max_rows: 50,
+          },
+        },
+      ],
     },
     {
-      type: 'log',
-      input: 'findings',
-      parameters: { message: 'second' },
+      activities: [
+        {
+          type: 'log',
+          input: 'findings',
+          output: 'first_notification',
+          parameters: { message: 'first' },
+        },
+        {
+          type: 'log',
+          input: 'findings',
+          output: 'second_notification',
+          parameters: { message: 'second' },
+        },
+      ],
     },
   ],
   current_version: 2,
@@ -70,14 +100,30 @@ const initial: WorkflowItem = {
   schedule_synced_at: '2026-01-02T00:00:00+00:00',
 };
 
-it('edits named inputs and serializes ordered activity parameters', async () => {
+it('edits staged activities and serializes query parameters and output references', async () => {
   const onSave = jest.fn().mockResolvedValue(undefined);
   render(
     <WorkflowDialog
       open
       initial={initial}
-      activityTypes={['log']}
+      activityTypes={['query', 'log']}
       activitySchemas={schemas}
+      activityDefinitions={{
+        query: {
+          description: 'Runs a query.',
+          input_required: false,
+          input_schema: {},
+          output_schema: { type: 'array' },
+          config_fields: schemas.query,
+        },
+        log: {
+          description: 'Writes rows to the log.',
+          input_required: true,
+          input_schema: { type: 'array' },
+          output_schema: { type: 'object' },
+          config_fields: schemas.log,
+        },
+      }}
       dependentSchemas={{}}
       onClose={jest.fn()}
       onSave={onSave}
@@ -88,9 +134,12 @@ it('edits named inputs and serializes ordered activity parameters', async () => 
   expect(
     screen.getByDisplayValue('RETURN $severity AS severity'),
   ).toBeInTheDocument();
+  expect(screen.getAllByRole('group', { name: /Stage/ })).toHaveLength(2);
   expect(
-    screen.getAllByRole('button', { name: /Reorder activity/ }),
-  ).toHaveLength(2);
+    screen
+      .getAllByRole('button', { name: 'Move activity 1 to previous stage' })
+      .some((button) => !button.hasAttribute('disabled')),
+  ).toBe(true);
 
   const messages = [
     screen.getByDisplayValue('first'),
@@ -101,16 +150,18 @@ it('edits named inputs and serializes ordered activity parameters', async () => 
 
   await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
   const request = onSave.mock.calls[0][0];
-  expect(request.inputs.findings.parameters).toEqual([
+  expect(request.stages[0].activities[0].parameters.parameters).toEqual([
     { name: 'severity', value: 'CRITICAL' },
   ]);
-  expect(request.inputs.findings.max_rows).toBe(50);
+  expect(request.stages[0].activities[0].parameters.max_rows).toBe(50);
   expect(
-    request.activities.map(
+    request.stages[1].activities.map(
       (activity: { parameters: { message: string } }) =>
         activity.parameters.message,
     ),
   ).toEqual(['updated first', 'second']);
+  expect(request.stages[1].activities[0].input).toBe('findings');
+  expect(request.stages[1].activities[0].output).toBe('first_notification');
 });
 
 it('shows activity descriptions in accessible tooltips instead of inline help text', async () => {
@@ -118,7 +169,7 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
     <WorkflowDialog
       open
       initial={initial}
-      activityTypes={['log']}
+      activityTypes={['query', 'log']}
       activitySchemas={schemas}
       dependentSchemas={{}}
       onClose={jest.fn()}

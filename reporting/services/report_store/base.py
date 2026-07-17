@@ -224,6 +224,7 @@ class ReportStore(ABC):
         enabled: bool,
         actions: list[dict[str, Any]],
         created_by: str,
+        stages: list[dict[str, Any]] | None = None,
         inputs: dict[str, Any] | None = None,
         activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem:
@@ -243,6 +244,7 @@ class ReportStore(ABC):
         actions: list[dict[str, Any]],
         updated_by: str,
         comment: str | None = None,
+        stages: list[dict[str, Any]] | None = None,
         inputs: dict[str, Any] | None = None,
         activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem | None:

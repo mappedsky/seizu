@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 import pytest
@@ -8,10 +9,12 @@ from temporalio.worker import Worker
 from reporting.temporal_workflows.configured_workflow import ConfiguredWorkflow
 from reporting.temporal_workflows.shared import (
     CodeWorkflowInputRequest,
+    CodeWorkflowOutputRequest,
     ConfiguredActivity,
     ConfiguredActivityInput,
+    ConfiguredActivityOutput,
     ConfiguredQueryInput,
-    ConfiguredQueryResult,
+    ConfiguredStage,
     ConfiguredWorkflowDefinition,
     ConfiguredWorkflowInvocation,
 )
@@ -23,8 +26,29 @@ async def _load(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowD
         workflow_id=invocation.workflow_id,
         creator_user_id="user-1",
         version=2,
-        inputs=[ConfiguredQueryInput(input_id="query", cypher="RETURN 1")],
-        activities=[ConfiguredActivity(type="log", input_id="query", parameters={})],
+        stages=[
+            ConfiguredStage(
+                activities=[
+                    ConfiguredActivity(
+                        type="query",
+                        input_id=None,
+                        output_id="first",
+                        parameters={"cypher": "RETURN 1"},
+                        requires_rows=False,
+                    ),
+                    ConfiguredActivity(
+                        type="query",
+                        input_id=None,
+                        output_id="second",
+                        parameters={"cypher": "RETURN 2"},
+                        requires_rows=False,
+                    ),
+                ]
+            ),
+            ConfiguredStage(
+                activities=[ConfiguredActivity(type="log", input_id="first", output_id="logged", parameters={})]
+            ),
+        ],
     )
 
 
@@ -39,23 +63,38 @@ async def _load_skipped(invocation: ConfiguredWorkflowInvocation) -> ConfiguredW
 
 
 @activity.defn(name="execute_configured_query")
-async def _query(value: ConfiguredQueryInput) -> ConfiguredQueryResult:
-    return ConfiguredQueryResult(input_id=value.input_id, rows=[{"details": {"id": 1}}])
+async def _query(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    return ConfiguredActivityOutput(
+        output_id=value.output_id,
+        value=[{"details": {"id": value.output_id}}],
+        metadata={"status": "completed", "row_count": 1},
+    )
+
+
+_settled: list[str] = []
 
 
 @activity.defn(name="execute_configured_query")
-async def _query_fails(value: ConfiguredQueryInput) -> ConfiguredQueryResult:
-    raise RuntimeError("query failed")
+async def _query_one_fails(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    if value.output_id == "first":
+        raise RuntimeError("query failed")
+    await asyncio.sleep(0.01)
+    _settled.append(value.output_id)
+    return ConfiguredActivityOutput(output_id=value.output_id, value=[], metadata={"status": "completed"})
 
 
 @activity.defn(name="execute_configured_query")
-async def _query_empty(value: ConfiguredQueryInput) -> ConfiguredQueryResult:
-    return ConfiguredQueryResult(input_id=value.input_id, rows=[])
+async def _query_empty(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    return ConfiguredActivityOutput(output_id=value.output_id, value=[], metadata={"status": "completed"})
 
 
 @activity.defn(name="execute_configured_activity")
-async def _action(value: ConfiguredActivityInput) -> dict:
-    return {"status": "completed", "rows": len(value.rows)}
+async def _action(value: ConfiguredActivityInput) -> ConfiguredActivityOutput:
+    return ConfiguredActivityOutput(
+        output_id=value.output_id,
+        value={"rows_logged": len(value.input_value)},
+        metadata={"status": "completed"},
+    )
 
 
 @activity.defn(name="record_configured_workflow_result")
@@ -69,12 +108,17 @@ async def _load_code(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWork
         workflow_id=invocation.workflow_id,
         creator_user_id="user-1",
         version=2,
-        activities=[
-            ConfiguredActivity(
-                type="workflow",
-                input_id=None,
-                parameters={"workflow": "example"},
-                requires_rows=False,
+        stages=[
+            ConfiguredStage(
+                activities=[
+                    ConfiguredActivity(
+                        type="workflow",
+                        input_id=None,
+                        output_id="child",
+                        parameters={"workflow": "example"},
+                        requires_rows=False,
+                    )
+                ]
             )
         ],
     )
@@ -86,14 +130,29 @@ async def _load_empty_code(invocation: ConfiguredWorkflowInvocation) -> Configur
         workflow_id=invocation.workflow_id,
         creator_user_id="user-1",
         version=2,
-        inputs=[ConfiguredQueryInput(input_id="query", cypher="RETURN 1")],
-        activities=[
-            ConfiguredActivity(
-                type="workflow",
-                input_id="query",
-                parameters={"workflow": "example"},
-                requires_rows=True,
-            )
+        stages=[
+            ConfiguredStage(
+                activities=[
+                    ConfiguredActivity(
+                        type="query",
+                        input_id=None,
+                        output_id="query",
+                        parameters={"cypher": "RETURN 1"},
+                        requires_rows=False,
+                    )
+                ]
+            ),
+            ConfiguredStage(
+                activities=[
+                    ConfiguredActivity(
+                        type="workflow",
+                        input_id="query",
+                        output_id="child",
+                        parameters={"workflow": "example"},
+                        requires_rows=True,
+                    )
+                ]
+            ),
         ],
     )
 
@@ -101,6 +160,15 @@ async def _load_empty_code(invocation: ConfiguredWorkflowInvocation) -> Configur
 @activity.defn(name="build_code_workflow_input")
 async def _build_code(value: CodeWorkflowInputRequest) -> dict:
     return {"workflow_id": value.workflow_id}
+
+
+@activity.defn(name="normalize_code_workflow_output")
+async def _normalize_code(value: CodeWorkflowOutputRequest) -> ConfiguredActivityOutput:
+    return ConfiguredActivityOutput(
+        output_id=value.output_id,
+        value=value.value,
+        metadata={"status": "completed", "workflow": value.workflow_name},
+    )
 
 
 @workflow.defn(name="example")
@@ -127,29 +195,38 @@ async def _execute(*activities):
             )
 
 
-async def test_configured_workflow_runs_queries_and_activities():
+async def test_stages_run_and_publish_named_outputs():
     result = await _execute(_load, _query, _action, _record)
     assert result["status"] == "completed"
-    assert result["input_rows"] == {"query": 1}
-    assert result["activity_results"] == [{"status": "completed", "rows": 1}]
+    assert result["activity_results"] == [
+        {"output": "first", "status": "completed", "row_count": 1},
+        {"output": "second", "status": "completed", "row_count": 1},
+        {"output": "logged", "status": "completed"},
+    ]
 
 
-async def test_configured_workflow_returns_skip_reason():
+async def test_returns_skip_reason():
     result = await _execute(_load_skipped)
     assert result["status"] == "skipped"
     assert result["skipped_reason"] == "disabled"
 
 
-async def test_configured_workflow_records_and_raises_failure():
+async def test_failed_stage_waits_for_started_siblings_and_stops():
+    _settled.clear()
     with pytest.raises(Exception):
-        await _execute(_load, _query_fails, _action, _record)
+        await _execute(_load, _query_one_fails, _action, _record)
+    assert _settled == ["second"]
 
 
-async def test_configured_workflow_runs_code_defined_child():
-    result = await _execute(_load_code, _build_code, _record)
-    assert result["activity_results"] == [{"status": "child-completed", "workflow_id": "workflow-1"}]
+async def test_runs_code_defined_child_and_normalizes_output():
+    result = await _execute(_load_code, _build_code, _normalize_code, _record)
+    assert result["activity_results"] == [{"output": "child", "status": "completed", "workflow": "example"}]
 
 
-async def test_configured_workflow_skips_row_dependent_child_without_rows():
+async def test_skips_row_dependent_child_without_rows():
     result = await _execute(_load_empty_code, _query_empty, _record)
-    assert result["activity_results"] == [{"status": "skipped", "reason": "input returned no rows"}]
+    assert result["activity_results"][-1] == {
+        "output": "child",
+        "status": "skipped",
+        "reason": "input returned no rows",
+    }

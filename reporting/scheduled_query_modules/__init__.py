@@ -61,6 +61,18 @@ class ModuleInterface:
         return []
 
     @staticmethod
+    def activity_description() -> str:
+        return "Runs a configured workflow activity."
+
+    @staticmethod
+    def activity_input_type() -> Any:
+        return list[dict[str, Any]]
+
+    @staticmethod
+    def activity_output_type() -> Any:
+        return dict[str, Any]
+
+    @staticmethod
     def validate_action_config(action_config: dict[str, Any]) -> str | None:
         """
         Optional module-specific validation beyond the generic required-field
@@ -75,7 +87,7 @@ class ModuleInterface:
         scheduled_query_id: str,
         action: ScheduledQueryAction,
         results: list[dict[str, Any]],
-    ) -> None | Awaitable[None]:
+    ) -> Any | Awaitable[Any]:
         """
         Called when a scheduled query configured to use this module has results.
 
@@ -127,7 +139,14 @@ def get_module(action_name: str) -> ModuleInterface:
 
     if action_name == "temporal" and "workflow" in _MODULES:
         return _MODULES["workflow"]
-    return _MODULES[action_name]
+    if action_name in _MODULES:
+        return _MODULES[action_name]
+    for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
+        module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+        name = module.action_name()
+        if name == action_name or (action_name == "workflow" and name == "temporal"):
+            return module
+    raise KeyError(action_name)
 
 
 def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:

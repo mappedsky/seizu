@@ -47,8 +47,10 @@ def _workflow_item(**updates):
         "scheduled_query_id": "workflow-1",
         "name": "Pipeline",
         "cypher": "",
-        "inputs": {"query": {"type": "query", "cypher": "RETURN 1"}},
-        "activities": [{"type": "log", "input": "query", "parameters": {}}],
+        "stages": [
+            {"activities": [{"type": "query", "output": "query", "parameters": {"cypher": "RETURN 1"}}]},
+            {"activities": [{"type": "log", "input": "query", "output": "logged", "parameters": {}}]},
+        ],
         "created_at": _NOW,
         "updated_at": _NOW,
         "created_by": "user-1",
@@ -64,8 +66,8 @@ async def test_load_configured_workflow_builds_definition(mocker):
     )
     result = await load_configured_workflow(ConfiguredWorkflowInvocation(workflow_id="workflow-1"))
     assert result.creator_user_id == "user-1"
-    assert result.inputs[0].input_id == "query"
-    assert result.activities[0].type == "log"
+    assert result.stages[0].activities[0].output_id == "query"
+    assert result.stages[1].activities[0].type == "log"
 
 
 async def test_load_configured_workflow_missing_and_disabled(mocker):
@@ -110,12 +112,17 @@ async def test_load_configured_workflow_watch_and_monthly_skips(mocker):
 
 async def test_load_configured_workflow_resolves_code_workflow_row_requirement(mocker):
     item = _workflow_item(
-        activities=[
+        stages=[
             {
-                "type": "workflow",
-                "parameters": {"workflow": "example"},
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {"workflow": "example"},
+                    }
+                ]
             }
-        ]
+        ],
     )
     mocker.patch(
         "reporting.temporal_workflows.activities.report_store.get_scheduled_query",
@@ -131,11 +138,13 @@ async def test_load_configured_workflow_resolves_code_workflow_row_requirement(m
         ),
     )
     result = await load_configured_workflow(ConfiguredWorkflowInvocation(workflow_id="workflow-1"))
-    assert result.activities[0].requires_rows is False
+    assert result.stages[0].activities[0].requires_rows is False
 
 
 def test_configured_activity_results_use_converter_safe_type_hints():
-    assert get_type_hints(execute_configured_activity)["return"] == dict[str, Any]
+    from reporting.temporal_workflows.shared import ConfiguredActivityOutput
+
+    assert get_type_hints(execute_configured_activity)["return"] is ConfiguredActivityOutput
     assert get_type_hints(build_code_workflow_input)["return"] is Any
 
 
@@ -156,12 +165,12 @@ async def test_execute_configured_query_converts_neo4j_records(mocker):
 
     result = await execute_configured_query(
         ConfiguredQueryInput(
-            input_id="findings",
+            output_id="findings",
             cypher="RETURN {id: 'CVE-1'} AS details",
         )
     )
 
-    assert result.rows == [{"details": {"id": "CVE-1"}}]
+    assert result.value == [{"details": {"id": "CVE-1"}}]
 
 
 async def test_build_code_workflow_input_preserves_legacy_projection(mocker):
@@ -181,7 +190,7 @@ async def test_build_code_workflow_input_preserves_legacy_projection(mocker):
             creator_user_id="user-1",
             workflow_name="example",
             parameters={"query_return_attribute": "payload", "max_rows": 1},
-            rows=[{"payload": {"id": 1}}, {"payload": {"id": 2}}, {"ignored": True}],
+            input_value=[{"payload": {"id": 1}}, {"payload": {"id": 2}}, {"ignored": True}],
         )
     )
 
@@ -198,7 +207,7 @@ async def test_build_code_workflow_input_validation_and_row_modes(mocker):
         creator_user_id="user-1",
         workflow_name="missing",
         parameters={},
-        rows=[{"id": 1}],
+        input_value=[{"id": 1}],
     )
     with pytest.raises(ApplicationError):
         await build_code_workflow_input(request)
@@ -220,8 +229,12 @@ async def test_build_code_workflow_input_validation_and_row_modes(mocker):
 
 
 async def test_execute_configured_activity_sync_and_async(mocker):
-    sync_handler = mocker.Mock()
-    module = SimpleNamespace(handle_results=sync_handler)
+    sync_handler = mocker.Mock(return_value={"rows_logged": 1})
+    module = SimpleNamespace(
+        handle_results=sync_handler,
+        activity_input_type=lambda: list[dict[str, Any]],
+        activity_output_type=lambda: dict[str, int],
+    )
     lookup = mocker.patch(
         "reporting.temporal_workflows.activities.scheduled_query_modules.get_module",
         return_value=module,
@@ -231,15 +244,21 @@ async def test_execute_configured_activity_sync_and_async(mocker):
     value = ConfiguredActivityInput(
         workflow_id="workflow-1",
         activity_type="log",
+        output_id="logged",
         parameters={},
-        rows=[{"id": 1}],
+        input_value=[{"id": 1}],
     )
     result = await execute_configured_activity(value)
-    assert result == {"status": "completed", "rows": 1}
+    assert result.output_id == "logged"
+    assert result.value == {"rows_logged": 1}
     sync_handler.assert_called_once()
 
-    async_handler = mocker.AsyncMock()
-    lookup.return_value = SimpleNamespace(handle_results=async_handler)
+    async_handler = mocker.AsyncMock(return_value={"rows_logged": 1})
+    lookup.return_value = SimpleNamespace(
+        handle_results=async_handler,
+        activity_input_type=lambda: list[dict[str, Any]],
+        activity_output_type=lambda: dict[str, int],
+    )
     await execute_configured_activity(value)
     async_handler.assert_awaited_once()
 

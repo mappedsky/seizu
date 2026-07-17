@@ -11,7 +11,7 @@ Seizu includes:
 
 * A configuration-driven react/mui frontend, with support for a dashboard, arbitrary reports, using a row/panel based layout with various panel types for visualizing data
 * An interactive **Query Console** for running ad-hoc Cypher queries, with graph, table, and raw result views, and a collapsible database schema browser showing available node labels, relationship types, and property keys
-* Temporal-backed **Workflows** that run named Cypher inputs on a time or graph-event schedule and pass their results through an ordered activity pipeline
+* Temporal-backed **Workflows** with sequential stages, parallel activities, named outputs, and time or graph-event schedules
 * An **MCP server** at ``/api/v1/mcp`` that exposes user-defined Cypher-backed tools to LLM agents such as Claude
 * A built-in **chat assistant** — an LLM agent that answers questions about your graph using the same tools and skills, with confirmation-gated writes, and can run headlessly on a schedule
 * A mechanism of providing SSO for Neo4j, when Seizu is placed behind an OAuth2 proxy

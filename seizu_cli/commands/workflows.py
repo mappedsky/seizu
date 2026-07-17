@@ -32,8 +32,9 @@ def _detail(data: dict[str, Any], as_json: bool) -> None:
     console.print(f"[bold]Name[/bold]: {data['name']}")
     console.print(f"[bold]Enabled[/bold]: {data.get('enabled', True)}")
     console.print(f"[bold]Version[/bold]: {data.get('current_version', data.get('version'))}")
-    console.print(f"[bold]Inputs[/bold]: {len(data.get('inputs', {}))}")
-    console.print(f"[bold]Activities[/bold]: {len(data.get('activities', []))}")
+    stages = data.get("stages", [])
+    console.print(f"[bold]Stages[/bold]: {len(stages)}")
+    console.print(f"[bold]Activities[/bold]: {sum(len(stage.get('activities', [])) for stage in stages)}")
     console.print(f"[bold]Schedule sync[/bold]: {data.get('schedule_sync_status', '')}")
 
 
@@ -51,15 +52,15 @@ def list_workflows(
         console.print_json(json.dumps(data))
         return
     table = Table(show_header=True, header_style="bold")
-    for column in ("ID", "Name", "Enabled", "Inputs", "Activities", "Schedule sync", "Version"):
+    for column in ("ID", "Name", "Enabled", "Stages", "Activities", "Schedule sync", "Version"):
         table.add_column(column)
     for item in data.get("workflows", []):
         table.add_row(
             item["workflow_id"],
             item["name"],
             "yes" if item.get("enabled", True) else "no",
-            str(len(item.get("inputs", {}))),
-            str(len(item.get("activities", []))),
+            str(len(item.get("stages", []))),
+            str(sum(len(stage.get("activities", [])) for stage in item.get("stages", []))),
             item.get("schedule_sync_status", ""),
             str(item.get("current_version", "")),
         )

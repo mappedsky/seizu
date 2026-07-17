@@ -394,15 +394,13 @@ def _seed_workflows(config: Any, force: bool, dry_run: bool) -> None:
     created = updated = skipped = 0
     for definition in config.workflows:
         payload = definition.model_dump()
-        for query_input in payload["inputs"].values():
-            query_input["cypher"] = config.queries.get(
-                query_input["cypher"],
-                query_input["cypher"],
-            )
+        for stage in payload["stages"]:
+            for activity in stage["activities"]:
+                if activity["type"] == "query":
+                    cypher = activity["parameters"].get("cypher", "")
+                    activity["parameters"]["cypher"] = config.queries.get(cypher, cypher)
         current = existing.get(definition.name)
-        comparable = {
-            key: payload[key] for key in ("name", "schedule", "watch_scans", "enabled", "inputs", "activities")
-        }
+        comparable = {key: payload[key] for key in ("name", "schedule", "watch_scans", "enabled", "stages")}
         changed = force or current is None or any(current.get(key) != value for key, value in comparable.items())
         if not changed:
             console.print(f"  [dim][skip][/dim] workflow '{definition.name}' (unchanged)")
@@ -818,8 +816,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
                             "schedule",
                             "watch_scans",
                             "enabled",
-                            "inputs",
-                            "activities",
+                            "stages",
                         )
                     }
                 )

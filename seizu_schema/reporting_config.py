@@ -620,25 +620,28 @@ class ScheduledQueryParam(BaseModel):
     )
 
 
-class WorkflowQueryInput(BaseModel):
-    """A named Cypher input evaluated at the start of a workflow run."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["query"] = "query"
-    cypher: str = Field(description="The read-only Cypher query to execute.")
-    parameters: list[ScheduledQueryParam] = Field(default_factory=list)
-    max_rows: int | None = Field(default=None, ge=1)
-
-
 class WorkflowActivity(BaseModel):
-    """One ordered activity in a configurable workflow."""
+    """One activity in a configurable workflow stage."""
 
     model_config = ConfigDict(extra="forbid")
 
     type: str = Field(description="Registered activity type.")
-    input: str | None = Field(default=None)
+    input: str | None = Field(default=None, description="Output from an activity in an earlier stage.")
+    output: str = Field(description="Globally unique name for this activity's output.")
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("output")
+    @classmethod
+    def validate_output(cls, value: str) -> str:
+        return validate_lower_snake_id(value)
+
+
+class WorkflowStage(BaseModel):
+    """Activities that start in parallel after the preceding stage settles."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activities: list[WorkflowActivity] = Field(min_length=1)
 
 
 class ScheduleSpec(BaseModel):
@@ -827,22 +830,26 @@ class Workflow(BaseModel):
     schedule: ScheduleSpec | None = None
     watch_scans: list[ScheduledQueryWatchScan] = Field(default_factory=list)
     enabled: bool = True
-    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
-    activities: list[WorkflowActivity] = Field(default_factory=list)
-
-    @field_validator("inputs")
-    @classmethod
-    def validate_input_ids(cls, value: dict[str, WorkflowQueryInput]) -> dict[str, WorkflowQueryInput]:
-        for input_id in value:
-            validate_lower_snake_id(input_id)
-        return value
+    stages: list[WorkflowStage] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_references(self) -> "Workflow":
         validate_exclusive_triggers(None, self.schedule, self.watch_scans)
-        for position, activity in enumerate(self.activities, start=1):
-            if activity.input is not None and activity.input not in self.inputs:
-                raise ValueError(f"activity {position} references unknown input '{activity.input}'")
+        available: set[str] = set()
+        all_outputs: set[str] = set()
+        for stage_position, stage in enumerate(self.stages, start=1):
+            stage_outputs: set[str] = set()
+            for activity_position, activity in enumerate(stage.activities, start=1):
+                if activity.output in all_outputs or activity.output in stage_outputs:
+                    raise ValueError(f"duplicate activity output '{activity.output}'")
+                if activity.input is not None and activity.input not in available:
+                    raise ValueError(
+                        f"stage {stage_position} activity {activity_position} references output"
+                        f" '{activity.input}' that is not produced by an earlier stage"
+                    )
+                stage_outputs.add(activity.output)
+            available.update(stage_outputs)
+            all_outputs.update(stage_outputs)
         return self
 
 

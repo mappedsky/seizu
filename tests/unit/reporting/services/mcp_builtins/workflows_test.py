@@ -17,8 +17,17 @@ def _item():
             "scheduled_query_id": "workflow-1",
             "name": "Pipeline",
             "cypher": "",
-            "inputs": {"query": {"type": "query", "cypher": "RETURN 1"}},
-            "activities": [],
+            "stages": [
+                {
+                    "activities": [
+                        {
+                            "type": "query",
+                            "output": "query",
+                            "parameters": {"cypher": "RETURN 1"},
+                        }
+                    ]
+                }
+            ],
             "created_at": _NOW,
             "updated_at": _NOW,
             "created_by": "user-1",
@@ -45,8 +54,17 @@ def _user():
 def _args():
     return {
         "name": "Pipeline",
-        "inputs": {"query": {"type": "query", "cypher": "RETURN 1"}},
-        "activities": [],
+        "stages": [
+            {
+                "activities": [
+                    {
+                        "type": "query",
+                        "output": "query",
+                        "parameters": {"cypher": "RETURN 1"},
+                    }
+                ]
+            }
+        ],
     }
 
 

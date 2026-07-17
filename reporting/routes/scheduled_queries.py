@@ -167,7 +167,7 @@ async def list_scheduled_query_workflow_runs(
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    if not any(activity.type == "workflow" for activity in workflows.normalized_activities(item)):
+    if not workflows.has_code_workflow(item):
         return WorkflowRunListResponse(runs=[])
     try:
         runs = await temporal_runs.list_workflow_runs(sq_id, limit=limit)
@@ -199,7 +199,7 @@ async def get_scheduled_query_workflow_run(
     item = await report_store.get_scheduled_query(sq_id)
     if not item:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
-    if not any(activity.type == "workflow" for activity in workflows.normalized_activities(item)):
+    if not workflows.has_code_workflow(item):
         raise HTTPException(status_code=404, detail="Workflow run not found")
     try:
         detail = await temporal_runs.get_workflow_run_detail(

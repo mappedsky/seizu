@@ -16,18 +16,26 @@ class ConfiguredWorkflowInvocation:
 
 @dataclass
 class ConfiguredQueryInput:
-    input_id: str
+    output_id: str
     cypher: str
     parameters: dict[str, Any] = field(default_factory=dict)
     max_rows: int = 200
+    has_input: bool = False
+    input_value: Any = None
 
 
 @dataclass
 class ConfiguredActivity:
     type: str
     input_id: str | None
+    output_id: str
     parameters: dict[str, Any] = field(default_factory=dict)
     requires_rows: bool = True
+
+
+@dataclass
+class ConfiguredStage:
+    activities: list[ConfiguredActivity] = field(default_factory=list)
 
 
 @dataclass
@@ -35,20 +43,16 @@ class ConfiguredWorkflowDefinition:
     workflow_id: str
     creator_user_id: str
     version: int
-    inputs: list[ConfiguredQueryInput] = field(default_factory=list)
-    activities: list[ConfiguredActivity] = field(default_factory=list)
+    stages: list[ConfiguredStage] = field(default_factory=list)
     skipped_reason: str | None = None
 
 
 @dataclass
-class ConfiguredQueryResult:
-    input_id: str
-    # ``Any`` is intentional for replay compatibility. Before the query
-    # activity normalized Neo4j Records, Temporal encoded each Record as a
-    # positional JSON list. Existing histories must remain decodable after the
-    # worker upgrade; new activity results always contain plain dictionaries.
-    rows: list[Any] = field(default_factory=list)
-    truncated: bool = False
+class ConfiguredActivityOutput:
+    output_id: str
+    # ``Any`` is required for converter-safe, module-defined JSON values.
+    value: Any = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,7 +60,6 @@ class ConfiguredWorkflowResult:
     status: str
     version: int = 0
     skipped_reason: str | None = None
-    input_rows: dict[str, int] = field(default_factory=dict)
     activity_results: list[Any] = field(default_factory=list)
 
 
@@ -64,8 +67,9 @@ class ConfiguredWorkflowResult:
 class ConfiguredActivityInput:
     workflow_id: str
     activity_type: str
+    output_id: str
     parameters: dict[str, Any]
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    input_value: Any = None
 
 
 @dataclass
@@ -74,7 +78,14 @@ class CodeWorkflowInputRequest:
     creator_user_id: str
     workflow_name: str
     parameters: dict[str, Any]
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    input_value: Any = None
+
+
+@dataclass
+class CodeWorkflowOutputRequest:
+    workflow_name: str
+    output_id: str
+    value: Any = None
 
 
 def normalize_configured_rows(

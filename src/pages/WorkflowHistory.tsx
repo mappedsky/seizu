@@ -84,11 +84,10 @@ export default function WorkflowHistory() {
                 try {
                   await updateWorkflow(id, {
                     name: version.name,
-                    inputs: version.inputs,
+                    stages: version.stages,
                     schedule: version.schedule,
                     watch_scans: version.watch_scans,
                     enabled: version.enabled,
-                    activities: version.activities,
                     comment: `Restored from version ${version.version}`,
                   });
                   navigate(`/app/workflows/${id}`);
@@ -110,8 +109,12 @@ export default function WorkflowHistory() {
             {version.comment ?? 'No comment'}
           </Typography>
           <Typography variant="body2">
-            {Object.keys(version.inputs).length} input(s),{' '}
-            {version.activities.length} activity(ies)
+            {version.stages.length} stage(s),{' '}
+            {version.stages.reduce(
+              (total, stage) => total + stage.activities.length,
+              0,
+            )}{' '}
+            activity(ies)
           </Typography>
         </Paper>
       ))}

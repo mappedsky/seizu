@@ -21,6 +21,7 @@ async def test_config(mocker):
 
 
 async def test_config_features_chat_disabled_by_default(mocker):
+    mocker.patch("reporting.settings.CHAT_ENABLED", False)
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get("/api/v1/config")
@@ -40,6 +41,10 @@ async def test_config_serves_dependent_action_schemas(mocker):
     config = ret.json()
     assert "workflow" in config["workflow_activity_types"]
     assert "workflow" in config["workflow_activity_schemas"]
+    workflow_variants = config["workflow_activity_definitions"]["workflow"]["variants"]
+    assert workflow_variants["cve_repo_report"]["input_required"] is True
+    assert workflow_variants["cartography_sync"]["input_required"] is False
+    assert workflow_variants["cartography_sync"]["output_schema"]["type"] == "object"
     assert "workflow" not in config["scheduled_query_action_types"]
 
 

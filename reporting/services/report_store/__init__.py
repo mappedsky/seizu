@@ -215,10 +215,13 @@ async def create_scheduled_query(
     enabled: bool,
     actions: list[dict[str, Any]],
     created_by: str,
+    stages: list[dict[str, Any]] | None = None,
     inputs: dict[str, Any] | None = None,
     activities: list[dict[str, Any]] | None = None,
 ) -> ScheduledQueryItem:
     kwargs: dict[str, Any] = {}
+    if stages is not None:
+        kwargs["stages"] = stages
     if inputs is not None:
         kwargs["inputs"] = inputs
     if activities is not None:
@@ -249,10 +252,13 @@ async def update_scheduled_query(
     actions: list[dict[str, Any]],
     updated_by: str,
     comment: str | None = None,
+    stages: list[dict[str, Any]] | None = None,
     inputs: dict[str, Any] | None = None,
     activities: list[dict[str, Any]] | None = None,
 ) -> ScheduledQueryItem | None:
     kwargs: dict[str, Any] = {}
+    if stages is not None:
+        kwargs["stages"] = stages
     if inputs is not None:
         kwargs["inputs"] = inputs
     if activities is not None:

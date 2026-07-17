@@ -89,7 +89,14 @@ export interface Report {
 export interface ActionConfigFieldDef {
   name: string;
   label: string;
-  type: 'string' | 'text' | 'number' | 'boolean' | 'string_list' | 'select';
+  type:
+    | 'string'
+    | 'text'
+    | 'number'
+    | 'boolean'
+    | 'string_list'
+    | 'select'
+    | 'parameters';
   required?: boolean;
   description?: string;
   default?: unknown;
@@ -105,6 +112,21 @@ export interface ActionConfigDependentSchema {
   schemas: Record<string, ActionConfigFieldDef[]>;
 }
 
+export interface WorkflowActivityDefinition {
+  description: string;
+  input_required: boolean;
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
+  config_fields: ActionConfigFieldDef[];
+  variants?: Record<
+    string,
+    Pick<
+      WorkflowActivityDefinition,
+      'input_required' | 'input_schema' | 'output_schema'
+    >
+  >;
+}
+
 export interface SeizuConfig {
   scheduled_query_action_types: string[];
   scheduled_query_action_schemas: Record<string, ActionConfigFieldDef[]>;
@@ -114,6 +136,7 @@ export interface SeizuConfig {
   >;
   workflow_activity_types?: string[];
   workflow_activity_schemas?: Record<string, ActionConfigFieldDef[]>;
+  workflow_activity_definitions?: Record<string, WorkflowActivityDefinition>;
   workflow_activity_dependent_schemas?: Record<
     string,
     ActionConfigDependentSchema

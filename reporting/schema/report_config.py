@@ -6,8 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from reporting.schema.reporting_config import (
     ScheduleSpec,
     Workflow,
-    WorkflowActivity,
-    WorkflowQueryInput,
+    WorkflowStage,
     validate_exclusive_triggers,
 )
 
@@ -187,8 +186,11 @@ class ScheduledQueryItem(BaseModel):
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default_factory=list)
-    # Canonical workflow fields. Legacy scheduled-query records omit these and
-    # are normalized on read by reporting.services.workflows.
+    # Canonical workflow field. Legacy scheduled-query records omit this and
+    # are projected on read by reporting.services.workflows.
+    stages: list[dict[str, Any]] | None = None
+    # Branch-only fields retained so databases created by an earlier revision
+    # remain readable. They are not accepted as workflow definitions.
     inputs: dict[str, Any] | None = None
     activities: list[dict[str, Any]] | None = None
     current_version: int = 0
@@ -246,6 +248,7 @@ class ScheduledQueryVersion(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
     inputs: dict[str, Any] | None = None
     activities: list[dict[str, Any]] | None = None
+    stages: list[dict[str, Any]] | None = None
     created_at: str
     created_by: str
     comment: str | None = None
@@ -300,11 +303,10 @@ class WorkflowItem(BaseModel):
 
     workflow_id: str
     name: str
-    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
+    stages: list[WorkflowStage]
     schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
-    activities: list[WorkflowActivity] = Field(default_factory=list)
     current_version: int = 0
     created_at: str
     updated_at: str
@@ -324,11 +326,10 @@ class WorkflowVersion(BaseModel):
     workflow_id: str
     name: str
     version: int
-    inputs: dict[str, WorkflowQueryInput] = Field(default_factory=dict)
+    stages: list[WorkflowStage]
     schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
-    activities: list[WorkflowActivity] = Field(default_factory=list)
     created_at: str
     created_by: str
     comment: str | None = None
@@ -424,7 +425,7 @@ class ActionConfigFieldDef(BaseModel):
 
     name: str
     label: str
-    type: Literal["string", "text", "number", "boolean", "string_list", "select"]
+    type: Literal["string", "text", "number", "boolean", "string_list", "select", "parameters"]
     required: bool = False
     description: str | None = None
     default: Any | None = None

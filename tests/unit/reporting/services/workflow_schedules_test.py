@@ -13,8 +13,17 @@ def _item(**updates):
         "scheduled_query_id": "workflow-1",
         "name": "Workflow",
         "cypher": "",
-        "inputs": {"query": {"type": "query", "cypher": "RETURN 1"}},
-        "activities": [],
+        "stages": [
+            {
+                "activities": [
+                    {
+                        "type": "query",
+                        "output": "query",
+                        "parameters": {"cypher": "RETURN 1"},
+                    }
+                ]
+            }
+        ],
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
         "created_by": "user-1",

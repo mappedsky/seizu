@@ -14,6 +14,7 @@ import re
 from html import escape
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -38,10 +39,12 @@ from reporting.temporal_workflows.shared import (
     CiFixInput,
     CiFixResult,
     CodeWorkflowInputRequest,
+    CodeWorkflowOutputRequest,
     ConfiguredActivity,
     ConfiguredActivityInput,
+    ConfiguredActivityOutput,
     ConfiguredQueryInput,
-    ConfiguredQueryResult,
+    ConfiguredStage,
     ConfiguredWorkflowDefinition,
     ConfiguredWorkflowInvocation,
     DependencyRemediationInput,
@@ -100,64 +103,89 @@ async def load_configured_workflow(
             version=item.current_version,
             skipped_reason="monthly candidate did not match",
         )
-    inputs = []
-    for input_id, query_input in workflow_service.normalized_inputs(item).items():
-        inputs.append(
-            ConfiguredQueryInput(
-                input_id=input_id,
-                cypher=query_input.cypher,
-                parameters={value.name: value.value for value in query_input.parameters},
-                max_rows=query_input.max_rows or settings.WORKFLOW_QUERY_MAX_ROWS,
+    stages = []
+    for stage in workflow_service.normalized_stages(item):
+        activities = []
+        for value in stage.activities:
+            parameters = dict(value.parameters)
+            if value.type == "query":
+                parameters.setdefault("max_rows", settings.WORKFLOW_QUERY_MAX_ROWS)
+            activities.append(
+                ConfiguredActivity(
+                    type=value.type,
+                    input_id=value.input,
+                    output_id=value.output,
+                    parameters=parameters,
+                    requires_rows=(
+                        spec.requires_rows
+                        if value.type == "workflow"
+                        and isinstance((workflow_name := value.parameters.get("workflow")), str)
+                        and (spec := get_enabled_workflow_spec(workflow_name)) is not None
+                        else value.type not in ("query", "workflow")
+                    ),
+                )
             )
-        )
-    activities = [
-        ConfiguredActivity(
-            type=value.type,
-            input_id=value.input,
-            parameters=value.parameters,
-            requires_rows=(
-                spec.requires_rows
-                if value.type == "workflow"
-                and isinstance((workflow_name := value.parameters.get("workflow")), str)
-                and (spec := get_enabled_workflow_spec(workflow_name)) is not None
-                else True
-            ),
-        )
-        for value in workflow_service.normalized_activities(item)
-    ]
+        stages.append(ConfiguredStage(activities=activities))
     return ConfiguredWorkflowDefinition(
         workflow_id=invocation.workflow_id,
         creator_user_id=item.created_by,
         version=item.current_version,
-        inputs=inputs,
-        activities=activities,
+        stages=stages,
     )
 
 
 @activity.defn
-async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredQueryResult:
-    records = await run_query_with_retry(input.cypher, input.parameters)
+async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    parameters = dict(input.parameters)
+    if input.has_input:
+        parameters["input"] = input.input_value
+    records = await run_query_with_retry(input.cypher, parameters)
     rows = [dict(record) for record in records]
     truncated = len(records) > input.max_rows
-    return ConfiguredQueryResult(
-        input_id=input.input_id,
-        rows=rows[: input.max_rows],
-        truncated=truncated,
+    return ConfiguredActivityOutput(
+        output_id=input.output_id,
+        value=rows[: input.max_rows],
+        metadata={
+            "status": "completed",
+            "row_count": min(len(rows), input.max_rows),
+            "truncated": truncated,
+        },
     )
 
 
 @activity.defn
-async def execute_configured_activity(input: ConfiguredActivityInput) -> dict[str, Any]:
+async def execute_configured_activity(input: ConfiguredActivityInput) -> ConfiguredActivityOutput:
     module = scheduled_query_modules.get_module(input.activity_type)
+    input_annotation = getattr(module, "activity_input_type", lambda: list[dict[str, Any]])()
+    try:
+        validated_input = TypeAdapter(input_annotation).validate_python(input.input_value)
+    except ValidationError as exc:
+        raise ApplicationError(
+            f"Input for activity '{input.activity_type}' does not match its schema: {exc}",
+            non_retryable=True,
+        ) from exc
     action = ScheduledQueryAction(
         action_type=input.activity_type,
         action_config=input.parameters,
     )
     if inspect.iscoroutinefunction(module.handle_results):
-        await module.handle_results(input.workflow_id, action, input.rows)
+        value = await module.handle_results(input.workflow_id, action, validated_input)
     else:
-        await asyncio.to_thread(module.handle_results, input.workflow_id, action, input.rows)
-    return {"status": "completed", "rows": len(input.rows)}
+        value = await asyncio.to_thread(module.handle_results, input.workflow_id, action, validated_input)
+    output_annotation = getattr(module, "activity_output_type", lambda: dict[str, Any])()
+    try:
+        adapter = TypeAdapter(output_annotation)
+        value = adapter.dump_python(adapter.validate_python(value), mode="json")
+    except ValidationError as exc:
+        raise ApplicationError(
+            f"Output from activity '{input.activity_type}' does not match its schema: {exc}",
+            non_retryable=True,
+        ) from exc
+    return ConfiguredActivityOutput(
+        output_id=input.output_id,
+        value=value,
+        metadata={"status": "completed"},
+    )
 
 
 @activity.defn
@@ -168,14 +196,23 @@ async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
             f"Unknown or disabled code-defined workflow '{input.workflow_name}'",
             non_retryable=True,
         )
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     if spec.requires_rows:
+        if not isinstance(input.input_value, list):
+            raise ApplicationError(
+                f"Workflow '{input.workflow_name}' requires a row-list input",
+                non_retryable=True,
+            )
         attribute = input.parameters.get("query_return_attribute", "details")
         max_rows = int(input.parameters.get("max_rows") or settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS)
         if isinstance(attribute, str) and attribute:
-            rows = [value for row in input.rows if isinstance((value := row.get(attribute)), dict)][:max_rows]
+            rows = [
+                value
+                for row in input.input_value
+                if isinstance(row, dict) and isinstance((value := row.get(attribute)), dict)
+            ][:max_rows]
         else:
-            rows = input.rows[:max_rows]
+            rows = [row for row in input.input_value if isinstance(row, dict)][:max_rows]
     return spec.build_input(
         WorkflowInputContext(
             scheduled_query_id=input.workflow_id,
@@ -184,6 +221,29 @@ async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
             chat_timeout_seconds=settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS,
             action_config=input.parameters,
         )
+    )
+
+
+@activity.defn
+async def normalize_code_workflow_output(input: CodeWorkflowOutputRequest) -> ConfiguredActivityOutput:
+    spec = get_enabled_workflow_spec(input.workflow_name)
+    if spec is None:
+        raise ApplicationError(
+            f"Unknown or disabled code-defined workflow '{input.workflow_name}'",
+            non_retryable=True,
+        )
+    try:
+        adapter = TypeAdapter(spec.output_type)
+        value = adapter.dump_python(adapter.validate_python(input.value), mode="json")
+    except ValidationError as exc:
+        raise ApplicationError(
+            f"Output from workflow '{input.workflow_name}' does not match its schema: {exc}",
+            non_retryable=True,
+        ) from exc
+    return ConfiguredActivityOutput(
+        output_id=input.output_id,
+        value=value,
+        metadata={"status": "completed", "workflow": input.workflow_name},
     )
 
 

@@ -104,6 +104,7 @@ class ScheduledQueryRecord(SQLModel, table=True):  # type: ignore
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    stages: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     inputs: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     activities: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     current_version: int = 0
@@ -134,6 +135,7 @@ class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
     actions: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    stages: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     inputs: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     activities: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     created_at: str
@@ -954,6 +956,7 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
+                    stages=r.stages,
                     inputs=r.inputs,
                     activities=r.activities,
                     current_version=r.current_version,
@@ -988,6 +991,7 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=record.watch_scans or [],
                 enabled=record.enabled,
                 actions=record.actions or [],
+                stages=record.stages,
                 inputs=record.inputs,
                 activities=record.activities,
                 current_version=record.current_version,
@@ -1016,6 +1020,7 @@ class SQLModelReportStore(ReportStore):
         enabled: bool,
         actions: list[dict[str, Any]],
         created_by: str,
+        stages: list[dict[str, Any]] | None = None,
         inputs: dict[str, Any] | None = None,
         activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem:
@@ -1033,6 +1038,7 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=watch_scans,
                 enabled=enabled,
                 actions=actions,
+                stages=stages,
                 inputs=inputs,
                 activities=activities,
                 current_version=version,
@@ -1053,6 +1059,7 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
+                    stages=stages,
                     inputs=inputs,
                     activities=activities,
                     created_at=now,
@@ -1071,6 +1078,7 @@ class SQLModelReportStore(ReportStore):
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
+            stages=stages,
             inputs=inputs,
             activities=activities,
             current_version=version,
@@ -1097,6 +1105,7 @@ class SQLModelReportStore(ReportStore):
         actions: list[dict[str, Any]],
         updated_by: str,
         comment: str | None = None,
+        stages: list[dict[str, Any]] | None = None,
         inputs: dict[str, Any] | None = None,
         activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem | None:
@@ -1121,6 +1130,7 @@ class SQLModelReportStore(ReportStore):
             record.watch_scans = watch_scans
             record.enabled = enabled
             record.actions = actions
+            record.stages = stages
             record.inputs = inputs
             record.activities = activities
             record.schedule_sync_status = "pending"
@@ -1140,6 +1150,7 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=watch_scans,
                     enabled=enabled,
                     actions=actions,
+                    stages=stages,
                     inputs=inputs,
                     activities=activities,
                     created_at=now,
@@ -1158,6 +1169,7 @@ class SQLModelReportStore(ReportStore):
             watch_scans=watch_scans,
             enabled=enabled,
             actions=actions,
+            stages=stages,
             inputs=inputs,
             activities=activities,
             current_version=version,
@@ -1197,6 +1209,7 @@ class SQLModelReportStore(ReportStore):
                     watch_scans=r.watch_scans or [],
                     enabled=r.enabled,
                     actions=r.actions or [],
+                    stages=r.stages,
                     inputs=r.inputs,
                     activities=r.activities,
                     created_at=r.created_at,
@@ -1231,6 +1244,7 @@ class SQLModelReportStore(ReportStore):
                 watch_scans=row.watch_scans or [],
                 enabled=row.enabled,
                 actions=row.actions or [],
+                stages=row.stages,
                 inputs=row.inputs,
                 activities=row.activities,
                 created_at=row.created_at,

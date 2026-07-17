@@ -36,6 +36,7 @@ async def get_config() -> dict:
     workflow_activity_schemas = {
         name: [field.model_dump() for field in fields] for name, fields in workflows.activity_schemas().items()
     }
+    workflow_activity_definitions = workflows.activity_definitions()
     workflow_dependent_schemas = {}
     if workflow_schemas:
         workflow_dependent_schemas["workflow"] = {
@@ -50,6 +51,7 @@ async def get_config() -> dict:
         "scheduled_query_action_dependent_schemas": dependent_schemas,
         "workflow_activity_types": sorted(workflow_activity_schemas),
         "workflow_activity_schemas": workflow_activity_schemas,
+        "workflow_activity_definitions": workflow_activity_definitions,
         "workflow_activity_dependent_schemas": workflow_dependent_schemas,
         # Feature flags consumed by the frontend to show/hide whole features.
         "features": {

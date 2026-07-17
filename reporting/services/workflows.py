@@ -1,16 +1,14 @@
-"""Canonical workflow model, legacy conversion, and persistence helpers.
-
-The report store keeps the existing scheduled-query key/table namespace for a
-compatibility release. New records use the explicit ``inputs`` and
-``activities`` fields; old records are normalized at this boundary.
-"""
+"""Canonical staged workflows, legacy projection, and persistence helpers."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from reporting import scheduled_query_modules
+from pydantic import TypeAdapter
+
+from reporting import scheduled_query_modules, settings
 from reporting.schema.report_config import (
+    ActionConfigFieldDef,
     CreateWorkflowRequest,
     ScheduledQueryItem,
     ScheduledQueryVersion,
@@ -20,58 +18,73 @@ from reporting.schema.report_config import (
 from reporting.schema.reporting_config import (
     ScheduledQueryAction,
     WorkflowActivity,
-    WorkflowQueryInput,
+    WorkflowStage,
 )
 from reporting.services import report_store
 from reporting.services.query_validator import validate_query
-from reporting.temporal_workflows import get_enabled_workflow_spec
+from reporting.temporal_workflows import enabled_workflow_names, get_enabled_workflow_spec
 
-LEGACY_INPUT_ID = "query"
-
-
-def _legacy_input(cypher: str, params: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "type": "query",
-        "cypher": cypher,
-        "parameters": params,
-    }
+LEGACY_QUERY_OUTPUT = "query"
 
 
-def normalized_inputs(item: ScheduledQueryItem | ScheduledQueryVersion) -> dict[str, WorkflowQueryInput]:
-    raw = item.inputs
-    if raw is None:
-        raw = {LEGACY_INPUT_ID: _legacy_input(item.cypher, item.params)}
-    return {name: WorkflowQueryInput.model_validate(value) for name, value in raw.items()}
+def _legacy_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowStage]:
+    if item.inputs is not None or item.activities is not None:
+        raise ValueError(
+            "This workflow uses the superseded feature-branch inputs/activities shape; recreate or reseed it"
+        )
+    stages = [
+        WorkflowStage(
+            activities=[
+                WorkflowActivity(
+                    type="query",
+                    output=LEGACY_QUERY_OUTPUT,
+                    parameters={
+                        "cypher": item.cypher,
+                        "parameters": item.params,
+                    },
+                )
+            ]
+        )
+    ]
+    for position, action in enumerate(item.actions, start=1):
+        action_type = str(action.get("action_type", ""))
+        parameters = dict(action.get("action_config") or {})
+        activity_type = "workflow" if action_type == "temporal" else action_type
+        input_name: str | None = LEGACY_QUERY_OUTPUT
+        if activity_type == "workflow":
+            workflow_name = parameters.get("workflow")
+            spec = get_enabled_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
+            if spec is not None and not spec.requires_rows:
+                input_name = None
+        stages.append(
+            WorkflowStage(
+                activities=[
+                    WorkflowActivity(
+                        type=activity_type,
+                        input=input_name,
+                        output=f"action_{position}",
+                        parameters=parameters,
+                    )
+                ]
+            )
+        )
+    return stages
 
 
-def _legacy_activity(action: dict[str, Any]) -> WorkflowActivity:
-    action_type = str(action.get("action_type", ""))
-    parameters = dict(action.get("action_config") or {})
-    activity_type = "workflow" if action_type == "temporal" else action_type
-    input_id: str | None = LEGACY_INPUT_ID
-    if activity_type == "workflow":
-        workflow_name = parameters.get("workflow")
-        spec = get_enabled_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
-        if spec is not None and not spec.requires_rows:
-            input_id = None
-    return WorkflowActivity(type=activity_type, input=input_id, parameters=parameters)
-
-
-def normalized_activities(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowActivity]:
-    if item.activities is not None:
-        return [WorkflowActivity.model_validate(value) for value in item.activities]
-    return [_legacy_activity(action) for action in item.actions]
+def normalized_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowStage]:
+    if item.stages is not None:
+        return [WorkflowStage.model_validate(stage) for stage in item.stages]
+    return _legacy_stages(item)
 
 
 def item_to_workflow(item: ScheduledQueryItem) -> WorkflowItem:
     return WorkflowItem(
         workflow_id=item.scheduled_query_id,
         name=item.name,
-        inputs=normalized_inputs(item),
+        stages=normalized_stages(item),
         schedule=item.schedule,
         watch_scans=item.watch_scans,
         enabled=item.enabled,
-        activities=normalized_activities(item),
         current_version=item.current_version,
         created_at=item.created_at,
         updated_at=item.updated_at,
@@ -91,76 +104,154 @@ def version_to_workflow(version: ScheduledQueryVersion) -> WorkflowVersion:
         workflow_id=version.scheduled_query_id,
         name=version.name,
         version=version.version,
-        inputs=normalized_inputs(version),
+        stages=normalized_stages(version),
         schedule=version.schedule,
         watch_scans=version.watch_scans,
         enabled=version.enabled,
-        activities=normalized_activities(version),
         created_at=version.created_at,
         created_by=version.created_by,
         comment=version.comment,
     )
 
 
-def _activity_schemas() -> dict[str, list[Any]]:
-    schemas = scheduled_query_modules.get_action_schemas()
-    if "temporal" in schemas:
-        temporal_schema = schemas.pop("temporal")
-        schemas.setdefault("workflow", temporal_schema)
-    return schemas
+def _module_description(module: Any, fallback: str) -> str:
+    value = getattr(module, "activity_description", None)
+    return str(value()) if callable(value) else fallback
+
+
+def _module_type_schema(module: Any, method: str, fallback: Any) -> dict[str, Any]:
+    value = getattr(module, method, None)
+    annotation = value() if callable(value) else fallback
+    return TypeAdapter(annotation).json_schema()
+
+
+def activity_definitions() -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {
+        "query": {
+            "description": "Runs a read-only Cypher query and outputs its rows.",
+            "input_required": False,
+            "input_schema": {},
+            "output_schema": TypeAdapter(list[dict[str, Any]]).json_schema(),
+            "config_fields": [
+                ActionConfigFieldDef(
+                    name="cypher",
+                    label="Cypher",
+                    type="text",
+                    required=True,
+                    description="Read-only Cypher to execute.",
+                ).model_dump(),
+                ActionConfigFieldDef(
+                    name="parameters",
+                    label="Query parameters",
+                    type="parameters",
+                    description="Static Cypher parameters; input is reserved for the referenced output.",
+                ).model_dump(),
+                ActionConfigFieldDef(
+                    name="max_rows",
+                    label="Max rows",
+                    type="number",
+                    default=settings.WORKFLOW_QUERY_MAX_ROWS,
+                    description="Maximum rows retained in the output.",
+                ).model_dump(),
+            ],
+        }
+    }
+    for name in scheduled_query_modules.get_configured_action_names():
+        module = scheduled_query_modules.get_module(name)
+        canonical = "workflow" if name == "temporal" else name
+        definitions[canonical] = {
+            "description": _module_description(module, f"Runs the {canonical} activity."),
+            "input_required": canonical != "workflow",
+            "input_schema": _module_type_schema(module, "activity_input_type", list[dict[str, Any]]),
+            "output_schema": _module_type_schema(module, "activity_output_type", dict[str, Any]),
+            "config_fields": [field.model_dump() for field in module.action_config_schema()],
+        }
+        if canonical == "workflow":
+            definitions[canonical]["variants"] = {
+                workflow_name: {
+                    "input_required": spec.requires_rows,
+                    "input_schema": (TypeAdapter(list[dict[str, Any]]).json_schema() if spec.requires_rows else {}),
+                    "output_schema": TypeAdapter(spec.output_type).json_schema(),
+                }
+                for workflow_name in enabled_workflow_names()
+                if (spec := get_enabled_workflow_spec(workflow_name)) is not None
+            }
+    return definitions
+
+
+def activity_schemas() -> dict[str, list[ActionConfigFieldDef]]:
+    return {
+        name: [ActionConfigFieldDef.model_validate(field) for field in definition["config_fields"]]
+        for name, definition in activity_definitions().items()
+    }
 
 
 def _activity_validators() -> dict[str, Any]:
     validators = scheduled_query_modules.get_action_validators()
     if "temporal" in validators:
-        temporal_validator = validators.pop("temporal")
-        validators.setdefault("workflow", temporal_validator)
+        validators["workflow"] = validators.pop("temporal")
     return validators
 
 
-def activity_schemas() -> dict[str, list[Any]]:
-    """Return configured activity schemas, using canonical activity names."""
-    return _activity_schemas()
-
-
-def validate_activity_configs(body: CreateWorkflowRequest) -> str | None:
-    schemas = _activity_schemas()
-    validators = _activity_validators()
-    for position, activity in enumerate(body.activities, start=1):
-        if activity.type not in schemas:
-            return f"Unknown activity type '{activity.type}'. Valid types: {sorted(schemas)}."
-        if activity.type != "workflow" and activity.input is None:
-            return f"Activity {position} ('{activity.type}') requires an input."
-        if activity.type == "workflow":
-            workflow_name = activity.parameters.get("workflow")
-            spec = get_enabled_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
-            if spec is not None and spec.requires_rows and activity.input is None:
-                return f"Activity {position} ('workflow') requires an input for '{workflow_name}'."
-        for field in schemas[activity.type]:
-            if not field.required:
-                continue
-            value = activity.parameters.get(field.name)
-            if value is None or value == "" or value == []:
-                return f"Activity {position} ('{activity.type}') is missing required field '{field.name}'."
-            if field.type == "boolean" and value is not True:
-                return f"Activity {position} ('{activity.type}') requires '{field.name}' to be accepted."
-        validator = validators.get(activity.type)
-        if validator is not None:
-            error = validator(activity.parameters)
-            if error:
-                return f"Activity {position} ('{activity.type}'): {error}"
-    return None
+def _query_parameters(activity: WorkflowActivity) -> tuple[list[dict[str, Any]], str | None]:
+    raw = activity.parameters.get("parameters", [])
+    if not isinstance(raw, list):
+        return [], "query parameters must be a list"
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for value in raw:
+        if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+            return [], "each query parameter requires a name"
+        name = value["name"]
+        if not name:
+            return [], "query parameter names must not be empty"
+        if name == "input":
+            return [], "query parameter 'input' is reserved for the referenced activity output"
+        if name in seen:
+            return [], f"duplicate query parameter '{name}'"
+        seen.add(name)
+        result.append(value)
+    return result, None
 
 
 async def validate_definition(body: CreateWorkflowRequest) -> str | None:
-    error = validate_activity_configs(body)
-    if error:
-        return error
-    for input_id, query_input in body.inputs.items():
-        result = await validate_query(query_input.cypher)
-        if result.has_errors:
-            messages = "; ".join(str(error) for error in result.errors)
-            return f"Input '{input_id}' is invalid: {messages}"
+    definitions = activity_definitions()
+    validators = _activity_validators()
+    for stage_position, stage in enumerate(body.stages, start=1):
+        for activity_position, activity in enumerate(stage.activities, start=1):
+            label = f"Stage {stage_position} activity {activity_position} ('{activity.type}')"
+            definition = definitions.get(activity.type)
+            if definition is None:
+                return f"{label} has an unknown type. Valid types: {sorted(definitions)}."
+            input_required = bool(definition["input_required"])
+            if activity.type == "workflow":
+                workflow_name = activity.parameters.get("workflow")
+                spec = get_enabled_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
+                input_required = bool(spec and spec.requires_rows)
+            if input_required and activity.input is None:
+                return f"{label} requires an input."
+            for field in definition["config_fields"]:
+                field_def = ActionConfigFieldDef.model_validate(field)
+                if not field_def.required:
+                    continue
+                value = activity.parameters.get(field_def.name)
+                if value is None or value == "" or value == []:
+                    return f"{label} is missing required field '{field_def.name}'."
+                if field_def.type == "boolean" and value is not True:
+                    return f"{label} requires '{field_def.name}' to be accepted."
+            if activity.type == "query":
+                _, error = _query_parameters(activity)
+                if error:
+                    return f"{label}: {error}."
+                cypher = activity.parameters.get("cypher")
+                if not isinstance(cypher, str) or not cypher.strip():
+                    return f"{label} requires Cypher."
+                validation = await validate_query(cypher)
+                if validation.has_errors:
+                    return f"{label} is invalid: {'; '.join(str(error) for error in validation.errors)}"
+            validator = validators.get(activity.type)
+            if validator is not None and (error := validator(activity.parameters)):
+                return f"{label}: {error}"
     return None
 
 
@@ -175,17 +266,12 @@ async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
         enabled=body.enabled,
         actions=[],
         created_by=created_by,
-        inputs={name: value.model_dump() for name, value in body.inputs.items()},
-        activities=[value.model_dump() for value in body.activities],
+        stages=[stage.model_dump() for stage in body.stages],
     )
     return item_to_workflow(item)
 
 
-async def update(
-    workflow_id: str,
-    body: CreateWorkflowRequest,
-    updated_by: str,
-) -> WorkflowItem | None:
+async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str) -> WorkflowItem | None:
     item = await report_store.update_scheduled_query(
         sq_id=workflow_id,
         name=body.name,
@@ -198,68 +284,25 @@ async def update(
         actions=[],
         updated_by=updated_by,
         comment=body.comment,
-        inputs={name: value.model_dump() for name, value in body.inputs.items()},
-        activities=[value.model_dump() for value in body.activities],
+        stages=[stage.model_dump() for stage in body.stages],
     )
     return item_to_workflow(item) if item is not None else None
 
 
 def legacy_representable(item: ScheduledQueryItem | ScheduledQueryVersion) -> bool:
-    """Whether a canonical record can be projected without losing meaning."""
-    if item.inputs is None and item.activities is None:
-        return True
-    inputs = normalized_inputs(item)
-    if len(inputs) != 1:
-        return False
-    only_input = next(iter(inputs))
-    return all(activity.input in (only_input, None) for activity in normalized_activities(item))
+    return item.stages is None and item.inputs is None and item.activities is None
 
 
 def project_legacy_item(item: ScheduledQueryItem) -> ScheduledQueryItem:
-    if item.inputs is None and item.activities is None:
-        return item
-    inputs = normalized_inputs(item)
-    input_id, query_input = next(iter(inputs.items()))
-    actions = []
-    for activity in normalized_activities(item):
-        actions.append(
-            {
-                "action_type": "temporal" if activity.type == "workflow" else activity.type,
-                "action_config": activity.parameters,
-            }
-        )
-    return item.model_copy(
-        update={
-            "cypher": query_input.cypher,
-            "params": [value.model_dump() for value in query_input.parameters],
-            "actions": actions,
-            "inputs": None,
-            "activities": None,
-        }
-    )
+    return item
 
 
 def project_legacy_version(version: ScheduledQueryVersion) -> ScheduledQueryVersion:
-    if version.inputs is None and version.activities is None:
-        return version
-    inputs = normalized_inputs(version)
-    _, query_input = next(iter(inputs.items()))
-    actions = [
-        {
-            "action_type": "temporal" if activity.type == "workflow" else activity.type,
-            "action_config": activity.parameters,
-        }
-        for activity in normalized_activities(version)
-    ]
-    return version.model_copy(
-        update={
-            "cypher": query_input.cypher,
-            "params": [value.model_dump() for value in query_input.parameters],
-            "actions": actions,
-            "inputs": None,
-            "activities": None,
-        }
-    )
+    return version
+
+
+def has_code_workflow(item: ScheduledQueryItem | ScheduledQueryVersion) -> bool:
+    return any(activity.type == "workflow" for stage in normalized_stages(item) for activity in stage.activities)
 
 
 def activity_as_legacy_action(activity: WorkflowActivity) -> ScheduledQueryAction:

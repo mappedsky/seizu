@@ -8,7 +8,7 @@ from reporting.temporal_workflows import (
     get_workflow_spec,
 )
 from reporting.temporal_workflows.shared import (
-    ConfiguredQueryResult,
+    ConfiguredActivityOutput,
     CveDependencyRemediationInput,
     group_rows_by_repo,
     group_rows_by_repo_package,
@@ -23,21 +23,21 @@ def test_normalize_configured_rows_recovers_legacy_record_payload():
     ) == [{"payload": {"id": "CVE-1"}}]
 
 
-async def test_configured_query_result_decodes_pre_fix_temporal_payload():
+async def test_configured_activity_output_decodes_arbitrary_json_values():
     converter = DataConverter.default
     payloads = await converter.encode(
         [
             {
-                "input_id": "findings",
-                "rows": [[{"id": "CVE-1"}]],
-                "truncated": False,
+                "output_id": "findings",
+                "value": [[{"id": "CVE-1"}]],
+                "metadata": {"truncated": False},
             }
         ]
     )
-    result = (await converter.decode(payloads, [ConfiguredQueryResult]))[0]
+    result = (await converter.decode(payloads, [ConfiguredActivityOutput]))[0]
 
-    assert isinstance(result, ConfiguredQueryResult)
-    assert result.rows == [[{"id": "CVE-1"}]]
+    assert isinstance(result, ConfiguredActivityOutput)
+    assert result.value == [[{"id": "CVE-1"}]]
 
 
 def test_registry_contains_cve_repo_report():

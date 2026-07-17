@@ -30,6 +30,18 @@ def action_name() -> str:
     return "temporal"
 
 
+def activity_description() -> str:
+    return "Runs a selected code-defined child workflow."
+
+
+def activity_input_type() -> Any:
+    return list[dict[str, Any]]
+
+
+def activity_output_type() -> Any:
+    return dict[str, Any]
+
+
 def action_config_schema() -> list[ActionConfigFieldDef]:
     return [
         ActionConfigFieldDef(

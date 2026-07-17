@@ -8,17 +8,15 @@ export interface WorkflowParameter {
   value: unknown;
 }
 
-export interface WorkflowQueryInput {
-  type: 'query';
-  cypher: string;
-  parameters: WorkflowParameter[];
-  max_rows?: number | null;
-}
-
 export interface WorkflowActivity {
   type: string;
   input: string | null;
+  output: string;
   parameters: Record<string, unknown>;
+}
+
+export interface WorkflowStage {
+  activities: WorkflowActivity[];
 }
 
 export interface WorkflowWatchScan {
@@ -30,11 +28,10 @@ export interface WorkflowWatchScan {
 export interface WorkflowItem {
   workflow_id: string;
   name: string;
-  inputs: Record<string, WorkflowQueryInput>;
+  stages: WorkflowStage[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;
-  activities: WorkflowActivity[];
   current_version: number;
   created_at: string;
   updated_at: string;
@@ -50,11 +47,10 @@ export interface WorkflowItem {
 
 export interface WorkflowRequest {
   name: string;
-  inputs: Record<string, WorkflowQueryInput>;
+  stages: WorkflowStage[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;
-  activities: WorkflowActivity[];
   comment?: string | null;
 }
 

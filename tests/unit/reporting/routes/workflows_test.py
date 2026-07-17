@@ -31,8 +31,17 @@ def _stored_item():
             "scheduled_query_id": "workflow-1",
             "name": "Notify",
             "cypher": "",
-            "inputs": {"critical": {"type": "query", "cypher": "RETURN 1 AS details"}},
-            "activities": [{"type": "log", "input": "critical", "parameters": {}}],
+            "stages": [
+                {
+                    "activities": [
+                        {
+                            "type": "query",
+                            "output": "critical",
+                            "parameters": {"cypher": "RETURN 1 AS details"},
+                        }
+                    ]
+                }
+            ],
             "current_version": 1,
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
@@ -52,8 +61,7 @@ async def test_list_workflows_returns_canonical_shape(mocker):
     assert response.status_code == 200
     workflow = response.json()["workflows"][0]
     assert workflow["workflow_id"] == "workflow-1"
-    assert list(workflow["inputs"]) == ["critical"]
-    assert workflow["activities"][0]["type"] == "log"
+    assert workflow["stages"][0]["activities"][0]["output"] == "critical"
 
 
 async def test_create_workflow_reconciles_schedule(mocker):
@@ -76,8 +84,17 @@ async def test_create_workflow_reconciles_schedule(mocker):
     )
     body = {
         "name": "Notify",
-        "inputs": {"critical": {"type": "query", "cypher": "RETURN 1 AS details"}},
-        "activities": [{"type": "log", "input": "critical", "parameters": {}}],
+        "stages": [
+            {
+                "activities": [
+                    {
+                        "type": "query",
+                        "output": "critical",
+                        "parameters": {"cypher": "RETURN 1 AS details"},
+                    }
+                ]
+            }
+        ],
     }
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.post("/api/v1/workflows", json=body)
@@ -111,8 +128,7 @@ async def test_get_update_and_delete_workflow(mocker):
     reconcile = mocker.patch("reporting.routes.workflows.workflow_schedules.reconcile_by_id", new=AsyncMock())
     body = {
         "name": "Updated",
-        "inputs": {"critical": {"type": "query", "cypher": "RETURN 1"}},
-        "activities": [],
+        "stages": [{"activities": [{"type": "query", "output": "critical", "parameters": {"cypher": "RETURN 1"}}]}],
     }
     assert (await _request("PUT", "/api/v1/workflows/workflow-1", json=body)).status_code == 200
     reconcile.assert_awaited_once_with("workflow-1")
@@ -135,7 +151,10 @@ async def test_create_validation_error(mocker):
     response = await _request(
         "POST",
         "/api/v1/workflows",
-        json={"name": "Bad", "inputs": {}, "activities": []},
+        json={
+            "name": "Bad",
+            "stages": [{"activities": [{"type": "query", "output": "query", "parameters": {"cypher": "RETURN 1"}}]}],
+        },
     )
     assert response.status_code == 400
 

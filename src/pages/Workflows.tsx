@@ -19,6 +19,7 @@ import {
   ActionConfigDependentSchema,
   ActionConfigFieldDef,
   SeizuConfig,
+  WorkflowActivityDefinition,
 } from 'src/config.context';
 import { usePermissions } from 'src/hooks/usePermissions';
 import {
@@ -54,8 +55,9 @@ export default function Workflows() {
   const [activityConfig, setActivityConfig] = useState<{
     types: string[];
     schemas: Record<string, ActionConfigFieldDef[]>;
+    definitions: Record<string, WorkflowActivityDefinition>;
     dependent: Record<string, ActionConfigDependentSchema>;
-  }>({ types: [], schemas: {}, dependent: {} });
+  }>({ types: [], schemas: {}, definitions: {}, dependent: {} });
 
   useEffect(() => {
     fetch('/api/v1/config')
@@ -64,6 +66,7 @@ export default function Workflows() {
         setActivityConfig({
           types: config.workflow_activity_types ?? [],
           schemas: config.workflow_activity_schemas ?? {},
+          definitions: config.workflow_activity_definitions ?? {},
           dependent: config.workflow_activity_dependent_schemas ?? {},
         }),
       )
@@ -106,7 +109,7 @@ export default function Workflows() {
         key: 'pipeline',
         label: 'Pipeline',
         render: (item) =>
-          `${Object.keys(item.inputs).length} input(s), ${item.activities.length} activity(ies)`,
+          `${item.stages.length} stage(s), ${item.stages.reduce((total, stage) => total + stage.activities.length, 0)} activity(ies)`,
       },
       {
         key: 'status',
@@ -251,6 +254,7 @@ export default function Workflows() {
           initial={editTarget}
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
+          activityDefinitions={activityConfig.definitions}
           dependentSchemas={activityConfig.dependent}
           onClose={() => setDialogOpen(false)}
           onSave={save}

@@ -29,7 +29,7 @@ from seizu_schema.reporting_config import (
     ToolsetDef,  # noqa: F401
     Workflow,  # noqa: F401
     WorkflowActivity,  # noqa: F401
-    WorkflowQueryInput,  # noqa: F401
+    WorkflowStage,  # noqa: F401
     dump_yaml,  # noqa: F401
     load_file,  # noqa: F401
     output_json_schema,  # noqa: F401

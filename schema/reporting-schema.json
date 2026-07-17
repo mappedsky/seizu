@@ -1243,30 +1243,25 @@
                     "title": "Enabled",
                     "type": "boolean"
                 },
-                "inputs": {
-                    "additionalProperties": {
-                        "$ref": "#/$defs/WorkflowQueryInput"
-                    },
-                    "title": "Inputs",
-                    "type": "object"
-                },
-                "activities": {
+                "stages": {
                     "items": {
-                        "$ref": "#/$defs/WorkflowActivity"
+                        "$ref": "#/$defs/WorkflowStage"
                     },
-                    "title": "Activities",
+                    "minItems": 1,
+                    "title": "Stages",
                     "type": "array"
                 }
             },
             "required": [
-                "name"
+                "name",
+                "stages"
             ],
             "title": "Workflow",
             "type": "object"
         },
         "WorkflowActivity": {
             "additionalProperties": false,
-            "description": "One ordered activity in a configurable workflow.",
+            "description": "One activity in a configurable workflow stage.",
             "properties": {
                 "type": {
                     "description": "Registered activity type.",
@@ -1283,7 +1278,13 @@
                         }
                     ],
                     "default": null,
+                    "description": "Output from an activity in an earlier stage.",
                     "title": "Input"
+                },
+                "output": {
+                    "description": "Globally unique name for this activity's output.",
+                    "title": "Output",
+                    "type": "string"
                 },
                 "parameters": {
                     "additionalProperties": true,
@@ -1292,51 +1293,29 @@
                 }
             },
             "required": [
-                "type"
+                "type",
+                "output"
             ],
             "title": "WorkflowActivity",
             "type": "object"
         },
-        "WorkflowQueryInput": {
+        "WorkflowStage": {
             "additionalProperties": false,
-            "description": "A named Cypher input evaluated at the start of a workflow run.",
+            "description": "Activities that start in parallel after the preceding stage settles.",
             "properties": {
-                "type": {
-                    "const": "query",
-                    "default": "query",
-                    "title": "Type",
-                    "type": "string"
-                },
-                "cypher": {
-                    "description": "The read-only Cypher query to execute.",
-                    "title": "Cypher",
-                    "type": "string"
-                },
-                "parameters": {
+                "activities": {
                     "items": {
-                        "$ref": "#/$defs/ScheduledQueryParam"
+                        "$ref": "#/$defs/WorkflowActivity"
                     },
-                    "title": "Parameters",
+                    "minItems": 1,
+                    "title": "Activities",
                     "type": "array"
-                },
-                "max_rows": {
-                    "anyOf": [
-                        {
-                            "minimum": 1,
-                            "type": "integer"
-                        },
-                        {
-                            "type": "null"
-                        }
-                    ],
-                    "default": null,
-                    "title": "Max Rows"
                 }
             },
             "required": [
-                "cypher"
+                "activities"
             ],
-            "title": "WorkflowQueryInput",
+            "title": "WorkflowStage",
             "type": "object"
         }
     },

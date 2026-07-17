@@ -21,6 +21,7 @@ import {
   ActionConfigDependentSchema,
   ActionConfigFieldDef,
   SeizuConfig,
+  WorkflowActivityDefinition,
 } from 'src/config.context';
 import { usePermissions } from 'src/hooks/usePermissions';
 import {
@@ -52,8 +53,9 @@ export default function WorkflowView() {
   const [activityConfig, setActivityConfig] = useState<{
     types: string[];
     schemas: Record<string, ActionConfigFieldDef[]>;
+    definitions: Record<string, WorkflowActivityDefinition>;
     dependent: Record<string, ActionConfigDependentSchema>;
-  }>({ types: [], schemas: {}, dependent: {} });
+  }>({ types: [], schemas: {}, definitions: {}, dependent: {} });
 
   useEffect(() => {
     fetch('/api/v1/config')
@@ -62,6 +64,7 @@ export default function WorkflowView() {
         setActivityConfig({
           types: config.workflow_activity_types ?? [],
           schemas: config.workflow_activity_schemas ?? {},
+          definitions: config.workflow_activity_definitions ?? {},
           dependent: config.workflow_activity_dependent_schemas ?? {},
         }),
       )
@@ -167,8 +170,10 @@ export default function WorkflowView() {
             color={workflow.enabled ? 'success' : 'default'}
           />
           <Chip label={`Version ${workflow.current_version}`} />
-          <Chip label={`${Object.keys(workflow.inputs).length} inputs`} />
-          <Chip label={`${workflow.activities.length} activities`} />
+          <Chip label={`${workflow.stages.length} stages`} />
+          <Chip
+            label={`${workflow.stages.reduce((total, stage) => total + stage.activities.length, 0)} activities`}
+          />
         </Stack>
         <Typography color="text.secondary">
           Last run:{' '}
@@ -179,32 +184,7 @@ export default function WorkflowView() {
         </Typography>
       </Paper>
       <Typography component="h2" variant="h5" sx={{ mb: 1 }}>
-        Query inputs
-      </Typography>
-      {Object.entries(workflow.inputs).map(([inputId, input]) => (
-        <Paper key={inputId} variant="outlined" sx={{ p: 2, mb: 2 }}>
-          <Typography variant="h6">{inputId}</Typography>
-          <Box
-            component="pre"
-            sx={{
-              whiteSpace: 'pre-wrap',
-              overflowWrap: 'anywhere',
-              bgcolor: 'action.hover',
-              p: 1.5,
-              borderRadius: 1,
-            }}
-          >
-            {input.cypher}
-          </Box>
-          {input.parameters.length > 0 && (
-            <Typography variant="body2">
-              Parameters: {JSON.stringify(input.parameters)}
-            </Typography>
-          )}
-        </Paper>
-      ))}
-      <Typography component="h2" variant="h5" sx={{ mb: 1 }}>
-        Ordered activities
+        Stages
       </Typography>
       <Stack
         divider={<Divider flexItem />}
@@ -212,22 +192,22 @@ export default function WorkflowView() {
         variant="outlined"
         sx={{ mb: 3 }}
       >
-        {workflow.activities.length === 0 && (
-          <Typography sx={{ p: 2 }} color="text.secondary">
-            No activities.
-          </Typography>
-        )}
-        {workflow.activities.map((activity, index) => (
-          <Box key={`${activity.type}-${index}`} sx={{ p: 2 }}>
-            <Typography variant="subtitle1">
-              {index + 1}. {activity.type}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Input: {activity.input ?? 'none'}
-            </Typography>
-            <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
-              {JSON.stringify(activity.parameters)}
-            </Typography>
+        {workflow.stages.map((stage, stageIndex) => (
+          <Box key={stageIndex} sx={{ p: 2 }}>
+            <Typography variant="h6">Stage {stageIndex + 1}</Typography>
+            {stage.activities.map((activity, activityIndex) => (
+              <Box key={activity.output} sx={{ mt: 1 }}>
+                <Typography variant="subtitle1">
+                  {activityIndex + 1}. {activity.type} → {activity.output}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Input: {activity.input ?? 'none'}
+                </Typography>
+                <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+                  {JSON.stringify(activity.parameters)}
+                </Typography>
+              </Box>
+            ))}
           </Box>
         ))}
       </Stack>
@@ -262,6 +242,7 @@ export default function WorkflowView() {
           initial={workflow}
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
+          activityDefinitions={activityConfig.definitions}
           dependentSchemas={activityConfig.dependent}
           onClose={() => setEditOpen(false)}
           onSave={async (request: WorkflowRequest) => {

@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Seizu's configurable [Workflows](workflows.html) run on Temporal. Their ordered
-`workflow` activity can hand a named input's rows to a durable, code-defined
-child workflow. The first built-in child workflow, `cve_repo_report`, runs an
+Seizu's configurable [Workflows](workflows.html) run on Temporal. A
+`workflow` activity can hand an earlier stage's named output to a durable,
+code-defined child workflow. The first built-in child workflow, `cve_repo_report`, runs an
 AI chat session per affected repository that evaluates newly discovered CVEs
 and creates or updates a versioned findings report.
 
@@ -19,7 +19,7 @@ stored workflow ── Temporal Schedule ──> Temporal server (task queue: se
                                + activities and schedule reconciliation)
 ```
 
-- A **Temporal Schedule** starts the configurable parent workflow. Its named queries run in parallel, activities run sequentially, and a `workflow` activity starts and awaits the selected child workflow.
+- A **Temporal Schedule** starts the configurable parent workflow. Stages run sequentially, activities within a stage run in parallel, and a `workflow` activity starts and awaits the selected child workflow.
 - The **Temporal server** in local development is the lightweight CLI dev server (`temporal server start-dev`, in-memory). The Web UI is at `http://localhost:8233`.
 - The **Seizu temporal worker** (`python -m reporting.temporal_worker`) hosts the workflow and activity code. Activities own all I/O: resolving the creator's identity, rendering skills, driving the chat agent, and storing results.
 

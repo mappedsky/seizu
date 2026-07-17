@@ -123,8 +123,8 @@ async def test_initialize_migrates_legacy_scheduled_query_tables(mocker):
     async with engine.connect() as conn:
         query_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_queries)"))}
         version_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))}
-    assert {"inputs", "activities", "schedule_sync_status"} <= query_columns
-    assert {"inputs", "activities"} <= version_columns
+    assert {"inputs", "activities", "stages", "schedule_sync_status"} <= query_columns
+    assert {"inputs", "activities", "stages"} <= version_columns
     await engine.dispose()
 
 

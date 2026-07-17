@@ -2328,142 +2328,154 @@ skillsets:
 
 workflows:
   - name: Recently published HIGH/CRITICAL CVEs
-    inputs:
-      recent_cves:
-        type: query
-        cypher: |-
-          MATCH (s:SyncMetadata)
-          WHERE s.grouptype = "CVE" AND s.syncedtype IN $syncedtype
-          WITH datetime({epochSeconds: s.lastupdated}) - duration({hours: 24}) AS feedupdatetime
-          MATCH (c:CVEMetadata)
-          WHERE (datetime(c.published_date)) > feedupdatetime AND c.base_severity IN $base_severity
-          RETURN {id: c.id, base_severity: c.base_severity, base_score: c.base_score, description: c.description} AS details
-        parameters:
-          - name: syncedtype
-            value:
-              - recent
-          - name: base_severity
-            value:
-              - HIGH
-              - CRITICAL
     schedule:
       type: interval
       interval_minutes: 1
     enabled: True
-    activities:
-      - type: log
-        input: recent_cves
-        parameters:
-          message: Recently published HIGH/CRITICAL CVEs
-          level: info
-          log_attrs:
-            - id
-            - base_severity
-            - base_score
-            - description
+    stages:
+      - activities:
+          - type: query
+            output: recent_cves
+            parameters:
+              cypher: |-
+                MATCH (s:SyncMetadata)
+                WHERE s.grouptype = "CVE" AND s.syncedtype IN $syncedtype
+                WITH datetime({epochSeconds: s.lastupdated}) - duration({hours: 24}) AS feedupdatetime
+                MATCH (c:CVEMetadata)
+                WHERE (datetime(c.published_date)) > feedupdatetime AND c.base_severity IN $base_severity
+                RETURN {id: c.id, base_severity: c.base_severity, base_score: c.base_score, description: c.description} AS details
+              parameters:
+                - name: syncedtype
+                  value:
+                    - recent
+                - name: base_severity
+                  value:
+                    - HIGH
+                    - CRITICAL
+      - activities:
+          - type: log
+            input: recent_cves
+            output: logged_recent_cves
+            parameters:
+              message: Recently published HIGH/CRITICAL CVEs
+              level: info
+              log_attrs:
+                - id
+                - base_severity
+                - base_score
+                - description
 
   - name: CVE counts by severity
-    inputs:
-      severity_counts:
-        type: query
-        cypher: |-
-          MATCH (c:CVEMetadata)
-          WHERE c.base_severity IS NOT NULL
-          WITH c.base_severity AS severity, count(c.id) AS total
-          RETURN {severity: severity, total: total} AS details
     schedule:
       type: interval
       interval_minutes: 60
     enabled: true
-    activities:
-      - type: statsd
-        input: severity_counts
-        parameters:
-          metric: cves.count
-          value_field: total
-          tag_fields:
-            - severity
+    stages:
+      - activities:
+          - type: query
+            output: severity_counts
+            parameters:
+              cypher: |-
+                MATCH (c:CVEMetadata)
+                WHERE c.base_severity IS NOT NULL
+                WITH c.base_severity AS severity, count(c.id) AS total
+                RETURN {severity: severity, total: total} AS details
+      - activities:
+          - type: statsd
+            input: severity_counts
+            output: emitted_severity_metrics
+            parameters:
+              metric: cves.count
+              value_field: total
+              tag_fields:
+                - severity
 
   - name: New CVEs affecting repositories
-    inputs:
-      repository_cves:
-        type: query
-        cypher: |-
-          MATCH (sm:SyncMetadata)
-          WHERE sm.grouptype = "GitHubOrganization"
-            AND sm.syncedtype = "GitHubOrganization"
-            AND toString(sm.groupid) = "https://github.com/mappedsky"
-          WITH datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
-          MATCH (r:GitHubRepository)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
-          WHERE s.created_at IS NOT NULL
-            AND datetime(s.created_at) > window_start
-            AND coalesce(r.archived, false) = false
-            AND coalesce(r.disabled, false) = false
-          MATCH (c:CVEMetadata {id: s.cve_id})
-          RETURN DISTINCT {
-            repo: r.fullname,
-            cve_id: c.id,
-            severity: c.base_severity,
-            score: c.base_score,
-            description: c.description,
-            package: s.dependency_package_name,
-            patched_version: s.first_patched_version,
-            url: s.html_url,
-            created_at: s.created_at
-          } AS details
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
         groupid: https://github.com/mappedsky
     enabled: true
-    activities:
-      - type: workflow
-        input: repository_cves
-        parameters:
-          workflow: cve_repo_report
+    stages:
+      - activities:
+          - type: query
+            output: repository_cves
+            parameters:
+              cypher: |-
+                MATCH (sm:SyncMetadata)
+                WHERE sm.grouptype = "GitHubOrganization"
+                  AND sm.syncedtype = "GitHubOrganization"
+                  AND toString(sm.groupid) = "https://github.com/mappedsky"
+                WITH datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+                MATCH (r:GitHubRepository)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
+                WHERE s.created_at IS NOT NULL
+                  AND datetime(s.created_at) > window_start
+                  AND coalesce(r.archived, false) = false
+                  AND coalesce(r.disabled, false) = false
+                MATCH (c:CVEMetadata {id: s.cve_id})
+                RETURN DISTINCT {
+                  repo: r.fullname,
+                  cve_id: c.id,
+                  severity: c.base_severity,
+                  score: c.base_score,
+                  description: c.description,
+                  package: s.dependency_package_name,
+                  patched_version: s.first_patched_version,
+                  url: s.html_url,
+                  created_at: s.created_at
+                } AS details
+      - activities:
+          - type: workflow
+            input: repository_cves
+            output: cve_reports
+            parameters:
+              workflow: cve_repo_report
 
   - name: New CVE dependencies requiring remediation
-    inputs:
-      vulnerable_dependencies:
-        type: query
-        cypher: |-
-          MATCH (sm:SyncMetadata)
-          WHERE sm.grouptype = "GitHubOrganization"
-            AND sm.syncedtype = "GitHubOrganization"
-          WITH toString(sm.groupid) AS org_id,
-               datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
-          MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
-          WHERE o.id = org_id
-          MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
-          WHERE s.created_at IS NOT NULL
-            AND datetime(s.created_at) > window_start
-            AND coalesce(r.archived, false) = false
-            AND coalesce(r.disabled, false) = false
-            AND s.dependency_package_name IS NOT NULL
-          MATCH (c:CVEMetadata {id: s.cve_id})
-          RETURN DISTINCT {
-            repo: r.fullname,
-            default_branch: r.defaultbranch,
-            package: s.dependency_package_name,
-            ecosystem: s.dependency_package_ecosystem,
-            manifest_path: s.dependency_manifest_path,
-            vulnerable_version_range: s.vulnerable_version_range,
-            patched_version: s.first_patched_version,
-            cve_id: c.id,
-            severity: c.base_severity,
-            score: c.base_score,
-            summary: s.advisory_summary,
-            url: s.html_url,
-            created_at: s.created_at
-          } AS details
     # Any GitHub organization sync (no groupid → matches all orgs); each org's
     # own SyncMetadata window is applied to its repositories in the query.
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
     enabled: true
-    activities:
-      - type: workflow
-        input: vulnerable_dependencies
-        parameters:
-          workflow: cve_dependency_remediation
+    stages:
+      - activities:
+          - type: query
+            output: vulnerable_dependencies
+            parameters:
+              cypher: |-
+                MATCH (sm:SyncMetadata)
+                WHERE sm.grouptype = "GitHubOrganization"
+                  AND sm.syncedtype = "GitHubOrganization"
+                WITH toString(sm.groupid) AS org_id,
+                     datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+                MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
+                WHERE o.id = org_id
+                MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
+                WHERE s.created_at IS NOT NULL
+                  AND datetime(s.created_at) > window_start
+                  AND coalesce(r.archived, false) = false
+                  AND coalesce(r.disabled, false) = false
+                  AND s.dependency_package_name IS NOT NULL
+                MATCH (c:CVEMetadata {id: s.cve_id})
+                RETURN DISTINCT {
+                  repo: r.fullname,
+                  default_branch: r.defaultbranch,
+                  package: s.dependency_package_name,
+                  ecosystem: s.dependency_package_ecosystem,
+                  manifest_path: s.dependency_manifest_path,
+                  vulnerable_version_range: s.vulnerable_version_range,
+                  patched_version: s.first_patched_version,
+                  cve_id: c.id,
+                  severity: c.base_severity,
+                  score: c.base_score,
+                  summary: s.advisory_summary,
+                  url: s.html_url,
+                  created_at: s.created_at
+                } AS details
+      - activities:
+          - type: workflow
+            input: vulnerable_dependencies
+            output: remediation_results
+            parameters:
+              workflow: cve_dependency_remediation

@@ -294,7 +294,7 @@ The sandbox delegation feature lets the chat agent run Python code, execute shel
 ### Scheduled queries
 
 * ``WORKFLOW_ACTIVITY_MODULES``: Comma-separated Python import locations for activities hosted by the Temporal worker; defaults to SQS, Slack, StatsD, and the code-defined ``workflow`` activity.
-* ``WORKFLOW_QUERY_MAX_ROWS``: Default maximum rows retained for each named query input; default: ``200``.
+* ``WORKFLOW_QUERY_MAX_ROWS``: Default maximum rows retained by each query activity; default: ``200``.
 * ``WORKFLOW_WATCH_POLL_SECONDS``: Temporal watch-schedule polling interval; default: ``20``.
 * ``WORKFLOW_RECONCILE_SECONDS``: How often stored desired state is reconciled to Temporal Schedules; default: ``30``.
 * ``SCHEDULED_QUERY_MODULES``: Deprecated compatibility fallback for ``WORKFLOW_ACTIVITY_MODULES``.

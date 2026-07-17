@@ -1,8 +1,9 @@
 # Workflows
 
-Workflows are Seizu's durable automation pipelines. A workflow has zero or
-more named Cypher **inputs**, an ordered list of **activities**, and either a
-UTC time schedule or a set of SyncMetadata watch filters. Temporal owns the
+Workflows are Seizu's durable automation pipelines. A workflow has an ordered
+list of **stages** and either a UTC time schedule or a set of SyncMetadata
+watch filters. Activities in one stage start in parallel; the next stage starts
+only after every activity in the current stage succeeds. Temporal owns the
 schedule and execution history, so runs are not tied to a single polling
 process and missed ticks can be caught up after downtime.
 
@@ -16,18 +17,27 @@ the compatibility release.
 
 The editor supports:
 
-- adding any number of named query inputs;
-- adding name/value parameters and an optional row cap to each query;
-- adding activities and selecting which input supplies each activity's rows;
-- activity-specific parameter forms supplied by the enabled module;
-- pointer or keyboard drag-and-drop activity reordering; and
+- adding, removing, and reordering stages;
+- adding activities, reordering them within a stage, or moving them between stages;
+- assigning every activity a named output and selecting an earlier-stage output as its input;
+- activity-specific parameter forms supplied by the enabled module; and
 - interval, hourly, daily, monthly, or SyncMetadata watch triggers.
 
-Query input IDs use `lower_snake_case`. Inputs are evaluated concurrently at
-the start of a run. Activities then execute from top to bottom. Ordinary
-activity modules receive the selected input's rows. A `workflow` activity
-starts a registered code-defined Temporal child workflow and waits for its
-result before the next activity starts.
+Output names use `lower_snake_case` and are unique across the workflow. An
+activity may reference only an output from an earlier stage, which keeps
+parallel activities independent and makes execution deterministic. References
+receive the output's `value`; Temporal also retains a small `metadata` object
+for status, counts, and diagnostics.
+
+Cypher is now a normal `query` activity, so it can run in any stage and more
+than once in one workflow. Its optional input is available to Cypher as
+`$input`; `input` is therefore reserved and cannot also be configured as a
+static query parameter. Query activities output a list of result-row objects.
+A `workflow` activity starts a registered code-defined Temporal child workflow,
+waits for it, and exposes the child's typed result as its named output.
+
+When one activity fails, the other activities already running in that stage
+are allowed to settle. The workflow then fails and no later stage starts.
 
 **Run now** starts a Temporal execution immediately, including for a disabled
 workflow. Disabling a workflow pauses its Temporal Schedule but deliberately
@@ -56,33 +66,36 @@ The YAML file remains a seed source, not runtime configuration:
 ```yaml
 workflows:
   - name: Notify on critical CVEs
-    inputs:
-      critical_cves:
-        type: query
-        cypher: |
-          MATCH (cve:CVE)
-          WHERE cve.severity = $severity
-          RETURN {id: cve.id, severity: cve.severity} AS details
-        parameters:
-          - name: severity
-            value: CRITICAL
-        max_rows: 200
     schedule:
       type: daily
       days_of_week: [0, 1, 2, 3, 4]
       hour: 9
       minute: 0
     enabled: true
-    activities:
-      - type: slack
-        input: critical_cves
-        parameters:
-          slack_channel: security-alerts
+    stages:
+      - activities:
+          - type: query
+            output: critical_cves
+            parameters:
+              cypher: |
+                MATCH (cve:CVE)
+                WHERE cve.severity = $severity
+                RETURN {id: cve.id, severity: cve.severity} AS details
+              parameters:
+                - name: severity
+                  value: CRITICAL
+              max_rows: 200
+      - activities:
+          - type: slack
+            input: critical_cves
+            output: slack_notification
+            parameters:
+              channels: [security-alerts]
 ```
 
 `scheduled_queries` seeds are still accepted when `workflows` is absent and
-are normalized to a one-input workflow. A configuration cannot contain both
-top-level sections.
+are normalized to a query stage followed by one sequential stage per legacy
+action. A configuration cannot contain both top-level sections.
 
 ## API and CLI
 

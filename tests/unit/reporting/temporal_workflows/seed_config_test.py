@@ -3,17 +3,24 @@ from pathlib import Path
 import yaml
 
 
+def _activity(workflow: dict, stage: int, position: int = 0) -> dict:
+    return workflow["stages"][stage]["activities"][position]
+
+
 def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
     config_path = Path(__file__).parents[4] / ".config/dev/seizu/reporting-dashboard.yaml"
     config = yaml.safe_load(config_path.read_text())
     configured_workflow = next(
         item for item in config["workflows"] if item["name"] == "New CVEs affecting repositories"
     )
-    cypher = configured_workflow["inputs"]["repository_cves"]["cypher"]
+    query = _activity(configured_workflow, 0)
+    cypher = query["parameters"]["cypher"]
 
     assert "datetime(s.created_at) > window_start" in cypher
     assert "s.firstseen" not in cypher
     assert "datetime(c.published_date) > window_start" not in cypher
+    assert query["type"] == "query"
+    assert query["output"] == "repository_cves"
     assert configured_workflow["watch_scans"] == [
         {
             "grouptype": "GitHubOrganization",
@@ -29,7 +36,8 @@ def test_cve_dependency_remediation_workflow() -> None:
     configured_workflow = next(
         item for item in config["workflows"] if item["name"] == "New CVE dependencies requiring remediation"
     )
-    cypher = configured_workflow["inputs"]["vulnerable_dependencies"]["cypher"]
+    query = _activity(configured_workflow, 0)
+    cypher = query["parameters"]["cypher"]
 
     # Same "new" convention as the assessment query: newly observed open
     # security issues, not CVE publication dates or firstseen.
@@ -49,10 +57,11 @@ def test_cve_dependency_remediation_workflow() -> None:
             "syncedtype": "GitHubOrganization",
         }
     ]
-    assert configured_workflow["activities"] == [
-        {
-            "type": "workflow",
-            "input": "vulnerable_dependencies",
-            "parameters": {"workflow": "cve_dependency_remediation"},
-        }
-    ]
+    assert query["type"] == "query"
+    assert query["output"] == "vulnerable_dependencies"
+    assert _activity(configured_workflow, 1) == {
+        "type": "workflow",
+        "input": "vulnerable_dependencies",
+        "output": "remediation_results",
+        "parameters": {"workflow": "cve_dependency_remediation"},
+    }
