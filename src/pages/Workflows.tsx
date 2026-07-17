@@ -29,6 +29,7 @@ import {
   useWorkflowsList,
 } from 'src/hooks/useWorkflowsApi';
 import { pageContentSx } from 'src/theme/layout';
+import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
 
 function triggerLabel(item: WorkflowItem): string {
   if (item.watch_scans.length)
@@ -116,6 +117,12 @@ export default function Workflows() {
         label: 'Status',
         render: (item) => (
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+            <Chip
+              size="small"
+              label={temporalStatusLabel(item.last_run_status)}
+              color={temporalStatusColor(item.last_run_status)}
+              variant="outlined"
+            />
             <Chip
               size="small"
               label={item.enabled ? 'Enabled' : 'Disabled'}

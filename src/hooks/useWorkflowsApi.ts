@@ -54,6 +54,43 @@ export interface WorkflowRequest {
   comment?: string | null;
 }
 
+export interface WorkflowRunSummary {
+  workflow_id: string;
+  run_id: string;
+  workflow_name: string;
+  status: string;
+  start_time: string | null;
+  close_time: string | null;
+  history_length: number | null;
+}
+
+export interface WorkflowRunActivity {
+  activity_id: string;
+  activity_type: string;
+  status: string;
+  attempts: number;
+  maximum_attempts: number | null;
+  scheduled_at: string | null;
+  started_at: string | null;
+  closed_at: string | null;
+  retry_state: string | null;
+  failure: string | null;
+  last_attempt_failure: string | null;
+  input_preview: string | null;
+  result_preview: string | null;
+}
+
+export interface WorkflowRunDetail {
+  workflow_id: string;
+  run_id: string;
+  workflow_name: string;
+  status: string;
+  start_time: string | null;
+  close_time: string | null;
+  failure: string | null;
+  activities: WorkflowRunActivity[];
+}
+
 function headers(token: string | null): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
@@ -128,6 +165,85 @@ export function useWorkflow(id: string | null): {
       .finally(() => setLoading(false));
   }, [accessToken, auth_required, id, tick]);
   return { workflow, loading, error, refresh };
+}
+
+export function useWorkflowRuns(id: string | null): {
+  runs: WorkflowRunSummary[] | null;
+  error: Error | null;
+  refresh: () => void;
+} {
+  const { accessToken } = useContext(AuthContext);
+  const { auth_required } = useContext(AuthConfigContext);
+  const [result, setResult] = useState<{
+    id: string | null;
+    runs: WorkflowRunSummary[];
+    error: Error | null;
+  }>({ id: null, runs: [], error: null });
+  const [tick, setTick] = useState(0);
+  const refresh = useCallback(() => setTick((value) => value + 1), []);
+
+  useEffect(() => {
+    if (!id || (auth_required && !accessToken)) return undefined;
+    const controller = new AbortController();
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    fetch(`/api/v1/workflows/${encodeURIComponent(id)}/runs`, {
+      headers: headers(accessToken),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok)
+          throw await apiError(response, 'Failed to load workflow runs.');
+        return response.json() as Promise<{ runs: WorkflowRunSummary[] }>;
+      })
+      .then((data) => {
+        if (cancelled) return;
+        const next = data.runs ?? [];
+        setResult({ id, runs: next, error: null });
+        if (
+          next.some((run) =>
+            ['running', 'scheduled', 'waiting'].includes(run.status),
+          )
+        ) {
+          pollTimer = setTimeout(refresh, 5000);
+        }
+      })
+      .catch((reason: Error) => {
+        if (!cancelled && reason.name !== 'AbortError')
+          setResult({ id, runs: [], error: reason });
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [accessToken, auth_required, id, refresh, tick]);
+
+  return {
+    runs: result.id === id ? result.runs : null,
+    error: result.id === id ? result.error : null,
+    refresh,
+  };
+}
+
+export function useWorkflowRunDetail(): (
+  workflowId: string,
+  temporalWorkflowId: string,
+  runId: string,
+) => Promise<WorkflowRunDetail> {
+  const { accessToken } = useContext(AuthContext);
+  return useCallback(
+    async (workflowId, temporalWorkflowId, runId) => {
+      const response = await fetch(
+        `/api/v1/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(temporalWorkflowId)}/${encodeURIComponent(runId)}`,
+        { headers: headers(accessToken) },
+      );
+      if (!response.ok)
+        throw await apiError(response, 'Failed to load workflow run.');
+      return response.json() as Promise<WorkflowRunDetail>;
+    },
+    [accessToken],
+  );
 }
 
 export function useWorkflowMutations(): {
