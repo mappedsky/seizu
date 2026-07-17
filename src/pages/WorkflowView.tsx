@@ -424,10 +424,14 @@ export default function WorkflowView() {
         </Card>
       )}
 
-      <Typography component="h2" variant="h5" sx={{ mb: 1.5 }}>
-        Workflow stages
-      </Typography>
-      <WorkflowStages workflow={workflow} />
+      <Card variant="outlined">
+        <CardContent>
+          <Typography component="h2" variant="h5" sx={{ mb: 1.5 }}>
+            Workflow stages
+          </Typography>
+          <WorkflowStages workflow={workflow} />
+        </CardContent>
+      </Card>
 
       <Card variant="outlined" sx={{ mt: 3 }}>
         <CardContent>
