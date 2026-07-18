@@ -11,7 +11,10 @@ process and missed ticks can be caught up after downtime.
 
 Open **Workflows** in the sidebar. Users with `workflows:read` can inspect
 definitions, versions, and runs. `workflows:write` permits create, edit, and
-run-now; `workflows:delete` permits deletion. The legacy
+run-now; `workflows:delete` permits deletion. Edit, run-now, restore, and
+delete are additionally owner-scoped: only the user who created a workflow
+may mutate it. Non-owners receive the same not-found response as a missing
+workflow. The legacy
 `scheduled_queries:*` permissions are expanded to these permissions during
 the compatibility release.
 
@@ -39,6 +42,15 @@ waits for it, and exposes the child's typed result as its named output.
 When one activity fails, the other activities already running in that stage
 are allowed to settle. The workflow then fails and no later stage starts.
 
+Query outputs are streamed only up to the configured `max_rows`, rather than
+materializing an unbounded Neo4j result first. Row-consuming activity forms
+also expose an optional `max_rows`; when set, Seizu takes that prefix before
+validating and passing the input to the module. `WORKFLOW_RESULT_MAX_BYTES`
+adds a serialized-size bound at every activity boundary. Modules that perform
+external side effects run once by default because Temporal activities are
+at-least-once; a module may opt into up to ten attempts with an
+`activity_retry_attempts()` function after making its handler idempotent.
+
 **Run now** starts a Temporal execution immediately, including for a disabled
 workflow. Disabling a workflow pauses its Temporal Schedule but deliberately
 does not prevent an operator-requested run.
@@ -54,8 +66,13 @@ temporary Temporal outage does not lose the saved definition.
 - Daily schedules use selected weekdays and an `HH:MM` UTC time.
 - Monthly schedules use selected calendar days and clamp missing days to the
   month's last day.
-- Watch schedules poll at `WORKFLOW_WATCH_POLL_SECONDS`; the Temporal workflow
-  checks SyncMetadata and exits as skipped when nothing changed.
+- Watch schedules run a lightweight poll workflow at
+  `WORKFLOW_WATCH_POLL_SECONDS`. It starts the configured workflow as a child
+  only when SyncMetadata changed, so polling executions do not appear in the
+  workflow's recent-runs list. Pre-upgrade scheduled watch executions shared
+  one ambiguous ID prefix for polls and real runs, so that legacy prefix is
+  omitted from watch-backed recent-run lists after upgrading; manual runs and
+  newly triggered runs remain visible.
 - Overlap policy is **buffer one**: one due run is retained while a previous
   run is still active.
 
@@ -115,6 +132,7 @@ execution. Relevant settings are:
 - `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, and `TEMPORAL_TASK_QUEUE`;
 - `WORKFLOW_ACTIVITY_MODULES` (comma-separated Python modules);
 - `WORKFLOW_QUERY_MAX_ROWS`;
+- `WORKFLOW_RESULT_MAX_BYTES`;
 - `WORKFLOW_WATCH_POLL_SECONDS`; and
 - `WORKFLOW_RECONCILE_SECONDS`.
 

@@ -12,6 +12,9 @@ from typing import Any
 class ConfiguredWorkflowInvocation:
     workflow_id: str
     manual: bool = False
+    # Set only by the watch-poll parent after it has already observed a new
+    # SyncMetadata value. Keeping the default preserves old Temporal payloads.
+    watch_checked: bool = False
 
 
 @dataclass
@@ -20,6 +23,7 @@ class ConfiguredQueryInput:
     cypher: str
     parameters: dict[str, Any] = field(default_factory=dict)
     max_rows: int = 200
+    max_bytes: int = 1_000_000
     has_input: bool = False
     input_value: Any = None
 
@@ -31,6 +35,7 @@ class ConfiguredActivity:
     output_id: str
     parameters: dict[str, Any] = field(default_factory=dict)
     requires_rows: bool = True
+    maximum_attempts: int = 1
 
 
 @dataclass

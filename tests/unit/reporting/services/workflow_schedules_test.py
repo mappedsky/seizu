@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from temporalio.client import ScheduleAlreadyRunningError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -113,6 +114,8 @@ def test_watch_schedule_uses_poll_interval(mocker):
     schedule = workflow_schedules.build_schedule(_item(watch_scans=[{"grouptype": "CVE"}]))
 
     assert schedule.spec.intervals[0].every.total_seconds() == 37
+    assert schedule.action.workflow == "seizu_configured_workflow_watch_poll"
+    assert schedule.action.id == "seizu-workflow-poll:workflow-1"
 
 
 async def test_reconcile_all_marks_items_when_temporal_is_unavailable(mocker):
@@ -242,7 +245,8 @@ async def test_reconcile_all_and_delete(mocker):
     await workflow_schedules.delete_schedule("workflow-1")
     handle.delete.assert_awaited_once()
     get_client.side_effect = RuntimeError("offline")
-    await workflow_schedules.delete_schedule("workflow-1")
+    with pytest.raises(RuntimeError, match="offline"):
+        await workflow_schedules.delete_schedule("workflow-1")
 
 
 async def test_run_now_success_and_existing(mocker):

@@ -33,6 +33,7 @@ import {
   WorkflowActivityDefinition,
 } from 'src/config.context';
 import { usePermissions } from 'src/hooks/usePermissions';
+import { useCurrentUser } from 'src/hooks/useCurrentUser';
 import {
   WorkflowActivity,
   WorkflowItem,
@@ -230,6 +231,7 @@ export default function WorkflowView() {
   const { id } = useParams();
   const navigate = useNavigate();
   const hasPermission = usePermissions();
+  const currentUser = useCurrentUser();
   const { workflow, loading, error, refresh } = useWorkflow(id ?? null);
   const {
     runs,
@@ -287,6 +289,9 @@ export default function WorkflowView() {
     (total, stage) => total + stage.activities.length,
     0,
   );
+  const canMutate =
+    workflow.created_by === currentUser?.user_id &&
+    hasPermission('workflows:write');
   const loadRunDetail = (run: WorkflowRunSummary) =>
     fetchRunDetail(workflow.workflow_id, run.workflow_id, run.run_id);
 
@@ -317,7 +322,7 @@ export default function WorkflowView() {
             </Button>
             <Button
               startIcon={<EditIcon />}
-              disabled={!hasPermission('workflows:write')}
+              disabled={!canMutate}
               onClick={() => setEditOpen(true)}
             >
               Edit
@@ -325,7 +330,7 @@ export default function WorkflowView() {
             <Button
               variant="contained"
               startIcon={<PlayArrowIcon />}
-              disabled={!hasPermission('workflows:write')}
+              disabled={!canMutate}
               onClick={async () => {
                 setOperationError(null);
                 try {

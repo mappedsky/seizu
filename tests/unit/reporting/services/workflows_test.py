@@ -145,6 +145,64 @@ async def test_create_and_update_persist_stages(mocker):
     assert await workflows.update("missing", body, "editor") is None
 
 
+async def test_managed_mutations_are_owner_scoped(mocker):
+    foreign = _legacy_item(
+        stages=_body().model_dump()["stages"],
+        actions=[],
+        cypher="",
+        created_by="other-user",
+    )
+    get = mocker.patch.object(
+        workflows.report_store,
+        "get_scheduled_query",
+        new=AsyncMock(return_value=foreign),
+    )
+    update = mocker.patch.object(workflows, "update", new=AsyncMock())
+    delete = mocker.patch.object(workflows.report_store, "delete_scheduled_query", new=AsyncMock())
+    run = mocker.patch.object(workflows.workflow_schedules, "run_now", new=AsyncMock())
+
+    with pytest.raises(workflows.WorkflowNotFoundError):
+        await workflows.update_managed("workflow-1", _body(), "user-1")
+    with pytest.raises(workflows.WorkflowNotFoundError):
+        await workflows.delete_managed("workflow-1", "user-1")
+    with pytest.raises(workflows.WorkflowNotFoundError):
+        await workflows.run_managed("workflow-1", "user-1")
+
+    get.assert_awaited()
+    update.assert_not_awaited()
+    delete.assert_not_awaited()
+    run.assert_not_awaited()
+
+
+async def test_delete_managed_removes_schedule_before_record(mocker):
+    owned = _legacy_item(
+        stages=_body().model_dump()["stages"],
+        actions=[],
+        cypher="",
+    )
+    mocker.patch.object(
+        workflows.report_store,
+        "get_scheduled_query",
+        new=AsyncMock(return_value=owned),
+    )
+    remove_schedule = mocker.patch.object(
+        workflows.workflow_schedules,
+        "delete_schedule",
+        new=AsyncMock(side_effect=RuntimeError("Temporal offline")),
+    )
+    delete_record = mocker.patch.object(
+        workflows.report_store,
+        "delete_scheduled_query",
+        new=AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(RuntimeError, match="Temporal offline"):
+        await workflows.delete_managed("workflow-1", "user-1")
+
+    remove_schedule.assert_awaited_once_with("workflow-1")
+    delete_record.assert_not_awaited()
+
+
 def test_version_uses_staged_shape():
     version = _version(stages=_body().model_dump()["stages"], actions=[], cypher="")
     result = workflows.version_to_workflow(version)

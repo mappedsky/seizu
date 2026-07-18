@@ -20,11 +20,20 @@ from reporting.schema.reporting_config import (
     WorkflowActivity,
     WorkflowStage,
 )
-from reporting.services import report_store
+from reporting.services import report_store, workflow_schedules
+from reporting.services.activity_config import config_json_schema, validate_config
 from reporting.services.query_validator import validate_query
 from reporting.temporal_workflows import enabled_workflow_names, get_enabled_workflow_spec
 
 LEGACY_QUERY_OUTPUT = "query"
+
+
+class WorkflowDefinitionError(ValueError):
+    """A submitted workflow definition is invalid."""
+
+
+class WorkflowNotFoundError(LookupError):
+    """A workflow is missing or is not owned by the requesting user."""
 
 
 def _legacy_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowStage]:
@@ -151,6 +160,8 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
                     label="Max rows",
                     type="number",
                     default=settings.WORKFLOW_QUERY_MAX_ROWS,
+                    minimum=1,
+                    maximum=settings.WORKFLOW_QUERY_MAX_ROWS,
                     description="Maximum rows retained in the output.",
                 ).model_dump(),
             ],
@@ -159,12 +170,25 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
     for name in scheduled_query_modules.get_configured_action_names():
         module = scheduled_query_modules.get_module(name)
         canonical = "workflow" if name == "temporal" else name
+        config_fields = [field.model_dump() for field in module.action_config_schema()]
+        if canonical != "workflow" and not any(field["name"] == "max_rows" for field in config_fields):
+            config_fields.append(
+                ActionConfigFieldDef(
+                    name="max_rows",
+                    label="Max input rows",
+                    type="number",
+                    required=False,
+                    minimum=1,
+                    maximum=settings.WORKFLOW_QUERY_MAX_ROWS,
+                    description="Maximum referenced-output rows passed to this activity.",
+                ).model_dump()
+            )
         definitions[canonical] = {
             "description": _module_description(module, f"Runs the {canonical} activity."),
             "input_required": canonical != "workflow",
             "input_schema": _module_type_schema(module, "activity_input_type", list[dict[str, Any]]),
             "output_schema": _module_type_schema(module, "activity_output_type", dict[str, Any]),
-            "config_fields": [field.model_dump() for field in module.action_config_schema()],
+            "config_fields": config_fields,
         }
         if canonical == "workflow":
             definitions[canonical]["variants"] = {
@@ -176,6 +200,9 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
                 for workflow_name in enabled_workflow_names()
                 if (spec := get_enabled_workflow_spec(workflow_name)) is not None
             }
+    for name, definition in definitions.items():
+        fields = [ActionConfigFieldDef.model_validate(field) for field in definition["config_fields"]]
+        definition["config_schema"] = config_json_schema(fields, name=f"{name.title()}ActivityConfig")
     return definitions
 
 
@@ -230,15 +257,16 @@ async def validate_definition(body: CreateWorkflowRequest) -> str | None:
                 input_required = bool(spec and spec.requires_rows)
             if input_required and activity.input is None:
                 return f"{label} requires an input."
-            for field in definition["config_fields"]:
-                field_def = ActionConfigFieldDef.model_validate(field)
-                if not field_def.required:
-                    continue
-                value = activity.parameters.get(field_def.name)
-                if value is None or value == "" or value == []:
-                    return f"{label} is missing required field '{field_def.name}'."
-                if field_def.type == "boolean" and value is not True:
-                    return f"{label} requires '{field_def.name}' to be accepted."
+            config_fields = [ActionConfigFieldDef.model_validate(field) for field in definition["config_fields"]]
+            if activity.type == "workflow" and spec is not None and spec.config_fields is not None:
+                known = {field.name for field in config_fields}
+                config_fields.extend(field for field in spec.config_fields() if field.name not in known)
+            if error := validate_config(
+                activity.parameters,
+                config_fields,
+                name=f"{activity.type.title()}ActivityConfig",
+            ):
+                return f"{label}: {error}"
             if activity.type == "query":
                 _, error = _query_parameters(activity)
                 if error:
@@ -287,6 +315,61 @@ async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str)
         stages=[stage.model_dump() for stage in body.stages],
     )
     return item_to_workflow(item) if item is not None else None
+
+
+async def require_owned_item(
+    workflow_id: str,
+    user_id: str,
+    *,
+    legacy_only: bool = False,
+) -> ScheduledQueryItem:
+    """Return an owner-mutable definition or use indistinguishable 404 semantics."""
+
+    item = await report_store.get_scheduled_query(workflow_id)
+    if item is None or item.created_by != user_id or (legacy_only and not legacy_representable(item)):
+        # Deliberately use identical missing/not-owner semantics so callers
+        # cannot use mutation endpoints to enumerate other users' workflows.
+        raise WorkflowNotFoundError("Workflow not found")
+    return item
+
+
+async def create_managed(body: CreateWorkflowRequest, owner_user_id: str) -> WorkflowItem:
+    if error := await validate_definition(body):
+        raise WorkflowDefinitionError(error)
+    created = await create(body, owner_user_id)
+    await workflow_schedules.reconcile_by_id(created.workflow_id)
+    refreshed = await report_store.get_scheduled_query(created.workflow_id)
+    return item_to_workflow(refreshed) if refreshed is not None else created
+
+
+async def update_managed(
+    workflow_id: str,
+    body: CreateWorkflowRequest,
+    owner_user_id: str,
+) -> WorkflowItem:
+    await require_owned_item(workflow_id, owner_user_id)
+    if error := await validate_definition(body):
+        raise WorkflowDefinitionError(error)
+    updated = await update(workflow_id, body, owner_user_id)
+    if updated is None:
+        raise WorkflowNotFoundError("Workflow not found")
+    await workflow_schedules.reconcile_by_id(workflow_id)
+    refreshed = await report_store.get_scheduled_query(workflow_id)
+    return item_to_workflow(refreshed) if refreshed is not None else updated
+
+
+async def delete_managed(workflow_id: str, owner_user_id: str) -> None:
+    await require_owned_item(workflow_id, owner_user_id)
+    # Delete the external trigger first. If Temporal is unavailable the stored
+    # definition remains, making retry safe and preventing an orphan schedule.
+    await workflow_schedules.delete_schedule(workflow_id)
+    if not await report_store.delete_scheduled_query(workflow_id):
+        raise WorkflowNotFoundError("Workflow not found")
+
+
+async def run_managed(workflow_id: str, owner_user_id: str) -> tuple[str, str | None]:
+    await require_owned_item(workflow_id, owner_user_id)
+    return await workflow_schedules.run_now(workflow_id)
 
 
 def legacy_representable(item: ScheduledQueryItem | ScheduledQueryVersion) -> bool:

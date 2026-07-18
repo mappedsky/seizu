@@ -1,5 +1,6 @@
+import importlib
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
@@ -13,13 +14,13 @@ _BUILTIN_MODULES = [
 ]
 
 
-class ModuleInterface:
+@runtime_checkable
+class ModuleInterface(Protocol):
     """
     Type interface for modules.
     """
 
-    @staticmethod
-    def action_name() -> str:
+    def action_name(self) -> str:
         """
         The name of this action module, which will be referenced from within the
         scheduled query configuration, via the ``action_type`` setting. For example:
@@ -40,53 +41,29 @@ class ModuleInterface:
                       sqs_queue: k8s-image-scanner
 
         """
-        return ""
+        ...
 
-    @staticmethod
-    async def setup() -> None:
+    async def setup(self) -> None:
         """
         Called when the scheduled queries worker is started. This function
         can be used for any setup that your module may need to do, like creating
         databases or queues in development, etc.
         """
-        return None
+        ...
 
-    @staticmethod
-    def action_config_schema() -> list[ActionConfigFieldDef]:
+    def action_config_schema(self) -> list[ActionConfigFieldDef]:
         """
         Returns a list of field definitions describing the action_config for
         this module. Used by the frontend to render a typed form instead of a
         raw JSON textarea, and by the backend to validate submitted configs.
         """
-        return []
+        ...
 
-    @staticmethod
-    def activity_description() -> str:
-        return "Runs a configured workflow activity."
-
-    @staticmethod
-    def activity_input_type() -> Any:
-        return list[dict[str, Any]]
-
-    @staticmethod
-    def activity_output_type() -> Any:
-        return dict[str, Any]
-
-    @staticmethod
-    def validate_action_config(action_config: dict[str, Any]) -> str | None:
-        """
-        Optional module-specific validation beyond the generic required-field
-        checks (e.g. cross-field rules or nested structures). Returns an error
-        message string, or None when the config is valid. Called on scheduled
-        query create/update.
-        """
-        return None
-
-    @staticmethod
     def handle_results(
+        self,
         scheduled_query_id: str,
         action: ScheduledQueryAction,
-        results: list[dict[str, Any]],
+        results: Any,
     ) -> Any | Awaitable[Any]:
         """
         Called when a scheduled query configured to use this module has results.
@@ -95,17 +72,24 @@ class ModuleInterface:
         run on the scheduled-query worker's event loop, which is required for
         services that share loop-bound async clients or database pools.
         """
-        return None
+        ...
+
+
+def _import_module(module_name: str) -> ModuleInterface:
+    module = importlib.import_module(module_name)
+    if not isinstance(module, ModuleInterface):
+        raise TypeError(
+            f"Workflow activity module '{module_name}' must define "
+            "action_name, setup, action_config_schema, and handle_results"
+        )
+    return cast(ModuleInterface, module)
 
 
 async def load_modules() -> None:
     global _MODULES
 
     for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
-        # fromlist is required here, or the module will not be loaded.
-        # The actual valud of fromlist doesn't matter. We're using this rather
-        # than importlib to be able to handle the type checking properly.
-        module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+        module = _import_module(module_name)
         await module.setup()
         _MODULES[module.action_name()] = module
 
@@ -127,7 +111,7 @@ def get_configured_action_names() -> list[str]:
             continue
         seen.add(module_name)
         try:
-            module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+            module = _import_module(module_name)
             names.append(module.action_name())
         except Exception:
             pass
@@ -142,7 +126,7 @@ def get_module(action_name: str) -> ModuleInterface:
     if action_name in _MODULES:
         return _MODULES[action_name]
     for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
-        module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+        module = _import_module(module_name)
         name = module.action_name()
         if name == action_name or (action_name == "workflow" and name == "temporal"):
             return module
@@ -162,7 +146,7 @@ def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
             continue
         seen.add(module_name)
         try:
-            module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+            module = _import_module(module_name)
             schemas[module.action_name()] = module.action_config_schema()
         except Exception:
             pass
@@ -183,7 +167,7 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
             continue
         seen.add(module_name)
         try:
-            module: ModuleInterface = cast(ModuleInterface, __import__(module_name, fromlist=["_fake"]))
+            module = _import_module(module_name)
             validator = getattr(module, "validate_action_config", None)
             if validator is not None:
                 validators[module.action_name()] = validator
@@ -192,3 +176,16 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
     if "workflow" in validators:
         validators.setdefault("temporal", validators["workflow"])
     return validators
+
+
+def get_activity_retry_attempts(action_name: str) -> int:
+    """Return an activity's explicit retry count, defaulting side effects to once.
+
+    Temporal activities are at-least-once. Modules must opt into automatic
+    retries only after making their handler idempotent for a stable activity id.
+    """
+
+    module = get_module(action_name)
+    value = getattr(module, "activity_retry_attempts", None)
+    attempts = value() if callable(value) else 1
+    return max(1, min(int(attempts), 10))

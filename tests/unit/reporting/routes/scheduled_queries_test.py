@@ -56,7 +56,7 @@ def _sq_item(sq_id=_SQ_ID, name="My Query", version=1):
         current_version=version,
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
-        created_by="user@example.com",
+        created_by="test-user-id",
     )
 
 
@@ -261,6 +261,10 @@ async def test_create_scheduled_query_action_config_error(mocker):
 
 async def test_update_scheduled_query_success(mocker):
     mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
+    mocker.patch(
         "reporting.routes.scheduled_queries.report_store.update_scheduled_query",
         new=AsyncMock(return_value=_sq_item(version=2)),
     )
@@ -284,6 +288,10 @@ async def test_update_scheduled_query_success(mocker):
 
 async def test_update_scheduled_query_cypher_validation_error(mocker):
     mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
+    mocker.patch(
         "reporting.services.scheduled_query_validation.scheduled_query_modules.get_action_schemas",
         return_value={"log": []},
     )
@@ -304,7 +312,7 @@ async def test_update_scheduled_query_cypher_validation_error(mocker):
 
 async def test_update_scheduled_query_not_found(mocker):
     mocker.patch(
-        "reporting.routes.scheduled_queries.report_store.update_scheduled_query",
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
         new=AsyncMock(return_value=None),
     )
     mocker.patch(
@@ -432,6 +440,10 @@ async def test_get_scheduled_query_version_not_found(mocker):
 
 async def test_delete_scheduled_query_success(mocker):
     mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
+    mocker.patch(
         "reporting.routes.scheduled_queries.report_store.delete_scheduled_query",
         new=AsyncMock(return_value=True),
     )
@@ -449,8 +461,8 @@ async def test_delete_scheduled_query_success(mocker):
 
 async def test_delete_scheduled_query_not_found(mocker):
     mocker.patch(
-        "reporting.routes.scheduled_queries.report_store.delete_scheduled_query",
-        new=AsyncMock(return_value=False),
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=None),
     )
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -464,6 +476,10 @@ async def test_delete_scheduled_query_not_found(mocker):
 
 
 async def test_run_scheduled_query_success(mocker):
+    mocker.patch(
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
+        new=AsyncMock(return_value=_sq_item()),
+    )
     mocker.patch(
         "reporting.routes.scheduled_queries.report_store.request_scheduled_query_run",
         new=AsyncMock(return_value="2026-01-01T00:00:00+00:00"),
@@ -480,7 +496,7 @@ async def test_run_scheduled_query_success(mocker):
 
 async def test_run_scheduled_query_not_found(mocker):
     mocker.patch(
-        "reporting.routes.scheduled_queries.report_store.request_scheduled_query_run",
+        "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
         new=AsyncMock(return_value=None),
     )
     app = _make_app()
@@ -574,9 +590,11 @@ async def test_create_scheduled_query_rejects_schedule_and_watch_scans(mocker):
 # ---------------------------------------------------------------------------
 
 
-def _temporal_sq_item():
+def _temporal_sq_item(*, watch: bool = False):
     item = _sq_item()
     item.actions = [{"action_type": "temporal", "action_config": {"workflow": "cve_repo_report"}}]
+    if watch:
+        item.watch_scans = [{"grouptype": "CVE"}]
     return item
 
 
@@ -586,7 +604,7 @@ _WORKFLOW_ID = f"seizu:cve_repo_report:{_SQ_ID}:2024-01-01T00:00:00+00:00"
 async def test_list_workflow_runs_success(mocker):
     mocker.patch(
         "reporting.routes.scheduled_queries.report_store.get_scheduled_query",
-        new=AsyncMock(return_value=_temporal_sq_item()),
+        new=AsyncMock(return_value=_temporal_sq_item(watch=True)),
     )
     runs_mock = mocker.patch(
         "reporting.routes.scheduled_queries.temporal_runs.list_workflow_runs",
@@ -612,7 +630,12 @@ async def test_list_workflow_runs_success(mocker):
     assert len(runs) == 1
     assert runs[0]["workflow_id"] == _WORKFLOW_ID
     assert runs[0]["status"] == "completed"
-    runs_mock.assert_awaited_once_with(_SQ_ID, limit=20)
+    runs_mock.assert_awaited_once_with(
+        _SQ_ID,
+        limit=20,
+        configured_name="My Query",
+        watch_polling=True,
+    )
 
 
 async def test_list_workflow_runs_no_temporal_action_skips_temporal(mocker):
@@ -696,7 +719,13 @@ async def test_get_workflow_run_success(mocker):
     body = ret.json()
     assert body["status"] == "failed"
     assert body["activities"][0]["attempts"] == 3
-    detail_mock.assert_awaited_once_with(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=True)
+    detail_mock.assert_awaited_once_with(
+        _SQ_ID,
+        _WORKFLOW_ID,
+        "run-1",
+        include_payload_previews=True,
+        configured_name="My Query",
+    )
 
 
 async def test_get_workflow_run_readers_get_no_payload_previews(mocker):
@@ -719,7 +748,13 @@ async def test_get_workflow_run_readers_get_no_payload_previews(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get(f"/api/v1/scheduled-queries/{_SQ_ID}/workflow-runs/{quote(_WORKFLOW_ID, safe='')}/run-1")
     assert ret.status_code == 200
-    detail_mock.assert_awaited_once_with(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=False)
+    detail_mock.assert_awaited_once_with(
+        _SQ_ID,
+        _WORKFLOW_ID,
+        "run-1",
+        include_payload_previews=False,
+        configured_name="My Query",
+    )
 
 
 async def test_get_workflow_run_requires_temporal_action(mocker):

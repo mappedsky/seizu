@@ -430,6 +430,8 @@ class ActionConfigFieldDef(BaseModel):
     description: str | None = None
     default: Any | None = None
     options: list[str] | None = None
+    minimum: float | None = None
+    maximum: float | None = None
     # Rendered as a warning alert above the field; pair with a required
     # boolean to force an explicit acknowledgement (a required boolean must be
     # checked for the action config to validate).

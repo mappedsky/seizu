@@ -1,12 +1,18 @@
 import asyncio
 import uuid
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from temporalio import activity, workflow
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from reporting.temporal_workflows.configured_workflow import ConfiguredWorkflow
+from reporting.temporal_workflows.configured_workflow import (
+    ConfiguredWorkflow,
+    ConfiguredWorkflowWatchPoll,
+    _activity_maximum_attempts,
+)
 from reporting.temporal_workflows.shared import (
     CodeWorkflowInputRequest,
     CodeWorkflowOutputRequest,
@@ -102,6 +108,16 @@ async def _record(value: dict) -> None:
     return None
 
 
+@activity.defn(name="check_configured_workflow_watch")
+async def _watch_triggered(value: ConfiguredWorkflowInvocation) -> bool:
+    return True
+
+
+@activity.defn(name="check_configured_workflow_watch")
+async def _watch_unchanged(value: ConfiguredWorkflowInvocation) -> bool:
+    return False
+
+
 @activity.defn(name="load_configured_workflow")
 async def _load_code(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowDefinition:
     return ConfiguredWorkflowDefinition(
@@ -195,6 +211,23 @@ async def _execute(*activities):
             )
 
 
+async def _execute_watch(check_activity):
+    queue = f"configured-watch-{uuid.uuid4()}"
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=queue,
+            workflows=[ConfiguredWorkflow, ConfiguredWorkflowWatchPoll],
+            activities=[check_activity, _load, _query, _action, _record],
+        ):
+            return await env.client.execute_workflow(
+                "seizu_configured_workflow_watch_poll",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-1"),
+                id="seizu-workflow-poll:workflow-1-2026-07-18T00:35:34Z",
+                task_queue=queue,
+            )
+
+
 async def test_stages_run_and_publish_named_outputs():
     result = await _execute(_load, _query, _action, _record)
     assert result["status"] == "completed"
@@ -230,3 +263,22 @@ async def test_skips_row_dependent_child_without_rows():
         "status": "skipped",
         "reason": "input returned no rows",
     }
+
+
+def test_old_configured_activity_history_uses_previous_retry_policy():
+    configured = cast(
+        ConfiguredActivity,
+        SimpleNamespace(type="log", input_id="rows", output_id="logged", parameters={}),
+    )
+
+    assert _activity_maximum_attempts(configured) == 3
+
+
+async def test_watch_poll_only_creates_real_run_when_triggered():
+    skipped = await _execute_watch(_watch_unchanged)
+    assert skipped["status"] == "skipped"
+    assert skipped["skipped_reason"] == "watch scan unchanged"
+
+    completed = await _execute_watch(_watch_triggered)
+    assert completed["status"] == "completed"
+    assert completed["activity_results"][-1]["output"] == "logged"

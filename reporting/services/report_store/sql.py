@@ -128,6 +128,7 @@ class ScheduledQueryVersionRecord(SQLModel, table=True):  # type: ignore
     id: int | None = Field(default=None, primary_key=True)
     scheduled_query_id: str = Field(index=True)
     version: int
+    name: str | None = None
     cypher: str
     params: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     frequency: int | None = None
@@ -549,127 +550,11 @@ class SQLModelReportStore(ReportStore):
         return generate_report_id()
 
     async def initialize(self) -> None:
-        """Create all tables if they do not already exist."""
-        engine = _get_engine()
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(SQLModel.metadata.create_all)
-                # Historical compatibility migrations remain for databases
-                # created before Alembic. New schema changes live in
-                # reporting/migrations and run immediately after this block.
-                if conn.dialect.name == "postgresql":
-                    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_username VARCHAR"))
-                    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR"))
-                    await conn.execute(text("ALTER TABLE users ALTER COLUMN email DROP NOT NULL"))
-                    await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS schedule JSON"))
-                    await conn.execute(
-                        text(
-                            "ALTER TABLE scheduled_chats "
-                            "ADD COLUMN IF NOT EXISTS current_version INTEGER NOT NULL DEFAULT 0"
-                        )
-                    )
-                    await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS updated_by VARCHAR"))
-                    await conn.execute(
-                        text(
-                            "ALTER TABLE chat_sessions "
-                            "ADD COLUMN IF NOT EXISTS origin VARCHAR NOT NULL DEFAULT 'interactive'"
-                        )
-                    )
-                    await conn.execute(
-                        text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS scheduled_chat_id VARCHAR")
-                    )
-                    await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS run_status VARCHAR"))
-                    await conn.execute(
-                        text("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS run_errors JSON NOT NULL DEFAULT '[]'")
-                    )
-                    await conn.execute(
-                        text("ALTER TABLE action_confirmations ADD COLUMN IF NOT EXISTS batch_id VARCHAR")
-                    )
-                    await conn.execute(
-                        text(
-                            "ALTER TABLE action_confirmations "
-                            "ADD COLUMN IF NOT EXISTS arguments_hash VARCHAR DEFAULT ''"
-                        )
-                    )
-                    await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN IF NOT EXISTS schedule JSON"))
-                    await conn.execute(
-                        text("ALTER TABLE scheduled_query_versions ADD COLUMN IF NOT EXISTS schedule JSON")
-                    )
-                    await conn.execute(
-                        text("ALTER TABLE scheduled_queries ADD COLUMN IF NOT EXISTS run_requested_at VARCHAR")
-                    )
-                    await conn.execute(
-                        text("ALTER TABLE scheduled_chats ADD COLUMN IF NOT EXISTS run_requested_at VARCHAR")
-                    )
-                elif conn.dialect.name == "sqlite":
-                    # SQLite cannot drop NOT NULL in-place. Existing SQLite
-                    # dev DBs created before nullable email still require email;
-                    # new DBs created from the model do not.
-                    columns = await conn.execute(text("PRAGMA table_info(users)"))
-                    column_names = {row[1] for row in columns}
-                    if "preferred_username" not in column_names:
-                        await conn.execute(text("ALTER TABLE users ADD COLUMN preferred_username VARCHAR"))
-                    if "role" not in column_names:
-                        await conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR"))
-                    sc_columns = await conn.execute(text("PRAGMA table_info(scheduled_chats)"))
-                    sc_column_names = {row[1] for row in sc_columns}
-                    if sc_column_names and "schedule" not in sc_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN schedule JSON"))
-                    if sc_column_names and "current_version" not in sc_column_names:
-                        await conn.execute(
-                            text("ALTER TABLE scheduled_chats ADD COLUMN current_version INTEGER NOT NULL DEFAULT 0")
-                        )
-                    if sc_column_names and "updated_by" not in sc_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN updated_by VARCHAR"))
-                    cs_columns = await conn.execute(text("PRAGMA table_info(chat_sessions)"))
-                    cs_column_names = {row[1] for row in cs_columns}
-                    if cs_column_names and "origin" not in cs_column_names:
-                        await conn.execute(
-                            text("ALTER TABLE chat_sessions ADD COLUMN origin VARCHAR NOT NULL DEFAULT 'interactive'")
-                        )
-                    if cs_column_names and "scheduled_chat_id" not in cs_column_names:
-                        await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN scheduled_chat_id VARCHAR"))
-                    if cs_column_names and "run_status" not in cs_column_names:
-                        await conn.execute(text("ALTER TABLE chat_sessions ADD COLUMN run_status VARCHAR"))
-                    if cs_column_names and "run_errors" not in cs_column_names:
-                        await conn.execute(
-                            text("ALTER TABLE chat_sessions ADD COLUMN run_errors JSON NOT NULL DEFAULT '[]'")
-                        )
-                    ac_columns = await conn.execute(text("PRAGMA table_info(action_confirmations)"))
-                    ac_column_names = {row[1] for row in ac_columns}
-                    if "batch_id" not in ac_column_names:
-                        await conn.execute(text("ALTER TABLE action_confirmations ADD COLUMN batch_id VARCHAR"))
-                    if "arguments_hash" not in ac_column_names:
-                        await conn.execute(
-                            text("ALTER TABLE action_confirmations ADD COLUMN arguments_hash VARCHAR DEFAULT ''")
-                        )
-                    sq_columns = await conn.execute(text("PRAGMA table_info(scheduled_queries)"))
-                    sq_column_names = {row[1] for row in sq_columns}
-                    if sq_column_names and "schedule" not in sq_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN schedule JSON"))
-                    if sq_column_names and "run_requested_at" not in sq_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_queries ADD COLUMN run_requested_at VARCHAR"))
-                    sqv_columns = await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))
-                    sqv_column_names = {row[1] for row in sqv_columns}
-                    if sqv_column_names and "schedule" not in sqv_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_query_versions ADD COLUMN schedule JSON"))
-                    if sc_column_names and "run_requested_at" not in sc_column_names:
-                        await conn.execute(text("ALTER TABLE scheduled_chats ADD COLUMN run_requested_at VARCHAR"))
-                await conn.execute(text("DROP INDEX IF EXISTS ix_action_conf_user_status_list"))
-                await conn.execute(
-                    text(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS ix_action_conf_pending_dedup "
-                        "ON action_confirmations "
-                        "(user_id, source, session_key, tool_name, action, resource_type, resource_id, arguments_hash) "
-                        "WHERE status = 'pending'"
-                    )
-                )
-            from reporting.services.report_store.migrations import run_schema_migrations
+        """Bring the report-store schema to the Alembic head revision."""
+        from reporting.services.report_store.migrations import run_schema_migrations
 
-            await run_schema_migrations(engine)
-            logger.info("SQL report store tables initialised")
-        except IntegrityError:
-            logger.info("SQL report store tables already exist")
+        await run_schema_migrations(_get_engine())
+        logger.info("SQL report store tables initialised")
 
     async def list_reports(self, user_id: str | None = None) -> list[ReportListItem]:
         async with AsyncSession(_get_engine()) as session:
@@ -1052,6 +937,7 @@ class SQLModelReportStore(ReportStore):
                 ScheduledQueryVersionRecord(
                     scheduled_query_id=sq_id,
                     version=version,
+                    name=name,
                     cypher=cypher,
                     params=params,
                     frequency=frequency,
@@ -1143,6 +1029,7 @@ class SQLModelReportStore(ReportStore):
                 ScheduledQueryVersionRecord(
                     scheduled_query_id=sq_id,
                     version=version,
+                    name=name,
                     cypher=cypher,
                     params=params,
                     frequency=frequency,
@@ -1200,7 +1087,7 @@ class SQLModelReportStore(ReportStore):
             return [
                 ScheduledQueryVersion(
                     scheduled_query_id=r.scheduled_query_id,
-                    name=sq.name,
+                    name=r.name or sq.name,
                     version=r.version,
                     cypher=r.cypher,
                     params=r.params or [],
@@ -1235,7 +1122,7 @@ class SQLModelReportStore(ReportStore):
                 return None
             return ScheduledQueryVersion(
                 scheduled_query_id=row.scheduled_query_id,
-                name=sq.name,
+                name=row.name or sq.name,
                 version=row.version,
                 cypher=row.cypher,
                 params=row.params or [],

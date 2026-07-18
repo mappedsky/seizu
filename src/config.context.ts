@@ -101,6 +101,8 @@ export interface ActionConfigFieldDef {
   description?: string;
   default?: unknown;
   options?: string[];
+  minimum?: number;
+  maximum?: number;
   warning?: string;
 }
 
@@ -118,6 +120,7 @@ export interface WorkflowActivityDefinition {
   input_schema: Record<string, unknown>;
   output_schema: Record<string, unknown>;
   config_fields: ActionConfigFieldDef[];
+  config_schema?: Record<string, unknown>;
   variants?: Record<
     string,
     Pick<

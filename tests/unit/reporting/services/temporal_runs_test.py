@@ -82,6 +82,10 @@ def test_workflow_id_matches():
         _SQ_ID,
         f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z",
     )
+    assert temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z",
+    )
 
 
 def test_workflow_id_matches_rejects_foreign_ids():
@@ -94,6 +98,14 @@ def test_workflow_id_matches_rejects_foreign_ids():
     assert not temporal_runs.workflow_id_matches(
         _SQ_ID,
         f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z:activity:1:cartography_sync",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z:stage:1:activity:1:child",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow-poll:{_SQ_ID}-2026-07-16T12:00:00Z",
     )
     assert not temporal_runs.workflow_id_matches(
         _SQ_ID,
@@ -177,6 +189,43 @@ async def test_list_workflow_runs(mocker):
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):
     client, _ = _mock_client(mocker)
     assert await temporal_runs.list_workflow_runs('sq" OR WorkflowId="x', limit=10) == []
+
+
+async def test_list_watch_runs_excludes_poll_and_uses_definition_name(mocker):
+    actual_id = f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z"
+    child_id = f"{actual_id}:stage:1:activity:1:child"
+    executions = [
+        SimpleNamespace(
+            id=actual_id,
+            run_id="run-actual",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=24,
+        ),
+        SimpleNamespace(
+            id=child_id,
+            run_id="run-child",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=10,
+        ),
+    ]
+    _, captured = _mock_client(mocker, executions=executions)
+
+    runs = await temporal_runs.list_workflow_runs(
+        _SQ_ID,
+        limit=10,
+        configured_name="Critical CVE workflow",
+        watch_polling=True,
+    )
+
+    assert f'WorkflowId STARTS_WITH "seizu-workflow:{_SQ_ID}:run:"' in captured["query"]
+    assert f'WorkflowId STARTS_WITH "seizu-workflow:{_SQ_ID}:manual:"' in captured["query"]
+    assert captured["limit"] == 100
+    assert len(runs) == 1
+    assert runs[0].workflow_name == "Critical CVE workflow"
 
 
 async def test_list_workflow_runs_unavailable(mocker):
@@ -290,7 +339,7 @@ async def test_get_workflow_run_detail_activities(mocker):
     handle = _mock_handle(events, status=temporalio.client.WorkflowExecutionStatus.FAILED)
     client, _ = _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=True)
 
     assert detail is not None
     client.get_workflow_handle.assert_called_once_with(_WORKFLOW_ID, run_id="run-1")
@@ -395,7 +444,7 @@ async def test_get_workflow_run_detail_folds_child_workflows(mocker):
     handle = _mock_handle(events)
     _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1")
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1", include_payload_previews=True)
 
     assert detail is not None
     assert len(detail.activities) == 2
@@ -481,7 +530,7 @@ async def test_get_workflow_run_detail_without_payload_previews(mocker):
     handle = _mock_handle(events)
     _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=False)
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
 
     assert detail is not None
     activity = detail.activities[0]

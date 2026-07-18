@@ -18,6 +18,7 @@ from reporting.schema.mcp_config import render_skill_prompt, validate_tool_argum
 from reporting.services import action_confirmations, report_store, reporting_neo4j
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
+from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -689,7 +690,7 @@ def _bounded_text_response(
         bounded = payload
 
     text = json.dumps(bounded, indent=2, default=str)
-    if max_bytes is None or max_bytes <= 0 or len(text.encode("utf-8")) <= max_bytes:
+    if max_bytes is None or max_bytes <= 0 or json_size_bytes(bounded, indent=2) <= max_bytes:
         return [TextContent(type="text", text=text)]
 
     # Over the byte budget: shed whole rows if the payload is a list.
@@ -728,15 +729,17 @@ def _byte_limit_error(max_bytes: int) -> dict[str, Any]:
 
 def _rows_within_byte_budget(rows: list[Any], *, total: int, max_bytes: int) -> int:
     """Largest k such that the byte-limit payload for rows[:k] fits max_bytes."""
-    lo, hi, best = 0, len(rows), 0
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        candidate = _byte_limit_payload(rows[:mid], total=total, returned=mid, max_bytes=max_bytes)
-        if len(json.dumps(candidate, indent=2, default=str).encode("utf-8")) <= max_bytes:
-            best, lo = mid, mid + 1
-        else:
-            hi = mid - 1
-    return best
+    return largest_prefix_within_bytes(
+        rows,
+        max_bytes=max_bytes,
+        envelope=lambda values: _byte_limit_payload(
+            values,
+            total=total,
+            returned=len(values),
+            max_bytes=max_bytes,
+        ),
+        indent=2,
+    )
 
 
 def _emit(payload: Any) -> list[TextContent]:

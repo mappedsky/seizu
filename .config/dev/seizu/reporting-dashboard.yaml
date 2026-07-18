@@ -2432,8 +2432,7 @@ workflows:
               workflow: cve_repo_report
 
   - name: New CVE dependencies requiring remediation
-    # Any GitHub organization sync (no groupid → matches all orgs); each org's
-    # own SyncMetadata window is applied to its repositories in the query.
+    # Any GitHub organization sync triggers the mappedsky-scoped, 48-hour query.
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
@@ -2444,20 +2443,16 @@ workflows:
             output: vulnerable_dependencies
             parameters:
               cypher: |-
-                MATCH (sm:SyncMetadata)
-                WHERE sm.grouptype = "GitHubOrganization"
-                  AND sm.syncedtype = "GitHubOrganization"
-                WITH toString(sm.groupid) AS org_id,
-                     datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+                WITH datetime() - duration({hours: 48}) AS window_start
                 MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
-                WHERE o.id = org_id
+                WHERE o.id = 'https://github.com/mappedsky'
                 MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
                 WHERE s.created_at IS NOT NULL
                   AND datetime(s.created_at) > window_start
                   AND coalesce(r.archived, false) = false
                   AND coalesce(r.disabled, false) = false
                   AND s.dependency_package_name IS NOT NULL
-                MATCH (c:CVEMetadata {id: s.cve_id})
+                OPTIONAL MATCH (c:CVEMetadata {id: s.cve_id})
                 RETURN DISTINCT {
                   repo: r.fullname,
                   default_branch: r.defaultbranch,
@@ -2471,7 +2466,8 @@ workflows:
                   score: c.base_score,
                   summary: s.advisory_summary,
                   url: s.html_url,
-                  created_at: s.created_at
+                  created_at: s.created_at,
+                  firstseen: s.firstseen
                 } AS details
       - activities:
           - type: workflow

@@ -19,6 +19,7 @@ from reporting import (
 from reporting.services import workflow_schedules
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
+    check_configured_workflow_watch,
     execute_configured_activity,
     execute_configured_query,
     get_pr_ci_status,
@@ -30,7 +31,7 @@ from reporting.temporal_workflows.activities import (
     run_repo_cve_chat,
 )
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
-from reporting.temporal_workflows.configured_workflow import ConfiguredWorkflow
+from reporting.temporal_workflows.configured_workflow import ConfiguredWorkflow, ConfiguredWorkflowWatchPoll
 from reporting.temporal_workflows.cve_dependency_remediation import CveDependencyRemediationWorkflow
 from reporting.temporal_workflows.cve_repo_report import CveRepoReportWorkflow
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
@@ -58,9 +59,11 @@ async def _run_worker() -> None:
                 CartographySyncWorkflow,
                 CartographyModuleWorkflow,
                 ConfiguredWorkflow,
+                ConfiguredWorkflowWatchPoll,
             ],
             activities=[
                 load_configured_workflow,
+                check_configured_workflow_watch,
                 execute_configured_query,
                 execute_configured_activity,
                 build_code_workflow_input,

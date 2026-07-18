@@ -204,6 +204,11 @@ function ConfigField({
         type={field.type === 'number' ? 'number' : 'text'}
         multiline={field.type === 'text'}
         minRows={field.type === 'text' ? 3 : undefined}
+        slotProps={
+          field.type === 'number'
+            ? { htmlInput: { min: field.minimum, max: field.maximum } }
+            : undefined
+        }
         onChange={(event) =>
           onChange(
             field.type === 'number'

@@ -32,7 +32,11 @@ from reporting.services import (
 from reporting.services import (
     workflows as workflow_service,
 )
-from reporting.services.reporting_neo4j import check_watch_scan_triggered, run_query_with_retry
+from reporting.services.payload_bounds import bounded_json_rows, json_size_bytes
+from reporting.services.reporting_neo4j import (
+    check_watch_scan_triggered,
+    run_query_bounded_with_retry,
+)
 from reporting.services.schedule_spec import schedule_due
 from reporting.temporal_workflows import WorkflowInputContext, get_enabled_workflow_spec
 from reporting.temporal_workflows.shared import (
@@ -79,7 +83,7 @@ async def load_configured_workflow(
             version=item.current_version,
             skipped_reason="disabled",
         )
-    if not invocation.manual and item.watch_scans:
+    if not invocation.manual and item.watch_scans and not bool(getattr(invocation, "watch_checked", False)):
         triggered = await check_watch_scan_triggered(
             item.last_run_at,
             [ScheduledQueryWatchScan.model_validate(value) for value in item.watch_scans],
@@ -110,6 +114,7 @@ async def load_configured_workflow(
             parameters = dict(value.parameters)
             if value.type == "query":
                 parameters.setdefault("max_rows", settings.WORKFLOW_QUERY_MAX_ROWS)
+                parameters.setdefault("max_bytes", settings.WORKFLOW_RESULT_MAX_BYTES)
             activities.append(
                 ConfiguredActivity(
                     type=value.type,
@@ -123,6 +128,11 @@ async def load_configured_workflow(
                         and (spec := get_enabled_workflow_spec(workflow_name)) is not None
                         else value.type not in ("query", "workflow")
                     ),
+                    maximum_attempts=(
+                        3
+                        if value.type in ("query", "workflow")
+                        else scheduled_query_modules.get_activity_retry_attempts(value.type)
+                    ),
                 )
             )
         stages.append(ConfiguredStage(activities=activities))
@@ -135,20 +145,45 @@ async def load_configured_workflow(
 
 
 @activity.defn
+async def check_configured_workflow_watch(invocation: ConfiguredWorkflowInvocation) -> bool:
+    """Return whether a watch schedule should launch a real workflow run."""
+
+    item = await report_store.get_scheduled_query(invocation.workflow_id)
+    if item is None or not item.enabled or not item.watch_scans:
+        return False
+    return await check_watch_scan_triggered(
+        item.last_run_at,
+        [ScheduledQueryWatchScan.model_validate(value) for value in item.watch_scans],
+    )
+
+
+@activity.defn
 async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredActivityOutput:
     parameters = dict(input.parameters)
     if input.has_input:
         parameters["input"] = input.input_value
-    records = await run_query_with_retry(input.cypher, parameters)
+    records, row_truncated = await run_query_bounded_with_retry(
+        input.cypher,
+        parameters,
+        max_rows=input.max_rows,
+    )
     rows = [dict(record) for record in records]
-    truncated = len(records) > input.max_rows
+    bounded, bounds = bounded_json_rows(
+        rows,
+        max_rows=input.max_rows,
+        max_bytes=input.max_bytes,
+    )
+    if row_truncated and "row_limit" not in bounds["truncated_reasons"]:
+        bounds["truncated"] = True
+        bounds["truncated_reasons"].insert(0, "row_limit")
     return ConfiguredActivityOutput(
         output_id=input.output_id,
-        value=rows[: input.max_rows],
+        value=bounded,
         metadata={
             "status": "completed",
-            "row_count": min(len(rows), input.max_rows),
-            "truncated": truncated,
+            "row_count": len(bounded),
+            "truncated": bounds["truncated"],
+            "truncated_reasons": bounds["truncated_reasons"],
         },
     )
 
@@ -156,17 +191,27 @@ async def execute_configured_query(input: ConfiguredQueryInput) -> ConfiguredAct
 @activity.defn
 async def execute_configured_activity(input: ConfiguredActivityInput) -> ConfiguredActivityOutput:
     module = scheduled_query_modules.get_module(input.activity_type)
+    input_value = input.input_value
+    if isinstance(input_value, list):
+        configured_max_rows = input.parameters.get("max_rows")
+        max_rows = int(configured_max_rows) if configured_max_rows is not None else None
+        input_value, _ = bounded_json_rows(
+            input_value,
+            max_rows=max_rows,
+            max_bytes=settings.WORKFLOW_RESULT_MAX_BYTES,
+        )
     input_annotation = getattr(module, "activity_input_type", lambda: list[dict[str, Any]])()
     try:
-        validated_input = TypeAdapter(input_annotation).validate_python(input.input_value)
+        validated_input = TypeAdapter(input_annotation).validate_python(input_value)
     except ValidationError as exc:
         raise ApplicationError(
             f"Input for activity '{input.activity_type}' does not match its schema: {exc}",
             non_retryable=True,
         ) from exc
+    action_config = {key: value for key, value in input.parameters.items() if key != "max_rows"}
     action = ScheduledQueryAction(
         action_type=input.activity_type,
-        action_config=input.parameters,
+        action_config=action_config,
     )
     if inspect.iscoroutinefunction(module.handle_results):
         value = await module.handle_results(input.workflow_id, action, validated_input)
@@ -181,10 +226,27 @@ async def execute_configured_activity(input: ConfiguredActivityInput) -> Configu
             f"Output from activity '{input.activity_type}' does not match its schema: {exc}",
             non_retryable=True,
         ) from exc
+    metadata: dict[str, Any] = {"status": "completed"}
+    if isinstance(value, list):
+        value, bounds = bounded_json_rows(
+            value,
+            max_rows=None,
+            max_bytes=settings.WORKFLOW_RESULT_MAX_BYTES,
+        )
+        metadata.update(
+            row_count=bounds["row_count"],
+            truncated=bounds["truncated"],
+            truncated_reasons=bounds["truncated_reasons"],
+        )
+    elif json_size_bytes(value) > settings.WORKFLOW_RESULT_MAX_BYTES:
+        raise ApplicationError(
+            f"Output from activity '{input.activity_type}' exceeds WORKFLOW_RESULT_MAX_BYTES",
+            non_retryable=True,
+        )
     return ConfiguredActivityOutput(
         output_id=input.output_id,
         value=value,
-        metadata={"status": "completed"},
+        metadata=metadata,
     )
 
 
@@ -210,9 +272,14 @@ async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
                 value
                 for row in input.input_value
                 if isinstance(row, dict) and isinstance((value := row.get(attribute)), dict)
-            ][:max_rows]
+            ]
         else:
-            rows = [row for row in input.input_value if isinstance(row, dict)][:max_rows]
+            rows = [row for row in input.input_value if isinstance(row, dict)]
+        rows, _ = bounded_json_rows(
+            rows,
+            max_rows=max_rows,
+            max_bytes=settings.WORKFLOW_RESULT_MAX_BYTES,
+        )
     return spec.build_input(
         WorkflowInputContext(
             scheduled_query_id=input.workflow_id,
@@ -240,10 +307,27 @@ async def normalize_code_workflow_output(input: CodeWorkflowOutputRequest) -> Co
             f"Output from workflow '{input.workflow_name}' does not match its schema: {exc}",
             non_retryable=True,
         ) from exc
+    metadata: dict[str, Any] = {"status": "completed", "workflow": input.workflow_name}
+    if isinstance(value, list):
+        value, bounds = bounded_json_rows(
+            value,
+            max_rows=None,
+            max_bytes=settings.WORKFLOW_RESULT_MAX_BYTES,
+        )
+        metadata.update(
+            row_count=bounds["row_count"],
+            truncated=bounds["truncated"],
+            truncated_reasons=bounds["truncated_reasons"],
+        )
+    elif json_size_bytes(value) > settings.WORKFLOW_RESULT_MAX_BYTES:
+        raise ApplicationError(
+            f"Output from workflow '{input.workflow_name}' exceeds WORKFLOW_RESULT_MAX_BYTES",
+            non_retryable=True,
+        )
     return ConfiguredActivityOutput(
         output_id=input.output_id,
         value=value,
-        metadata={"status": "completed", "workflow": input.workflow_name},
+        metadata=metadata,
     )
 
 

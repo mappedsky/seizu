@@ -144,6 +144,41 @@ async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Rec
         attempt = attempt + 1
 
 
+async def run_query_bounded_with_retry(
+    cypher: str,
+    parameters: dict | None,
+    *,
+    max_rows: int,
+) -> tuple[list[Record], bool]:
+    """Stream at most ``max_rows`` records plus one truncation sentinel.
+
+    Unlike :func:`run_query_with_retry`, this protects worker memory from a
+    large result set. Closing the session after the sentinel discards the
+    remaining records instead of materializing them in Python.
+    """
+
+    attempt = 1
+    while True:
+        try:
+            records: list[Record] = []
+            driver = _get_async_neo4j_client()
+            async with driver.session() as session:
+                result = await session.run(
+                    Query(cypher, timeout=settings.NEO4J_QUERY_TIMEOUT),
+                    parameters=parameters,
+                )
+                async for record in result:
+                    records.append(record)
+                    if len(records) > max_rows:
+                        break
+            return records[:max_rows], len(records) > max_rows
+        except neo4j.exceptions.ServiceUnavailable:
+            logger.debug("Unable to connect to neo4j, retrying...")
+            if attempt >= 5:
+                raise
+            attempt += 1
+
+
 async def run_tx(tx: AsyncTransaction, cypher: str, parameters: dict = None) -> list[Record]:
     results = []
     # tx.run() takes no transaction timeout — for an explicit transaction the

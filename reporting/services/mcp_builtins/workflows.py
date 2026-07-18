@@ -7,7 +7,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmationTarget
 from reporting.schema.report_config import CreateWorkflowRequest
-from reporting.services import report_store, workflow_schedules, workflows
+from reporting.services import report_store, workflows
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
 
 GROUP = "workflows"
@@ -61,42 +61,41 @@ async def _get(args: dict[str, Any], current_user: CurrentUser | None) -> dict[s
 
 async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     body = CreateWorkflowRequest.model_validate(args)
-    error = await workflows.validate_definition(body)
-    if error:
-        return {"error": error}
-    item = await workflows.create(body, _user(current_user).user.user_id)
-    await workflow_schedules.reconcile_by_id(item.workflow_id)
-    refreshed = await report_store.get_scheduled_query(item.workflow_id)
-    return workflows.item_to_workflow(refreshed).model_dump() if refreshed else item.model_dump()
+    try:
+        item = await workflows.create_managed(body, _user(current_user).user.user_id)
+    except workflows.WorkflowDefinitionError as exc:
+        return {"error": str(exc)}
+    return item.model_dump()
 
 
 async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     workflow_id = args["workflow_id"]
     body = CreateWorkflowRequest.model_validate({key: value for key, value in args.items() if key != "workflow_id"})
-    error = await workflows.validate_definition(body)
-    if error:
-        return {"error": error}
-    item = await workflows.update(workflow_id, body, _user(current_user).user.user_id)
-    if item is None:
-        return {"error": "Workflow not found"}
-    await workflow_schedules.reconcile_by_id(workflow_id)
-    refreshed = await report_store.get_scheduled_query(workflow_id)
-    return workflows.item_to_workflow(refreshed).model_dump() if refreshed else item.model_dump()
+    try:
+        item = await workflows.update_managed(workflow_id, body, _user(current_user).user.user_id)
+    except (workflows.WorkflowDefinitionError, workflows.WorkflowNotFoundError) as exc:
+        return {"error": str(exc)}
+    return item.model_dump()
 
 
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     workflow_id = args["workflow_id"]
-    if not await report_store.delete_scheduled_query(workflow_id):
-        return {"error": "Workflow not found"}
-    await workflow_schedules.delete_schedule(workflow_id)
+    try:
+        await workflows.delete_managed(workflow_id, _user(current_user).user.user_id)
+    except workflows.WorkflowNotFoundError as exc:
+        return {"error": str(exc)}
     return {"workflow_id": workflow_id}
 
 
 async def _run(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     workflow_id = args["workflow_id"]
-    if await report_store.get_scheduled_query(workflow_id) is None:
-        return {"error": "Workflow not found"}
-    temporal_workflow_id, run_id = await workflow_schedules.run_now(workflow_id)
+    try:
+        temporal_workflow_id, run_id = await workflows.run_managed(
+            workflow_id,
+            _user(current_user).user.user_id,
+        )
+    except workflows.WorkflowNotFoundError as exc:
+        return {"error": str(exc)}
     return {"workflow_id": workflow_id, "temporal_workflow_id": temporal_workflow_id, "run_id": run_id}
 
 
@@ -168,6 +167,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.WORKFLOWS_DELETE.value],
             handler=_delete,
+            requires_user=True,
             confirmation=_confirm_delete,
         ),
         BuiltinTool(
@@ -181,6 +181,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.WORKFLOWS_WRITE.value],
             handler=_run,
+            requires_user=True,
             confirmation=_confirm_run,
         ),
         BuiltinTool(

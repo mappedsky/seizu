@@ -110,7 +110,7 @@ async def test_initialize_migrates_legacy_scheduled_query_tables(mocker):
             text(
                 "CREATE TABLE scheduled_query_versions ("
                 "scheduled_query_id VARCHAR NOT NULL, version INTEGER NOT NULL, "
-                "name VARCHAR NOT NULL, cypher VARCHAR NOT NULL, params JSON NOT NULL, "
+                "cypher VARCHAR NOT NULL, params JSON NOT NULL, "
                 "frequency INTEGER, watch_scans JSON NOT NULL, enabled BOOLEAN NOT NULL, "
                 "actions JSON NOT NULL, created_at VARCHAR NOT NULL, created_by VARCHAR NOT NULL, "
                 "PRIMARY KEY (scheduled_query_id, version))"
@@ -123,8 +123,10 @@ async def test_initialize_migrates_legacy_scheduled_query_tables(mocker):
     async with engine.connect() as conn:
         query_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_queries)"))}
         version_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))}
+        table_names = await conn.run_sync(lambda c: set(c.dialect.get_table_names(c)))
     assert {"inputs", "activities", "stages", "schedule_sync_status"} <= query_columns
-    assert {"inputs", "activities", "stages"} <= version_columns
+    assert {"name", "inputs", "activities", "stages"} <= version_columns
+    assert {"reports", "users", "scheduled_chats", "action_confirmations"} <= table_names
     await engine.dispose()
 
 
@@ -1337,6 +1339,8 @@ async def test_list_scheduled_query_versions(store, mocker):
     assert len(versions) == 2
     assert versions[0].version == 2  # descending order
     assert versions[1].version == 1
+    assert versions[0].name == "Updated"
+    assert versions[1].name == "Test Query"
 
 
 async def test_list_scheduled_query_versions_not_found(store):

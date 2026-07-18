@@ -87,47 +87,55 @@ async def test_list_and_get(mocker):
 
 
 async def test_create_validation_and_refresh(mocker):
-    validate = mocker.patch.object(builtin.workflows, "validate_definition", new=AsyncMock(return_value="bad"))
+    create = mocker.patch.object(
+        builtin.workflows,
+        "create_managed",
+        new=AsyncMock(side_effect=builtin.workflows.WorkflowDefinitionError("bad")),
+    )
     assert await builtin._create(_args(), _user()) == {"error": "bad"}
-    validate.return_value = None
     created = item_to_workflow(_item())
-    mocker.patch.object(builtin.workflows, "create", new=AsyncMock(return_value=created))
-    reconcile = mocker.patch.object(builtin.workflow_schedules, "reconcile_by_id", new=AsyncMock())
-    get = mocker.patch.object(builtin.report_store, "get_scheduled_query", new=AsyncMock(return_value=_item()))
+    create.side_effect = None
+    create.return_value = created
     assert (await builtin._create(_args(), _user()))["workflow_id"] == "workflow-1"
-    reconcile.assert_awaited_once()
-    get.return_value = None
-    assert (await builtin._create(_args(), _user()))["workflow_id"] == "workflow-1"
+    assert create.await_args.args[1] == "user-1"
 
 
 async def test_update_branches(mocker):
     args = {"workflow_id": "workflow-1", **_args()}
-    validate = mocker.patch.object(builtin.workflows, "validate_definition", new=AsyncMock(return_value="bad"))
+    update = mocker.patch.object(
+        builtin.workflows,
+        "update_managed",
+        new=AsyncMock(side_effect=builtin.workflows.WorkflowDefinitionError("bad")),
+    )
     assert await builtin._update(args, _user()) == {"error": "bad"}
-    validate.return_value = None
-    update = mocker.patch.object(builtin.workflows, "update", new=AsyncMock(return_value=None))
+    update.side_effect = builtin.workflows.WorkflowNotFoundError("Workflow not found")
     assert "error" in await builtin._update(args, _user())
+    update.side_effect = None
     update.return_value = item_to_workflow(_item())
-    mocker.patch.object(builtin.workflow_schedules, "reconcile_by_id", new=AsyncMock())
-    get = mocker.patch.object(builtin.report_store, "get_scheduled_query", new=AsyncMock(return_value=_item()))
     assert (await builtin._update(args, _user()))["workflow_id"] == "workflow-1"
-    get.return_value = None
-    assert (await builtin._update(args, _user()))["workflow_id"] == "workflow-1"
+    assert update.await_args.args[2] == "user-1"
 
 
 async def test_delete_and_run_branches(mocker):
-    delete = mocker.patch.object(builtin.report_store, "delete_scheduled_query", new=AsyncMock(return_value=False))
-    assert "error" in await builtin._delete({"workflow_id": "missing"}, None)
-    delete.return_value = True
-    remove = mocker.patch.object(builtin.workflow_schedules, "delete_schedule", new=AsyncMock())
-    assert await builtin._delete({"workflow_id": "workflow-1"}, None) == {"workflow_id": "workflow-1"}
-    remove.assert_awaited_once()
+    delete = mocker.patch.object(
+        builtin.workflows,
+        "delete_managed",
+        new=AsyncMock(side_effect=builtin.workflows.WorkflowNotFoundError("Workflow not found")),
+    )
+    assert "error" in await builtin._delete({"workflow_id": "missing"}, _user())
+    delete.side_effect = None
+    assert await builtin._delete({"workflow_id": "workflow-1"}, _user()) == {"workflow_id": "workflow-1"}
+    delete.assert_awaited_with("workflow-1", "user-1")
 
-    get = mocker.patch.object(builtin.report_store, "get_scheduled_query", new=AsyncMock(return_value=None))
-    assert "error" in await builtin._run({"workflow_id": "missing"}, None)
-    get.return_value = _item()
-    mocker.patch.object(builtin.workflow_schedules, "run_now", new=AsyncMock(return_value=("temporal", "run")))
-    result = await builtin._run({"workflow_id": "workflow-1"}, None)
+    run = mocker.patch.object(
+        builtin.workflows,
+        "run_managed",
+        new=AsyncMock(side_effect=builtin.workflows.WorkflowNotFoundError("Workflow not found")),
+    )
+    assert "error" in await builtin._run({"workflow_id": "missing"}, _user())
+    run.side_effect = None
+    run.return_value = ("temporal", "run")
+    result = await builtin._run({"workflow_id": "workflow-1"}, _user())
     assert result["run_id"] == "run"
 
 

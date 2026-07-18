@@ -6,9 +6,11 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import RestoreIcon from '@mui/icons-material/Restore';
 import { AuthContext } from 'src/auth.context';
 import UserDisplay from 'src/components/UserDisplay';
+import { useCurrentUser } from 'src/hooks/useCurrentUser';
 import { usePermissions } from 'src/hooks/usePermissions';
 import {
   WorkflowRequest,
+  useWorkflow,
   useWorkflowMutations,
 } from 'src/hooks/useWorkflowsApi';
 import { pageContentSx } from 'src/theme/layout';
@@ -26,7 +28,9 @@ export default function WorkflowHistory() {
   const navigate = useNavigate();
   const { accessToken } = useContext(AuthContext);
   const hasPermission = usePermissions();
+  const currentUser = useCurrentUser();
   const { updateWorkflow } = useWorkflowMutations();
+  const { workflow } = useWorkflow(id ?? null);
   const [versions, setVersions] = useState<Version[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState<number | null>(null);
@@ -75,6 +79,7 @@ export default function WorkflowHistory() {
               disabled={
                 version.version === currentVersion ||
                 !hasPermission('workflows:write') ||
+                workflow?.created_by !== currentUser?.user_id ||
                 restoring !== null
               }
               onClick={async () => {

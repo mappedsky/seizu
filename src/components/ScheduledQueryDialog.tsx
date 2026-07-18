@@ -227,6 +227,9 @@ function ActionConfigFieldControl({
         size="small"
         fullWidth
         helperText={field.description}
+        slotProps={{
+          htmlInput: { min: field.minimum, max: field.maximum },
+        }}
       />
     );
   }

@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 SCHEDULE_ID_PREFIX = "seizu-workflow-schedule:"
 RUN_ID_PREFIX = "seizu-workflow:"
+WATCH_POLL_RUN_ID_PREFIX = "seizu-workflow-poll:"
 
 _client: Client | None = None
 _client_lock = asyncio.Lock()
@@ -136,11 +137,16 @@ def _trigger_immediately(item: ScheduledQueryItem, now: datetime | None = None) 
 
 
 def build_schedule(item: ScheduledQueryItem) -> Schedule:
+    is_watch = bool(item.watch_scans)
     return Schedule(
         action=ScheduleActionStartWorkflow(
-            "seizu_configured_workflow",
+            "seizu_configured_workflow_watch_poll" if is_watch else "seizu_configured_workflow",
             ConfiguredWorkflowInvocation(workflow_id=item.scheduled_query_id),
-            id=f"{RUN_ID_PREFIX}{item.scheduled_query_id}",
+            id=(
+                f"{WATCH_POLL_RUN_ID_PREFIX}{item.scheduled_query_id}"
+                if is_watch
+                else f"{RUN_ID_PREFIX}{item.scheduled_query_id}"
+            ),
             task_queue=settings.TEMPORAL_TASK_QUEUE,
         ),
         spec=_temporal_spec(item),
@@ -218,11 +224,15 @@ async def reconcile_all() -> None:
 
 
 async def delete_schedule(workflow_id: str) -> None:
+    import temporalio.service
+
     try:
         client = await get_client()
         await client.get_schedule_handle(schedule_id(workflow_id)).delete()
-    except Exception:
-        logger.exception("Failed to delete Temporal Schedule", extra={"workflow_id": workflow_id})
+    except temporalio.service.RPCError as exc:
+        if exc.status == temporalio.service.RPCStatusCode.NOT_FOUND:
+            return
+        raise
 
 
 async def run_now(

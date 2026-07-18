@@ -58,6 +58,8 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
             type="number",
             required=False,
             default=settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS,
+            minimum=1,
+            maximum=settings.WORKFLOW_QUERY_MAX_ROWS,
             description="Maximum query rows passed to the child workflow.",
         ),
         ActionConfigFieldDef(

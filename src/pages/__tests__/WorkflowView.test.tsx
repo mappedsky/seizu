@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WorkflowView from 'src/pages/WorkflowView';
+import * as currentUserHook from 'src/hooks/useCurrentUser';
 import * as workflowsApi from 'src/hooks/useWorkflowsApi';
 
 jest.mock('src/hooks/useWorkflowsApi', () => ({
@@ -12,6 +13,9 @@ jest.mock('src/hooks/useWorkflowsApi', () => ({
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: () => () => true,
 }));
+jest.mock('src/hooks/useCurrentUser', () => ({
+  useCurrentUser: jest.fn(),
+}));
 jest.mock('src/components/UserDisplay', () => ({
   __esModule: true,
   default: () => <span>Workflow owner</span>,
@@ -21,8 +25,10 @@ const useWorkflow = workflowsApi.useWorkflow as jest.Mock;
 const useWorkflowRuns = workflowsApi.useWorkflowRuns as jest.Mock;
 const useWorkflowRunDetail = workflowsApi.useWorkflowRunDetail as jest.Mock;
 const useWorkflowMutations = workflowsApi.useWorkflowMutations as jest.Mock;
+const useCurrentUser = currentUserHook.useCurrentUser as jest.Mock;
 
 beforeEach(() => {
+  useCurrentUser.mockReturnValue({ user_id: 'user-1' });
   global.fetch = jest.fn().mockResolvedValue({
     ok: true,
     json: async () => ({}),
@@ -122,4 +128,20 @@ it('shows workflow status, compact stages, and recent Temporal runs', async () =
     screen.getByRole('heading', { name: 'Recent Temporal runs' }),
   ).toBeInTheDocument();
   expect(screen.getByText('seizu_configured_workflow')).toBeInTheDocument();
+});
+
+it('disables mutation actions for a non-owner', async () => {
+  useCurrentUser.mockReturnValue({ user_id: 'other-user' });
+
+  render(
+    <MemoryRouter initialEntries={['/app/workflows/workflow-1']}>
+      <Routes>
+        <Route path="/app/workflows/:id" element={<WorkflowView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled();
 });

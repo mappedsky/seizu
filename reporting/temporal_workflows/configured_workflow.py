@@ -10,6 +10,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from reporting.temporal_workflows.activities import (
         build_code_workflow_input,
+        check_configured_workflow_watch,
         execute_configured_activity,
         execute_configured_query,
         load_configured_workflow,
@@ -26,6 +27,15 @@ with workflow.unsafe.imports_passed_through():
         ConfiguredWorkflowInvocation,
         ConfiguredWorkflowResult,
     )
+
+
+def _activity_maximum_attempts(configured: ConfiguredActivity) -> int:
+    """Read the retry field without breaking histories created before it existed."""
+
+    # Old load_configured_workflow activity results are durable history. Their
+    # decoded ConfiguredActivity objects have no maximum_attempts attribute and
+    # previously used the hard-coded three-attempt policy.
+    return int(getattr(configured, "maximum_attempts", 3))
 
 
 @workflow.defn(name="seizu_configured_workflow")
@@ -71,6 +81,7 @@ class ConfiguredWorkflow:
                         cypher=str(configured.parameters.get("cypher", "")),
                         parameters=parameters,
                         max_rows=int(configured.parameters.get("max_rows") or 200),
+                        max_bytes=int(configured.parameters.get("max_bytes") or 1_000_000),
                         has_input=configured.input_id is not None,
                         input_value=input_value,
                     ),
@@ -130,7 +141,7 @@ class ConfiguredWorkflow:
                 ),
                 activity_id=f"{prefix}:{configured.type}",
                 start_to_close_timeout=timedelta(seconds=300),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                retry_policy=RetryPolicy(maximum_attempts=_activity_maximum_attempts(configured)),
             )
 
         try:
@@ -176,3 +187,35 @@ class ConfiguredWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
             raise
+
+
+@workflow.defn(name="seizu_configured_workflow_watch_poll")
+class ConfiguredWorkflowWatchPoll:
+    """Poll SyncMetadata and create a visible child only for an actual run."""
+
+    @workflow.run
+    async def run(self, invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowResult:
+        triggered = await workflow.execute_activity(
+            check_configured_workflow_watch,
+            invocation,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        if not triggered:
+            return ConfiguredWorkflowResult(
+                status="skipped",
+                skipped_reason="watch scan unchanged",
+            )
+
+        poll_id = workflow.info().workflow_id
+        poll_prefix = f"seizu-workflow-poll:{invocation.workflow_id}"
+        suffix = poll_id.removeprefix(poll_prefix).lstrip("-:")
+        actual_id = f"seizu-workflow:{invocation.workflow_id}:run:{suffix}"
+        return await workflow.execute_child_workflow(
+            "seizu_configured_workflow",
+            ConfiguredWorkflowInvocation(
+                workflow_id=invocation.workflow_id,
+                watch_checked=True,
+            ),
+            id=actual_id,
+        )
