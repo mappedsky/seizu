@@ -30,6 +30,18 @@ def action_name() -> str:
     return "slack"
 
 
+def activity_description() -> str:
+    return "Uploads the input rows as a CSV file to Slack."
+
+
+def activity_input_type() -> Any:
+    return list[dict[str, Any]]
+
+
+def activity_output_type() -> Any:
+    return dict[str, int]
+
+
 def action_config_schema() -> list[ActionConfigFieldDef]:
     return [
         ActionConfigFieldDef(
@@ -68,9 +80,11 @@ async def setup() -> None:
     return
 
 
-def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, results: list[dict[str, Any]]) -> None:
+def handle_results(
+    scheduled_query_id: str, action: ScheduledQueryAction, results: list[dict[str, Any]]
+) -> dict[str, int]:
     if not results:
-        return
+        return {"rows_uploaded": 0, "channels": 0}
 
     slack_client = _get_client()
 
@@ -109,3 +123,4 @@ def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, result
         title=action.action_config["title"],
         initial_comment=action.action_config["initial_comment"],
     )
+    return {"rows_uploaded": len(results), "channels": len(action.action_config["channels"])}

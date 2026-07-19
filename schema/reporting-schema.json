@@ -1211,6 +1211,112 @@
             ],
             "title": "ToolsetDef",
             "type": "object"
+        },
+        "Workflow": {
+            "additionalProperties": false,
+            "description": "A versioned, configurable workflow executed by Temporal.",
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                },
+                "schedule": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/$defs/ScheduleSpec"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null
+                },
+                "watch_scans": {
+                    "items": {
+                        "$ref": "#/$defs/ScheduledQueryWatchScan"
+                    },
+                    "title": "Watch Scans",
+                    "type": "array"
+                },
+                "enabled": {
+                    "default": true,
+                    "title": "Enabled",
+                    "type": "boolean"
+                },
+                "stages": {
+                    "items": {
+                        "$ref": "#/$defs/WorkflowStage"
+                    },
+                    "minItems": 1,
+                    "title": "Stages",
+                    "type": "array"
+                }
+            },
+            "required": [
+                "name",
+                "stages"
+            ],
+            "title": "Workflow",
+            "type": "object"
+        },
+        "WorkflowActivity": {
+            "additionalProperties": false,
+            "description": "One activity in a configurable workflow stage.",
+            "properties": {
+                "type": {
+                    "description": "Registered activity type.",
+                    "title": "Type",
+                    "type": "string"
+                },
+                "input": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Output from an activity in an earlier stage.",
+                    "title": "Input"
+                },
+                "output": {
+                    "description": "Globally unique name for this activity's output.",
+                    "title": "Output",
+                    "type": "string"
+                },
+                "parameters": {
+                    "additionalProperties": true,
+                    "title": "Parameters",
+                    "type": "object"
+                }
+            },
+            "required": [
+                "type",
+                "output"
+            ],
+            "title": "WorkflowActivity",
+            "type": "object"
+        },
+        "WorkflowStage": {
+            "additionalProperties": false,
+            "description": "Activities that start in parallel after the preceding stage settles.",
+            "properties": {
+                "activities": {
+                    "items": {
+                        "$ref": "#/$defs/WorkflowActivity"
+                    },
+                    "minItems": 1,
+                    "title": "Activities",
+                    "type": "array"
+                }
+            },
+            "required": [
+                "activities"
+            ],
+            "title": "WorkflowStage",
+            "type": "object"
         }
     },
     "properties": {
@@ -1261,6 +1367,14 @@
                 "$ref": "#/$defs/ScheduledQuery"
             },
             "title": "Scheduled Queries",
+            "type": "array"
+        },
+        "workflows": {
+            "description": "Temporal-backed configurable workflows.",
+            "items": {
+                "$ref": "#/$defs/Workflow"
+            },
+            "title": "Workflows",
             "type": "array"
         },
         "toolsets": {

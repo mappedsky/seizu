@@ -14,6 +14,11 @@ import {
   CurrentUserStateProvider,
   type CurrentUser,
 } from 'src/hooks/useCurrentUser';
+import * as permissionsModule from 'src/hooks/usePermissions';
+
+jest.mock('src/hooks/usePermissions', () => ({
+  usePermissionState: jest.fn(),
+}));
 
 jest.mock('src/components/reports/PanelEditor', () => ({
   __esModule: true,
@@ -38,6 +43,10 @@ jest.mock('src/components/reports/PanelGridRow', () => ({
 }));
 
 const theme = createTheme();
+const mockUsePermissionState =
+  permissionsModule.usePermissionState as jest.MockedFunction<
+    typeof permissionsModule.usePermissionState
+  >;
 
 function Wrapper({ children }: { children: React.ReactNode }) {
   return <ThemeProvider theme={theme}>{children}</ThemeProvider>;
@@ -84,15 +93,19 @@ function userWith(permissions: string[]): CurrentUser {
 }
 
 function renderAsUser(report: Report, permissions: string[]) {
+  const currentUser = userWith(permissions);
+  mockUsePermissionState.mockReturnValue({
+    hasPermission: (permission) => permissions.includes(permission),
+    loading: false,
+    currentUser,
+  });
   return render(
     <Wrapper>
       <AuthConfigContext.Provider
         value={{ auth_required: false, oidc: null, loaded: true }}
       >
         <AuthContext.Provider value={{ accessToken: null, isLoading: false }}>
-          <CurrentUserStateProvider
-            value={{ currentUser: userWith(permissions), loading: false }}
-          >
+          <CurrentUserStateProvider value={{ currentUser, loading: false }}>
             <EditableReportView
               report={report}
               reportId="r1"
@@ -109,7 +122,13 @@ function renderAsUser(report: Report, permissions: string[]) {
 describe('EditableReportView', () => {
   let originalFetch: typeof global.fetch;
   beforeEach(() => {
+    jest.clearAllMocks();
     originalFetch = global.fetch;
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: () => false,
+      loading: false,
+      currentUser: null,
+    });
   });
   afterEach(() => {
     cleanup();
@@ -267,18 +286,13 @@ describe('EditableReportView', () => {
   });
 
   it('falls back to a skeleton (no query) when the user lacks query:execute', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      json: () => Promise.resolve({ results: [] }),
-    }) as unknown as typeof global.fetch;
-
-    renderAsUser(REPORT, ['reports:write']);
+    global.fetch = jest.fn() as unknown as typeof global.fetch;
+    const { container } = renderAsUser(REPORT, ['reports:write']);
 
     await waitFor(() =>
       expect(screen.getByLabelText('Row name')).toBeInTheDocument(),
     );
-    const hitAdhoc = (global.fetch as jest.Mock).mock.calls.some(
-      (call) => call[0] === '/api/v1/query/adhoc',
-    );
-    expect(hitAdhoc).toBe(false);
+    expect(container.querySelector('.MuiSkeleton-root')).not.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

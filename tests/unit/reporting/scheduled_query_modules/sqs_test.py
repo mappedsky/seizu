@@ -47,11 +47,23 @@ async def test_setup(mocker):
         ScheduledQueryItem(
             scheduled_query_id="sq2",
             name="test_query2",
-            cypher="test",
+            cypher="",
             enabled=True,
             params=[],
             watch_scans=[],
-            actions=[{"action_type": "sqs", "action_config": {"sqs_queue": "test2"}}],
+            actions=[],
+            stages=[
+                {
+                    "activities": [
+                        {
+                            "type": "sqs",
+                            "input": "query",
+                            "output": "sent",
+                            "parameters": {"sqs_queue": "test2"},
+                        }
+                    ]
+                }
+            ],
             created_at="2024-01-01T00:00:00",
             updated_at="2024-01-01T00:00:00",
             created_by="seed-script",

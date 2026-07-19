@@ -35,6 +35,7 @@ from reporting.routes import sync_metadata as sync_metadata_routes
 from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
+from reporting.routes import workflows as workflows_routes
 from reporting.services import report_store
 from reporting.services.chat_graph import (
     close_chat_checkpoints,
@@ -332,6 +333,7 @@ def create_app() -> FastAPI:
         toolsets_routes,
         users_routes,
         validate_routes,
+        workflows_routes,
         static_routes,
     ]:
         app.include_router(router_module.router)

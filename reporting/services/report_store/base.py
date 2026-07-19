@@ -224,6 +224,9 @@ class ReportStore(ABC):
         enabled: bool,
         actions: list[dict[str, Any]],
         created_by: str,
+        stages: list[dict[str, Any]] | None = None,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem:
         """Create a new scheduled query (at version 1) and return it."""
 
@@ -241,6 +244,9 @@ class ReportStore(ABC):
         actions: list[dict[str, Any]],
         updated_by: str,
         comment: str | None = None,
+        stages: list[dict[str, Any]] | None = None,
+        inputs: dict[str, Any] | None = None,
+        activities: list[dict[str, Any]] | None = None,
     ) -> ScheduledQueryItem | None:
         """Save a new version of an existing scheduled query. Returns None if not found."""
 
@@ -276,6 +282,17 @@ class ReportStore(ABC):
         The worker picks the request up on its next poll. Returns the
         timestamp set, or None if the scheduled query does not exist.
         """
+
+    @abstractmethod
+    async def set_workflow_schedule_sync_status(
+        self,
+        workflow_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        """Persist Temporal Schedule reconciliation status."""
 
     @abstractmethod
     async def delete_scheduled_query(self, sq_id: str) -> bool:

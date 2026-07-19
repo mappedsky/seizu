@@ -19,6 +19,7 @@ pays for it when the endpoints are actually used.
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,7 @@ _ENUM_PREFIXES = (
     "PENDING_ACTIVITY_STATE_",
     "RETRY_STATE_",
 )
+_SCHEDULE_TIME_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
 
 
 class TemporalUnavailableError(Exception):
@@ -82,11 +84,30 @@ def workflow_id_matches(sq_id: str, workflow_id: str) -> bool:
     set the run listing queries — so detail reads can never reach beyond the
     surface the list exposes.
     """
+    configured_id = f"seizu-workflow:{sq_id}"
+    if workflow_id == configured_id:
+        return True
+    if workflow_id.startswith(f"{configured_id}:manual:"):
+        suffix = workflow_id.removeprefix(f"{configured_id}:manual:")
+        return bool(suffix) and ":stage:" not in suffix and ":activity:" not in suffix
+    if re.fullmatch(rf"{re.escape(configured_id)}:run:{_SCHEDULE_TIME_RE}", workflow_id):
+        return True
+    # Temporal Schedule actions append the nominal schedule time to the
+    # configured workflow ID. Keep this strict so child workflow IDs (which
+    # append ``:activity:...``) and similarly prefixed definitions cannot be
+    # used to escape the run-detail authorization boundary.
+    if re.fullmatch(
+        rf"{re.escape(configured_id)}-{_SCHEDULE_TIME_RE}",
+        workflow_id,
+    ):
+        return True
     parts = workflow_id.split(":", 3)
     return len(parts) == 4 and parts[0] == "seizu" and parts[1] in WORKFLOW_REGISTRY and parts[2] == sq_id
 
 
-def _workflow_name(workflow_id: str) -> str:
+def _workflow_name(workflow_id: str, configured_name: str | None = None) -> str:
+    if workflow_id.startswith("seizu-workflow:"):
+        return configured_name or "configured"
     return workflow_id.split(":", 3)[1]
 
 
@@ -149,7 +170,13 @@ def _payload_preview(payloads: "Iterable[temporalio.api.common.v1.Payload]") -> 
     return rendered
 
 
-async def list_workflow_runs(sq_id: str, limit: int) -> list[WorkflowRunSummary]:
+async def list_workflow_runs(
+    sq_id: str,
+    limit: int,
+    *,
+    configured_name: str | None = None,
+    watch_polling: bool = False,
+) -> list[WorkflowRunSummary]:
     """Return the most recent workflow runs started for a scheduled query.
 
     Visibility results come back StartTime-descending, so the first ``limit``
@@ -159,24 +186,42 @@ async def list_workflow_runs(sq_id: str, limit: int) -> list[WorkflowRunSummary]
 
     if '"' in sq_id or "\\" in sq_id:
         return []
-    query = " OR ".join(
-        f"WorkflowId STARTS_WITH {_quote(f'seizu:{name}:{sq_id}:')}" for name in sorted(WORKFLOW_REGISTRY)
-    )
+    prefixes = [f"seizu:{name}:{sq_id}:" for name in sorted(WORKFLOW_REGISTRY)]
+    if watch_polling:
+        # Watch schedules now use a separate poll workflow. Only its triggered
+        # child has the :run: prefix, so poll executions never enter this list.
+        prefixes.extend(
+            (
+                f"seizu-workflow:{sq_id}:run:",
+                f"seizu-workflow:{sq_id}:manual:",
+            )
+        )
+    else:
+        prefixes.append(f"seizu-workflow:{sq_id}")
+    query = " OR ".join(f"WorkflowId STARTS_WITH {_quote(prefix)}" for prefix in prefixes)
     client = await _get_client()
     runs: list[WorkflowRunSummary] = []
+    # Triggered configured runs may own child workflow IDs beneath the same
+    # prefix. Read extra visibility candidates so those filtered children do
+    # not crowd top-level runs out of the requested page.
+    visibility_limit = min(limit * 10, 500) if watch_polling else limit
     try:
-        async for execution in client.list_workflows(query, limit=limit):
+        async for execution in client.list_workflows(query, limit=visibility_limit):
+            if not workflow_id_matches(sq_id, execution.id):
+                continue
             runs.append(
                 WorkflowRunSummary(
                     workflow_id=execution.id,
                     run_id=execution.run_id,
-                    workflow_name=_workflow_name(execution.id),
+                    workflow_name=_workflow_name(execution.id, configured_name),
                     status=_status_name(execution.status),
                     start_time=_isoformat(execution.start_time),
                     close_time=_isoformat(execution.close_time),
                     history_length=execution.history_length,
                 )
             )
+            if len(runs) >= limit:
+                break
     except temporalio.service.RPCError as exc:
         _raise_if_unavailable(exc)
         raise
@@ -188,7 +233,8 @@ async def get_workflow_run_detail(
     workflow_id: str,
     run_id: str,
     *,
-    include_payload_previews: bool = True,
+    include_payload_previews: bool = False,
+    configured_name: str | None = None,
 ) -> WorkflowRunDetail | None:
     """Return one run's activity breakdown, or None when it doesn't exist.
 
@@ -196,9 +242,9 @@ async def get_workflow_run_detail(
     scheduled query by a registered workflow, so the endpoint can't be used
     to read arbitrary workflows in the namespace.
 
-    ``include_payload_previews=False`` omits activity input/result previews —
-    those carry query-result rows and activity outputs, which is more than a
-    scheduled-query reader is entitled to see.
+    Payload previews are omitted by default because they carry query-result
+    rows and activity outputs. Callers must opt in only after applying the
+    stronger permission check appropriate to their API surface.
     """
     import temporalio.service
 
@@ -225,7 +271,7 @@ async def get_workflow_run_detail(
     return WorkflowRunDetail(
         workflow_id=workflow_id,
         run_id=description.run_id,
-        workflow_name=_workflow_name(workflow_id),
+        workflow_name=_workflow_name(workflow_id, configured_name),
         status=_status_name(description.status),
         start_time=_isoformat(description.start_time),
         close_time=_isoformat(description.close_time),
