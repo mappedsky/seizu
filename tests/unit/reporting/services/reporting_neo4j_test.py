@@ -129,6 +129,37 @@ async def test_run_query_with_raise(mocker):
     assert run_query_mock.call_count >= 2
 
 
+async def test_run_query_bounded_stops_after_truncation_sentinel(mocker):
+    records = [MagicMock(name=f"record-{index}") for index in range(5)]
+    yielded = 0
+
+    async def _records():
+        nonlocal yielded
+        for record in records:
+            yielded += 1
+            yield record
+
+    session_mock = AsyncMock()
+    session_mock.run = AsyncMock(return_value=_records())
+    driver_mock = MagicMock()
+    driver_mock.session.return_value.__aenter__ = AsyncMock(return_value=session_mock)
+    driver_mock.session.return_value.__aexit__ = AsyncMock(return_value=False)
+    mocker.patch(
+        "reporting.services.reporting_neo4j._get_async_neo4j_client",
+        return_value=driver_mock,
+    )
+
+    result, truncated = await reporting_neo4j.run_query_bounded_with_retry(
+        "MATCH (n) RETURN n",
+        {},
+        max_rows=2,
+    )
+
+    assert result == records[:2]
+    assert truncated is True
+    assert yielded == 3
+
+
 async def test_run_tx(mocker):
     mock_record = MagicMock()
     tx_mock = AsyncMock()

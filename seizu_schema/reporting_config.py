@@ -620,6 +620,30 @@ class ScheduledQueryParam(BaseModel):
     )
 
 
+class WorkflowActivity(BaseModel):
+    """One activity in a configurable workflow stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(description="Registered activity type.")
+    input: str | None = Field(default=None, description="Output from an activity in an earlier stage.")
+    output: str = Field(description="Globally unique name for this activity's output.")
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("output")
+    @classmethod
+    def validate_output(cls, value: str) -> str:
+        return validate_lower_snake_id(value)
+
+
+class WorkflowStage(BaseModel):
+    """Activities that start in parallel after the preceding stage settles."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    activities: list[WorkflowActivity] = Field(min_length=1)
+
+
 class ScheduleSpec(BaseModel):
     """A structured time-based schedule. All times are UTC.
 
@@ -797,6 +821,38 @@ class ScheduledQuery(BaseModel):
         return self
 
 
+class Workflow(BaseModel):
+    """A versioned, configurable workflow executed by Temporal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    schedule: ScheduleSpec | None = None
+    watch_scans: list[ScheduledQueryWatchScan] = Field(default_factory=list)
+    enabled: bool = True
+    stages: list[WorkflowStage] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "Workflow":
+        validate_exclusive_triggers(None, self.schedule, self.watch_scans)
+        available: set[str] = set()
+        all_outputs: set[str] = set()
+        for stage_position, stage in enumerate(self.stages, start=1):
+            stage_outputs: set[str] = set()
+            for activity_position, activity in enumerate(stage.activities, start=1):
+                if activity.output in all_outputs or activity.output in stage_outputs:
+                    raise ValueError(f"duplicate activity output '{activity.output}'")
+                if activity.input is not None and activity.input not in available:
+                    raise ValueError(
+                        f"stage {stage_position} activity {activity_position} references output"
+                        f" '{activity.input}' that is not produced by an earlier stage"
+                    )
+                stage_outputs.add(activity.output)
+            available.update(stage_outputs)
+            all_outputs.update(stage_outputs)
+        return self
+
+
 class ToolParamDef(BaseModel):
     """Definition of a single parameter accepted by a tool."""
 
@@ -956,6 +1012,19 @@ class ReportingConfig(BaseModel):
             """
         ],
     )
+
+    workflows: list[Workflow] = Field(
+        default_factory=list,
+        description="Temporal-backed configurable workflows.",
+    )
+
+    @model_validator(mode="after")
+    def exclusive_workflow_sections(self) -> "ReportingConfig":
+        if self.workflows and self.scheduled_queries:
+            raise ValueError(
+                "workflows and scheduled_queries cannot both be configured; scheduled_queries is deprecated"
+            )
+        return self
 
     toolsets: dict[str, ToolsetDef] = Field(
         default_factory=dict,

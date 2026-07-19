@@ -200,6 +200,11 @@ async def test_scheduled_queries_update_success():
     args = {"scheduled_query_id": "sq1", **_valid_create_args(), "comment": "why"}
     with (
         patch(
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
+            new_callable=AsyncMock,
+            return_value=_sq_item(),
+        ),
+        patch(
             "reporting.services.mcp_builtins.scheduled_queries.validate_action_configs",
             return_value=None,
         ),
@@ -227,9 +232,16 @@ async def test_scheduled_queries_update_success():
 
 async def test_scheduled_queries_update_rejects_bad_action_config():
     args = {"scheduled_query_id": "sq1", **_valid_create_args()}
-    with patch(
-        "reporting.services.mcp_builtins.scheduled_queries.validate_action_configs",
-        return_value="bad action",
+    with (
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
+            new_callable=AsyncMock,
+            return_value=_sq_item(),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.validate_action_configs",
+            return_value="bad action",
+        ),
     ):
         server = _build_mcp_server()
         result = await _call(server, "scheduled_queries__update", args)
@@ -241,6 +253,11 @@ async def test_scheduled_queries_update_rejects_bad_action_config():
 async def test_scheduled_queries_update_rejects_invalid_cypher():
     args = {"scheduled_query_id": "sq1", **_valid_create_args()}
     with (
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
+            new_callable=AsyncMock,
+            return_value=_sq_item(),
+        ),
         patch(
             "reporting.services.mcp_builtins.scheduled_queries.validate_action_configs",
             return_value=None,
@@ -262,16 +279,7 @@ async def test_scheduled_queries_update_returns_error_when_missing():
     args = {"scheduled_query_id": "nope", **_valid_create_args()}
     with (
         patch(
-            "reporting.services.mcp_builtins.scheduled_queries.validate_action_configs",
-            return_value=None,
-        ),
-        patch(
-            "reporting.services.mcp_builtins.scheduled_queries.validate_query",
-            new_callable=AsyncMock,
-            return_value=ValidationResult(),
-        ),
-        patch(
-            "reporting.services.mcp_builtins.scheduled_queries.report_store.update_scheduled_query",
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
             new_callable=AsyncMock,
             return_value=None,
         ),
@@ -284,10 +292,21 @@ async def test_scheduled_queries_update_returns_error_when_missing():
 
 
 async def test_scheduled_queries_delete_success():
-    with patch(
-        "reporting.services.mcp_builtins.scheduled_queries.report_store.delete_scheduled_query",
-        new_callable=AsyncMock,
-        return_value=True,
+    with (
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
+            new_callable=AsyncMock,
+            return_value=_sq_item(),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.workflow_schedules.delete_schedule",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "reporting.services.mcp_builtins.scheduled_queries.report_store.delete_scheduled_query",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         server = _build_mcp_server()
         result = await _call(server, "scheduled_queries__delete", {"scheduled_query_id": "sq1"})
@@ -298,9 +317,9 @@ async def test_scheduled_queries_delete_success():
 
 async def test_scheduled_queries_delete_returns_error_when_missing():
     with patch(
-        "reporting.services.mcp_builtins.scheduled_queries.report_store.delete_scheduled_query",
+        "reporting.services.mcp_builtins.scheduled_queries.report_store.get_scheduled_query",
         new_callable=AsyncMock,
-        return_value=False,
+        return_value=None,
     ):
         server = _build_mcp_server()
         result = await _call(server, "scheduled_queries__delete", {"scheduled_query_id": "nope"})

@@ -43,6 +43,7 @@ def test_action_name():
 def test_action_config_schema():
     schema = {field.name: field for field in temporal.action_config_schema()}
     assert schema["workflow"].required is True
+    assert schema["workflow"].description == "Code-defined child workflow to run."
     assert "cve_repo_report" in (schema["workflow"].options or [])
     assert "cve_dependency_remediation" in (schema["workflow"].options or [])
     assert "accept_confirmation_bypass" not in schema
@@ -52,8 +53,7 @@ def test_action_config_schema_honors_enabled_allowlist(mocker):
     mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
     schema = {field.name: field for field in temporal.action_config_schema()}
     assert schema["workflow"].options == ["cve_repo_report"]
-    # Only the enabled workflow's description is surfaced in the picker help.
-    assert "cve_dependency_remediation" not in schema["workflow"].description
+    assert schema["workflow"].description == "Code-defined child workflow to run."
 
 
 async def test_handle_results_refuses_disabled_workflow(mocker):

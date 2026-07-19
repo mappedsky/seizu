@@ -24,13 +24,6 @@ from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
 from reporting.temporal_workflows import WorkflowInputContext
 
-# cve_metadata enriches CVEs produced by earlier modules, so it gets its own
-# later stage in the example (cartography's documented ordering requirement).
-_PIPELINE_EXAMPLE = (
-    '{"stages": [{"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},'
-    ' {"module": "github"}]}, {"runs": [{"module": "cve_metadata"}]}]}'
-)
-
 
 class CartographyModuleRunConfig(BaseModel):
     module: str
@@ -61,18 +54,14 @@ def enabled_module_names() -> list[str]:
 
 
 def config_fields() -> list[ActionConfigFieldDef]:
-    module_lines = ", ".join(f"{name} ({MODULE_REGISTRY[name].description})" for name in enabled_module_names())
+    module_names = ", ".join(enabled_module_names())
     return [
         ActionConfigFieldDef(
             name="modules",
             label="Modules",
             type="string_list",
             required=False,
-            description=(
-                "Cartography intel modules to sync, one sequential stage each,"
-                f" in order. Available: {module_lines}. For parallel runs or"
-                " per-module parameters use the pipeline field instead."
-            ),
+            description=(f"Run these modules sequentially in the listed order. Enabled modules: {module_names}."),
         ),
         ActionConfigFieldDef(
             name="pipeline",
@@ -80,9 +69,8 @@ def config_fields() -> list[ActionConfigFieldDef]:
             type="text",
             required=False,
             description=(
-                "Advanced staged pipeline as JSON (mutually exclusive with"
-                " Modules): stages run sequentially, runs within a stage in"
-                f" parallel. Example: {_PIPELINE_EXAMPLE}"
+                "Advanced JSON pipeline. Stages run in order; runs within a "
+                "stage run in parallel. Cannot be combined with Modules."
             ),
         ),
         ActionConfigFieldDef(
@@ -91,7 +79,7 @@ def config_fields() -> list[ActionConfigFieldDef]:
             type="boolean",
             required=False,
             default=False,
-            description="Skip remaining stages when a module run fails (for pipelines with data dependencies).",
+            description="Stop before the next stage if any module fails.",
         ),
         ActionConfigFieldDef(
             name="timeout_minutes",
@@ -99,7 +87,7 @@ def config_fields() -> list[ActionConfigFieldDef]:
             type="number",
             required=False,
             default=settings.CARTOGRAPHY_MODULE_TIMEOUT_SECONDS // 60,
-            description="Timeout for one module run; the run is terminated and marked failed past it.",
+            description="Maximum runtime for each module run.",
         ),
     ]
 

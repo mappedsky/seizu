@@ -8,6 +8,7 @@ from datetime import UTC
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -85,6 +86,47 @@ async def test_initialize_creates_tables(mocker):
     assert "users" in table_names
     assert "skillsets" in table_names
     assert "skills" in table_names
+    await engine.dispose()
+
+
+async def test_initialize_migrates_legacy_scheduled_query_tables(mocker):
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE TABLE scheduled_queries ("
+                "scheduled_query_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, "
+                "cypher VARCHAR NOT NULL, params JSON NOT NULL, frequency INTEGER, "
+                "watch_scans JSON NOT NULL, enabled BOOLEAN NOT NULL, actions JSON NOT NULL, "
+                "current_version INTEGER NOT NULL, created_at VARCHAR NOT NULL, "
+                "updated_at VARCHAR NOT NULL, created_by VARCHAR NOT NULL)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE scheduled_query_versions ("
+                "scheduled_query_id VARCHAR NOT NULL, version INTEGER NOT NULL, "
+                "cypher VARCHAR NOT NULL, params JSON NOT NULL, "
+                "frequency INTEGER, watch_scans JSON NOT NULL, enabled BOOLEAN NOT NULL, "
+                "actions JSON NOT NULL, created_at VARCHAR NOT NULL, created_by VARCHAR NOT NULL, "
+                "PRIMARY KEY (scheduled_query_id, version))"
+            )
+        )
+    mocker.patch("reporting.services.report_store.sql._get_engine", return_value=engine)
+
+    await SQLModelReportStore().initialize()
+
+    async with engine.connect() as conn:
+        query_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_queries)"))}
+        version_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(scheduled_query_versions)"))}
+        table_names = await conn.run_sync(lambda c: set(c.dialect.get_table_names(c)))
+    assert {"inputs", "activities", "stages", "schedule_sync_status"} <= query_columns
+    assert {"name", "inputs", "activities", "stages"} <= version_columns
+    assert {"reports", "users", "scheduled_chats", "action_confirmations"} <= table_names
     await engine.dispose()
 
 
@@ -1170,6 +1212,41 @@ async def test_create_scheduled_query(store, mocker):
     assert result.updated_by == "user@example.com"
 
 
+async def test_scheduled_query_runtime_state_methods(store, mocker):
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="sq1",
+    )
+    await store.create_scheduled_query(**_SQ_KWARGS)
+
+    requested_at = await store.request_scheduled_query_run("sq1")
+    assert requested_at is not None
+    assert await store.request_scheduled_query_run("missing") is None
+
+    await store.record_scheduled_query_result("sq1", "failure", "boom")
+    failed = await store.get_scheduled_query("sq1")
+    assert failed is not None
+    assert failed.last_run_status == "failure"
+    assert failed.last_errors[0]["error"] == "boom"
+    await store.record_scheduled_query_result("sq1", "success")
+    succeeded = await store.get_scheduled_query("sq1")
+    assert succeeded is not None
+    assert succeeded.last_errors == []
+    await store.record_scheduled_query_result("missing", "success")
+
+    await store.set_workflow_schedule_sync_status(
+        "sq1",
+        "error",
+        error="offline",
+        synced_at="2026-01-01T00:00:00+00:00",
+    )
+    synced = await store.get_scheduled_query("sq1")
+    assert synced is not None
+    assert synced.schedule_sync_status == "error"
+    assert synced.schedule_sync_error == "offline"
+    await store.set_workflow_schedule_sync_status("missing", "synced")
+
+
 async def test_list_scheduled_queries_returns_created(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",
@@ -1262,6 +1339,8 @@ async def test_list_scheduled_query_versions(store, mocker):
     assert len(versions) == 2
     assert versions[0].version == 2  # descending order
     assert versions[1].version == 1
+    assert versions[0].name == "Updated"
+    assert versions[1].name == "Test Query"
 
 
 async def test_list_scheduled_query_versions_not_found(store):

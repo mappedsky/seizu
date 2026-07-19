@@ -13,7 +13,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from reporting.temporal_workflows.shared import CveDependencyRemediationInput, CveRepoReportInput
+from cartography_sync.shared import CartographySyncResult
+from reporting.temporal_workflows.shared import (
+    CveDependencyRemediationInput,
+    CveDependencyRemediationResult,
+    CveRepoReportInput,
+    CveRepoReportResult,
+)
 
 if TYPE_CHECKING:
     from reporting.schema.report_config import ActionConfigFieldDef
@@ -70,6 +76,7 @@ class WorkflowSpec:
     # action dispatches even for schedules whose query returned nothing (the
     # schedule's cypher is just the trigger, e.g. RETURN 1 for cartography).
     requires_rows: bool = True
+    output_type: Any = dict[str, Any]
     # Extra ActionConfigFieldDef fields rendered in the scheduled-query UI
     # when this workflow is selected (a callable so defaults can read settings
     # lazily), and an optional validator for the submitted action_config.
@@ -107,6 +114,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
             " creates/updates a versioned 'CVE Findings' report."
         ),
         input_factory=_cve_repo_report_input,
+        output_type=CveRepoReportResult,
     ),
     "cve_dependency_remediation": WorkflowSpec(
         name="cve_dependency_remediation",
@@ -120,6 +128,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
             " (REMEDIATION_GITHUB_TOKEN plus an agent API key)."
         ),
         input_factory=_cve_dependency_remediation_input,
+        output_type=CveDependencyRemediationResult,
     ),
     "cartography_sync": WorkflowSpec(
         name="cartography_sync",
@@ -133,6 +142,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
         requires_rows=False,
         config_fields=_cartography_config_fields,
         config_validator=_cartography_config_validator,
+        output_type=CartographySyncResult,
     ),
 }
 

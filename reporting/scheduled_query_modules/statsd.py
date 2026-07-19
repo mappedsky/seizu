@@ -31,6 +31,18 @@ def action_name() -> str:
     return "statsd"
 
 
+def activity_description() -> str:
+    return "Emits a StatsD metric for each matching input row."
+
+
+def activity_input_type() -> Any:
+    return list[dict[str, Any]]
+
+
+def activity_output_type() -> Any:
+    return dict[str, int]
+
+
 def action_config_schema() -> list[ActionConfigFieldDef]:
     return [
         ActionConfigFieldDef(
@@ -82,15 +94,15 @@ def handle_results(
     scheduled_query_id: str,
     action: ScheduledQueryAction,
     results: list[dict[str, Any]],
-) -> None:
+) -> dict[str, int]:
     if not results:
-        return
+        return {"metrics_emitted": 0}
     if not _STATSD_HOST:
         logger.warning(
             "STATSD_HOST is not configured; skipping statsd action",
             extra={"scheduled_query_id": scheduled_query_id},
         )
-        return
+        return {"metrics_emitted": 0}
 
     metric = action.action_config.get("metric")
     value_field = action.action_config.get("value_field")
@@ -106,7 +118,7 @@ def handle_results(
                 "missing": [k for k in ("metric", "value_field") if not action.action_config.get(k)],
             },
         )
-        return
+        return {"metrics_emitted": 0}
 
     client = _get_client()
     logger.info(
@@ -117,6 +129,7 @@ def handle_results(
             "metric": metric,
         },
     )
+    emitted = 0
     for result in results:
         row = result.get(attr, {})
         value = row.get(value_field)
@@ -129,3 +142,5 @@ def handle_results(
             client.increment(metric, float(value), tags=tags)
         elif metric_type == "decrement":
             client.decrement(metric, float(value), tags=tags)
+        emitted += 1
+    return {"metrics_emitted": emitted}

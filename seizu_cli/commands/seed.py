@@ -55,6 +55,10 @@ def _list_scheduled_queries() -> list[dict[str, Any]]:
     return state.get_client().get("/api/v1/scheduled-queries").get("scheduled_queries", [])
 
 
+def _list_workflows() -> list[dict[str, Any]]:
+    return state.get_client().get("/api/v1/workflows").get("workflows", [])
+
+
 def _sq_content_changed(
     existing: dict[str, Any],
     resolved_cypher: str,
@@ -157,11 +161,17 @@ def _skill_content_changed(
 
 
 def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
-    """Seed reports, scheduled queries, toolsets, and skillsets from YAML."""
+    """Seed reports, workflows, toolsets, and skillsets from YAML."""
     loaded = schema.load_file(config)
 
-    if not loaded.reports and not loaded.scheduled_queries and not loaded.toolsets and not loaded.skillsets:
-        console.print("No reports, scheduled queries, toolsets, or skillsets found in config file. Nothing to do.")
+    if (
+        not loaded.reports
+        and not loaded.workflows
+        and not loaded.scheduled_queries
+        and not loaded.toolsets
+        and not loaded.skillsets
+    ):
+        console.print("No reports, workflows, toolsets, or skillsets found in config file. Nothing to do.")
         return
 
     try:
@@ -261,8 +271,12 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
             console.print(msg)
 
     console.print(f"\nReports: created={created} updated={updated} skipped={skipped}")
-    console.print("\nSeeding scheduled queries...")
-    _seed_scheduled_queries(loaded, force=force, dry_run=dry_run)
+    if loaded.workflows:
+        console.print("\nSeeding workflows...")
+        _seed_workflows(loaded, force=force, dry_run=dry_run)
+    else:
+        console.print("\nSeeding scheduled queries (deprecated)...")
+        _seed_scheduled_queries(loaded, force=force, dry_run=dry_run)
 
     console.print("\nSeeding toolsets...")
     _seed_toolsets(loaded, force=force, dry_run=dry_run)
@@ -369,6 +383,50 @@ def _seed_scheduled_queries(
         created += 1
 
     console.print(f"  Scheduled queries: created={created} updated={updated} skipped={skipped}")
+
+
+def _seed_workflows(config: Any, force: bool, dry_run: bool) -> None:
+    try:
+        existing = {item["name"]: item for item in _list_workflows()}
+    except Exception as exc:
+        _die(exc)
+        return
+    created = updated = skipped = 0
+    for definition in config.workflows:
+        payload = definition.model_dump()
+        for stage in payload["stages"]:
+            for activity in stage["activities"]:
+                if activity["type"] == "query":
+                    cypher = activity["parameters"].get("cypher", "")
+                    activity["parameters"]["cypher"] = config.queries.get(cypher, cypher)
+        current = existing.get(definition.name)
+        comparable = {key: payload[key] for key in ("name", "schedule", "watch_scans", "enabled", "stages")}
+        changed = force or current is None or any(current.get(key) != value for key, value in comparable.items())
+        if not changed:
+            console.print(f"  [dim][skip][/dim] workflow '{definition.name}' (unchanged)")
+            skipped += 1
+            continue
+        if dry_run:
+            verb = "create" if current is None else "update"
+            console.print(f"  [yellow][dry-run][/yellow] would {verb} workflow '{definition.name}'")
+            created += current is None
+            updated += current is not None
+            continue
+        try:
+            if current is None:
+                result = state.get_client().post("/api/v1/workflows", json=payload)
+                created += 1
+                workflow_id = result["workflow_id"]
+            else:
+                payload["comment"] = SEED_UPDATE_COMMENT
+                workflow_id = current["workflow_id"]
+                state.get_client().put(f"/api/v1/workflows/{workflow_id}", json=payload)
+                updated += 1
+        except Exception as exc:
+            _die(exc)
+            return
+        console.print(f"  [green][saved][/green] '{workflow_id}'  name='{definition.name}'")
+    console.print(f"  Workflows: created={created} updated={updated} skipped={skipped}")
 
 
 def _seed_toolsets(
@@ -738,6 +796,37 @@ def export_cmd(config: str, dry_run: bool) -> None:
         console.print(f"[green][export][/green] report '{item['name']}' → key='{key}'")
         exported += 1
 
+    # Export canonical workflows (legacy scheduled-query records are
+    # normalized by the API before they reach the CLI).
+    new_workflows: list[Any] = []
+    workflow_failed = 0
+    try:
+        workflow_list = _list_workflows()
+    except Exception as exc:
+        _die(exc)
+        return
+    for item in sorted(workflow_list, key=lambda value: value["name"]):
+        try:
+            new_workflows.append(
+                schema.Workflow.model_validate(
+                    {
+                        key: item[key]
+                        for key in (
+                            "name",
+                            "schedule",
+                            "watch_scans",
+                            "enabled",
+                            "stages",
+                        )
+                    }
+                )
+            )
+        except Exception as exc:
+            err_console.print(f"[yellow][warn][/yellow] Invalid workflow '{item.get('name', '')}': {exc} — skipping.")
+            workflow_failed += 1
+            continue
+        console.print(f"[green][export][/green] workflow '{item['name']}'")
+
     # Export toolsets
     new_toolsets: dict[str, Any] = {}
     ts_exported = ts_failed = 0
@@ -831,7 +920,8 @@ def export_cmd(config: str, dry_run: bool) -> None:
         queries=existing_cfg.queries,
         dashboard=dashboard_key if dashboard_key is not None else existing_cfg.dashboard,
         reports=new_reports,
-        scheduled_queries=existing_cfg.scheduled_queries,
+        scheduled_queries=[],
+        workflows=new_workflows,
         toolsets=new_toolsets,
         skillsets=new_skillsets,
     )
@@ -842,6 +932,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
         console.print(yaml_content)
         console.print(
             f"\nDone. reports: exported={exported} failed={failed}  "
+            f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
             f"toolsets: exported={ts_exported} failed={ts_failed}  "
             f"skillsets: exported={ss_exported} failed={ss_failed}  "
             "(dry-run, file not written)"
@@ -852,6 +943,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
         f.write(yaml_content)
     console.print(
         f"\nDone. reports: exported={exported} failed={failed}  "
+        f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
         f"toolsets: exported={ts_exported} failed={ts_failed}  "
         f"skillsets: exported={ss_exported} failed={ss_failed}  "
         f"→ wrote '{config}'"

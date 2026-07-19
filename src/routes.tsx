@@ -1,4 +1,4 @@
-import { Navigate } from 'react-router-dom';
+import { Navigate, useParams } from 'react-router-dom';
 import DashboardLayout from 'src/components/DashboardLayout';
 import MainLayout from 'src/components/MainLayout';
 import Dashboard from 'src/pages/Dashboard';
@@ -11,9 +11,6 @@ import QueryConsole from 'src/pages/QueryConsole';
 import ChatInterface from 'src/pages/ChatInterface';
 import BatchConfirmationPage from 'src/pages/BatchConfirmationPage';
 import ConfirmationPage from 'src/pages/ConfirmationPage';
-import ScheduledQueries from 'src/pages/ScheduledQueries';
-import ScheduledQueryHistory from 'src/pages/ScheduledQueryHistory';
-import ScheduledQueryView from 'src/pages/ScheduledQueryView';
 import ScheduledChats from 'src/pages/ScheduledChats';
 import ScheduledChatView from 'src/pages/ScheduledChatView';
 import ScheduledChatHistory from 'src/pages/ScheduledChatHistory';
@@ -28,6 +25,23 @@ import SkillHistory from 'src/pages/SkillHistory';
 import Roles from 'src/pages/Roles';
 import RoleHistory from 'src/pages/RoleHistory';
 import LoggedOut from 'src/pages/LoggedOut';
+import Workflows from 'src/pages/Workflows';
+import WorkflowView from 'src/pages/WorkflowView';
+import WorkflowHistory from 'src/pages/WorkflowHistory';
+
+function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
+  const { id } = useParams();
+  return (
+    <Navigate
+      replace
+      to={
+        id
+          ? `/app/workflows/${id}${history ? '/history' : ''}`
+          : '/app/workflows'
+      }
+    />
+  );
+}
 
 const routes = [
   {
@@ -47,11 +61,14 @@ const routes = [
         element: <BatchConfirmationPage />,
       },
       { path: 'confirmations/:confirmationId', element: <ConfirmationPage /> },
-      { path: 'scheduled-queries', element: <ScheduledQueries /> },
-      { path: 'scheduled-queries/:id', element: <ScheduledQueryView /> },
+      { path: 'workflows', element: <Workflows /> },
+      { path: 'workflows/:id', element: <WorkflowView /> },
+      { path: 'workflows/:id/history', element: <WorkflowHistory /> },
+      { path: 'scheduled-queries', element: <LegacyWorkflowRedirect /> },
+      { path: 'scheduled-queries/:id', element: <LegacyWorkflowRedirect /> },
       {
         path: 'scheduled-queries/:id/history',
-        element: <ScheduledQueryHistory />,
+        element: <LegacyWorkflowRedirect history />,
       },
       { path: 'scheduled-chats', element: <ScheduledChats /> },
       { path: 'scheduled-chats/:id', element: <ScheduledChatView /> },

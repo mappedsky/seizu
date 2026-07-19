@@ -9,6 +9,123 @@ from typing import Any
 
 
 @dataclass
+class ConfiguredWorkflowInvocation:
+    workflow_id: str
+    manual: bool = False
+    # Set only by the watch-poll parent after it has already observed a new
+    # SyncMetadata value. Keeping the default preserves old Temporal payloads.
+    watch_checked: bool = False
+
+
+@dataclass
+class ConfiguredQueryInput:
+    output_id: str
+    cypher: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+    max_rows: int = 200
+    max_bytes: int = 1_000_000
+    has_input: bool = False
+    input_value: Any = None
+
+
+@dataclass
+class ConfiguredActivity:
+    type: str
+    input_id: str | None
+    output_id: str
+    parameters: dict[str, Any] = field(default_factory=dict)
+    requires_rows: bool = True
+    maximum_attempts: int = 1
+
+
+@dataclass
+class ConfiguredStage:
+    activities: list[ConfiguredActivity] = field(default_factory=list)
+
+
+@dataclass
+class ConfiguredWorkflowDefinition:
+    workflow_id: str
+    creator_user_id: str
+    version: int
+    stages: list[ConfiguredStage] = field(default_factory=list)
+    skipped_reason: str | None = None
+
+
+@dataclass
+class ConfiguredActivityOutput:
+    output_id: str
+    # ``Any`` is required for converter-safe, module-defined JSON values.
+    value: Any = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConfiguredWorkflowResult:
+    status: str
+    version: int = 0
+    skipped_reason: str | None = None
+    activity_results: list[Any] = field(default_factory=list)
+
+
+@dataclass
+class ConfiguredActivityInput:
+    workflow_id: str
+    activity_type: str
+    output_id: str
+    parameters: dict[str, Any]
+    input_value: Any = None
+
+
+@dataclass
+class CodeWorkflowInputRequest:
+    workflow_id: str
+    creator_user_id: str
+    workflow_name: str
+    parameters: dict[str, Any]
+    input_value: Any = None
+
+
+@dataclass
+class CodeWorkflowOutputRequest:
+    workflow_name: str
+    output_id: str
+    value: Any = None
+
+
+def normalize_configured_rows(
+    rows: list[Any],
+    return_attribute: str = "details",
+) -> list[dict[str, Any]]:
+    """Normalize query rows, including pre-fix Temporal history payloads.
+
+    Neo4j ``Record`` objects were previously serialized by Temporal as lists
+    of positional values. Most scheduled queries return one named map (usually
+    ``details``), so a single value can be reconstructed losslessly using the
+    activity's configured return attribute. Multiple positional values cannot
+    recover their original column names; retain them under ``_values`` while
+    exposing the first value under the configured attribute.
+    """
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            normalized.append(row)
+        elif isinstance(row, list):
+            if len(row) == 1:
+                normalized.append({return_attribute: row[0]})
+            else:
+                normalized.append(
+                    {
+                        return_attribute: row[0] if row else None,
+                        "_values": row,
+                    }
+                )
+        else:
+            normalized.append({return_attribute: row})
+    return normalized
+
+
+@dataclass
 class CveRepoReportInput:
     scheduled_query_id: str
     creator_user_id: str

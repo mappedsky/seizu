@@ -12,16 +12,26 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from reporting import (
+    scheduled_query_modules,
     settings,
     setup_logging,  # noqa:F401
 )
+from reporting.services import workflow_schedules
 from reporting.temporal_workflows.activities import (
+    build_code_workflow_input,
+    check_configured_workflow_watch,
+    execute_configured_activity,
+    execute_configured_query,
     get_pr_ci_status,
+    load_configured_workflow,
+    normalize_code_workflow_output,
+    record_configured_workflow_result,
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
 )
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
+from reporting.temporal_workflows.configured_workflow import ConfiguredWorkflow, ConfiguredWorkflowWatchPoll
 from reporting.temporal_workflows.cve_dependency_remediation import CveDependencyRemediationWorkflow
 from reporting.temporal_workflows.cve_repo_report import CveRepoReportWorkflow
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
@@ -38,6 +48,7 @@ def _bootstrap() -> None:
 async def _run_worker() -> None:
     _bootstrap()
     async with chat_worker_resources():
+        await scheduled_query_modules.load_modules()
         client = await Client.connect(settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE)
         worker = Worker(
             client,
@@ -47,8 +58,22 @@ async def _run_worker() -> None:
                 CveDependencyRemediationWorkflow,
                 CartographySyncWorkflow,
                 CartographyModuleWorkflow,
+                ConfiguredWorkflow,
+                ConfiguredWorkflowWatchPoll,
             ],
-            activities=[run_repo_cve_chat, run_dependency_remediation, get_pr_ci_status, run_dependency_ci_fix],
+            activities=[
+                load_configured_workflow,
+                check_configured_workflow_watch,
+                execute_configured_query,
+                execute_configured_activity,
+                build_code_workflow_input,
+                normalize_code_workflow_output,
+                record_configured_workflow_result,
+                run_repo_cve_chat,
+                run_dependency_remediation,
+                get_pr_ci_status,
+                run_dependency_ci_fix,
+            ],
         )
         logger.info(
             "Temporal worker started",
@@ -59,7 +84,27 @@ async def _run_worker() -> None:
             },
         )
         async with worker:
-            await _shutdown_event.wait()
+            reconcile_task = asyncio.create_task(_reconcile_loop())
+            try:
+                await _shutdown_event.wait()
+            finally:
+                reconcile_task.cancel()
+                await asyncio.gather(reconcile_task, return_exceptions=True)
+
+
+async def _reconcile_loop() -> None:
+    while not _shutdown_event.is_set():
+        try:
+            await workflow_schedules.reconcile_all()
+        except Exception:
+            logger.exception("Workflow Schedule reconciliation pass failed")
+        try:
+            await asyncio.wait_for(
+                _shutdown_event.wait(),
+                timeout=settings.WORKFLOW_RECONCILE_SECONDS,
+            )
+        except TimeoutError:
+            pass
 
 
 def main() -> None:

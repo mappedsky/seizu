@@ -78,6 +78,14 @@ def test_workflow_id_matches():
     assert temporal_runs.workflow_id_matches(_SQ_ID, _WORKFLOW_ID)
     # Timestamp segment may itself contain colons.
     assert temporal_runs.workflow_id_matches("sq1", "seizu:cve_repo_report:sq1:2024-01-01T00:00:00+00:00")
+    assert temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z",
+    )
+    assert temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z",
+    )
 
 
 def test_workflow_id_matches_rejects_foreign_ids():
@@ -87,6 +95,47 @@ def test_workflow_id_matches_rejects_foreign_ids():
     # Workflow-name segment must be a registered workflow.
     assert not temporal_runs.workflow_id_matches(_SQ_ID, f"seizu:not_a_registered_workflow:{_SQ_ID}:x")
     assert not temporal_runs.workflow_id_matches(_SQ_ID, "seizu:cve_repo_report")
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z:activity:1:cartography_sync",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z:stage:1:activity:1:child",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow-poll:{_SQ_ID}-2026-07-16T12:00:00Z",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}-not-a-schedule-time",
+    )
+
+
+async def test_get_client_caches_and_wraps_connection_errors(mocker):
+    temporal_runs._client = None
+    client = object()
+    connect = mocker.patch("temporalio.client.Client.connect", new=AsyncMock(return_value=client))
+    assert await temporal_runs._get_client() is client
+    assert await temporal_runs._get_client() is client
+    connect.assert_awaited_once()
+    temporal_runs._client = None
+    connect.side_effect = RuntimeError("offline")
+    try:
+        await temporal_runs._get_client()
+        raise AssertionError("expected unavailable")
+    except temporal_runs.TemporalUnavailableError:
+        pass
+    finally:
+        temporal_runs._client = None
+
+
+def test_small_visibility_helpers():
+    assert temporal_runs.workflow_id_matches(_SQ_ID, f"seizu-workflow:{_SQ_ID}:manual:request")
+    assert temporal_runs._event_time(history_pb.HistoryEvent()) is None
+    assert temporal_runs._failure_summary(None) is None
+    assert temporal_runs._retry_state_label(0) is None
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +161,14 @@ async def test_list_workflow_runs(mocker):
             close_time=None,
             history_length=None,
         ),
+        SimpleNamespace(
+            id=f"seizu-workflow:{_SQ_ID}-2026-07-16T12:00:00Z",
+            run_id="run-3",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=24,
+        ),
     ]
     _, captured = _mock_client(mocker, executions=executions)
 
@@ -121,16 +178,54 @@ async def test_list_workflow_runs(mocker):
     # One STARTS_WITH clause per registered workflow.
     assert f'WorkflowId STARTS_WITH "seizu:cve_repo_report:{_SQ_ID}:"' in captured["query"]
     assert f'WorkflowId STARTS_WITH "seizu:cve_dependency_remediation:{_SQ_ID}:"' in captured["query"]
-    assert [r.status for r in runs] == ["failed", "unknown"]
+    assert [r.status for r in runs] == ["failed", "unknown", "completed"]
     assert runs[0].workflow_name == "cve_repo_report"
     assert runs[0].start_time == "2024-01-01T00:00:00+00:00"
     assert runs[0].history_length == 42
     assert runs[1].start_time is None
+    assert runs[2].workflow_name == "configured"
 
 
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):
     client, _ = _mock_client(mocker)
     assert await temporal_runs.list_workflow_runs('sq" OR WorkflowId="x', limit=10) == []
+
+
+async def test_list_watch_runs_excludes_poll_and_uses_definition_name(mocker):
+    actual_id = f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z"
+    child_id = f"{actual_id}:stage:1:activity:1:child"
+    executions = [
+        SimpleNamespace(
+            id=actual_id,
+            run_id="run-actual",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=24,
+        ),
+        SimpleNamespace(
+            id=child_id,
+            run_id="run-child",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2026, 7, 16, 12, tzinfo=UTC),
+            close_time=datetime(2026, 7, 16, 13, tzinfo=UTC),
+            history_length=10,
+        ),
+    ]
+    _, captured = _mock_client(mocker, executions=executions)
+
+    runs = await temporal_runs.list_workflow_runs(
+        _SQ_ID,
+        limit=10,
+        configured_name="Critical CVE workflow",
+        watch_polling=True,
+    )
+
+    assert f'WorkflowId STARTS_WITH "seizu-workflow:{_SQ_ID}:run:"' in captured["query"]
+    assert f'WorkflowId STARTS_WITH "seizu-workflow:{_SQ_ID}:manual:"' in captured["query"]
+    assert captured["limit"] == 100
+    assert len(runs) == 1
+    assert runs[0].workflow_name == "Critical CVE workflow"
 
 
 async def test_list_workflow_runs_unavailable(mocker):
@@ -244,7 +339,7 @@ async def test_get_workflow_run_detail_activities(mocker):
     handle = _mock_handle(events, status=temporalio.client.WorkflowExecutionStatus.FAILED)
     client, _ = _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=True)
 
     assert detail is not None
     client.get_workflow_handle.assert_called_once_with(_WORKFLOW_ID, run_id="run-1")
@@ -349,7 +444,7 @@ async def test_get_workflow_run_detail_folds_child_workflows(mocker):
     handle = _mock_handle(events)
     _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1")
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1", include_payload_previews=True)
 
     assert detail is not None
     assert len(detail.activities) == 2
@@ -435,7 +530,7 @@ async def test_get_workflow_run_detail_without_payload_previews(mocker):
     handle = _mock_handle(events)
     _mock_client(mocker, handle=handle)
 
-    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=False)
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
 
     assert detail is not None
     activity = detail.activities[0]
@@ -445,6 +540,95 @@ async def test_get_workflow_run_detail_without_payload_previews(mocker):
     assert activity.last_attempt_failure == "attempt 1 crashed"
     assert activity.input_preview is None
     assert activity.result_preview is None
+
+
+async def test_get_workflow_run_detail_terminal_event_variants(mocker):
+    child_ids = ["child-timeout", "child-canceled", "child-terminated"]
+    events = [
+        _event(
+            1,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="timed", activity_type=common_pb.ActivityType(name="task")
+            ),
+        ),
+        _event(
+            2,
+            activity_task_timed_out_event_attributes=history_pb.ActivityTaskTimedOutEventAttributes(
+                scheduled_event_id=1,
+                failure=failure_pb.Failure(message="late"),
+                retry_state=enums_pb.RetryState.RETRY_STATE_TIMEOUT,
+            ),
+        ),
+        _event(
+            3,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="canceled", activity_type=common_pb.ActivityType(name="task")
+            ),
+        ),
+        _event(
+            4,
+            activity_task_cancel_requested_event_attributes=history_pb.ActivityTaskCancelRequestedEventAttributes(
+                scheduled_event_id=3
+            ),
+        ),
+        _event(
+            5,
+            activity_task_canceled_event_attributes=history_pb.ActivityTaskCanceledEventAttributes(
+                scheduled_event_id=3
+            ),
+        ),
+    ]
+    event_id = 6
+    terminal_attrs = [
+        (
+            "child_workflow_execution_timed_out_event_attributes",
+            history_pb.ChildWorkflowExecutionTimedOutEventAttributes,
+        ),
+        (
+            "child_workflow_execution_canceled_event_attributes",
+            history_pb.ChildWorkflowExecutionCanceledEventAttributes,
+        ),
+        (
+            "child_workflow_execution_terminated_event_attributes",
+            history_pb.ChildWorkflowExecutionTerminatedEventAttributes,
+        ),
+    ]
+    for child_id, (field, attr_type) in zip(child_ids, terminal_attrs, strict=True):
+        initiated_id = event_id
+        events.append(
+            _event(
+                initiated_id,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=child_id,
+                        workflow_type=common_pb.WorkflowType(name="child"),
+                    )
+                ),
+            )
+        )
+        events.append(_event(event_id + 1, **{field: attr_type(initiated_event_id=initiated_id)}))
+        event_id += 2
+    events.append(
+        _event(
+            event_id,
+            workflow_execution_terminated_event_attributes=history_pb.WorkflowExecutionTerminatedEventAttributes(
+                reason="stopped"
+            ),
+        )
+    )
+    handle = _mock_handle(events, status=temporalio.client.WorkflowExecutionStatus.TERMINATED)
+    _mock_client(mocker, handle=handle)
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
+    assert detail is not None
+    assert detail.failure == "stopped"
+    statuses = {activity.activity_id: activity.status for activity in detail.activities}
+    assert statuses == {
+        "timed": "timed_out",
+        "canceled": "canceled",
+        "child-timeout": "timed_out",
+        "child-canceled": "canceled",
+        "child-terminated": "terminated",
+    }
 
 
 async def test_payload_preview_truncates_and_survives_garbage():

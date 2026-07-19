@@ -25,6 +25,9 @@ def test_config_fields_lists_enabled_modules():
     assert set(fields) == {"modules", "pipeline", "stop_on_failure", "timeout_minutes"}
     assert "aws" in fields["modules"].description
     assert "github" in fields["modules"].description
+    assert "(" not in fields["modules"].description
+    assert "Example:" not in fields["pipeline"].description
+    assert all(len(field.description or "") <= 160 for field in fields.values())
 
 
 def test_enabled_modules_honors_allowlist(mocker):

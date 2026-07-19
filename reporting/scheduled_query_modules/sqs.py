@@ -33,6 +33,18 @@ def action_name() -> str:
     return "sqs"
 
 
+def activity_description() -> str:
+    return "Sends one SQS message for each input row."
+
+
+def activity_input_type() -> Any:
+    return list[dict[str, Any]]
+
+
+def activity_output_type() -> Any:
+    return dict[str, int]
+
+
 def action_config_schema() -> list[ActionConfigFieldDef]:
     return [
         ActionConfigFieldDef(
@@ -56,16 +68,33 @@ def action_config_schema() -> list[ActionConfigFieldDef]:
 async def setup() -> None:
     if not _SQS_CREATE_SCHEDULED_QUERY_QUEUES:
         return
+    queue_names: set[str] = set()
     for item in await report_store.list_scheduled_queries():
         for action in item.actions:
             if action.get("action_type") == "sqs":
-                sqs_client = _get_client()
-                sqs_client.create_queue(QueueName=action["action_config"]["sqs_queue"])
+                queue_name = (action.get("action_config") or {}).get("sqs_queue")
+                if isinstance(queue_name, str) and queue_name:
+                    queue_names.add(queue_name)
+        for stage in item.stages or []:
+            for activity in stage.get("activities", []):
+                if activity.get("type") != "sqs":
+                    continue
+                queue_name = (activity.get("parameters") or {}).get("sqs_queue")
+                if isinstance(queue_name, str) and queue_name:
+                    queue_names.add(queue_name)
+    if queue_names:
+        sqs_client = _get_client()
+        for queue_name in sorted(queue_names):
+            sqs_client.create_queue(QueueName=queue_name)
 
 
-def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, results: dict[str, Any]) -> None:
+def handle_results(
+    scheduled_query_id: str,
+    action: ScheduledQueryAction,
+    results: list[dict[str, Any]],
+) -> dict[str, int]:
     if not results:
-        return
+        return {"messages_sent": 0}
 
     sqs_client = _get_client()
     q_url = sqs_client.get_queue_url(QueueName=action.action_config["sqs_queue"])["QueueUrl"]
@@ -93,3 +122,4 @@ def handle_results(scheduled_query_id: str, action: ScheduledQueryAction, result
                 },
             },
         )
+    return {"messages_sent": len(results)}
