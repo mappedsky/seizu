@@ -172,11 +172,17 @@ shallow push finds its ancestor objects; CI-fix runs clone and push the PR
 branch on the fork. The credential phase isolation above is identical in both
 modes.
 
-Two operational caveats: the token owner must be able to fork the target (a
-repository cannot be forked into the account that already owns it), and many
+Three operational caveats: the token owner must be able to fork the target (a
+repository cannot be forked into the account that already owns it); many
 organizations restrict GitHub Actions on PRs from forks (no secrets, or
 `approve-first` policies) — if the CI watch keeps reporting `no_checks` on
-fork PRs, check the target's Actions fork policy.
+fork PRs, check the target's Actions fork policy; and CodeQL **default setup**
+never analyzes PRs from forks, so a target repository combining default setup
+with a code-scanning merge rule blocks fork-mode PRs indefinitely ("waiting
+for results" that never arrive). Switch such repositories to CodeQL advanced
+setup — a committed `codeql.yml` workflow with a `pull_request` trigger, which
+runs in the base-repo context and therefore covers fork PRs — and disable
+default setup.
 
 ### GitHub token setup
 

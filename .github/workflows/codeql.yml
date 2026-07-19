@@ -1,0 +1,49 @@
+name: CodeQL
+
+# Advanced setup replacing GitHub's default setup: default setup never
+# analyzes pull requests from forks, so the code-scanning merge rule blocked
+# remediation-bot PRs (REMEDIATION_USE_FORK) forever. pull_request workflows
+# run in the base-repo context, so fork PRs are analyzed here.
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  schedule:
+    # Weekly on Saturdays.
+    - cron: "45 2 * * 6"
+
+# Deny all permissions by default; grant only what each job needs.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - javascript-typescript
+          - python
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        with:
+          category: "/language:${{ matrix.language }}"
