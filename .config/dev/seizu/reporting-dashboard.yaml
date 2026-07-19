@@ -2394,7 +2394,6 @@ workflows:
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
-        groupid: https://github.com/mappedsky
     enabled: true
     stages:
       - activities:
@@ -2402,11 +2401,7 @@ workflows:
             output: repository_cves
             parameters:
               cypher: |-
-                MATCH (sm:SyncMetadata)
-                WHERE sm.grouptype = "GitHubOrganization"
-                  AND sm.syncedtype = "GitHubOrganization"
-                  AND toString(sm.groupid) = "https://github.com/mappedsky"
-                WITH datetime({epochSeconds: sm.lastupdated}) - duration({hours: 24}) AS window_start
+                WITH datetime() - duration({hours: 24}) AS window_start
                 MATCH (r:GitHubRepository)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
                 WHERE s.created_at IS NOT NULL
                   AND datetime(s.created_at) > window_start
@@ -2432,7 +2427,6 @@ workflows:
               workflow: cve_repo_report
 
   - name: New CVE dependencies requiring remediation
-    # Any GitHub organization sync triggers the mappedsky-scoped, 48-hour query.
     watch_scans:
       - grouptype: GitHubOrganization
         syncedtype: GitHubOrganization
@@ -2443,9 +2437,8 @@ workflows:
             output: vulnerable_dependencies
             parameters:
               cypher: |-
-                WITH datetime() - duration({hours: 48}) AS window_start
+                WITH datetime() - duration({hours: 24}) AS window_start
                 MATCH (r:GitHubRepository)-[:OWNER]->(o:GitHubOrganization)
-                WHERE o.id = 'https://github.com/mappedsky'
                 MATCH (r)-[:FOUND_IN]-(s:SecurityIssue {state: 'open'})
                 WHERE s.created_at IS NOT NULL
                   AND datetime(s.created_at) > window_start
