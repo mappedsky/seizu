@@ -723,6 +723,10 @@ def _mock_ci_fix_deps(mocker, run_result: RemediationRunResult, ci_context: str 
         "reporting.services.github_checks.fetch_failure_context",
         mocker.AsyncMock(return_value=ci_context),
     )
+    mocker.patch(
+        "reporting.services.github_checks.fetch_pr_head",
+        mocker.AsyncMock(return_value=("seizu-bot/app", "actual-pr-head")),
+    )
     run = mocker.patch(
         "reporting.services.sandbox_remediation.run_ci_fix",
         mocker.AsyncMock(return_value=run_result),
@@ -752,7 +756,8 @@ async def test_run_dependency_ci_fix_pushed(mocker, caplog):
     kwargs = run.await_args.kwargs
     assert kwargs["repo"] == "org/app"
     assert kwargs["base_branch"] == "develop"
-    assert kwargs["branch_name"] == "seizu/dependency-update/pip-requests-2.32.4"
+    assert kwargs["branch_name"] == "actual-pr-head"
+    assert kwargs["head_repo"] == "seizu-bot/app"
     # Commit title stays CVE-free (routine dependency update presentation).
     assert "CVE" not in kwargs["commit_title"]
     prompt = kwargs["prompt"]

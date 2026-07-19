@@ -322,6 +322,26 @@ async def fetch_pr_ci_status(repo: str, pr_number: int, *, queued_stuck_seconds:
     )
 
 
+async def fetch_pr_head(repo: str, pr_number: int) -> tuple[str, str]:
+    """Return the API-authoritative ``(head_repo, head_ref)`` for a PR.
+
+    A remediation PR may live on the target repository or a bot-owned fork.
+    The setting used when the PR was created is not durable branch identity:
+    it can change before a later CI-fix activity runs.  Resolve the existing
+    PR's head directly so follow-up clones and pushes always target the branch
+    GitHub is actually testing.
+    """
+    async with _client() as client:
+        resp = await client.get(f"/repos/{repo}/pulls/{pr_number}")
+        resp.raise_for_status()
+        head = resp.json().get("head") or {}
+        head_repo = str((head.get("repo") or {}).get("full_name") or "")
+        head_ref = str(head.get("ref") or "")
+        if not head_repo or not head_ref:
+            raise RuntimeError(f"pull request {repo}#{pr_number} has no available head repository")
+        return head_repo, head_ref
+
+
 async def fetch_failure_context(repo: str, failing: list[PrCiCheck]) -> str:
     """Best-effort failure details for the fix agent's prompt (UNTRUSTED text).
 
