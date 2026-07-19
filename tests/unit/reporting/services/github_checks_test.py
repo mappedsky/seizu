@@ -14,6 +14,7 @@ from reporting.services.github_checks import (
     api_base_url,
     classify_checks,
     ensure_fork,
+    fetch_pr_head,
     parse_pr_number,
     render_agent_pr_comment,
 )
@@ -61,6 +62,34 @@ def test_api_base_url_github_and_ghes() -> None:
         assert api_base_url() == "https://api.github.com"
     with patch("reporting.settings.REMEDIATION_GITHUB_HOST", "github.example.com"):
         assert api_base_url() == "https://github.example.com/api/v3"
+
+
+async def test_fetch_pr_head_returns_authoritative_fork_and_ref() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/org/app/pulls/42"
+        return httpx.Response(
+            200,
+            json={
+                "head": {
+                    "ref": "seizu/dependency-update/pip-requests-2.32.4",
+                    "repo": {"full_name": "seizu-bot/app"},
+                }
+            },
+        )
+
+    with _fork_client(handler):
+        assert await fetch_pr_head("org/app", 42) == (
+            "seizu-bot/app",
+            "seizu/dependency-update/pip-requests-2.32.4",
+        )
+
+
+async def test_fetch_pr_head_fails_when_the_head_repository_was_deleted() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"head": {"ref": "branch", "repo": None}})
+
+    with _fork_client(handler), pytest.raises(RuntimeError, match="no available head repository"):
+        await fetch_pr_head("org/app", 42)
 
 
 def test_all_checks_passed() -> None:

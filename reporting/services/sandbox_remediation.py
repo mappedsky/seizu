@@ -432,6 +432,7 @@ async def run_ci_fix(
     repo: str,
     base_branch: str,
     branch_name: str,
+    head_repo: str | None = None,
     prompt: str,
     commit_title: str,
     on_progress: Callable[[], None] | None = None,
@@ -448,6 +449,7 @@ async def run_ci_fix(
         repo=repo,
         base_branch=base_branch,
         branch_name=branch_name,
+        head_repo=head_repo,
         prompt=prompt,
         pr_title=commit_title,
         pr_body_fallback="",
@@ -461,6 +463,7 @@ async def _run(
     repo: str,
     base_branch: str,
     branch_name: str,
+    head_repo: str | None = None,
     prompt: str,
     pr_title: str,
     pr_body_fallback: str,
@@ -473,6 +476,8 @@ async def _run(
         return RemediationRunResult(status="failed", error=error)
     if (error := validate_target(repo, base_branch, branch_name)) is not None:
         return RemediationRunResult(status="failed", error=error)
+    if head_repo is not None and not _REPO_FULLNAME_RE.match(head_repo):
+        return RemediationRunResult(status="failed", error=f"invalid PR head repo {head_repo!r}")
     maybe_provider = sandbox_agent.resolve_provider()
     if maybe_provider is None:  # unreachable: config_error() already checked
         return RemediationRunResult(status="failed", error="unknown sandbox agent provider")
@@ -536,9 +541,9 @@ async def _run(
         "SEIZU_BASE_BRANCH": base_branch,
         "SEIZU_BRANCH": branch_name,
         "SEIZU_GITHUB_HOST": github_host,
-        # The repo the PR branch lives on (fix-mode clone/push target);
-        # overridden to the bot fork in fork mode below.
-        "SEIZU_HEAD_REPO": repo,
+        # The repo the PR branch lives on (fix-mode clone/push target). The
+        # caller supplies the existing PR's authoritative head when available.
+        "SEIZU_HEAD_REPO": head_repo or repo,
     }
     # gh install has no secrets; the (non-secret) digest pins gh independently.
     gh_install_env = {"SEIZU_GH_VERSION": settings.REMEDIATION_GH_VERSION}
@@ -688,14 +693,12 @@ async def _run(
 
     ticker = asyncio.create_task(_ticker())
     try:
-        if settings.REMEDIATION_USE_FORK:
+        if settings.REMEDIATION_USE_FORK and (not fix_mode or head_repo is None):
             # The fork is ensured worker-side (plain GitHub API I/O — the token
             # never needs a sandbox for it); the ticker above keeps Temporal
             # heartbeats flowing while a brand-new fork's git data appears. In
-            # fix mode this resolves the same, already-existing fork the PR was
-            # opened from: the CI watch only ever fixes PRs pushed by the same
-            # workflow run (guard-skipped PRs are not re-watched), so the
-            # settings-derived fork matches the PR's actual head repo.
+            # fix mode this is a compatibility fallback for direct callers
+            # that did not supply the API-authoritative PR head repository.
             try:
                 fork_repo = await github_checks.ensure_fork(repo, org=settings.REMEDIATION_FORK_ORG)
             except Exception as exc:

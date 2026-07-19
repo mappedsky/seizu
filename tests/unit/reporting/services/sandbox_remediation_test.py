@@ -674,6 +674,19 @@ async def test_fork_mode_fix_clones_and_pushes_the_pr_branch_on_the_fork() -> No
     assert result.pushed is True
 
 
+async def test_ci_fix_explicit_head_repo_overrides_current_fork_setting() -> None:
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/42\n"})
+    ensure = AsyncMock()
+    with _settings(REMEDIATION_USE_FORK=False), _patched_fork(ensure), _patched_open([agent, push], []):
+        result = await run_ci_fix(**_FIX_TARGET, head_repo="seizu-bot/app")
+
+    assert dict(agent.calls)["setup"]["SEIZU_HEAD_REPO"] == "seizu-bot/app"
+    assert dict(push.calls)["push"]["SEIZU_HEAD_REPO"] == "seizu-bot/app"
+    ensure.assert_not_awaited()
+    assert result.status == "completed"
+
+
 def test_push_script_fork_branch_is_cross_repo() -> None:
     push = sandbox_remediation._PUSH_SCRIPT
     # Fork mode pushes the branch to the fork remote and opens the PR on the
@@ -1093,6 +1106,10 @@ async def test_ci_fix_fails_closed_when_unconfigured_or_invalid() -> None:
     with _settings(), _patched_backend(backend):
         result = await run_ci_fix(**{**_FIX_TARGET, "branch_name": "a..b"})
     assert result.status == "failed"
+    assert backend.calls == []
+    with _settings(), _patched_backend(backend):
+        result = await run_ci_fix(**_FIX_TARGET, head_repo="bot/app; touch /tmp/pwned")
+    assert "invalid PR head repo" in (result.error or "")
     assert backend.calls == []
 
 

@@ -618,6 +618,7 @@ async def get_pr_ci_status(input: PrCiStatusInput) -> PrCiStatusResult:
     pr_number = github_checks.parse_pr_number(input.pr_url)
     if pr_number is None:
         raise ApplicationError(f"cannot parse a PR number from {input.pr_url!r}", non_retryable=True)
+
     status = await github_checks.fetch_pr_ci_status(
         input.repo, pr_number, queued_stuck_seconds=input.queued_stuck_seconds
     )
@@ -707,6 +708,11 @@ async def run_dependency_ci_fix(input: CiFixInput) -> CiFixResult:
     if pr_number is None:
         raise ApplicationError(f"cannot parse a PR number from {input.pr_url!r}", non_retryable=True)
 
+    # The PR is the source of truth for both values. In particular, do not
+    # infer the head repository from the current REMEDIATION_USE_FORK setting:
+    # that setting may have changed since the remediation PR was opened.
+    head_repo, head_ref = await github_checks.fetch_pr_head(input.repo, pr_number)
+
     try:
         ci_context = await github_checks.fetch_failure_context(input.repo, input.failing)
     except Exception:
@@ -731,14 +737,16 @@ async def run_dependency_ci_fix(input: CiFixInput) -> CiFixResult:
             "repo": input.repo,
             "package": input.package,
             "pr_url": input.pr_url,
-            "branch": input.branch_name,
+            "branch": head_ref,
+            "head_repo": head_repo,
             "user": current_user.user.user_id,
         },
     )
     result = await sandbox_remediation.run_ci_fix(
         repo=input.repo,
         base_branch=input.base_branch,
-        branch_name=input.branch_name,
+        branch_name=head_ref,
+        head_repo=head_repo,
         prompt=prompt,
         commit_title=_ci_fix_commit_title(input.package),
         on_progress=activity.heartbeat,
