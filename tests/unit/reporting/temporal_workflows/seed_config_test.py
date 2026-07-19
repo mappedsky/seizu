@@ -25,7 +25,6 @@ def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
         {
             "grouptype": "GitHubOrganization",
             "syncedtype": "GitHubOrganization",
-            "groupid": "https://github.com/mappedsky",
         }
     ]
 
@@ -39,18 +38,17 @@ def test_cve_dependency_remediation_workflow() -> None:
     query = _activity(configured_workflow, 0)
     cypher = query["parameters"]["cypher"]
 
-    # Same "new" convention as the assessment query: newly observed open
-    # security issues, not CVE publication dates or firstseen.
+    # Select newly observed open security issues rather than newly published
+    # CVEs. firstseen is returned as remediation context, not used as a filter.
     assert "datetime(s.created_at) > window_start" in cypher
-    assert "s.firstseen" not in cypher
+    assert "firstseen: s.firstseen" in cypher
     assert "datetime(c.published_date) > window_start" not in cypher
     # Remediation needs a concrete package to upgrade.
     assert "s.dependency_package_name IS NOT NULL" in cypher
-    # Org-agnostic: no hardcoded organization; each org's own sync window is
-    # joined to its repositories, and the watch scan matches every org sync
-    # (groupid omitted → ".*").
+    # Org-agnostic: no hardcoded organization or organization-id filter, and
+    # the watch scan matches every organization sync (groupid omitted → ".*").
     assert "mappedsky" not in cypher
-    assert "o.id = org_id" in cypher
+    assert "WHERE o.id" not in cypher
     assert configured_workflow["watch_scans"] == [
         {
             "grouptype": "GitHubOrganization",
