@@ -30,7 +30,7 @@ def test_cve_argv_contains_selected_modules_and_fixed_flags():
     assert argv == [
         "--selected-modules=cve",
         "--cve-enabled",
-        "--cve-api-key-env-var=NIST_NVD_TOKEN",
+        "--cve-api-key-env-var=CARTOGRAPHY_NIST_NVD_TOKEN",
         "--nist-cve-url=https://services.nvd.nist.gov/rest/json/cves/2.0/",
     ]
 
@@ -64,8 +64,8 @@ def test_string_value_joins_flag_in_single_token():
 
 def test_credential_env_var_names_are_fixed_constants():
     argv = build_module_argv("crowdstrike", {})
-    assert "--crowdstrike-client-id-env-var=CROWDSTRIKE_CLIENT_ID" in argv
-    assert "--crowdstrike-client-secret-env-var=CROWDSTRIKE_CLIENT_SECRET" in argv
+    assert "--crowdstrike-client-id-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID" in argv
+    assert "--crowdstrike-client-secret-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_SECRET" in argv
 
 
 def test_repeatable_string_list_emits_one_flag_per_value():
@@ -127,9 +127,15 @@ def test_registry_entries_are_well_formed():
         assert spec.name == name
         assert spec.description
         assert all(token.startswith("--") for token in spec.fixed_argv)
-        assert all(env and env.upper() == env for env in spec.required_env)
-        assert all(env and env.upper() == env for env in spec.optional_env)
+        assert all(env.startswith("CARTOGRAPHY_") and env.upper() == env for env in spec.required_env)
+        assert all(env.startswith("CARTOGRAPHY_") and env.upper() == env for env in spec.optional_env)
         declared_env = set(spec.required_env) | set(spec.optional_env)
+        mappings = dict(spec.env_mappings)
+        assert set(mappings) <= declared_env
+        assert all(source.startswith("CARTOGRAPHY_") for source in mappings)
+        aliases = dict(spec.env_aliases)
+        assert set(aliases) <= declared_env
+        assert all(alias.startswith("CARTOGRAPHY_") for names in aliases.values() for alias in names)
         for token in spec.fixed_argv:
             flag, _, value = token.partition("=")
             if flag.endswith("-env-var"):

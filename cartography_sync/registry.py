@@ -71,12 +71,19 @@ class CartographyModuleSpec:
     # Constant argv appended for every run: credential env-var-NAME flags and
     # fixed container paths. Never derived from user input.
     fixed_argv: tuple[str, ...] = ()
-    # Env vars the activity must copy into the subprocess (missing → config
-    # error before the subprocess starts).
+    # Prefixed worker env vars the activity must copy or translate into the
+    # subprocess (missing → config error before the subprocess starts).
     required_env: tuple[str, ...] = ()
-    # Env vars copied into the subprocess only when present (e.g. AWS SDK
-    # credential/region configuration supplied by the operator).
+    # Prefixed worker env vars copied or translated only when present (e.g.
+    # AWS SDK credential/region configuration supplied by the operator).
     optional_env: tuple[str, ...] = ()
+    # Worker-facing CARTOGRAPHY_* name → upstream SDK-mandated subprocess
+    # name. CLI --*-env-var options can read CARTOGRAPHY_* names directly and
+    # therefore do not need a mapping.
+    env_mappings: tuple[tuple[str, str], ...] = ()
+    # Preferred worker-facing name → deprecated prefixed aliases. Aliases are
+    # resolved worker-side and never copied into the subprocess.
+    env_aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 # Credential-free structural stages that must never be blocked by the operator
@@ -86,7 +93,7 @@ class CartographyModuleSpec:
 ALWAYS_ENABLED_MODULES: frozenset[str] = frozenset({"create-indexes", "analysis"})
 
 
-_AWS_OPTIONAL_ENV = (
+_AWS_SDK_ENV = (
     "AWS_PROFILE",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
@@ -101,6 +108,22 @@ _AWS_OPTIONAL_ENV = (
     "AWS_ROLE_ARN",
     "AWS_WEB_IDENTITY_TOKEN_FILE",
 )
+
+
+def _cartography_env(name: str) -> str:
+    return f"CARTOGRAPHY_{name}"
+
+
+def _prefixed_env(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(_cartography_env(name) for name in names)
+
+
+def _sdk_env_mappings(names: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple((_cartography_env(name), name) for name in names)
+
+
+_AWS_OPTIONAL_ENV = _prefixed_env(_AWS_SDK_ENV)
+_AWS_ENV_MAPPINGS = _sdk_env_mappings(_AWS_SDK_ENV)
 
 
 def _flag(
@@ -135,6 +158,8 @@ def _module(
     fixed_argv: tuple[str, ...] = (),
     required_env: tuple[str, ...] = (),
     optional_env: tuple[str, ...] = (),
+    env_mappings: tuple[tuple[str, str], ...] = (),
+    env_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (),
     description: str | None = None,
 ) -> CartographyModuleSpec:
     return CartographyModuleSpec(
@@ -144,6 +169,8 @@ def _module(
         fixed_argv=fixed_argv,
         required_env=required_env,
         optional_env=optional_env,
+        env_mappings=env_mappings,
+        env_aliases=env_aliases,
     )
 
 
@@ -162,8 +189,8 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("airbyte_client_id"),
             _flag("airbyte_api_url", default="https://api.airbyte.com/v1"),
         ),
-        fixed_argv=("--airbyte-client-secret-env-var=AIRBYTE_CLIENT_SECRET",),
-        required_env=("AIRBYTE_CLIENT_SECRET",),
+        fixed_argv=("--airbyte-client-secret-env-var=CARTOGRAPHY_AIRBYTE_CLIENT_SECRET",),
+        required_env=("CARTOGRAPHY_AIRBYTE_CLIENT_SECRET",),
     ),
     "databricks": _module(
         "databricks",
@@ -175,16 +202,20 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("databricks_account_client_id"),
         ),
         fixed_argv=(
-            "--databricks-token-env-var=DATABRICKS_TOKEN",
-            "--databricks-client-secret-env-var=DATABRICKS_CLIENT_SECRET",
-            "--databricks-account-client-secret-env-var=DATABRICKS_ACCOUNT_CLIENT_SECRET",
+            "--databricks-token-env-var=CARTOGRAPHY_DATABRICKS_TOKEN",
+            "--databricks-client-secret-env-var=CARTOGRAPHY_DATABRICKS_CLIENT_SECRET",
+            "--databricks-account-client-secret-env-var=CARTOGRAPHY_DATABRICKS_ACCOUNT_CLIENT_SECRET",
         ),
-        optional_env=("DATABRICKS_TOKEN", "DATABRICKS_CLIENT_SECRET", "DATABRICKS_ACCOUNT_CLIENT_SECRET"),
+        optional_env=(
+            "CARTOGRAPHY_DATABRICKS_TOKEN",
+            "CARTOGRAPHY_DATABRICKS_CLIENT_SECRET",
+            "CARTOGRAPHY_DATABRICKS_ACCOUNT_CLIENT_SECRET",
+        ),
     ),
     "anthropic": _module(
         "anthropic",
-        fixed_argv=("--anthropic-apikey-env-var=ANTHROPIC_API_KEY",),
-        required_env=("ANTHROPIC_API_KEY",),
+        fixed_argv=("--anthropic-apikey-env-var=CARTOGRAPHY_ANTHROPIC_API_KEY",),
+        required_env=("CARTOGRAPHY_ANTHROPIC_API_KEY",),
     ),
     "aws": _module(
         "aws",
@@ -210,6 +241,7 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
         ),
         fixed_argv=("--permission-relationships-file=/etc/cartography/permission_relationships.yaml",),
         optional_env=_AWS_OPTIONAL_ENV,
+        env_mappings=_AWS_ENV_MAPPINGS,
         description="AWS asset inventory using the mounted AWS configuration or AWS environment credentials.",
     ),
     "azure": _module(
@@ -222,36 +254,37 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("azure_subscription_id"),
         ),
         fixed_argv=(
-            "--azure-client-secret-env-var=AZURE_CLIENT_SECRET",
+            "--azure-client-secret-env-var=CARTOGRAPHY_AZURE_CLIENT_SECRET",
             "--azure-permission-relationships-file=/etc/cartography/azure_permission_relationships.yaml",
         ),
-        optional_env=("AZURE_CLIENT_SECRET",),
+        optional_env=("CARTOGRAPHY_AZURE_CLIENT_SECRET",),
     ),
     "microsoft": _module(
         "microsoft",
         flags=(_flag("microsoft_tenant_id"), _flag("microsoft_client_id")),
-        fixed_argv=("--microsoft-client-secret-env-var=MICROSOFT_CLIENT_SECRET",),
-        required_env=("MICROSOFT_CLIENT_SECRET",),
+        fixed_argv=("--microsoft-client-secret-env-var=CARTOGRAPHY_MICROSOFT_CLIENT_SECRET",),
+        required_env=("CARTOGRAPHY_MICROSOFT_CLIENT_SECRET",),
     ),
     "cloudflare": _module(
         "cloudflare",
-        fixed_argv=("--cloudflare-token-env-var=CLOUDFLARE_TOKEN",),
-        required_env=("CLOUDFLARE_TOKEN",),
+        fixed_argv=("--cloudflare-token-env-var=CARTOGRAPHY_CLOUDFLARE_TOKEN",),
+        required_env=("CARTOGRAPHY_CLOUDFLARE_TOKEN",),
     ),
     "crowdstrike": _module(
         "crowdstrike",
         flags=(_flag("crowdstrike_api_url"),),
         fixed_argv=(
-            "--crowdstrike-client-id-env-var=CROWDSTRIKE_CLIENT_ID",
-            "--crowdstrike-client-secret-env-var=CROWDSTRIKE_CLIENT_SECRET",
+            "--crowdstrike-client-id-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID",
+            "--crowdstrike-client-secret-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_SECRET",
         ),
-        required_env=("CROWDSTRIKE_CLIENT_ID", "CROWDSTRIKE_CLIENT_SECRET"),
+        required_env=("CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID", "CARTOGRAPHY_CROWDSTRIKE_CLIENT_SECRET"),
     ),
     "gcp": _module(
         "gcp",
         flags=(_flag("gcp_requested_syncs", pattern=r"[a-z0-9_,:-]+"),),
         fixed_argv=("--gcp-permission-relationships-file=/etc/cartography/gcp_permission_relationships.yaml",),
-        optional_env=("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CONFIG"),
+        optional_env=_prefixed_env(("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CONFIG")),
+        env_mappings=_sdk_env_mappings(("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CONFIG")),
     ),
     "googleworkspace": _module(
         "googleworkspace",
@@ -263,8 +296,8 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
                 choices=("delegated", "oauth", "default"),
             ),
         ),
-        fixed_argv=("--googleworkspace-tokens-env-var=GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS",),
-        required_env=("GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS",),
+        fixed_argv=("--googleworkspace-tokens-env-var=CARTOGRAPHY_GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS",),
+        required_env=("CARTOGRAPHY_GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS",),
     ),
     "gsuite": _module(
         "gsuite",
@@ -276,20 +309,21 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
                 choices=("delegated", "oauth", "default"),
             ),
         ),
-        fixed_argv=("--gsuite-tokens-env-var=GSUITE_GOOGLE_APPLICATION_CREDENTIALS",),
-        required_env=("GSUITE_GOOGLE_APPLICATION_CREDENTIALS",),
+        fixed_argv=("--gsuite-tokens-env-var=CARTOGRAPHY_GSUITE_GOOGLE_APPLICATION_CREDENTIALS",),
+        required_env=("CARTOGRAPHY_GSUITE_GOOGLE_APPLICATION_CREDENTIALS",),
     ),
     "cve": _module(
         "cve",
         flags=(_flag("nist_cve_url", default="https://services.nvd.nist.gov/rest/json/cves/2.0/"),),
-        fixed_argv=("--cve-enabled", "--cve-api-key-env-var=NIST_NVD_TOKEN"),
-        optional_env=("NIST_NVD_TOKEN",),
+        fixed_argv=("--cve-enabled", "--cve-api-key-env-var=CARTOGRAPHY_NIST_NVD_TOKEN"),
+        optional_env=("CARTOGRAPHY_NIST_NVD_TOKEN",),
         description="NIST NVD CVE feed.",
     ),
     "oci": _module(
         "oci",
         flags=(_flag("oci_sync_all_profiles", type=BOOLEAN),),
-        optional_env=("OCI_CONFIG_FILE", "OCI_CONFIG_PROFILE", "OCI_CLI_AUTH", "OCI_CLI_REGION"),
+        optional_env=_prefixed_env(("OCI_CONFIG_FILE", "OCI_CONFIG_PROFILE", "OCI_CLI_AUTH", "OCI_CLI_REGION")),
+        env_mappings=_sdk_env_mappings(("OCI_CONFIG_FILE", "OCI_CONFIG_PROFILE", "OCI_CLI_AUTH", "OCI_CLI_REGION")),
     ),
     "okta": _module(
         "okta",
@@ -298,20 +332,21 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("okta_base_domain", default="okta.com"),
             _flag("okta_saml_role_regex", default=r"^aws\#\S+\#(?{{role}}[\w\-]+)\#(?{{accountid}}\d+)$"),
         ),
-        fixed_argv=("--okta-api-key-env-var=OKTA_API_KEY",),
-        required_env=("OKTA_API_KEY",),
+        fixed_argv=("--okta-api-key-env-var=CARTOGRAPHY_OKTA_API_KEY",),
+        required_env=("CARTOGRAPHY_OKTA_API_KEY",),
     ),
     "openai": _module(
         "openai",
         flags=(_flag("openai_org_id"),),
-        fixed_argv=("--openai-apikey-env-var=OPENAI_API_KEY",),
-        required_env=("OPENAI_API_KEY",),
+        fixed_argv=("--openai-apikey-env-var=CARTOGRAPHY_OPENAI_API_KEY",),
+        required_env=("CARTOGRAPHY_OPENAI_API_KEY",),
     ),
     "github": _module(
         "github",
         flags=(_flag("github_commit_lookback_days", type=NUMBER, default=30),),
-        fixed_argv=("--github-config-env-var=GITHUB_TOKEN",),
-        required_env=("GITHUB_TOKEN",),
+        fixed_argv=("--github-config-env-var=CARTOGRAPHY_GITHUB_CONFIG",),
+        required_env=("CARTOGRAPHY_GITHUB_CONFIG",),
+        env_aliases=(("CARTOGRAPHY_GITHUB_CONFIG", ("CARTOGRAPHY_GITHUB_TOKEN",)),),
     ),
     "gitlab": _module(
         "gitlab",
@@ -320,19 +355,19 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("gitlab_organization_id", type=NUMBER),
             _flag("gitlab_commits_since_days", type=NUMBER, default=90),
         ),
-        fixed_argv=("--gitlab-token-env-var=GITLAB_TOKEN",),
-        required_env=("GITLAB_TOKEN",),
+        fixed_argv=("--gitlab-token-env-var=CARTOGRAPHY_GITLAB_TOKEN",),
+        required_env=("CARTOGRAPHY_GITLAB_TOKEN",),
     ),
     "digitalocean": _module(
         "digitalocean",
-        fixed_argv=("--digitalocean-token-env-var=DIGITALOCEAN_TOKEN",),
-        required_env=("DIGITALOCEAN_TOKEN",),
+        fixed_argv=("--digitalocean-token-env-var=CARTOGRAPHY_DIGITALOCEAN_TOKEN",),
+        required_env=("CARTOGRAPHY_DIGITALOCEAN_TOKEN",),
     ),
     "kandji": _module(
         "kandji",
         flags=(_flag("kandji_base_uri"), _flag("kandji_tenant_id")),
-        fixed_argv=("--kandji-token-env-var=KANDJI_TOKEN",),
-        required_env=("KANDJI_TOKEN",),
+        fixed_argv=("--kandji-token-env-var=CARTOGRAPHY_KANDJI_TOKEN",),
+        required_env=("CARTOGRAPHY_KANDJI_TOKEN",),
     ),
     "keycloak": _module(
         "keycloak",
@@ -341,8 +376,8 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("keycloak_url"),
             _flag("keycloak_realm", default="master"),
         ),
-        fixed_argv=("--keycloak-client-secret-env-var=KEYCLOAK_CLIENT_SECRET",),
-        required_env=("KEYCLOAK_CLIENT_SECRET",),
+        fixed_argv=("--keycloak-client-secret-env-var=CARTOGRAPHY_KEYCLOAK_CLIENT_SECRET",),
+        required_env=("CARTOGRAPHY_KEYCLOAK_CLIENT_SECRET",),
     ),
     "salesforce": _module(
         "salesforce",
@@ -352,83 +387,84 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("salesforce_username"),
         ),
         fixed_argv=(
-            "--salesforce-client-secret-env-var=SALESFORCE_CLIENT_SECRET",
-            "--salesforce-private-key-env-var=SALESFORCE_PRIVATE_KEY",
+            "--salesforce-client-secret-env-var=CARTOGRAPHY_SALESFORCE_CLIENT_SECRET",
+            "--salesforce-private-key-env-var=CARTOGRAPHY_SALESFORCE_PRIVATE_KEY",
         ),
-        optional_env=("SALESFORCE_CLIENT_SECRET", "SALESFORCE_PRIVATE_KEY"),
+        optional_env=("CARTOGRAPHY_SALESFORCE_CLIENT_SECRET", "CARTOGRAPHY_SALESFORCE_PRIVATE_KEY"),
     ),
     "kubernetes": _module(
         "kubernetes",
         flags=(_flag("managed_kubernetes"),),
         fixed_argv=("--k8s-kubeconfig=/etc/cartography/kube.config",),
         optional_env=_AWS_OPTIONAL_ENV,
+        env_mappings=_AWS_ENV_MAPPINGS,
     ),
     "jumpcloud": _module(
         "jumpcloud",
         flags=(_flag("jumpcloud_org_id"),),
-        fixed_argv=("--jumpcloud-api-key-env-var=JUMPCLOUD_API_KEY",),
-        required_env=("JUMPCLOUD_API_KEY",),
+        fixed_argv=("--jumpcloud-api-key-env-var=CARTOGRAPHY_JUMPCLOUD_API_KEY",),
+        required_env=("CARTOGRAPHY_JUMPCLOUD_API_KEY",),
     ),
     "lastpass": _module(
         "lastpass",
         fixed_argv=(
-            "--lastpass-cid-env-var=LASTPASS_CID",
-            "--lastpass-provhash-env-var=LASTPASS_PROVHASH",
+            "--lastpass-cid-env-var=CARTOGRAPHY_LASTPASS_CID",
+            "--lastpass-provhash-env-var=CARTOGRAPHY_LASTPASS_PROVHASH",
         ),
-        required_env=("LASTPASS_CID", "LASTPASS_PROVHASH"),
+        required_env=("CARTOGRAPHY_LASTPASS_CID", "CARTOGRAPHY_LASTPASS_PROVHASH"),
     ),
     "bigfix": _module(
         "bigfix",
         flags=(_flag("bigfix_username"), _flag("bigfix_root_url")),
-        fixed_argv=("--bigfix-password-env-var=BIGFIX_PASSWORD",),
-        required_env=("BIGFIX_PASSWORD",),
+        fixed_argv=("--bigfix-password-env-var=CARTOGRAPHY_BIGFIX_PASSWORD",),
+        required_env=("CARTOGRAPHY_BIGFIX_PASSWORD",),
     ),
     "duo": _module(
         "duo",
         flags=(_flag("duo_api_hostname"),),
         fixed_argv=(
-            "--duo-api-key-env-var=DUO_API_KEY",
-            "--duo-api-secret-env-var=DUO_API_SECRET",
+            "--duo-api-key-env-var=CARTOGRAPHY_DUO_API_KEY",
+            "--duo-api-secret-env-var=CARTOGRAPHY_DUO_API_SECRET",
         ),
-        required_env=("DUO_API_KEY", "DUO_API_SECRET"),
+        required_env=("CARTOGRAPHY_DUO_API_KEY", "CARTOGRAPHY_DUO_API_SECRET"),
     ),
     "workday": _module(
         "workday",
         flags=(_flag("workday_api_url"), _flag("workday_api_login")),
-        fixed_argv=("--workday-api-password-env-var=WORKDAY_API_PASSWORD",),
-        required_env=("WORKDAY_API_PASSWORD",),
+        fixed_argv=("--workday-api-password-env-var=CARTOGRAPHY_WORKDAY_API_PASSWORD",),
+        required_env=("CARTOGRAPHY_WORKDAY_API_PASSWORD",),
     ),
     "scaleway": _module(
         "scaleway",
         flags=(_flag("scaleway_org"), _flag("scaleway_access_key")),
-        fixed_argv=("--scaleway-secret-key-env-var=SCALEWAY_SECRET_KEY",),
-        required_env=("SCALEWAY_SECRET_KEY",),
+        fixed_argv=("--scaleway-secret-key-env-var=CARTOGRAPHY_SCALEWAY_SECRET_KEY",),
+        required_env=("CARTOGRAPHY_SCALEWAY_SECRET_KEY",),
     ),
     "semgrep": _module(
         "semgrep",
         flags=(_flag("semgrep_dependency_ecosystems"),),
         fixed_argv=(
-            "--semgrep-app-token-env-var=SEMGREP_APP_TOKEN",
+            "--semgrep-app-token-env-var=CARTOGRAPHY_SEMGREP_APP_TOKEN",
             "--semgrep-oss-source=/etc/cartography/reports/semgrep",
         ),
-        optional_env=("SEMGREP_APP_TOKEN",),
+        optional_env=("CARTOGRAPHY_SEMGREP_APP_TOKEN",),
     ),
     "sentry": _module(
         "sentry",
         flags=(_flag("sentry_org"), _flag("sentry_host", default="https://sentry.io")),
-        fixed_argv=("--sentry-token-env-var=SENTRY_TOKEN",),
-        required_env=("SENTRY_TOKEN",),
+        fixed_argv=("--sentry-token-env-var=CARTOGRAPHY_SENTRY_TOKEN",),
+        required_env=("CARTOGRAPHY_SENTRY_TOKEN",),
     ),
     "snipeit": _module(
         "snipeit",
         flags=(_flag("snipeit_base_uri"), _flag("snipeit_tenant_id")),
-        fixed_argv=("--snipeit-token-env-var=SNIPEIT_TOKEN",),
-        required_env=("SNIPEIT_TOKEN",),
+        fixed_argv=("--snipeit-token-env-var=CARTOGRAPHY_SNIPEIT_TOKEN",),
+        required_env=("CARTOGRAPHY_SNIPEIT_TOKEN",),
     ),
     "socketdev": _module(
         "socketdev",
-        fixed_argv=("--socketdev-token-env-var=SOCKETDEV_TOKEN",),
-        required_env=("SOCKETDEV_TOKEN",),
+        fixed_argv=("--socketdev-token-env-var=CARTOGRAPHY_SOCKETDEV_TOKEN",),
+        required_env=("CARTOGRAPHY_SOCKETDEV_TOKEN",),
     ),
     "tailscale": _module(
         "tailscale",
@@ -437,23 +473,27 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("tailscale_base_url", default="https://api.tailscale.com/api/v2"),
         ),
         fixed_argv=(
-            "--tailscale-token-env-var=TAILSCALE_TOKEN",
-            "--tailscale-oauth-client-id-env-var=TAILSCALE_OAUTH_CLIENT_ID",
-            "--tailscale-oauth-client-secret-env-var=TAILSCALE_OAUTH_CLIENT_SECRET",
+            "--tailscale-token-env-var=CARTOGRAPHY_TAILSCALE_TOKEN",
+            "--tailscale-oauth-client-id-env-var=CARTOGRAPHY_TAILSCALE_OAUTH_CLIENT_ID",
+            "--tailscale-oauth-client-secret-env-var=CARTOGRAPHY_TAILSCALE_OAUTH_CLIENT_SECRET",
         ),
-        optional_env=("TAILSCALE_TOKEN", "TAILSCALE_OAUTH_CLIENT_ID", "TAILSCALE_OAUTH_CLIENT_SECRET"),
+        optional_env=(
+            "CARTOGRAPHY_TAILSCALE_TOKEN",
+            "CARTOGRAPHY_TAILSCALE_OAUTH_CLIENT_ID",
+            "CARTOGRAPHY_TAILSCALE_OAUTH_CLIENT_SECRET",
+        ),
     ),
     "jamf": _module(
         "jamf",
         flags=(_flag("jamf_base_uri"), _flag("jamf_user")),
-        fixed_argv=("--jamf-password-env-var=JAMF_PASSWORD",),
-        required_env=("JAMF_PASSWORD",),
+        fixed_argv=("--jamf-password-env-var=CARTOGRAPHY_JAMF_PASSWORD",),
+        required_env=("CARTOGRAPHY_JAMF_PASSWORD",),
     ),
     "pagerduty": _module(
         "pagerduty",
         flags=(_flag("pagerduty_request_timeout", type=NUMBER),),
-        fixed_argv=("--pagerduty-api-key-env-var=PAGERDUTY_API_KEY",),
-        required_env=("PAGERDUTY_API_KEY",),
+        fixed_argv=("--pagerduty-api-key-env-var=CARTOGRAPHY_PAGERDUTY_API_KEY",),
+        required_env=("CARTOGRAPHY_PAGERDUTY_API_KEY",),
     ),
     "docker_scout": _module(
         "docker_scout",
@@ -474,8 +514,8 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("sentinelone_site_ids"),
             _flag("sentinelone_api_url"),
         ),
-        fixed_argv=("--sentinelone-api-token-env-var=SENTINELONE_API_TOKEN",),
-        required_env=("SENTINELONE_API_TOKEN",),
+        fixed_argv=("--sentinelone-api-token-env-var=CARTOGRAPHY_SENTINELONE_API_TOKEN",),
+        required_env=("CARTOGRAPHY_SENTINELONE_API_TOKEN",),
     ),
     "tenable": _module(
         "tenable",
@@ -485,23 +525,23 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("tenable_findings_lookback_days", type=NUMBER, default=180, min_value=1),
         ),
         fixed_argv=(
-            "--tenable-access-key-env-var=TENABLE_ACCESS_KEY",
-            "--tenable-secret-key-env-var=TENABLE_SECRET_KEY",
+            "--tenable-access-key-env-var=CARTOGRAPHY_TENABLE_ACCESS_KEY",
+            "--tenable-secret-key-env-var=CARTOGRAPHY_TENABLE_SECRET_KEY",
         ),
-        required_env=("TENABLE_ACCESS_KEY", "TENABLE_SECRET_KEY"),
+        required_env=("CARTOGRAPHY_TENABLE_ACCESS_KEY", "CARTOGRAPHY_TENABLE_SECRET_KEY"),
     ),
     "cve_metadata": _module(
         "cve_metadata",
         flags=(_flag("cve_metadata_src", type=STRING_LIST, choices=("nvd", "epss")),),
-        fixed_argv=("--cve-metadata-nist-api-key-env-var=NIST_NVD_TOKEN",),
-        optional_env=("NIST_NVD_TOKEN",),
+        fixed_argv=("--cve-metadata-nist-api-key-env-var=CARTOGRAPHY_NIST_NVD_TOKEN",),
+        optional_env=("CARTOGRAPHY_NIST_NVD_TOKEN",),
         description="CVE metadata enrichment from NVD and EPSS; run after CVE-producing modules.",
     ),
     "slack": _module(
         "slack",
         flags=(_flag("slack_teams"), _flag("slack_channels_memberships", type=BOOLEAN)),
-        fixed_argv=("--slack-token-env-var=SLACK_TOKEN",),
-        required_env=("SLACK_TOKEN",),
+        fixed_argv=("--slack-token-env-var=CARTOGRAPHY_SLACK_TOKEN",),
+        required_env=("CARTOGRAPHY_SLACK_TOKEN",),
     ),
     "spacelift": _module(
         "spacelift",
@@ -512,17 +552,23 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("spacelift_ec2_ownership_s3_prefix"),
         ),
         fixed_argv=(
-            "--spacelift-api-token-env-var=SPACELIFT_API_TOKEN",
-            "--spacelift-api-key-id-env-var=SPACELIFT_API_KEY_ID",
-            "--spacelift-api-key-secret-env-var=SPACELIFT_API_KEY_SECRET",
+            "--spacelift-api-token-env-var=CARTOGRAPHY_SPACELIFT_API_TOKEN",
+            "--spacelift-api-key-id-env-var=CARTOGRAPHY_SPACELIFT_API_KEY_ID",
+            "--spacelift-api-key-secret-env-var=CARTOGRAPHY_SPACELIFT_API_KEY_SECRET",
         ),
-        optional_env=("SPACELIFT_API_TOKEN", "SPACELIFT_API_KEY_ID", "SPACELIFT_API_KEY_SECRET", *_AWS_OPTIONAL_ENV),
+        optional_env=(
+            "CARTOGRAPHY_SPACELIFT_API_TOKEN",
+            "CARTOGRAPHY_SPACELIFT_API_KEY_ID",
+            "CARTOGRAPHY_SPACELIFT_API_KEY_SECRET",
+            *_AWS_OPTIONAL_ENV,
+        ),
+        env_mappings=_AWS_ENV_MAPPINGS,
     ),
     "workos": _module(
         "workos",
         flags=(_flag("workos_client_id"),),
-        fixed_argv=("--workos-apikey-env-var=WORKOS_API_KEY",),
-        required_env=("WORKOS_API_KEY",),
+        fixed_argv=("--workos-apikey-env-var=CARTOGRAPHY_WORKOS_API_KEY",),
+        required_env=("CARTOGRAPHY_WORKOS_API_KEY",),
     ),
     "subimage": _module(
         "subimage",
@@ -531,16 +577,16 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("subimage_authkit_url", default="https://auth.subimage.io"),
         ),
         fixed_argv=(
-            "--subimage-client-id-env-var=SUBIMAGE_CLIENT_ID",
-            "--subimage-client-secret-env-var=SUBIMAGE_CLIENT_SECRET",
+            "--subimage-client-id-env-var=CARTOGRAPHY_SUBIMAGE_CLIENT_ID",
+            "--subimage-client-secret-env-var=CARTOGRAPHY_SUBIMAGE_CLIENT_SECRET",
         ),
-        required_env=("SUBIMAGE_CLIENT_ID", "SUBIMAGE_CLIENT_SECRET"),
+        required_env=("CARTOGRAPHY_SUBIMAGE_CLIENT_ID", "CARTOGRAPHY_SUBIMAGE_CLIENT_SECRET"),
     ),
     "vercel": _module(
         "vercel",
         flags=(_flag("vercel_team_id"), _flag("vercel_base_url", default="https://api.vercel.com")),
-        fixed_argv=("--vercel-token-env-var=VERCEL_TOKEN",),
-        required_env=("VERCEL_TOKEN",),
+        fixed_argv=("--vercel-token-env-var=CARTOGRAPHY_VERCEL_TOKEN",),
+        required_env=("CARTOGRAPHY_VERCEL_TOKEN",),
     ),
     "circleci": _module(
         "circleci",
@@ -548,8 +594,8 @@ MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
             _flag("circleci_base_url", default="https://circleci.com/api/v2"),
             _flag("circleci_project_slugs"),
         ),
-        fixed_argv=("--circleci-token-env-var=CIRCLECI_TOKEN",),
-        required_env=("CIRCLECI_TOKEN",),
+        fixed_argv=("--circleci-token-env-var=CARTOGRAPHY_CIRCLECI_TOKEN",),
+        required_env=("CARTOGRAPHY_CIRCLECI_TOKEN",),
     ),
     "ontology": _module(
         "ontology",

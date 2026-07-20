@@ -84,7 +84,7 @@ To sync GitHub organization and repository data into the graph, create a [GitHub
 
 For the full set of supported permissions — including fine-grained token and GitHub App alternatives — see Cartography's [GitHub module configuration docs](https://cartography-cncf.github.io/cartography/modules/github/config.html).
 
-Cartography reads its GitHub configuration as a **base64-encoded JSON object**, not a bare token, so `CARTOGRAPHY_GITHUB_TOKEN` must hold that encoded value. Build it from your token and organization name (replace both placeholders):
+Cartography reads its GitHub configuration as a **base64-encoded JSON object**, not a bare token. The bare GitHub token belongs in that JSON object's `token` field; the resulting encoded object goes in `CARTOGRAPHY_GITHUB_CONFIG`. Build it from your token and organization name (replace both placeholders):
 
 ```bash
 printf '%s' '{"organization":[{"token":"<your_github_pat>","url":"https://api.github.com/graphql","name":"<your_org_name>"}]}' | base64 | tr -d '\n'
@@ -93,8 +93,12 @@ printf '%s' '{"organization":[{"token":"<your_github_pat>","url":"https://api.gi
 Put the resulting string in `.env`:
 
 ```
-CARTOGRAPHY_GITHUB_TOKEN=<base64_value_from_above>
+CARTOGRAPHY_GITHUB_CONFIG=<base64_value_from_above>
 ```
+
+`CARTOGRAPHY_GITHUB_TOKEN` remains a deprecated compatibility alias for the
+old Seizu setting. Despite that historical name, its value must also be the
+complete base64-encoded configuration, not a bare PAT.
 
 Then run:
 
@@ -114,7 +118,7 @@ make sync_cve_metadata    # enriches them
 Setting a free [NVD API key](https://nvd.nist.gov/developers/request-an-api-key) in `.env` is optional but strongly recommended — it makes the sync considerably faster. With a key, the module fetches the individual referenced CVEs; without one, it falls back to pulling an entire year of CVE data at a time.
 
 ```
-NIST_NVD_TOKEN=<your_nvd_api_key>
+CARTOGRAPHY_NIST_NVD_TOKEN=<your_nvd_api_key>
 ```
 
 ## Testing authentication

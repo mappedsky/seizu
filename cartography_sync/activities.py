@@ -38,32 +38,64 @@ CONFIG_ERROR = "CartographyConfigError"
 # Retryable: cartography ran and exited non-zero (transient API errors etc.).
 MODULE_FAILED = "CartographyModuleFailed"
 
-# Baseline env vars every cartography subprocess gets (when set on the
-# worker). STATSD_* mirrors the standalone cartography compose service.
-_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "STATSD_ENABLED", "STATSD_HOST")
+# Baseline process env plus Cartography-specific worker settings that upstream
+# libraries require under conventional names.
+_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+_GLOBAL_ENV_MAPPINGS = (
+    ("CARTOGRAPHY_STATSD_ENABLED", "STATSD_ENABLED"),
+    ("CARTOGRAPHY_STATSD_HOST", "STATSD_HOST"),
+)
 _HEARTBEAT_INTERVAL_SECONDS = 30.0
 _OUTPUT_TAIL_MAX_BYTES = 16 * 1024
 _FAILURE_EXCERPT_MAX_CHARS = 2048
 
 
 def _subprocess_env(module: str) -> dict[str, str]:
-    """Minimal base + only the env vars the module's registry entry declares."""
+    """Build a scrubbed env, translating only registry-declared SDK names."""
     spec = MODULE_REGISTRY[module]
     env: dict[str, str] = {}
-    for name in (*_BASE_ENV, *spec.optional_env):
+    for name in _BASE_ENV:
         value = os.environ.get(name)
         if value is not None:
             env[name] = value
-    missing = [name for name in spec.required_env if not os.environ.get(name)]
+
+    for worker_name, subprocess_name in _GLOBAL_ENV_MAPPINGS:
+        value = os.environ.get(worker_name)
+        if value is not None:
+            env[subprocess_name] = value
+
+    aliases = dict(spec.env_aliases)
+    mappings = dict(spec.env_mappings)
+
+    def _resolve(worker_name: str) -> tuple[str | None, str | None]:
+        for candidate in (worker_name, *aliases.get(worker_name, ())):
+            value = os.environ.get(candidate)
+            if value:
+                return value, candidate
+        return None, None
+
+    missing: list[str] = []
+    for worker_name in (*spec.optional_env, *spec.required_env):
+        value, source_name = _resolve(worker_name)
+        if value is None:
+            if worker_name in spec.required_env:
+                missing.append(worker_name)
+            continue
+        if source_name != worker_name:
+            logger.warning(
+                "%s is deprecated for Cartography; use %s",
+                source_name,
+                worker_name,
+            )
+        env[mappings.get(worker_name, worker_name)] = value
+
     if missing:
         raise ApplicationError(
             f"cartography module '{module}' requires env vars not set on the sync worker: {missing}",
             type=CONFIG_ERROR,
             non_retryable=True,
         )
-    for name in spec.required_env:
-        env[name] = os.environ[name]
-    password = os.environ.get("NEO4J_PASSWORD")
+    password = os.environ.get("CARTOGRAPHY_NEO4J_PASSWORD")
     if password:
         env["NEO4J_PASSWORD"] = password
     return env

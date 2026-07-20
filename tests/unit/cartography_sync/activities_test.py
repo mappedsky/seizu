@@ -74,13 +74,14 @@ async def test_invalid_params_raise_non_retryable_config_error(sync_env):
 
 async def test_missing_required_env_raises_config_error(sync_env, monkeypatch):
     sync_env("echo never-runs")
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("CARTOGRAPHY_GITHUB_CONFIG", raising=False)
+    monkeypatch.delenv("CARTOGRAPHY_GITHUB_TOKEN", raising=False)
     with pytest.raises(ApplicationError) as excinfo:
         await ActivityEnvironment().run(
             run_cartography_module, CartographyModuleActivityInput(module="github", params={})
         )
     assert excinfo.value.type == "CartographyConfigError"
-    assert "GITHUB_TOKEN" in str(excinfo.value)
+    assert "CARTOGRAPHY_GITHUB_CONFIG" in str(excinfo.value)
 
 
 async def test_missing_neo4j_uri_raises_config_error(sync_env, monkeypatch):
@@ -93,25 +94,62 @@ async def test_missing_neo4j_uri_raises_config_error(sync_env, monkeypatch):
 
 async def test_subprocess_env_is_scrubbed(sync_env, monkeypatch):
     sync_env("env | cut -d= -f1")
-    monkeypatch.setenv("GITHUB_TOKEN", "gh-secret")
+    monkeypatch.setenv("CARTOGRAPHY_GITHUB_CONFIG", "gh-config")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-leak")
     monkeypatch.setenv("REMEDIATION_GITHUB_TOKEN", "must-not-leak")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
     result = await ActivityEnvironment().run(
         run_cartography_module, CartographyModuleActivityInput(module="github", params={})
     )
     names = set(result.output_tail.split())
-    assert "GITHUB_TOKEN" in names
+    assert "CARTOGRAPHY_GITHUB_CONFIG" in names
     assert "PATH" in names
     assert "REMEDIATION_GITHUB_TOKEN" not in names
     assert "ANTHROPIC_API_KEY" not in names
+    assert "GITHUB_TOKEN" not in names
     # The activity's own config vars don't leak into the subprocess either.
     assert "CARTOGRAPHY_NEO4J_URI" not in names
+
+
+async def test_sdk_env_is_translated_from_prefixed_worker_name(sync_env, monkeypatch):
+    sync_env("env | cut -d= -f1")
+    monkeypatch.setenv("CARTOGRAPHY_AWS_PROFILE", "audit")
+    result = await ActivityEnvironment().run(
+        run_cartography_module, CartographyModuleActivityInput(module="aws", params={})
+    )
+    names = set(result.output_tail.split())
+    assert "AWS_PROFILE" in names
+    assert "CARTOGRAPHY_AWS_PROFILE" not in names
+
+
+async def test_deprecated_github_token_alias_becomes_prefixed_config(sync_env, monkeypatch, caplog):
+    sync_env("env | cut -d= -f1")
+    monkeypatch.delenv("CARTOGRAPHY_GITHUB_CONFIG", raising=False)
+    monkeypatch.setenv("CARTOGRAPHY_GITHUB_TOKEN", "legacy-base64-config")
+    with caplog.at_level("WARNING", logger="cartography_sync.activities"):
+        result = await ActivityEnvironment().run(
+            run_cartography_module, CartographyModuleActivityInput(module="github", params={})
+        )
+    names = set(result.output_tail.split())
+    assert "CARTOGRAPHY_GITHUB_CONFIG" in names
+    assert "CARTOGRAPHY_GITHUB_TOKEN" not in names
+    assert "CARTOGRAPHY_GITHUB_TOKEN is deprecated" in caplog.text
+
+
+async def test_preferred_github_config_wins_over_deprecated_alias(sync_env, monkeypatch):
+    sync_env('printf "%s" "$CARTOGRAPHY_GITHUB_CONFIG"')
+    monkeypatch.setenv("CARTOGRAPHY_GITHUB_CONFIG", "preferred-config")
+    monkeypatch.setenv("CARTOGRAPHY_GITHUB_TOKEN", "legacy-config")
+    result = await ActivityEnvironment().run(
+        run_cartography_module, CartographyModuleActivityInput(module="github", params={})
+    )
+    assert result.output_tail == "preferred-config"
 
 
 async def test_neo4j_auth_flags_added_without_password_in_argv(sync_env, monkeypatch):
     sync_env('for arg in "$@"; do echo "TOKEN:$arg"; done; env | cut -d= -f1')
     monkeypatch.setenv("CARTOGRAPHY_NEO4J_USER", "neo4j")
-    monkeypatch.setenv("NEO4J_PASSWORD", "hunter2")
+    monkeypatch.setenv("CARTOGRAPHY_NEO4J_PASSWORD", "hunter2")
     result = await ActivityEnvironment().run(
         run_cartography_module, CartographyModuleActivityInput(module="cve", params={})
     )
@@ -148,7 +186,7 @@ async def test_timeout_terminates_subprocess(sync_env):
 async def test_worker_side_enabled_modules_allowlist(sync_env, monkeypatch):
     sync_env("echo ok")
     monkeypatch.setenv("CARTOGRAPHY_ENABLED_MODULES", "github")
-    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("CARTOGRAPHY_GITHUB_CONFIG", "gh-config")
     # Disabled module → non-retryable config error even though it's registered.
     with pytest.raises(ApplicationError) as excinfo:
         await ActivityEnvironment().run(run_cartography_module, CartographyModuleActivityInput(module="cve", params={}))
