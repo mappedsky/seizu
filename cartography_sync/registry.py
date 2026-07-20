@@ -75,9 +75,13 @@ class CartographyModuleSpec:
     # Env vars copied into the subprocess only when present (e.g. AWS SDK
     # credential/region configuration supplied by the operator).
     optional_env: tuple[str, ...] = ()
-    # Internal stages (create-indexes, analysis) are added to every pipeline
-    # by the workflow input builder and cannot be selected in user config.
-    internal: bool = False
+
+
+# Credential-free structural stages that must never be blocked by the operator
+# intel-module allowlist: existing CARTOGRAPHY_ENABLED_MODULES values don't
+# list them, yet every useful pipeline needs indexes first and analysis after
+# ingestion.
+ALWAYS_ENABLED_MODULES: frozenset[str] = frozenset({"create-indexes", "analysis"})
 
 
 _AWS_OPTIONAL_ENV = (
@@ -96,19 +100,16 @@ _AWS_OPTIONAL_ENV = (
 
 
 MODULE_REGISTRY: dict[str, CartographyModuleSpec] = {
-    # Internal stages: cartography's own execution model runs create-indexes
-    # before ingestion and analysis after it. The workflow input builder adds
-    # these once per pipeline (first/last stage) so parallel module runs don't
-    # each repeat them — subprocesses run exactly one --selected-modules stage.
+    # Structural stages: cartography's own execution model runs create-indexes
+    # before ingestion and analysis after it. Users place them explicitly —
+    # typically create-indexes first and analysis last (analysis may repeat).
     "create-indexes": CartographyModuleSpec(
         name="create-indexes",
-        description="Creates cartography's Neo4j indexes (implicit first stage of every pipeline).",
-        internal=True,
+        description="Creates cartography's Neo4j indexes (run before any ingestion module).",
     ),
     "analysis": CartographyModuleSpec(
         name="analysis",
-        description="Cartography's post-ingestion analysis jobs (implicit last stage of every pipeline).",
-        internal=True,
+        description="Cartography's post-ingestion analysis jobs (run after ingestion modules).",
     ),
     "aws": CartographyModuleSpec(
         name="aws",
@@ -250,8 +251,8 @@ def build_module_argv(module: str, params: dict[str, object]) -> list[str]:
         raise ValueError("; ".join(errors))
     spec = MODULE_REGISTRY[module]
     # Exactly one sync stage per subprocess: create-indexes and analysis are
-    # separate pipeline stages (see the internal registry entries), so
-    # parallel module runs never repeat them or run analysis mid-ingestion.
+    # their own registry modules users place as stages, so parallel module
+    # runs never repeat them or run analysis mid-ingestion.
     argv = [f"--selected-modules={module}", *spec.fixed_argv]
     for flag in spec.flags:
         value = params.get(flag.name, flag.default)

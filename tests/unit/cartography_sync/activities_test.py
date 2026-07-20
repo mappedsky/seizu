@@ -155,7 +155,7 @@ async def test_worker_side_enabled_modules_allowlist(sync_env, monkeypatch):
     assert excinfo.value.type == "CartographyConfigError"
     assert excinfo.value.non_retryable
     assert "CARTOGRAPHY_ENABLED_MODULES" in str(excinfo.value)
-    # Enabled module runs; internal stages are always allowed.
+    # Enabled module runs; structural stages are always allowed.
     result = await ActivityEnvironment().run(
         run_cartography_module, CartographyModuleActivityInput(module="github", params={})
     )

@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -63,8 +64,197 @@ def test_legacy_item_projects_to_query_then_sequential_actions():
     assert query.output == "query"
     assert query.parameters["parameters"][0]["name"] == "limit"
     assert item.stages[1].activities[0].input == "query"
-    assert item.stages[2].activities[0].type == "workflow"
+    # The legacy temporal action migrates to its top-level activity type.
+    assert item.stages[2].activities[0].type == "cartography_sync"
+    assert "workflow" not in item.stages[2].activities[0].parameters
     assert item.stages[2].activities[0].input is None
+
+
+def test_stored_workflow_activity_migrates_to_top_level_type():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {"type": "query", "output": "rows", "parameters": {"cypher": "RETURN 1", "parameters": []}},
+                ]
+            },
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "input": "rows",
+                        "output": "out",
+                        "parameters": {"workflow": "cve_dependency_remediation", "max_rows": 100},
+                    }
+                ]
+            },
+        ],
+    )
+    stages = workflows.normalized_stages(item)
+    migrated = stages[1].activities[0]
+    assert migrated.type == "cve_dependency_remediation"
+    assert migrated.parameters == {"max_rows": 100}
+    assert migrated.input == "rows"
+    assert workflows.has_code_workflow(item)
+
+
+def test_stored_workflow_activity_with_unknown_name_stays_unmigrated():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {"type": "workflow", "output": "out", "parameters": {"workflow": "not-registered"}},
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    assert activity.type == "workflow"
+    assert activity.parameters == {"workflow": "not-registered"}
+
+
+def test_stored_cartography_modules_migrate_to_module_runs():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {
+                            "workflow": "cartography_sync",
+                            "modules": ["github", "cve"],
+                            "stop_on_failure": True,
+                        },
+                    }
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    assert activity.type == "cartography_sync"
+    # The previously-implicit structural stages are materialized.
+    assert [run["module"] for run in activity.parameters["module_runs"]] == [
+        "create-indexes",
+        "github",
+        "cve",
+        "analysis",
+    ]
+    assert activity.parameters["stop_on_failure"] is True
+    assert "modules" not in activity.parameters
+    assert "workflow" not in activity.parameters
+
+
+def test_stored_cartography_drops_stray_max_rows_and_query_return_attribute():
+    # The old dispatcher's base schema always populated max_rows and
+    # query_return_attribute for every temporal action regardless of the
+    # selected workflow's row requirement; cartography_sync's new top-level
+    # schema has no such fields, so a leftover value must not survive
+    # migration (it would fail save-time validation as an extra input).
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {
+                            "workflow": "cartography_sync",
+                            "modules": ["github"],
+                            "max_rows": 200,
+                            "query_return_attribute": "details",
+                        },
+                    }
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    assert activity.type == "cartography_sync"
+    assert "max_rows" not in activity.parameters
+    assert "query_return_attribute" not in activity.parameters
+
+
+def test_row_consuming_workflow_keeps_max_rows_and_query_return_attribute():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {"activities": [{"type": "query", "output": "rows", "parameters": {"cypher": "RETURN 1"}}]},
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "input": "rows",
+                        "output": "report",
+                        "parameters": {
+                            "workflow": "cve_repo_report",
+                            "max_rows": 50,
+                            "query_return_attribute": "details",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+    activity = workflows.normalized_stages(item)[1].activities[0]
+    assert activity.type == "cve_repo_report"
+    assert activity.parameters == {"max_rows": 50, "query_return_attribute": "details"}
+
+
+def test_stored_cartography_pipeline_migrates_flattened():
+    pipeline = '{"stages": [{"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},'
+    pipeline += ' {"module": "github"}]}, {"runs": [{"module": "cve"}]}]}'
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {"workflow": "cartography_sync", "pipeline": pipeline},
+                    }
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    runs = activity.parameters["module_runs"]
+    assert [run["module"] for run in runs] == ["create-indexes", "aws", "github", "cve", "analysis"]
+    assert runs[1]["params"] == {"aws_sync_all_profiles": True}
+    assert "pipeline" not in activity.parameters
+
+
+def test_stored_cartography_unparseable_pipeline_left_untouched():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {"workflow": "cartography_sync", "pipeline": "{nope"},
+                    }
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    assert activity.type == "cartography_sync"
+    assert activity.parameters["pipeline"] == "{nope"
+    assert "module_runs" not in activity.parameters
 
 
 def test_canonical_stages_are_not_exposed_by_legacy_api():
@@ -107,6 +297,90 @@ async def test_validate_definition_checks_query_and_reserved_input(mocker):
         ]
     )
     assert "reserved" in (await workflows.validate_definition(body) or "")
+
+
+def test_activity_definitions_reject_module_named_like_disabled_workflow(mocker):
+    # A module named after ANY registered workflow — enabled or not — must be
+    # rejected: it would look valid in the editor but be classified as that
+    # child workflow at dispatch and fail at runtime.
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
+    mocker.patch.object(
+        workflows.scheduled_query_modules,
+        "get_configured_action_names",
+        return_value=["cartography_sync"],
+    )
+    mocker.patch.object(
+        workflows.scheduled_query_modules,
+        "get_module",
+        return_value=SimpleNamespace(action_config_schema=lambda: []),
+    )
+    with pytest.raises(ValueError, match="collide"):
+        workflows.activity_definitions()
+
+
+async def test_validate_definition_rejects_workflow_sub_type(mocker):
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
+    body = _body(
+        stages=[
+            {
+                "activities": [
+                    {"type": "workflow", "output": "out", "parameters": {"workflow": "cve_repo_report"}},
+                ]
+            }
+        ]
+    )
+    error = await workflows.validate_definition(body)
+    assert "unknown type" in (error or "")
+
+
+async def test_validate_definition_accepts_top_level_workflow_types(mocker):
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
+    body = _body(
+        stages=[
+            {"activities": [{"type": "query", "output": "rows", "parameters": {"cypher": "RETURN 1"}}]},
+            {"activities": [{"type": "cve_repo_report", "input": "rows", "output": "report", "parameters": {}}]},
+            {
+                "activities": [
+                    {
+                        "type": "cartography_sync",
+                        "output": "sync",
+                        "parameters": {"module_runs": [{"module": "cve", "params": {}}]},
+                    }
+                ]
+            },
+        ]
+    )
+    assert await workflows.validate_definition(body) is None
+
+
+async def test_validate_definition_requires_input_for_row_consuming_workflow(mocker):
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
+    body = _body(
+        stages=[
+            {"activities": [{"type": "cve_repo_report", "output": "report", "parameters": {}}]},
+        ]
+    )
+    error = await workflows.validate_definition(body)
+    assert "requires an input" in (error or "")
+
+
+async def test_validate_definition_runs_cartography_validator(mocker):
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
+    body = _body(
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "cartography_sync",
+                        "output": "sync",
+                        "parameters": {"module_runs": [{"module": "not-a-module", "params": {}}]},
+                    }
+                ]
+            }
+        ]
+    )
+    error = await workflows.validate_definition(body)
+    assert "not enabled" in (error or "")
 
 
 def test_schema_rejects_duplicate_and_non_earlier_outputs():

@@ -126,7 +126,6 @@ it('edits staged activities and serializes query parameters and output reference
           config_fields: schemas.log,
         },
       }}
-      dependentSchemas={{}}
       onClose={jest.fn()}
       onSave={onSave}
     />,
@@ -169,6 +168,137 @@ it('edits staged activities and serializes query parameters and output reference
   expect(request.stages[1].activities[0].output).toBe('first_notification');
 });
 
+const cartographySchemas: Record<string, ActionConfigFieldDef[]> = {
+  cartography_sync: [
+    {
+      name: 'module_runs',
+      label: 'Intel modules',
+      type: 'module_runs',
+      required: true,
+      options: ['analysis', 'aws', 'create-indexes', 'github'],
+      item_schemas: {
+        analysis: [],
+        aws: [
+          {
+            name: 'aws_sync_all_profiles',
+            label: 'Aws sync all profiles',
+            type: 'boolean',
+            default: true,
+          },
+        ],
+        'create-indexes': [],
+        github: [],
+      },
+    },
+    {
+      name: 'stop_on_failure',
+      label: 'Stop on failure',
+      type: 'boolean',
+      default: false,
+    },
+  ],
+};
+
+const cartographyInitial: WorkflowItem = {
+  ...initial,
+  stages: [
+    {
+      activities: [
+        {
+          type: 'cartography_sync',
+          input: null,
+          output: 'sync',
+          parameters: {
+            module_runs: [
+              { module: 'create-indexes', params: {} },
+              { module: 'github', params: {} },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+};
+
+it('renders and serializes an ordered intel module list for module_runs fields', async () => {
+  const onSave = jest.fn().mockResolvedValue(undefined);
+  render(
+    <WorkflowDialog
+      open
+      initial={cartographyInitial}
+      activityTypes={['cartography_sync']}
+      activitySchemas={cartographySchemas}
+      onClose={jest.fn()}
+      onSave={onSave}
+    />,
+  );
+
+  const moduleSelects = screen.getAllByRole('combobox', {
+    name: 'Intel module',
+  });
+  expect(moduleSelects).toHaveLength(2);
+  expect(moduleSelects[0]).toHaveTextContent('create-indexes');
+  expect(moduleSelects[1]).toHaveTextContent('github');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add intel module' }));
+  const added = screen.getAllByRole('combobox', { name: 'Intel module' })[2];
+  fireEvent.mouseDown(added);
+  fireEvent.click(await screen.findByRole('option', { name: 'aws' }));
+  // Selecting a module seeds its param defaults, rendered as a sub-form.
+  expect(
+    screen.getByRole('checkbox', { name: 'Aws sync all profiles' }),
+  ).toBeChecked();
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Move intel module 3 up' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
+
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  const request = onSave.mock.calls[0][0];
+  expect(request.stages[0].activities[0].parameters.module_runs).toEqual([
+    { module: 'create-indexes', params: {} },
+    { module: 'aws', params: { aws_sync_all_profiles: true } },
+    { module: 'github', params: {} },
+  ]);
+});
+
+it('requires at least one intel module when the field is required', async () => {
+  const onSave = jest.fn().mockResolvedValue(undefined);
+  render(
+    <WorkflowDialog
+      open
+      initial={{
+        ...cartographyInitial,
+        stages: [
+          {
+            activities: [
+              {
+                type: 'cartography_sync',
+                input: null,
+                output: 'sync',
+                parameters: { module_runs: [] },
+              },
+            ],
+          },
+        ],
+      }}
+      activityTypes={['cartography_sync']}
+      activitySchemas={cartographySchemas}
+      onClose={jest.fn()}
+      onSave={onSave}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
+  expect(
+    await screen.findByText(
+      "Activity 'sync' requires at least one intel module.",
+    ),
+  ).toBeInTheDocument();
+  expect(onSave).not.toHaveBeenCalled();
+});
+
 it('shows activity descriptions in accessible tooltips instead of inline help text', async () => {
   render(
     <WorkflowDialog
@@ -176,7 +306,6 @@ it('shows activity descriptions in accessible tooltips instead of inline help te
       initial={initial}
       activityTypes={['query', 'log']}
       activitySchemas={schemas}
-      dependentSchemas={{}}
       onClose={jest.fn()}
       onSave={jest.fn().mockResolvedValue(undefined)}
     />,
@@ -213,7 +342,6 @@ it('generates unique output names and explains disabled inputs', async () => {
       initial={null}
       activityTypes={['query', 'log']}
       activitySchemas={schemas}
-      dependentSchemas={{}}
       onClose={jest.fn()}
       onSave={jest.fn().mockResolvedValue(undefined)}
     />,

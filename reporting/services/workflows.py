@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -16,14 +17,17 @@ from reporting.schema.report_config import (
     WorkflowVersion,
 )
 from reporting.schema.reporting_config import (
-    ScheduledQueryAction,
     WorkflowActivity,
     WorkflowStage,
 )
 from reporting.services import report_store, workflow_schedules
 from reporting.services.activity_config import config_json_schema, validate_config
 from reporting.services.query_validator import validate_query
-from reporting.temporal_workflows import enabled_workflow_names, get_enabled_workflow_spec
+from reporting.temporal_workflows import (
+    WORKFLOW_REGISTRY,
+    enabled_workflow_names,
+    get_enabled_workflow_spec,
+)
 
 LEGACY_QUERY_OUTPUT = "query"
 
@@ -80,10 +84,81 @@ def _legacy_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[Wor
     return stages
 
 
+def _migrate_cartography_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Convert a superseded cartography config (modules/pipeline) to module_runs.
+
+    Materializes the previously-implicit create-indexes (first) and analysis
+    (last) runs so migrated schedules keep their behavior. A pipeline's
+    within-stage parallelism is conservatively flattened to sequential order —
+    parallelism now belongs to top-level workflow stages. Unparseable configs
+    are returned untouched; validation and dispatch report them clearly.
+    """
+    if "module_runs" in parameters:
+        return parameters
+    modules = parameters.get("modules")
+    pipeline = parameters.get("pipeline")
+    runs: list[dict[str, Any]] | None = None
+    if isinstance(modules, list) and modules and all(isinstance(module, str) for module in modules):
+        runs = [{"module": module, "params": {}} for module in modules]
+    elif isinstance(pipeline, str) and pipeline.strip():
+        try:
+            runs = [
+                {"module": run["module"], "params": dict(run.get("params") or {})}
+                for stage in json.loads(pipeline)["stages"]
+                for run in stage["runs"]
+            ]
+        except (json.JSONDecodeError, TypeError, KeyError):
+            runs = None
+    if runs is None:
+        return parameters
+    migrated = {key: value for key, value in parameters.items() if key not in ("modules", "pipeline")}
+    migrated["module_runs"] = [
+        {"module": "create-indexes", "params": {}},
+        *runs,
+        {"module": "analysis", "params": {}},
+    ]
+    return migrated
+
+
+def _migrate_activity(activity: WorkflowActivity) -> WorkflowActivity:
+    """Read-time migration of the superseded ``workflow`` dispatcher shape.
+
+    Stored activities of ``type: "workflow"`` selected a code-defined workflow
+    via a ``workflow`` parameter; those workflows are now top-level activity
+    types. Activities without a registered ``workflow`` parameter are returned
+    untouched so validation and dispatch report them clearly (an unknown name
+    must not become an unknown activity type).
+    """
+    if activity.type != "workflow":
+        return activity
+    parameters = dict(activity.parameters)
+    workflow_name = parameters.pop("workflow", None)
+    if not isinstance(workflow_name, str) or workflow_name not in WORKFLOW_REGISTRY:
+        return activity
+    spec = WORKFLOW_REGISTRY[workflow_name]
+    if not spec.requires_rows:
+        # The old dispatcher's base schema always exposed max_rows and
+        # query_return_attribute, regardless of whether the selected workflow
+        # consumed rows, and the frontend defaulted them in. The top-level
+        # activity type for a rowless workflow (e.g. cartography_sync) has no
+        # such fields, so a stray value here would be rejected as an extra
+        # input by the strict activity config model.
+        parameters.pop("max_rows", None)
+        parameters.pop("query_return_attribute", None)
+    if workflow_name == "cartography_sync":
+        parameters = _migrate_cartography_parameters(parameters)
+    return activity.model_copy(update={"type": workflow_name, "parameters": parameters})
+
+
 def normalized_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowStage]:
     if item.stages is not None:
-        return [WorkflowStage.model_validate(stage) for stage in item.stages]
-    return _legacy_stages(item)
+        stages = [WorkflowStage.model_validate(stage) for stage in item.stages]
+    else:
+        stages = _legacy_stages(item)
+    return [
+        stage.model_copy(update={"activities": [_migrate_activity(activity) for activity in stage.activities]})
+        for stage in stages
+    ]
 
 
 def item_to_workflow(item: ScheduledQueryItem) -> WorkflowItem:
@@ -134,6 +209,38 @@ def _module_type_schema(module: Any, method: str, fallback: Any) -> dict[str, An
     return TypeAdapter(annotation).json_schema()
 
 
+def _workflow_config_fields(spec: Any) -> list[ActionConfigFieldDef]:
+    """Config fields for a code-defined workflow's top-level activity type."""
+    fields: list[ActionConfigFieldDef] = []
+    if spec.requires_rows:
+        fields.extend(
+            [
+                ActionConfigFieldDef(
+                    name="max_rows",
+                    label="Max result rows",
+                    type="number",
+                    required=False,
+                    default=settings.TEMPORAL_WORKFLOW_MAX_RESULT_ROWS,
+                    minimum=1,
+                    maximum=settings.WORKFLOW_QUERY_MAX_ROWS,
+                    description="Maximum referenced-output rows passed to the workflow.",
+                ),
+                ActionConfigFieldDef(
+                    name="query_return_attribute",
+                    label="Query return attribute",
+                    type="string",
+                    required=False,
+                    default="details",
+                    description="Result field containing the data passed to the workflow.",
+                ),
+            ]
+        )
+    if spec.config_fields is not None:
+        known = {field.name for field in fields}
+        fields.extend(field for field in spec.config_fields() if field.name not in known)
+    return fields
+
+
 def activity_definitions() -> dict[str, dict[str, Any]]:
     definitions: dict[str, dict[str, Any]] = {
         "query": {
@@ -169,9 +276,8 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
     }
     for name in scheduled_query_modules.get_configured_action_names():
         module = scheduled_query_modules.get_module(name)
-        canonical = "workflow" if name == "temporal" else name
         config_fields = [field.model_dump() for field in module.action_config_schema()]
-        if canonical != "workflow" and not any(field["name"] == "max_rows" for field in config_fields):
+        if not any(field["name"] == "max_rows" for field in config_fields):
             config_fields.append(
                 ActionConfigFieldDef(
                     name="max_rows",
@@ -183,23 +289,30 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
                     description="Maximum referenced-output rows passed to this activity.",
                 ).model_dump()
             )
-        definitions[canonical] = {
-            "description": _module_description(module, f"Runs the {canonical} activity."),
-            "input_required": canonical != "workflow",
+        definitions[name] = {
+            "description": _module_description(module, f"Runs the {name} activity."),
+            "input_required": True,
             "input_schema": _module_type_schema(module, "activity_input_type", list[dict[str, Any]]),
             "output_schema": _module_type_schema(module, "activity_output_type", dict[str, Any]),
             "config_fields": config_fields,
         }
-        if canonical == "workflow":
-            definitions[canonical]["variants"] = {
-                workflow_name: {
-                    "input_required": spec.requires_rows,
-                    "input_schema": (TypeAdapter(list[dict[str, Any]]).json_schema() if spec.requires_rows else {}),
-                    "output_schema": TypeAdapter(spec.output_type).json_schema(),
-                }
-                for workflow_name in enabled_workflow_names()
-                if (spec := get_enabled_workflow_spec(workflow_name)) is not None
-            }
+    # Reject collisions against every registered workflow, enabled or not: a
+    # module named after a disabled workflow would look valid in the editor
+    # but be classified as that child workflow at dispatch and fail at runtime.
+    collisions = set(definitions) & set(WORKFLOW_REGISTRY)
+    if collisions:
+        raise ValueError(f"Activity modules collide with code-defined workflow names: {sorted(collisions)}")
+    for name in enabled_workflow_names():
+        spec = get_enabled_workflow_spec(name)
+        if spec is None:
+            continue
+        definitions[name] = {
+            "description": spec.description,
+            "input_required": spec.requires_rows,
+            "input_schema": (TypeAdapter(list[dict[str, Any]]).json_schema() if spec.requires_rows else {}),
+            "output_schema": TypeAdapter(spec.output_type).json_schema(),
+            "config_fields": [field.model_dump() for field in _workflow_config_fields(spec)],
+        }
     for name, definition in definitions.items():
         fields = [ActionConfigFieldDef.model_validate(field) for field in definition["config_fields"]]
         definition["config_schema"] = config_json_schema(fields, name=f"{name.title()}ActivityConfig")
@@ -215,8 +328,10 @@ def activity_schemas() -> dict[str, list[ActionConfigFieldDef]]:
 
 def _activity_validators() -> dict[str, Any]:
     validators = scheduled_query_modules.get_action_validators()
-    if "temporal" in validators:
-        validators["workflow"] = validators.pop("temporal")
+    for name in enabled_workflow_names():
+        spec = get_enabled_workflow_spec(name)
+        if spec is not None and spec.config_validator is not None:
+            validators[name] = spec.config_validator
     return validators
 
 
@@ -250,17 +365,9 @@ async def validate_definition(body: CreateWorkflowRequest) -> str | None:
             definition = definitions.get(activity.type)
             if definition is None:
                 return f"{label} has an unknown type. Valid types: {sorted(definitions)}."
-            input_required = bool(definition["input_required"])
-            if activity.type == "workflow":
-                workflow_name = activity.parameters.get("workflow")
-                spec = get_enabled_workflow_spec(workflow_name) if isinstance(workflow_name, str) else None
-                input_required = bool(spec and spec.requires_rows)
-            if input_required and activity.input is None:
+            if bool(definition["input_required"]) and activity.input is None:
                 return f"{label} requires an input."
             config_fields = [ActionConfigFieldDef.model_validate(field) for field in definition["config_fields"]]
-            if activity.type == "workflow" and spec is not None and spec.config_fields is not None:
-                known = {field.name for field in config_fields}
-                config_fields.extend(field for field in spec.config_fields() if field.name not in known)
             if error := validate_config(
                 activity.parameters,
                 config_fields,
@@ -385,11 +492,4 @@ def project_legacy_version(version: ScheduledQueryVersion) -> ScheduledQueryVers
 
 
 def has_code_workflow(item: ScheduledQueryItem | ScheduledQueryVersion) -> bool:
-    return any(activity.type == "workflow" for stage in normalized_stages(item) for activity in stage.activities)
-
-
-def activity_as_legacy_action(activity: WorkflowActivity) -> ScheduledQueryAction:
-    return ScheduledQueryAction(
-        action_type="temporal" if activity.type == "workflow" else activity.type,
-        action_config=activity.parameters,
-    )
+    return any(activity.type in WORKFLOW_REGISTRY for stage in normalized_stages(item) for activity in stage.activities)

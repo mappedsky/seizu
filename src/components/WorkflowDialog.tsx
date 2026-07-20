@@ -34,7 +34,6 @@ import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ScheduleSpecEditor from 'src/components/ScheduleSpecEditor';
 import SyncMetadataAutocomplete from 'src/components/SyncMetadataAutocomplete';
 import {
-  ActionConfigDependentSchema,
   ActionConfigFieldDef,
   WorkflowActivityDefinition,
 } from 'src/config.context';
@@ -51,9 +50,15 @@ let editorSequence = 0;
 const editorId = (prefix: string) => `${prefix}-${++editorSequence}`;
 
 type ParameterForm = { editorId: string; name: string; value: string };
+type ModuleRunForm = {
+  editorId: string;
+  module: string;
+  params: Record<string, unknown>;
+};
 type ActivityForm = WorkflowActivity & {
   editorId: string;
   queryParameters: ParameterForm[];
+  moduleRuns: ModuleRunForm[];
 };
 type StageForm = { editorId: string; activities: ActivityForm[] };
 
@@ -75,8 +80,15 @@ function activityForm(activity: WorkflowActivity): ActivityForm {
   const rawParameters = Array.isArray(activity.parameters.parameters)
     ? (activity.parameters.parameters as { name?: unknown; value?: unknown }[])
     : [];
+  const rawModuleRuns = Array.isArray(activity.parameters.module_runs)
+    ? (activity.parameters.module_runs as {
+        module?: unknown;
+        params?: unknown;
+      }[])
+    : [];
   const parameters = { ...activity.parameters };
   delete parameters.parameters;
+  delete parameters.module_runs;
   return {
     ...activity,
     parameters,
@@ -85,6 +97,14 @@ function activityForm(activity: WorkflowActivity): ActivityForm {
       editorId: editorId('parameter'),
       name: String(parameter.name ?? ''),
       value: displayValue(parameter.value),
+    })),
+    moduleRuns: rawModuleRuns.map((run) => ({
+      editorId: editorId('module-run'),
+      module: String(run.module ?? ''),
+      params:
+        run.params && typeof run.params === 'object'
+          ? { ...(run.params as Record<string, unknown>) }
+          : {},
     })),
   };
 }
@@ -154,7 +174,7 @@ function ConfigField({
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
-  if (field.type === 'parameters') return null;
+  if (field.type === 'parameters' || field.type === 'module_runs') return null;
   const label = field.required ? `${field.label} *` : field.label;
   const tooltip = [
     field.description,
@@ -253,7 +273,6 @@ export default function WorkflowDialog({
   activityTypes,
   activitySchemas,
   activityDefinitions = {},
-  dependentSchemas,
   onClose,
   onSave,
 }: {
@@ -262,7 +281,6 @@ export default function WorkflowDialog({
   activityTypes: string[];
   activitySchemas: Record<string, ActionConfigFieldDef[]>;
   activityDefinitions?: Record<string, WorkflowActivityDefinition>;
-  dependentSchemas: Record<string, ActionConfigDependentSchema>;
   onClose: () => void;
   onSave: (request: WorkflowRequest) => Promise<void>;
 }) {
@@ -357,6 +375,7 @@ export default function WorkflowDialog({
                   output,
                   parameters: {},
                   queryParameters: [],
+                  moduleRuns: [],
                 },
               ],
             }
@@ -414,23 +433,40 @@ export default function WorkflowDialog({
       return next;
     });
 
-  const subSchema = (activity: ActivityForm): ActionConfigFieldDef[] => {
-    const dependent = dependentSchemas[activity.type];
-    return dependent
-      ? (dependent.schemas[
-          String(activity.parameters[dependent.discriminator] ?? '')
-        ] ?? [])
-      : [];
-  };
-
   const activityDefinition = (
     activity: ActivityForm,
-  ): WorkflowActivityDefinition | undefined => {
-    const base = activityDefinitions[activity.type];
-    if (!base) return undefined;
-    const variant = base.variants?.[String(activity.parameters.workflow ?? '')];
-    return variant ? { ...base, ...variant } : base;
-  };
+  ): WorkflowActivityDefinition | undefined =>
+    activityDefinitions[activity.type];
+
+  const updateModuleRun = (
+    activityId: string,
+    runId: string,
+    update: (run: ModuleRunForm) => ModuleRunForm,
+  ) =>
+    updateActivity(activityId, (item) => ({
+      ...item,
+      moduleRuns: item.moduleRuns.map((run) =>
+        run.editorId === runId ? update(run) : run,
+      ),
+    }));
+
+  const reorderModuleRun = (
+    activityId: string,
+    runId: string,
+    offset: number,
+  ) =>
+    updateActivity(activityId, (item) => {
+      const index = item.moduleRuns.findIndex((run) => run.editorId === runId);
+      const target = index + offset;
+      if (index < 0 || target < 0 || target >= item.moduleRuns.length)
+        return item;
+      const moduleRuns = [...item.moduleRuns];
+      [moduleRuns[index], moduleRuns[target]] = [
+        moduleRuns[target],
+        moduleRuns[index],
+      ];
+      return { ...item, moduleRuns };
+    });
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -459,6 +495,19 @@ export default function WorkflowDialog({
           );
         if (activityDefinition(activity)?.input_required && !activity.input)
           return setError(`Activity '${activity.output}' requires an input.`);
+        const moduleRunsField = (activitySchemas[activity.type] ?? []).find(
+          (field) => field.type === 'module_runs',
+        );
+        if (moduleRunsField) {
+          if (moduleRunsField.required && !activity.moduleRuns.length)
+            return setError(
+              `Activity '${activity.output}' requires at least one intel module.`,
+            );
+          if (activity.moduleRuns.some((run) => !run.module))
+            return setError(
+              `Activity '${activity.output}' has an intel module without a selection.`,
+            );
+        }
         if (activity.type === 'query') {
           if (!String(activity.parameters.cypher ?? '').trim())
             return setError(
@@ -486,10 +535,7 @@ export default function WorkflowDialog({
 
     const serializedStages = stages.map((stage) => ({
       activities: stage.activities.map((activity) => {
-        const fields = [
-          ...(activitySchemas[activity.type] ?? []),
-          ...subSchema(activity),
-        ];
+        const fields = activitySchemas[activity.type] ?? [];
         const fieldTypes = Object.fromEntries(
           fields.map((field) => [field.name, field.type]),
         );
@@ -508,6 +554,14 @@ export default function WorkflowDialog({
           parameters.parameters = activity.queryParameters.map((parameter) => ({
             name: parameter.name.trim(),
             value: parseValue(parameter.value),
+          }));
+        }
+        if (fields.some((field) => field.type === 'module_runs')) {
+          parameters.module_runs = activity.moduleRuns.map((run) => ({
+            module: run.module,
+            params: Object.fromEntries(
+              Object.entries(run.params).filter(([, value]) => value !== ''),
+            ),
           }));
         }
         return {
@@ -737,10 +791,10 @@ export default function WorkflowDialog({
                     </IconButton>
                   </Box>
                   {stage.activities.map((activity, activityIndex) => {
-                    const fields = [
-                      ...(activitySchemas[activity.type] ?? []),
-                      ...subSchema(activity),
-                    ];
+                    const fields = activitySchemas[activity.type] ?? [];
+                    const moduleRunsField = fields.find(
+                      (field) => field.type === 'module_runs',
+                    );
                     const definition = activityDefinition(activity);
                     const inputDisabled = availableOutputs.length === 0;
                     return (
@@ -781,6 +835,7 @@ export default function WorkflowDialog({
                                     activitySchemas[type] ?? [],
                                   ),
                                   queryParameters: [],
+                                  moduleRuns: [],
                                 }));
                               }}
                             >
@@ -967,28 +1022,216 @@ export default function WorkflowDialog({
                               field={field}
                               value={activity.parameters[field.name]}
                               onChange={(fieldValue) =>
-                                updateActivity(activity.editorId, (item) => {
-                                  const dependent = dependentSchemas[item.type];
-                                  const parameters = { ...item.parameters };
-                                  if (dependent?.discriminator === field.name) {
-                                    for (const oldField of dependent.schemas[
-                                      String(parameters[field.name] ?? '')
-                                    ] ?? [])
-                                      delete parameters[oldField.name];
-                                    Object.assign(
-                                      parameters,
-                                      schemaDefaults(
-                                        dependent.schemas[String(fieldValue)] ??
-                                          [],
-                                      ),
-                                    );
-                                  }
-                                  parameters[field.name] = fieldValue;
-                                  return { ...item, parameters };
-                                })
+                                updateActivity(activity.editorId, (item) => ({
+                                  ...item,
+                                  parameters: {
+                                    ...item.parameters,
+                                    [field.name]: fieldValue,
+                                  },
+                                }))
                               }
                             />
                           ))}
+                          {moduleRunsField && (
+                            <Box>
+                              <Box
+                                sx={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 0.5,
+                                }}
+                              >
+                                <Typography variant="subtitle2">
+                                  {moduleRunsField.label}
+                                </Typography>
+                                {moduleRunsField.description && (
+                                  <Tooltip
+                                    title={moduleRunsField.description}
+                                    placement="top"
+                                    arrow
+                                    describeChild
+                                  >
+                                    <IconButton
+                                      aria-label={`Help for ${moduleRunsField.label}`}
+                                      size="small"
+                                    >
+                                      <HelpOutlineIcon fontSize="small" />
+                                    </IconButton>
+                                  </Tooltip>
+                                )}
+                              </Box>
+                              {activity.moduleRuns.map((run, runIndex) => {
+                                const paramFields =
+                                  moduleRunsField.item_schemas?.[run.module] ??
+                                  [];
+                                return (
+                                  <Box
+                                    key={run.editorId}
+                                    component="fieldset"
+                                    sx={{
+                                      border: '1px solid',
+                                      borderColor: 'divider',
+                                      borderRadius: 1,
+                                      p: 1.5,
+                                      mt: 1,
+                                    }}
+                                  >
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        gap: 1,
+                                        alignItems: 'center',
+                                      }}
+                                    >
+                                      <FormControl
+                                        size="small"
+                                        sx={{ minWidth: 220 }}
+                                      >
+                                        <InputLabel
+                                          id={`${run.editorId}-module-label`}
+                                        >
+                                          Intel module
+                                        </InputLabel>
+                                        <Select
+                                          labelId={`${run.editorId}-module-label`}
+                                          label="Intel module"
+                                          value={run.module}
+                                          onChange={(event) =>
+                                            updateModuleRun(
+                                              activity.editorId,
+                                              run.editorId,
+                                              (item) => ({
+                                                ...item,
+                                                module: event.target.value,
+                                                params: schemaDefaults(
+                                                  moduleRunsField
+                                                    .item_schemas?.[
+                                                    event.target.value
+                                                  ] ?? [],
+                                                ),
+                                              }),
+                                            )
+                                          }
+                                        >
+                                          {(moduleRunsField.options ?? []).map(
+                                            (option) => (
+                                              <MenuItem
+                                                key={option}
+                                                value={option}
+                                              >
+                                                {option}
+                                              </MenuItem>
+                                            ),
+                                          )}
+                                        </Select>
+                                      </FormControl>
+                                      <Box sx={{ flex: 1 }} />
+                                      <IconButton
+                                        aria-label={`Move intel module ${runIndex + 1} up`}
+                                        disabled={runIndex === 0}
+                                        onClick={() =>
+                                          reorderModuleRun(
+                                            activity.editorId,
+                                            run.editorId,
+                                            -1,
+                                          )
+                                        }
+                                      >
+                                        <ArrowUpwardIcon />
+                                      </IconButton>
+                                      <IconButton
+                                        aria-label={`Move intel module ${runIndex + 1} down`}
+                                        disabled={
+                                          runIndex ===
+                                          activity.moduleRuns.length - 1
+                                        }
+                                        onClick={() =>
+                                          reorderModuleRun(
+                                            activity.editorId,
+                                            run.editorId,
+                                            1,
+                                          )
+                                        }
+                                      >
+                                        <ArrowDownwardIcon />
+                                      </IconButton>
+                                      <IconButton
+                                        aria-label={`Remove intel module ${runIndex + 1}`}
+                                        onClick={() =>
+                                          updateActivity(
+                                            activity.editorId,
+                                            (item) => ({
+                                              ...item,
+                                              moduleRuns:
+                                                item.moduleRuns.filter(
+                                                  (candidate) =>
+                                                    candidate.editorId !==
+                                                    run.editorId,
+                                                ),
+                                            }),
+                                          )
+                                        }
+                                      >
+                                        <DeleteOutlineIcon />
+                                      </IconButton>
+                                    </Box>
+                                    {paramFields.length > 0 && (
+                                      <Box
+                                        sx={{
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: 1.5,
+                                          mt: 1.5,
+                                        }}
+                                      >
+                                        {paramFields.map((paramField) => (
+                                          <ConfigField
+                                            key={paramField.name}
+                                            field={paramField}
+                                            value={run.params[paramField.name]}
+                                            onChange={(paramValue) =>
+                                              updateModuleRun(
+                                                activity.editorId,
+                                                run.editorId,
+                                                (item) => ({
+                                                  ...item,
+                                                  params: {
+                                                    ...item.params,
+                                                    [paramField.name]:
+                                                      paramValue,
+                                                  },
+                                                }),
+                                              )
+                                            }
+                                          />
+                                        ))}
+                                      </Box>
+                                    )}
+                                  </Box>
+                                );
+                              })}
+                              <Button
+                                size="small"
+                                startIcon={<AddIcon />}
+                                sx={{ mt: 1 }}
+                                onClick={() =>
+                                  updateActivity(activity.editorId, (item) => ({
+                                    ...item,
+                                    moduleRuns: [
+                                      ...item.moduleRuns,
+                                      {
+                                        editorId: editorId('module-run'),
+                                        module: '',
+                                        params: {},
+                                      },
+                                    ],
+                                  }))
+                                }
+                              >
+                                Add intel module
+                              </Button>
+                            </Box>
+                          )}
                           {activity.type === 'query' && (
                             <Box>
                               <Button

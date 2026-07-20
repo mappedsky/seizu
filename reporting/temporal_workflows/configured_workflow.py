@@ -90,16 +90,28 @@ class ConfiguredWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
 
-            if configured.type == "workflow":
+            # The child-workflow classification is read from durable history
+            # (code_workflow_name is resolved by load_configured_workflow and
+            # recorded in its activity result), never from the live registry —
+            # removing or renaming a registry entry must not change how an
+            # already-recorded activity replays.
+            code_workflow_name = getattr(configured, "code_workflow_name", None)
+            if configured.type == "workflow" or code_workflow_name:
                 if configured.requires_rows and isinstance(input_value, list) and not input_value:
                     return ConfiguredActivityOutput(
                         output_id=configured.output_id,
                         value=None,
                         metadata={"status": "skipped", "reason": "input returned no rows"},
                     )
-                workflow_name = configured.parameters.get("workflow")
-                if not isinstance(workflow_name, str) or not workflow_name:
-                    raise ValueError("workflow activity is missing its workflow parameter")
+                if configured.type == "workflow":
+                    # Superseded dispatcher shape: kept only so durable
+                    # histories recorded before the top-level types existed
+                    # replay deterministically. Do not remove this release.
+                    workflow_name = configured.parameters.get("workflow")
+                    if not isinstance(workflow_name, str) or not workflow_name:
+                        raise ValueError("workflow activity is missing its workflow parameter")
+                else:
+                    workflow_name = str(code_workflow_name)
                 child_input = await workflow.execute_activity(
                     build_code_workflow_input,
                     CodeWorkflowInputRequest(

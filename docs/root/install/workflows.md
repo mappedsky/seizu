@@ -36,8 +36,12 @@ Cypher is now a normal `query` activity, so it can run in any stage and more
 than once in one workflow. Its optional input is available to Cypher as
 `$input`; `input` is therefore reserved and cannot also be configured as a
 static query parameter. Query activities output a list of result-row objects.
-A `workflow` activity starts a registered code-defined Temporal child workflow,
-waits for it, and exposes the child's typed result as its named output.
+Each registered code-defined Temporal workflow (e.g. `cve_repo_report`,
+`cve_dependency_remediation`, `cartography_sync`) is its own activity type: the
+activity starts the child workflow, waits for it, and exposes the child's
+typed result as its named output. Stored definitions using the former
+`workflow` activity sub-type (with a `workflow` parameter) are migrated to the
+top-level type transparently on read; new saves must use the top-level types.
 
 When one activity fails, the other activities already running in that stage
 are allowed to settle. The workflow then fails and no later stage starts.

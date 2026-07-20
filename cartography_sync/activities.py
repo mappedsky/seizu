@@ -22,7 +22,12 @@ import time
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from cartography_sync.registry import MODULE_REGISTRY, parse_enabled_modules, validate_module_params
+from cartography_sync.registry import (
+    ALWAYS_ENABLED_MODULES,
+    MODULE_REGISTRY,
+    parse_enabled_modules,
+    validate_module_params,
+)
 from cartography_sync.registry import build_module_argv as _build_registry_argv
 from cartography_sync.shared import CartographyModuleActivityInput, CartographyModuleResult
 
@@ -70,13 +75,13 @@ def _check_module_enabled(module: str) -> None:
     The web app and dispatcher validate configs against
     CARTOGRAPHY_ENABLED_MODULES too, but a forged Temporal payload bypasses
     them — the worker that holds the credentials must reject disabled modules
-    itself. Internal stages (create-indexes, analysis) are always allowed.
+    itself. Credential-free structural stages (create-indexes, analysis) are
+    always allowed.
     """
     enabled = parse_enabled_modules(os.environ.get("CARTOGRAPHY_ENABLED_MODULES"))
     if not enabled:
         return
-    spec = MODULE_REGISTRY.get(module)
-    if spec is not None and spec.internal:
+    if module in ALWAYS_ENABLED_MODULES:
         return
     if module not in enabled:
         raise ApplicationError(

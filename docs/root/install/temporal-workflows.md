@@ -2,11 +2,14 @@
 
 ## Purpose
 
-Seizu's configurable [Workflows](workflows.html) run on Temporal. A
-`workflow` activity can hand an earlier stage's named output to a durable,
-code-defined child workflow. The first built-in child workflow, `cve_repo_report`, runs an
-AI chat session per affected repository that evaluates newly discovered CVEs
-and creates or updates a versioned findings report.
+Seizu's configurable [Workflows](workflows.html) run on Temporal. Each
+code-defined workflow is its own top-level activity type in the workflow
+editor (e.g. `cve_repo_report`, `cve_dependency_remediation`,
+`cartography_sync`) and can consume an earlier stage's named output as a
+durable, awaited child workflow. The first built-in workflow,
+`cve_repo_report`, runs an AI chat session per affected repository that
+evaluates newly discovered CVEs and creates or updates a versioned findings
+report.
 
 ## Architecture
 
@@ -19,7 +22,7 @@ stored workflow ── Temporal Schedule ──> Temporal server (task queue: se
                                + activities and schedule reconciliation)
 ```
 
-- A **Temporal Schedule** starts the configurable parent workflow. Stages run sequentially, activities within a stage run in parallel, and a `workflow` activity starts and awaits the selected child workflow.
+- A **Temporal Schedule** starts the configurable parent workflow. Stages run sequentially, activities within a stage run in parallel, and an activity whose type names a code-defined workflow starts and awaits it as a child workflow.
 - The **Temporal server** in local development is the lightweight CLI dev server (`temporal server start-dev`, in-memory). The Web UI is at `http://localhost:8233`.
 - The **Seizu temporal worker** (`python -m reporting.temporal_worker`) hosts the workflow and activity code. Activities own all I/O: resolving the creator's identity, rendering skills, driving the chat agent, and storing results.
 
@@ -266,12 +269,11 @@ There is no per-user permission and no dedicated enable flag for this
 workflow: it has direct, fixed targets and is reachable only through
 configurable workflows, which are admin-managed (`workflows:write`). It runs only
 when configured (`REMEDIATION_GITHUB_TOKEN` plus an agent API key); operators
-turn it off by disabling the scheduled query, removing the configuration,
+turn it off by disabling the workflow, removing the configuration, or
 dropping `cve_dependency_remediation` from `TEMPORAL_ENABLED_WORKFLOWS` (while
-keeping other workflows), or removing the `temporal` module from
-`SCHEDULED_QUERY_MODULES` entirely. The scheduled
-query's creator is still resolved before each run, so archived users hard-stop
-their automations, and each run is audit-logged against them.
+keeping other workflows). The workflow's creator is still resolved before
+each run, so archived users hard-stop their automations, and each run is
+audit-logged against them.
 
 The seeded scheduled query **New CVE dependencies requiring remediation** uses
 the same watch-scan trigger and `SecurityIssue.created_at` window as the
@@ -326,7 +328,7 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `TEMPORAL_TASK_QUEUE` | `seizu-workflows` | Task queue shared by the action module and the worker. |
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
-| `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of workflows the temporal action may start. Enabling the temporal module otherwise makes every registered workflow dispatchable; this narrows it (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow picker only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (picker) and the scheduled query worker (enforcement). |
+| `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of code-defined workflows exposed as top-level activity types (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow editor only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (editor) and the temporal worker (enforcement). |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
 | `SANDBOX_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code), `codex`, or `opencode`. `opencode` is multi-provider — set `SANDBOX_AGENT_MODEL` to a `provider/model` id (e.g. `deepseek/deepseek-v4-pro`) and it uses that provider's key, reusing the same global `*_API_KEY` (e.g. `DEEPSEEK_API_KEY`) the chat assistant uses. For opencode, an explicit `SANDBOX_AGENT_API_KEY` must belong to the model's provider — an Anthropic key with a `deepseek/…` model is exported as `DEEPSEEK_API_KEY` and fails auth. |
 | `SANDBOX_AGENT_TEMPLATE` | `""` (official) | E2B sandbox template. Empty → the provider's official prebuilt template (E2B ships first-party `claude`/`codex`/`opencode` images with the CLI installed), which removes the per-run `npm install` and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). `none` → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (`SANDBOX_DOMAIN` set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged. |
@@ -369,7 +371,7 @@ This path stands up LiteLLM inside a sandbox and depends on each CLI talking to 
 - Temporal Web UI: `http://localhost:8233` — inspect workflow runs (`seizu:cve_repo_report:<scheduled_query_id>:<run marker>`), activity retries, and results.
 - The dev server is in-memory: workflow history is lost on restart, which is fine for the lightweight testing it is meant for.
 
-To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description, input factory) to `WORKFLOW_REGISTRY`. The factory converts the common scheduled-query context into that workflow's typed input; the description is surfaced in the action form's workflow picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.
+To add a workflow: define the workflow + activities under `reporting/temporal_workflows/`, register them in `reporting/temporal_worker.py`, and add a `WorkflowSpec` (name, description, input factory) to `WORKFLOW_REGISTRY`. A registered workflow automatically becomes its own top-level activity type in the workflow editor; the factory converts the common workflow context into its typed input, and the description is surfaced next to the activity-type picker. Use `reporting.services.headless_chat.run_headless_chat` for AI sessions so identity, confirmation, and audit handling stay consistent.
 
 ## Verifying the remediation flow
 

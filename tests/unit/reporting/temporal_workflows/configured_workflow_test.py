@@ -194,13 +194,46 @@ class _ExampleWorkflow:
         return {"status": "child-completed", **value}
 
 
+@activity.defn(name="load_configured_workflow")
+async def _load_top_level_code(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowDefinition:
+    # A registry workflow as its own top-level activity type (post-migration
+    # shape). The child-workflow classification rides in the durable
+    # code_workflow_name field, so replay never consults the live registry.
+    return ConfiguredWorkflowDefinition(
+        workflow_id=invocation.workflow_id,
+        creator_user_id="user-1",
+        version=2,
+        stages=[
+            ConfiguredStage(
+                activities=[
+                    ConfiguredActivity(
+                        type="cartography_sync",
+                        input_id=None,
+                        output_id="child",
+                        parameters={},
+                        requires_rows=False,
+                        code_workflow_name="cartography_sync",
+                    )
+                ]
+            )
+        ],
+    )
+
+
+@workflow.defn(name="cartography_sync")
+class _FakeCartographySyncWorkflow:
+    @workflow.run
+    async def run(self, value: dict) -> dict:
+        return {"status": "child-completed", **value}
+
+
 async def _execute(*activities):
     queue = f"configured-{uuid.uuid4()}"
     async with await WorkflowEnvironment.start_time_skipping() as env:
         async with Worker(
             env.client,
             task_queue=queue,
-            workflows=[ConfiguredWorkflow, _ExampleWorkflow],
+            workflows=[ConfiguredWorkflow, _ExampleWorkflow, _FakeCartographySyncWorkflow],
             activities=list(activities),
         ):
             return await env.client.execute_workflow(
@@ -252,8 +285,53 @@ async def test_failed_stage_waits_for_started_siblings_and_stops():
 
 
 async def test_runs_code_defined_child_and_normalizes_output():
+    # Superseded dispatcher shape (type="workflow"): kept for durable-history
+    # replay of runs recorded before top-level types existed.
     result = await _execute(_load_code, _build_code, _normalize_code, _record)
     assert result["activity_results"] == [{"output": "child", "status": "completed", "workflow": "example"}]
+
+
+async def test_runs_top_level_code_workflow_type():
+    result = await _execute(_load_top_level_code, _build_code, _normalize_code, _record)
+    assert result["activity_results"] == [{"output": "child", "status": "completed", "workflow": "cartography_sync"}]
+
+
+async def test_real_load_configured_workflow_dispatches_code_workflow_as_child(mocker):
+    """Round-trips the REAL load_configured_workflow activity (not a stub)
+    through Temporal's data converter, to prove code_workflow_name survives
+    encode/decode and the workflow dispatches a top-level code-workflow
+    activity as a child workflow rather than falling through to the
+    scheduled_query_modules module-dispatch path."""
+    from reporting.schema.report_config import ScheduledQueryItem
+    from reporting.temporal_workflows.activities import load_configured_workflow as real_load_configured_workflow
+
+    item = ScheduledQueryItem.model_validate(
+        {
+            "scheduled_query_id": "workflow-1",
+            "name": "Cartography",
+            "cypher": "",
+            "stages": [
+                {
+                    "activities": [
+                        {
+                            "type": "cartography_sync",
+                            "output": "sync",
+                            "parameters": {"module_runs": [{"module": "create-indexes", "params": {}}]},
+                        }
+                    ]
+                }
+            ],
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "created_by": "user-1",
+        }
+    )
+    mocker.patch(
+        "reporting.temporal_workflows.activities.report_store.get_scheduled_query",
+        mocker.AsyncMock(return_value=item),
+    )
+    result = await _execute(real_load_configured_workflow, _build_code, _normalize_code, _record)
+    assert result["activity_results"] == [{"output": "sync", "status": "completed", "workflow": "cartography_sync"}]
 
 
 async def test_skips_row_dependent_child_without_rows():

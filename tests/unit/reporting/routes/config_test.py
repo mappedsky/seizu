@@ -28,24 +28,32 @@ async def test_config_features_chat_disabled_by_default(mocker):
     assert ret.json()["features"]["chat"] is False
 
 
-async def test_config_serves_dependent_action_schemas(mocker):
+async def test_config_serves_workflow_activity_types(mocker):
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.get("/api/v1/config")
-    dependent = ret.json()["scheduled_query_action_dependent_schemas"]
-    assert dependent["temporal"]["discriminator"] == "workflow"
-    cartography_fields = {f["name"] for f in dependent["temporal"]["schemas"]["cartography_sync"]}
-    assert {"modules", "pipeline"} <= cartography_fields
-    # Workflows without their own config fields have no sub-schema.
-    assert "cve_repo_report" not in dependent["temporal"]["schemas"]
     config = ret.json()
-    assert "workflow" in config["workflow_activity_types"]
-    assert "workflow" in config["workflow_activity_schemas"]
-    workflow_variants = config["workflow_activity_definitions"]["workflow"]["variants"]
-    assert workflow_variants["cve_repo_report"]["input_required"] is True
-    assert workflow_variants["cartography_sync"]["input_required"] is False
-    assert workflow_variants["cartography_sync"]["output_schema"]["type"] == "object"
-    assert "workflow" not in config["scheduled_query_action_types"]
+    # The superseded workflow dispatcher sub-type is gone; code-defined
+    # workflows are top-level activity types.
+    assert config["scheduled_query_action_dependent_schemas"] == {}
+    assert "workflow" not in config["workflow_activity_types"]
+    assert "temporal" not in config["scheduled_query_action_types"]
+    for name in ("cve_repo_report", "cve_dependency_remediation", "cartography_sync"):
+        assert name in config["workflow_activity_types"]
+    definitions = config["workflow_activity_definitions"]
+    assert definitions["cve_repo_report"]["input_required"] is True
+    repo_report_fields = {f["name"] for f in definitions["cve_repo_report"]["config_fields"]}
+    assert {"max_rows", "query_return_attribute"} <= repo_report_fields
+    cartography = definitions["cartography_sync"]
+    assert cartography["input_required"] is False
+    assert cartography["output_schema"]["type"] == "object"
+    cartography_fields = {f["name"]: f for f in cartography["config_fields"]}
+    assert set(cartography_fields) == {"module_runs", "stop_on_failure", "timeout_minutes"}
+    module_runs = cartography_fields["module_runs"]
+    assert module_runs["type"] == "module_runs"
+    assert "github" in module_runs["options"]
+    assert "create-indexes" in module_runs["options"]
+    assert set(module_runs["item_schemas"]) == set(module_runs["options"])
 
 
 async def test_config_features_reflect_chat_enabled(mocker):

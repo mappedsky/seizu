@@ -1,11 +1,13 @@
-"""Registry of Temporal workflows startable from scheduled query actions.
+"""Registry of code-defined Temporal workflows exposed as top-level activity types.
 
-Workflow AI sessions run headlessly as the scheduled query's creator. When
+Each registered workflow is its own activity type in the configurable
+workflow editor; ``ConfiguredWorkflow`` dispatches it as an awaited child
+workflow. Workflow AI sessions run headlessly as the workflow's creator. When
 the creator holds ``chat:bypass_permissions``, the session runs with action
 confirmations bypassed (audit-logged in mcp_runtime); otherwise confirmation-
 gated tools fail closed for the run.
 
-This module is imported by the web process for the action config schema, so
+This module is imported by the web process for the activity config schema, so
 it must stay free of ``temporalio`` (and other heavy) imports.
 """
 
@@ -33,8 +35,8 @@ class WorkflowInputContext:
     creator_user_id: str
     rows: list[dict[str, Any]]
     chat_timeout_seconds: int
-    # The temporal action's full action_config, so workflows with their own
-    # config_fields can read per-schedule settings in their input factory.
+    # The activity's full parameters, so workflows with their own
+    # config_fields can read per-workflow settings in their input factory.
     action_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -67,19 +69,19 @@ def _cve_dependency_remediation_input(context: WorkflowInputContext) -> CveDepen
 
 @dataclass(frozen=True)
 class WorkflowSpec:
-    """A workflow startable from the temporal scheduled query action."""
+    """A code-defined workflow exposed as a top-level workflow activity type."""
 
     name: str
     description: str
     input_factory: Callable[[WorkflowInputContext], object]
-    # Whether the workflow needs query result rows. When False the temporal
-    # action dispatches even for schedules whose query returned nothing (the
-    # schedule's cypher is just the trigger, e.g. RETURN 1 for cartography).
+    # Whether the workflow needs a referenced-output row list. When False the
+    # activity dispatches even without an input reference (e.g. cartography's
+    # trigger-only schedules).
     requires_rows: bool = True
     output_type: Any = dict[str, Any]
-    # Extra ActionConfigFieldDef fields rendered in the scheduled-query UI
-    # when this workflow is selected (a callable so defaults can read settings
-    # lazily), and an optional validator for the submitted action_config.
+    # The activity type's ActionConfigFieldDef fields rendered in the workflow
+    # editor (a callable so defaults can read settings lazily), and an
+    # optional validator for the submitted activity parameters.
     config_fields: Callable[[], list["ActionConfigFieldDef"]] | None = None
     config_validator: Callable[[dict[str, Any]], str | None] | None = None
 
@@ -133,10 +135,10 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
     "cartography_sync": WorkflowSpec(
         name="cartography_sync",
         description=(
-            "Runs cartography intel-module syncs as a staged pipeline (modules"
-            " within a stage run in parallel, stages run sequentially) on the"
-            " dedicated cartography sync worker. The schedule's query is only"
-            " the trigger (e.g. RETURN 1) — no result rows are consumed."
+            "Runs the configured cartography intel-module runs sequentially on"
+            " the dedicated cartography sync worker. Consumes no input rows;"
+            " for parallel syncs place multiple cartography activities in one"
+            " workflow stage."
         ),
         input_factory=_cartography_sync_input,
         requires_rows=False,
@@ -156,9 +158,9 @@ def enabled_workflow_names() -> list[str]:
 
     ``TEMPORAL_ENABLED_WORKFLOWS`` empty → every registered workflow. Otherwise
     only the configured names that actually exist in the registry (unknown
-    names are ignored). Lets an operator run the temporal action module while
-    allowing only a subset of workflows — e.g. enable ``cve_repo_report`` but
-    not ``cve_dependency_remediation``. Lazy settings import keeps this module
+    names are ignored). Lets an operator expose only a subset of workflows as
+    activity types — e.g. enable ``cve_repo_report`` but not
+    ``cve_dependency_remediation``. Lazy settings import keeps this module
     importable by the web process without heavy deps.
     """
     from reporting import settings
@@ -174,45 +176,3 @@ def get_enabled_workflow_spec(name: str) -> WorkflowSpec | None:
     if name not in enabled_workflow_names():
         return None
     return WORKFLOW_REGISTRY.get(name)
-
-
-def workflow_config_schemas() -> dict[str, list["ActionConfigFieldDef"]]:
-    """Per-workflow extra config fields, for enabled workflows that have any.
-
-    Served to the frontend so the scheduled-query dialog can render a
-    dependent sub-form once a workflow is selected.
-    """
-    schemas: dict[str, list[ActionConfigFieldDef]] = {}
-    for name in enabled_workflow_names():
-        spec = WORKFLOW_REGISTRY[name]
-        if spec.config_fields is not None:
-            schemas[name] = spec.config_fields()
-    return schemas
-
-
-def validate_workflow_action_config(action_config: dict[str, Any]) -> str | None:
-    """Validate a temporal action's config against the selected workflow.
-
-    Checks the workflow's own required config_fields and runs its
-    config_validator. The base fields (workflow/max_rows/...) are validated by
-    the generic schema loop; an unknown/disabled workflow is reported here so
-    a schedule can't be saved for a workflow that dispatch would refuse.
-    """
-    workflow_name = action_config.get("workflow")
-    if not isinstance(workflow_name, str) or not workflow_name:
-        return None  # the generic required-field check reports missing workflow
-    spec = get_enabled_workflow_spec(workflow_name)
-    if spec is None:
-        return f"Unknown or disabled workflow '{workflow_name}'. Enabled workflows: {enabled_workflow_names()}."
-    if spec.config_fields is not None:
-        for field_def in spec.config_fields():
-            if not field_def.required:
-                continue
-            value = action_config.get(field_def.name)
-            if value is None or value == "" or value == []:
-                return f"Workflow '{workflow_name}' is missing required field '{field_def.name}'."
-            if field_def.type == "boolean" and value is not True:
-                return f"Workflow '{workflow_name}' requires '{field_def.name}' to be accepted."
-    if spec.config_validator is not None:
-        return spec.config_validator(action_config)
-    return None
