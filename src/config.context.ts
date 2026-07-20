@@ -96,7 +96,8 @@ export interface ActionConfigFieldDef {
     | 'boolean'
     | 'string_list'
     | 'select'
-    | 'parameters';
+    | 'parameters'
+    | 'module_runs';
   required?: boolean;
   description?: string;
   default?: unknown;
@@ -104,6 +105,9 @@ export interface ActionConfigFieldDef {
   minimum?: number;
   maximum?: number;
   warning?: string;
+  // For 'module_runs': per-option sub-form field definitions, keyed by the
+  // option (module) name the run selects.
+  item_schemas?: Record<string, ActionConfigFieldDef[]>;
 }
 
 // Extra fields rendered when the discriminator field of an action's config
@@ -121,13 +125,6 @@ export interface WorkflowActivityDefinition {
   output_schema: Record<string, unknown>;
   config_fields: ActionConfigFieldDef[];
   config_schema?: Record<string, unknown>;
-  variants?: Record<
-    string,
-    Pick<
-      WorkflowActivityDefinition,
-      'input_required' | 'input_schema' | 'output_schema'
-    >
-  >;
 }
 
 export interface SeizuConfig {
@@ -140,8 +137,4 @@ export interface SeizuConfig {
   workflow_activity_types?: string[];
   workflow_activity_schemas?: Record<string, ActionConfigFieldDef[]>;
   workflow_activity_definitions?: Record<string, WorkflowActivityDefinition>;
-  workflow_activity_dependent_schemas?: Record<
-    string,
-    ActionConfigDependentSchema
-  >;
 }

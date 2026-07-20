@@ -141,30 +141,37 @@ async def test_load_configured_workflow_resolves_code_workflow_row_requirement(m
         stages=[
             {
                 "activities": [
+                    # The superseded dispatcher shape migrates on read to the
+                    # top-level type before the row requirement is resolved.
                     {
                         "type": "workflow",
                         "output": "sync",
-                        "parameters": {"workflow": "example"},
+                        "parameters": {"workflow": "cartography_sync"},
                     }
                 ]
-            }
+            },
+            {
+                "activities": [
+                    {
+                        "type": "cve_repo_report",
+                        "input": "sync",
+                        "output": "report",
+                        "parameters": {},
+                    }
+                ]
+            },
         ],
     )
     mocker.patch(
         "reporting.temporal_workflows.activities.report_store.get_scheduled_query",
         mocker.AsyncMock(return_value=item),
     )
-    mocker.patch(
-        "reporting.temporal_workflows.activities.get_enabled_workflow_spec",
-        return_value=WorkflowSpec(
-            name="example",
-            description="test",
-            input_factory=lambda context: context,
-            requires_rows=False,
-        ),
-    )
     result = await load_configured_workflow(ConfiguredWorkflowInvocation(workflow_id="workflow-1"))
-    assert result.stages[0].activities[0].requires_rows is False
+    migrated = result.stages[0].activities[0]
+    assert migrated.type == "cartography_sync"
+    assert migrated.requires_rows is False
+    assert migrated.maximum_attempts == 3
+    assert result.stages[1].activities[0].requires_rows is True
 
 
 def test_configured_activity_results_use_converter_safe_type_hints():

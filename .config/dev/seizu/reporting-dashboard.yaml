@@ -2420,11 +2420,10 @@ workflows:
                   created_at: s.created_at
                 } AS details
       - activities:
-          - type: workflow
+          - type: cve_repo_report
             input: repository_cves
             output: cve_reports
-            parameters:
-              workflow: cve_repo_report
+            parameters: {}
 
   - name: New CVE dependencies requiring remediation
     watch_scans:
@@ -2463,8 +2462,7 @@ workflows:
                   firstseen: s.firstseen
                 } AS details
       - activities:
-          - type: workflow
+          - type: cve_dependency_remediation
             input: vulnerable_dependencies
             output: remediation_results
-            parameters:
-              workflow: cve_dependency_remediation
+            parameters: {}

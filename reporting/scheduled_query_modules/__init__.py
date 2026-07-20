@@ -1,4 +1,5 @@
 import importlib
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, cast, runtime_checkable
 
@@ -6,12 +7,36 @@ from reporting import settings
 from reporting.schema.report_config import ActionConfigFieldDef
 from reporting.schema.reporting_config import ScheduledQueryAction
 
+logger = logging.getLogger(__name__)
+
 _MODULES = {}
 
 # These modules are always available regardless of SCHEDULED_QUERY_MODULES.
 _BUILTIN_MODULES = [
     "reporting.scheduled_query_modules.log",
 ]
+
+# The superseded code-workflow dispatcher: code-defined workflows are now
+# top-level activity types. Stale WORKFLOW_ACTIVITY_MODULES env values naming
+# it are skipped with a warning instead of crashing the worker at startup.
+_REMOVED_MODULES = (
+    "reporting.scheduled_query_modules.temporal",
+    "reporting.scheduled_query_modules.workflow",
+)
+
+
+def _configured_module_names() -> list[str]:
+    names = []
+    for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
+        if module_name in _REMOVED_MODULES:
+            logger.warning(
+                "Ignoring removed workflow activity module '%s': code-defined workflows are now"
+                " top-level activity types; drop it from WORKFLOW_ACTIVITY_MODULES",
+                module_name,
+            )
+            continue
+        names.append(module_name)
+    return names
 
 
 @runtime_checkable
@@ -88,7 +113,7 @@ def _import_module(module_name: str) -> ModuleInterface:
 async def load_modules() -> None:
     global _MODULES
 
-    for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
+    for module_name in _configured_module_names():
         module = _import_module(module_name)
         await module.setup()
         _MODULES[module.action_name()] = module
@@ -104,12 +129,8 @@ def get_configured_action_names() -> list[str]:
     Includes built-in modules plus those listed in WORKFLOW_ACTIVITY_MODULES.
     Imports without calling setup(), so this is safe to call from the web process.
     """
-    seen = set()
     names = []
-    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
-        if module_name in seen:
-            continue
-        seen.add(module_name)
+    for module_name in _configured_module_names():
         try:
             module = _import_module(module_name)
             names.append(module.action_name())
@@ -121,14 +142,11 @@ def get_configured_action_names() -> list[str]:
 def get_module(action_name: str) -> ModuleInterface:
     global _MODULES
 
-    if action_name == "temporal" and "workflow" in _MODULES:
-        return _MODULES["workflow"]
     if action_name in _MODULES:
         return _MODULES[action_name]
-    for module_name in dict.fromkeys(_BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES)):
+    for module_name in _configured_module_names():
         module = _import_module(module_name)
-        name = module.action_name()
-        if name == action_name or (action_name == "workflow" and name == "temporal"):
+        if module.action_name() == action_name:
             return module
     raise KeyError(action_name)
 
@@ -139,19 +157,13 @@ def get_action_schemas() -> dict[str, list[ActionConfigFieldDef]]:
     Includes built-in modules plus those listed in WORKFLOW_ACTIVITY_MODULES.
     Imports without calling setup(), so this is safe to call from the web process.
     """
-    seen: set = set()
     schemas: dict[str, list[ActionConfigFieldDef]] = {}
-    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
-        if module_name in seen:
-            continue
-        seen.add(module_name)
+    for module_name in _configured_module_names():
         try:
             module = _import_module(module_name)
             schemas[module.action_name()] = module.action_config_schema()
         except Exception:
             pass
-    if "workflow" in schemas:
-        schemas.setdefault("temporal", schemas["workflow"])
     return schemas
 
 
@@ -160,12 +172,8 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
 
     Imports without calling setup(), so this is safe to call from the web process.
     """
-    seen: set = set()
     validators: dict[str, Callable[[dict[str, Any]], str | None]] = {}
-    for module_name in _BUILTIN_MODULES + list(settings.WORKFLOW_ACTIVITY_MODULES):
-        if module_name in seen:
-            continue
-        seen.add(module_name)
+    for module_name in _configured_module_names():
         try:
             module = _import_module(module_name)
             validator = getattr(module, "validate_action_config", None)
@@ -173,8 +181,6 @@ def get_action_validators() -> dict[str, Callable[[dict[str, Any]], str | None]]
                 validators[module.action_name()] = validator
         except Exception:
             pass
-    if "workflow" in validators:
-        validators.setdefault("temporal", validators["workflow"])
     return validators
 
 

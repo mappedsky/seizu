@@ -1,8 +1,8 @@
 """Read-only Temporal visibility/history lookups for scheduled query runs.
 
-Workflow IDs started by the temporal action are ``seizu:{workflow}:{sq_id}:{ts}``
-(see ``reporting/scheduled_query_modules/temporal.py``), so runs for a
-scheduled query are found with ``WorkflowId STARTS_WITH`` visibility queries —
+Workflow IDs started by the removed temporal action were
+``seizu:{workflow}:{sq_id}:{ts}``, so historical runs for a scheduled query
+are found with ``WorkflowId STARTS_WITH`` visibility queries —
 no extra bookkeeping in the report store. Run details come from the workflow's
 event history: each activity execution is folded into a single
 ``WorkflowRunActivity`` carrying status, final attempt count (Temporal writes

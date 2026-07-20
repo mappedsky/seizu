@@ -58,8 +58,8 @@ def test_cve_dependency_remediation_workflow() -> None:
     assert query["type"] == "query"
     assert query["output"] == "vulnerable_dependencies"
     assert _activity(configured_workflow, 1) == {
-        "type": "workflow",
+        "type": "cve_dependency_remediation",
         "input": "vulnerable_dependencies",
         "output": "remediation_results",
-        "parameters": {"workflow": "cve_dependency_remediation"},
+        "parameters": {},
     }

@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Seizu reports over graph data loaded by [cartography](https://github.com/cartography-cncf/cartography). Running cartography by hand (`make sync_*`) works for development, but production deployments want syncs on a schedule, split across parallel runs, and ordered so data dependencies land first. The `cartography_sync` Temporal workflow provides that: a configurable workflow's `workflow` activity starts a staged pipeline of cartography intel-module runs, executed by a dedicated sync worker.
+Seizu reports over graph data loaded by [cartography](https://github.com/cartography-cncf/cartography). Running cartography by hand (`make sync_*`) works for development, but production deployments want syncs on a schedule, split across parallel runs, and ordered so data dependencies land first. The `cartography_sync` activity type provides that: a configurable workflow's cartography activity runs an ordered list of cartography intel-module runs, executed by a dedicated sync worker. Ordering across module groups comes from workflow stages; parallelism comes from placing multiple cartography activities in one stage.
 
 ## Architecture
 
 ```
-configurable workflow ── workflow activity ──> Temporal server
+configurable workflow ── cartography_sync activity ──> Temporal server
               (input-free child workflow)            │
                                                      ▼
                                         seizu-temporal-worker
@@ -31,32 +31,22 @@ Because cartography bumps `SyncMetadata` on completion, scheduled syncs compose 
 ## Configuring a scheduled sync
 
 1. Create a workflow with the desired time or watch trigger. No query input is required.
-2. Add a `workflow` activity with no input and pick `cartography_sync`. Extra fields appear:
-   - **Modules** — a list of intel modules, run one at a time in order (one stage each). The common case.
-   - **Pipeline (JSON)** — the full staged form, mutually exclusive with Modules: stages run sequentially, runs within a stage in parallel, and each run may set the module's allowlisted params. Put dependency-sensitive modules in later stages — `cve_metadata` enriches CVEs produced by earlier modules, so it must follow them:
-
-     ```json
-     {"stages": [
-       {"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},
-                 {"module": "github"}]},
-       {"runs": [{"module": "cve_metadata"}]}
-     ]}
-     ```
-
-   - **Stop on failure** — skip remaining stages when a module run fails (for pipelines whose later stages depend on earlier data). Off by default: failures are recorded and the pipeline continues.
+2. Add a `cartography_sync` activity with no input. Its fields:
+   - **Intel modules** — an ordered list of module runs, executed sequentially one at a time. **Add intel module** appends a run; each run picks a registry module and exposes that module's allowlisted params as a sub-form. Place `create-indexes` first and `analysis` after your ingestion modules — they are ordinary selectable modules now, so you control where (and how often) they run. Put dependency-sensitive modules later in the list — `cve_metadata` enriches CVEs produced by earlier modules, so it must follow them.
+   - **Stop on failure** — skip remaining module runs when one fails (for lists whose later runs depend on earlier data). Off by default: failures are recorded and the list continues.
    - **Per-module timeout (minutes)** — a run past it is terminated and marked failed.
-3. Save. The config is validated against the module registry at save time; invalid modules, disallowed params, and duplicate modules within a stage are rejected with a specific error.
+3. Save. The config is validated against the module registry at save time; invalid modules and disallowed params are rejected with a specific error.
 
-Every pipeline is automatically wrapped in two implicit stages mirroring cartography's own execution model: `create-indexes` runs once before any ingestion, and `analysis` runs once after all of it — parallel module runs never repeat them, and analysis never runs mid-ingestion. Each subprocess executes exactly one `--selected-modules` stage.
+Nothing is added implicitly: mirror cartography's own execution model by running `create-indexes` before any ingestion and `analysis` after all of it. Each subprocess executes exactly one `--selected-modules` stage. For parallel syncs, put multiple cartography activities in the same workflow stage — the per-module mutex still serializes runs of the same module.
 
-Run history (per-stage activity status, retries, failure output) appears in the scheduled query's **Workflow runs** panel and the Temporal Web UI. One schedule tick starts at most one workflow run (the workflow ID embeds the run marker).
+Run history (per-stage activity status, retries, failure output) appears in the workflow's **Workflow runs** panel and the Temporal Web UI. One schedule tick starts at most one workflow run (the workflow ID embeds the run marker).
 
 ## Concurrency control
 
 Cartography warns that concurrent jobs for the same resource type race on their update tags and can delete each other's freshly loaded data. Scheduled syncs enforce serialization rather than relying on interval tuning:
 
-- **Within a stage**: a module may appear at most once per stage (rejected at save time).
-- **Across everything else** — stages, schedules, overlapping ticks of one long-running schedule, and sync-worker replicas: every module run executes as a `cartography_module` child workflow whose **fixed workflow ID** (`seizu-cartography-module:{module}`) is the mutex. Temporal allows one open workflow per ID, so an overlapping run of the same module waits (the pipeline retries the start every 30s, up to `CARTOGRAPHY_MODULE_WAIT_SECONDS`) and then records a busy failure rather than racing. A crashed or terminated run releases the mutex the instant Temporal closes its workflow — no external lock state anywhere, exact release timing, and the wait is visible in the runs UI and the Temporal Web UI.
+- **Within one cartography activity**: module runs execute sequentially in the listed order, so repeats of a module never overlap.
+- **Across everything else** — activities, workflows, overlapping ticks of one long-running schedule, and sync-worker replicas: every module run executes as a `cartography_module` child workflow whose **fixed workflow ID** (`seizu-cartography-module:{module}`) is the mutex. Temporal allows one open workflow per ID, so an overlapping run of the same module waits (the pipeline retries the start every 30s, up to `CARTOGRAPHY_MODULE_WAIT_SECONDS`) and then records a busy failure rather than racing. A crashed or terminated run releases the mutex the instant Temporal closes its workflow — no external lock state anywhere, exact release timing, and the wait is visible in the runs UI and the Temporal Web UI.
 
 Different modules still run concurrently — the mutex is per module name (conservatively treating e.g. two `aws` runs with different `aws_requested_syncs` subsets as conflicting).
 

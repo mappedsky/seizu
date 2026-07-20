@@ -34,6 +34,10 @@ def _annotation(field: ActionConfigFieldDef) -> Any:
         return StrictStr
     if field.type == "parameters":
         return list[dict[str, Any]]
+    if field.type == "module_runs":
+        # Deep validation (module names, per-module params) is owned by the
+        # module-runs consumer's config validator.
+        return list[dict[str, Any]]
     raise ValueError(f"Unsupported activity config field type: {field.type}")
 
 

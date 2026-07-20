@@ -38,7 +38,7 @@ from reporting.services.reporting_neo4j import (
     run_query_bounded_with_retry,
 )
 from reporting.services.schedule_spec import schedule_due
-from reporting.temporal_workflows import WorkflowInputContext, get_enabled_workflow_spec
+from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowInputContext, get_enabled_workflow_spec
 from reporting.temporal_workflows.shared import (
     CiFixInput,
     CiFixResult,
@@ -123,14 +123,12 @@ async def load_configured_workflow(
                     parameters=parameters,
                     requires_rows=(
                         spec.requires_rows
-                        if value.type == "workflow"
-                        and isinstance((workflow_name := value.parameters.get("workflow")), str)
-                        and (spec := get_enabled_workflow_spec(workflow_name)) is not None
+                        if (spec := WORKFLOW_REGISTRY.get(value.type)) is not None
                         else value.type not in ("query", "workflow")
                     ),
                     maximum_attempts=(
                         3
-                        if value.type in ("query", "workflow")
+                        if value.type in ("query", "workflow") or value.type in WORKFLOW_REGISTRY
                         else scheduled_query_modules.get_activity_retry_attempts(value.type)
                     ),
                 )

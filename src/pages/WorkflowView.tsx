@@ -27,7 +27,6 @@ import TemporalRunList from 'src/components/TemporalRunList';
 import UserDisplay from 'src/components/UserDisplay';
 import WorkflowDialog from 'src/components/WorkflowDialog';
 import {
-  ActionConfigDependentSchema,
   ActionConfigFieldDef,
   SeizuConfig,
   WorkflowActivityDefinition,
@@ -246,8 +245,7 @@ export default function WorkflowView() {
     types: string[];
     schemas: Record<string, ActionConfigFieldDef[]>;
     definitions: Record<string, WorkflowActivityDefinition>;
-    dependent: Record<string, ActionConfigDependentSchema>;
-  }>({ types: [], schemas: {}, definitions: {}, dependent: {} });
+  }>({ types: [], schemas: {}, definitions: {} });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -261,7 +259,6 @@ export default function WorkflowView() {
           types: config.workflow_activity_types ?? [],
           schemas: config.workflow_activity_schemas ?? {},
           definitions: config.workflow_activity_definitions ?? {},
-          dependent: config.workflow_activity_dependent_schemas ?? {},
         }),
       )
       .catch(() => undefined);
@@ -458,7 +455,6 @@ export default function WorkflowView() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
-          dependentSchemas={activityConfig.dependent}
           onClose={() => setEditOpen(false)}
           onSave={async (request: WorkflowRequest) => {
             await updateWorkflow(workflow.workflow_id, request);

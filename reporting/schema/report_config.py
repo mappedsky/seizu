@@ -425,7 +425,7 @@ class ActionConfigFieldDef(BaseModel):
 
     name: str
     label: str
-    type: Literal["string", "text", "number", "boolean", "string_list", "select", "parameters"]
+    type: Literal["string", "text", "number", "boolean", "string_list", "select", "parameters", "module_runs"]
     required: bool = False
     description: str | None = None
     default: Any | None = None
@@ -436,6 +436,9 @@ class ActionConfigFieldDef(BaseModel):
     # boolean to force an explicit acknowledgement (a required boolean must be
     # checked for the action config to validate).
     warning: str | None = None
+    # For "module_runs": per-option sub-form field definitions, keyed by the
+    # option (module) name the run selects.
+    item_schemas: dict[str, list["ActionConfigFieldDef"]] | None = None
 
 
 class QueryHistoryItem(BaseModel):

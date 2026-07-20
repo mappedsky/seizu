@@ -1,6 +1,7 @@
 import pytest
 
 from cartography_sync.registry import (
+    ALWAYS_ENABLED_MODULES,
     MODULE_REGISTRY,
     build_module_argv,
     parse_enabled_modules,
@@ -23,14 +24,14 @@ def test_parse_enabled_modules(raw, expected):
 
 def test_cve_argv_contains_selected_modules_and_fixed_flags():
     # Exactly one sync stage per subprocess: create-indexes and analysis are
-    # separate (internal) pipeline stages, never repeated per module.
+    # separate registry modules placed as their own stages, never repeated
+    # per module.
     argv = build_module_argv("cve", {})
     assert argv == ["--selected-modules=cve", "--cve-enabled"]
 
 
-def test_internal_stages_are_registered_and_flagged():
-    assert MODULE_REGISTRY["create-indexes"].internal is True
-    assert MODULE_REGISTRY["analysis"].internal is True
+def test_structural_stages_are_registered_and_always_enabled():
+    assert ALWAYS_ENABLED_MODULES <= set(MODULE_REGISTRY)
     assert build_module_argv("create-indexes", {}) == ["--selected-modules=create-indexes"]
     assert build_module_argv("analysis", {}) == ["--selected-modules=analysis"]
 

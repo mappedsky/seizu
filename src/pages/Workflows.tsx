@@ -21,7 +21,6 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import UserDisplay from 'src/components/UserDisplay';
 import WorkflowDialog from 'src/components/WorkflowDialog';
 import {
-  ActionConfigDependentSchema,
   ActionConfigFieldDef,
   SeizuConfig,
   WorkflowActivityDefinition,
@@ -71,8 +70,7 @@ export default function Workflows() {
     types: string[];
     schemas: Record<string, ActionConfigFieldDef[]>;
     definitions: Record<string, WorkflowActivityDefinition>;
-    dependent: Record<string, ActionConfigDependentSchema>;
-  }>({ types: [], schemas: {}, definitions: {}, dependent: {} });
+  }>({ types: [], schemas: {}, definitions: {} });
 
   useEffect(() => {
     fetch('/api/v1/config')
@@ -82,7 +80,6 @@ export default function Workflows() {
           types: config.workflow_activity_types ?? [],
           schemas: config.workflow_activity_schemas ?? {},
           definitions: config.workflow_activity_definitions ?? {},
-          dependent: config.workflow_activity_dependent_schemas ?? {},
         }),
       )
       .catch(() => undefined);
@@ -306,7 +303,6 @@ export default function Workflows() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
-          dependentSchemas={activityConfig.dependent}
           onClose={() => setDialogOpen(false)}
           onSave={save}
         />

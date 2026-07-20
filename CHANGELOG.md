@@ -4,6 +4,40 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+**Code-defined workflows are top-level activity types** (#223)
+- The generic `workflow` activity sub-type (and the legacy `temporal`
+  scheduled-query action) is removed. `cve_repo_report`,
+  `cve_dependency_remediation`, and `cartography_sync` are now their own
+  activity types in the workflow editor; a new `WorkflowSpec` in
+  `WORKFLOW_REGISTRY` automatically becomes one.
+- **Breaking on save, migrated on read:** stored definitions using
+  `type: workflow` + `parameters.workflow` keep running — they are migrated
+  transparently when loaded (including by the Temporal worker) — but new saves
+  must use the top-level types. Editing a legacy definition in the UI saves it
+  in the canonical shape.
+- The cartography activity config is now an ordered **Intel modules** list
+  (`module_runs`: `{module, params}` entries executed sequentially, with an
+  "Add intel module" button and per-module parameter sub-forms). The
+  `modules` and advanced `pipeline` JSON fields are removed (stored configs
+  are migrated on read). `create-indexes` and `analysis` are no longer
+  injected implicitly — they are ordinary selectable modules; place
+  create-indexes before ingestion and analysis after it (migrated configs get
+  them materialized explicitly, preserving behavior). Parallel syncs are
+  expressed as multiple cartography activities in one workflow stage.
+- Operators with a custom `WORKFLOW_ACTIVITY_MODULES` value should drop
+  `reporting.scheduled_query_modules.workflow` (or `.temporal`) from it; stale
+  entries are skipped with a warning instead of failing worker startup. The
+  deprecated legacy scheduled-query worker (`ENABLE_SCHEDULED_QUERIES=true`)
+  can no longer execute stored `temporal` actions.
+- `GET /api/v1/config` no longer serves `workflow_activity_dependent_schemas`
+  (per-workflow fields are inlined into each type's
+  `workflow_activity_definitions` entry), and
+  `scheduled_query_action_dependent_schemas` is now always empty.
+
 ## [3.1.0] - 2026-07-13
 
 The headline of this release is a **LangGraph-backed AI chat assistant** with

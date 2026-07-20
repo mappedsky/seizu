@@ -8,6 +8,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    from reporting.temporal_workflows import WORKFLOW_REGISTRY
     from reporting.temporal_workflows.activities import (
         build_code_workflow_input,
         check_configured_workflow_watch,
@@ -90,16 +91,22 @@ class ConfiguredWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
 
-            if configured.type == "workflow":
+            if configured.type == "workflow" or configured.type in WORKFLOW_REGISTRY:
                 if configured.requires_rows and isinstance(input_value, list) and not input_value:
                     return ConfiguredActivityOutput(
                         output_id=configured.output_id,
                         value=None,
                         metadata={"status": "skipped", "reason": "input returned no rows"},
                     )
-                workflow_name = configured.parameters.get("workflow")
-                if not isinstance(workflow_name, str) or not workflow_name:
-                    raise ValueError("workflow activity is missing its workflow parameter")
+                if configured.type == "workflow":
+                    # Superseded dispatcher shape: kept only so durable
+                    # histories recorded before the top-level types existed
+                    # replay deterministically. Do not remove this release.
+                    workflow_name = configured.parameters.get("workflow")
+                    if not isinstance(workflow_name, str) or not workflow_name:
+                        raise ValueError("workflow activity is missing its workflow parameter")
+                else:
+                    workflow_name = configured.type
                 child_input = await workflow.execute_activity(
                     build_code_workflow_input,
                     CodeWorkflowInputRequest(
