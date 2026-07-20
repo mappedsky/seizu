@@ -724,17 +724,67 @@ services:
       - nostart
     volumes:
       - ./.compose/cartography/aws-config:/srv/cartography/.aws/config
+      - ./.compose/cartography/gcp-credentials.json:/etc/cartography/gcp-credentials.json:ro
+      - ./.compose/cartography/oci-config:/var/cartography/.oci/config:ro
       - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml
       - ./.compose/cartography/kube.config:/etc/cartography/kube.config
+      - ./.compose/cartography/reports:/etc/cartography/reports:ro
+      - ./.compose/cartography/analysis:/etc/cartography/analysis:ro
     environment:
       - "STATSD_ENABLED=true"
       - STATSD_HOST=telegraf
       - GITHUB_TOKEN=${CARTOGRAPHY_GITHUB_TOKEN}
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/cartography/gcp-credentials.json
+      - AIRBYTE_CLIENT_SECRET
+      - ANTHROPIC_API_KEY=${CARTOGRAPHY_ANTHROPIC_API_KEY:-}
+      - AZURE_CLIENT_SECRET
+      - MICROSOFT_CLIENT_SECRET
+      - CLOUDFLARE_TOKEN
       - NIST_NVD_TOKEN
       - CROWDSTRIKE_CLIENT_ID
       - CROWDSTRIKE_CLIENT_SECRET
+      - DATABRICKS_TOKEN
+      - DATABRICKS_CLIENT_SECRET
+      - DATABRICKS_ACCOUNT_CLIENT_SECRET
+      - DIGITALOCEAN_TOKEN
+      - GITLAB_TOKEN
+      - GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS
+      - GSUITE_GOOGLE_APPLICATION_CREDENTIALS
+      - JAMF_PASSWORD
+      - JUMPCLOUD_API_KEY
+      - KANDJI_TOKEN
+      - KEYCLOAK_CLIENT_SECRET
+      - LASTPASS_CID
+      - LASTPASS_PROVHASH
+      - BIGFIX_PASSWORD
+      - DUO_API_KEY
+      - DUO_API_SECRET
+      - WORKDAY_API_PASSWORD
+      - OPENAI_API_KEY=${CARTOGRAPHY_OPENAI_API_KEY:-}
       - PAGERDUTY_API_KEY
       - OKTA_API_KEY
+      - SALESFORCE_CLIENT_SECRET
+      - SALESFORCE_PRIVATE_KEY
+      - SCALEWAY_SECRET_KEY
+      - SEMGREP_APP_TOKEN
+      - SENTRY_TOKEN
+      - SENTINELONE_API_TOKEN
+      - SLACK_TOKEN
+      - SNIPEIT_TOKEN
+      - SOCKETDEV_TOKEN
+      - SPACELIFT_API_TOKEN
+      - SPACELIFT_API_KEY_ID
+      - SPACELIFT_API_KEY_SECRET
+      - SUBIMAGE_CLIENT_ID
+      - SUBIMAGE_CLIENT_SECRET
+      - TAILSCALE_TOKEN
+      - TAILSCALE_OAUTH_CLIENT_ID
+      - TAILSCALE_OAUTH_CLIENT_SECRET
+      - TENABLE_ACCESS_KEY
+      - TENABLE_SECRET_KEY
+      - VERCEL_TOKEN
+      - CIRCLECI_TOKEN
+      - WORKOS_API_KEY
     networks:
       credentials:
           ipv4_address: "169.254.169.2"
@@ -760,8 +810,12 @@ services:
         condition: service_healthy
     volumes:
       - ./.compose/cartography/aws-config:/srv/cartography/.aws/config
+      - ./.compose/cartography/gcp-credentials.json:/etc/cartography/gcp-credentials.json:ro
+      - ./.compose/cartography/oci-config:/var/cartography/.oci/config:ro
       - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml
       - ./.compose/cartography/kube.config:/etc/cartography/kube.config
+      - ./.compose/cartography/reports:/etc/cartography/reports:ro
+      - ./.compose/cartography/analysis:/etc/cartography/analysis:ro
       # Dev live-reload parity with the other workers.
       - ./cartography_sync:/opt/seizu/cartography_sync
     environment:
@@ -775,11 +829,57 @@ services:
       - "STATSD_ENABLED=true"
       - STATSD_HOST=telegraf
       - GITHUB_TOKEN=${CARTOGRAPHY_GITHUB_TOKEN}
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/cartography/gcp-credentials.json
+      - AIRBYTE_CLIENT_SECRET
+      - ANTHROPIC_API_KEY=${CARTOGRAPHY_ANTHROPIC_API_KEY:-}
+      - AZURE_CLIENT_SECRET
+      - MICROSOFT_CLIENT_SECRET
+      - CLOUDFLARE_TOKEN
       - NIST_NVD_TOKEN
       - CROWDSTRIKE_CLIENT_ID
       - CROWDSTRIKE_CLIENT_SECRET
+      - DATABRICKS_TOKEN
+      - DATABRICKS_CLIENT_SECRET
+      - DATABRICKS_ACCOUNT_CLIENT_SECRET
+      - DIGITALOCEAN_TOKEN
+      - GITLAB_TOKEN
+      - GOOGLEWORKSPACE_GOOGLE_APPLICATION_CREDENTIALS
+      - GSUITE_GOOGLE_APPLICATION_CREDENTIALS
+      - JAMF_PASSWORD
+      - JUMPCLOUD_API_KEY
+      - KANDJI_TOKEN
+      - KEYCLOAK_CLIENT_SECRET
+      - LASTPASS_CID
+      - LASTPASS_PROVHASH
+      - BIGFIX_PASSWORD
+      - DUO_API_KEY
+      - DUO_API_SECRET
+      - WORKDAY_API_PASSWORD
+      - OPENAI_API_KEY=${CARTOGRAPHY_OPENAI_API_KEY:-}
       - PAGERDUTY_API_KEY
       - OKTA_API_KEY
+      - SALESFORCE_CLIENT_SECRET
+      - SALESFORCE_PRIVATE_KEY
+      - SCALEWAY_SECRET_KEY
+      - SEMGREP_APP_TOKEN
+      - SENTRY_TOKEN
+      - SENTINELONE_API_TOKEN
+      - SLACK_TOKEN
+      - SNIPEIT_TOKEN
+      - SOCKETDEV_TOKEN
+      - SPACELIFT_API_TOKEN
+      - SPACELIFT_API_KEY_ID
+      - SPACELIFT_API_KEY_SECRET
+      - SUBIMAGE_CLIENT_ID
+      - SUBIMAGE_CLIENT_SECRET
+      - TAILSCALE_TOKEN
+      - TAILSCALE_OAUTH_CLIENT_ID
+      - TAILSCALE_OAUTH_CLIENT_SECRET
+      - TENABLE_ACCESS_KEY
+      - TENABLE_SECRET_KEY
+      - VERCEL_TOKEN
+      - CIRCLECI_TOKEN
+      - WORKOS_API_KEY
     networks:
       credentials:
           ipv4_address: "169.254.169.3"

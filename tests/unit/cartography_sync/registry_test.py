@@ -27,13 +27,21 @@ def test_cve_argv_contains_selected_modules_and_fixed_flags():
     # separate registry modules placed as their own stages, never repeated
     # per module.
     argv = build_module_argv("cve", {})
-    assert argv == ["--selected-modules=cve", "--cve-enabled"]
+    assert argv == [
+        "--selected-modules=cve",
+        "--cve-enabled",
+        "--cve-api-key-env-var=NIST_NVD_TOKEN",
+        "--nist-cve-url=https://services.nvd.nist.gov/rest/json/cves/2.0/",
+    ]
 
 
 def test_structural_stages_are_registered_and_always_enabled():
     assert ALWAYS_ENABLED_MODULES <= set(MODULE_REGISTRY)
     assert build_module_argv("create-indexes", {}) == ["--selected-modules=create-indexes"]
-    assert build_module_argv("analysis", {}) == ["--selected-modules=analysis"]
+    assert build_module_argv("analysis", {}) == [
+        "--selected-modules=analysis",
+        "--analysis-job-directory=/etc/cartography/analysis",
+    ]
 
 
 def test_aws_defaults_apply_sync_all_profiles():
@@ -60,8 +68,15 @@ def test_credential_env_var_names_are_fixed_constants():
     assert "--crowdstrike-client-secret-env-var=CROWDSTRIKE_CLIENT_SECRET" in argv
 
 
+def test_repeatable_string_list_emits_one_flag_per_value():
+    argv = build_module_argv("cve_metadata", {"cve_metadata_src": ["nvd", "epss"]})
+    assert "--cve-metadata-src=nvd" in argv
+    assert "--cve-metadata-src=epss" in argv
+    assert validate_module_params("cve_metadata", {"cve_metadata_src": ["invalid"]})
+
+
 def test_unknown_module_rejected():
-    errors = validate_module_params("gcp", {})
+    errors = validate_module_params("not-a-module", {})
     assert errors and "unknown cartography module" in errors[0]
 
 
@@ -107,14 +122,23 @@ def test_build_module_argv_raises_on_invalid_config():
 
 
 def test_registry_entries_are_well_formed():
+    assert len(MODULE_REGISTRY) == 52
     for name, spec in MODULE_REGISTRY.items():
         assert spec.name == name
         assert spec.description
         assert all(token.startswith("--") for token in spec.fixed_argv)
         assert all(env and env.upper() == env for env in spec.required_env)
+        assert all(env and env.upper() == env for env in spec.optional_env)
+        declared_env = set(spec.required_env) | set(spec.optional_env)
+        for token in spec.fixed_argv:
+            flag, _, value = token.partition("=")
+            if flag.endswith("-env-var"):
+                assert value in declared_env
+            if any(part in flag for part in ("-file", "-kubeconfig", "-source", "-directory")):
+                assert value.startswith("/")
         for flag in spec.flags:
             assert flag.flag.startswith("--")
-            assert flag.type in ("boolean", "number", "string", "enum")
+            assert flag.type in ("boolean", "number", "string", "enum", "string_list")
         # Every module builds a valid default argv.
         argv = build_module_argv(name, {})
         assert argv[0] == f"--selected-modules={name}"

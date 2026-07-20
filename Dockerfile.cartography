@@ -10,6 +10,20 @@
 FROM ghcr.io/cartography-cncf/cartography:0.139.0@sha256:58e96a4eb9fce008683720444c2902bdd69f9675fc2611b9cce3584594317b9a
 
 USER root
+# Give every path-valued registry option a stable container path. The three
+# permission maps ship with Cartography; report inputs and custom analysis jobs
+# are operator-mounted below these empty directories.
+RUN set -eu; \
+    CARTOGRAPHY_DATA_DIR="$(find /var/cartography/.local/share/uv/tools/cartography -type d -path '*/site-packages/cartography/data' -print -quit)"; \
+    install -d -m 0755 /var/cartography/.oci /etc/cartography/analysis \
+        /etc/cartography/reports/aibom \
+        /etc/cartography/reports/docker-scout \
+        /etc/cartography/reports/semgrep \
+        /etc/cartography/reports/syft \
+        /etc/cartography/reports/trivy; \
+    install -m 0644 "$CARTOGRAPHY_DATA_DIR/permission_relationships.yaml" /etc/cartography/permission_relationships.yaml; \
+    install -m 0644 "$CARTOGRAPHY_DATA_DIR/azure_permission_relationships.yaml" /etc/cartography/azure_permission_relationships.yaml; \
+    install -m 0644 "$CARTOGRAPHY_DATA_DIR/gcp_permission_relationships.yaml" /etc/cartography/gcp_permission_relationships.yaml
 # Match the temporalio version pinned in uv.lock (dataclass payloads are
 # JSON-serialized, but keeping the SDKs aligned avoids surprises).
 RUN pip install --no-cache-dir temporalio==1.28.0

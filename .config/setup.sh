@@ -1,6 +1,12 @@
 #!/bin/bash
 
-mkdir -p ./.compose/telegraf ./.compose/elasticmq ./.compose/neo4j ./.compose/seizu ./.compose/dynamodb ./.compose/authentik/blueprints
+mkdir -p ./.compose/telegraf ./.compose/elasticmq ./.compose/neo4j ./.compose/seizu ./.compose/dynamodb ./.compose/authentik/blueprints \
+  ./.compose/cartography/analysis \
+  ./.compose/cartography/reports/aibom \
+  ./.compose/cartography/reports/docker-scout \
+  ./.compose/cartography/reports/semgrep \
+  ./.compose/cartography/reports/syft \
+  ./.compose/cartography/reports/trivy
 
 if [ ! -f ./.env ]
 then
