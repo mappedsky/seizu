@@ -115,6 +115,7 @@ async def load_configured_workflow(
             if value.type == "query":
                 parameters.setdefault("max_rows", settings.WORKFLOW_QUERY_MAX_ROWS)
                 parameters.setdefault("max_bytes", settings.WORKFLOW_RESULT_MAX_BYTES)
+            code_spec = WORKFLOW_REGISTRY.get(value.type)
             activities.append(
                 ConfiguredActivity(
                     type=value.type,
@@ -122,15 +123,14 @@ async def load_configured_workflow(
                     output_id=value.output,
                     parameters=parameters,
                     requires_rows=(
-                        spec.requires_rows
-                        if (spec := WORKFLOW_REGISTRY.get(value.type)) is not None
-                        else value.type not in ("query", "workflow")
+                        code_spec.requires_rows if code_spec is not None else value.type not in ("query", "workflow")
                     ),
                     maximum_attempts=(
                         3
-                        if value.type in ("query", "workflow") or value.type in WORKFLOW_REGISTRY
+                        if value.type in ("query", "workflow") or code_spec is not None
                         else scheduled_query_modules.get_activity_retry_attempts(value.type)
                     ),
+                    code_workflow_name=code_spec.name if code_spec is not None else None,
                 )
             )
         stages.append(ConfiguredStage(activities=activities))

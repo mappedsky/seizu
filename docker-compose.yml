@@ -417,7 +417,7 @@ services:
       - WORKFLOW_QUERY_MAX_ROWS
       - WORKFLOW_WATCH_POLL_SECONDS
       - WORKFLOW_RECONCILE_SECONDS
-      - WORKFLOW_ACTIVITY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd,reporting.scheduled_query_modules.workflow
+      - WORKFLOW_ACTIVITY_MODULES=reporting.scheduled_query_modules.sqs,reporting.scheduled_query_modules.slack,reporting.scheduled_query_modules.log,reporting.scheduled_query_modules.statsd
       - "SQS_CREATE_SCHEDULED_QUERY_QUEUES=true"
       - SQS_URL=http://sqs:9324
       - SLACK_OAUTH_BOT_TOKEN

@@ -171,7 +171,11 @@ async def test_load_configured_workflow_resolves_code_workflow_row_requirement(m
     assert migrated.type == "cartography_sync"
     assert migrated.requires_rows is False
     assert migrated.maximum_attempts == 3
+    # The classification is persisted so replay dispatch never consults the
+    # live registry.
+    assert migrated.code_workflow_name == "cartography_sync"
     assert result.stages[1].activities[0].requires_rows is True
+    assert result.stages[1].activities[0].code_workflow_name == "cve_repo_report"
 
 
 def test_configured_activity_results_use_converter_safe_type_hints():

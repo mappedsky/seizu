@@ -197,7 +197,8 @@ class _ExampleWorkflow:
 @activity.defn(name="load_configured_workflow")
 async def _load_top_level_code(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowDefinition:
     # A registry workflow as its own top-level activity type (post-migration
-    # shape): no dispatcher parameters, the type names the child workflow.
+    # shape). The child-workflow classification rides in the durable
+    # code_workflow_name field, so replay never consults the live registry.
     return ConfiguredWorkflowDefinition(
         workflow_id=invocation.workflow_id,
         creator_user_id="user-1",
@@ -211,6 +212,7 @@ async def _load_top_level_code(invocation: ConfiguredWorkflowInvocation) -> Conf
                         output_id="child",
                         parameters={},
                         requires_rows=False,
+                        code_workflow_name="cartography_sync",
                     )
                 ]
             )

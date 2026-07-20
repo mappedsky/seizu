@@ -36,6 +36,11 @@ class ConfiguredActivity:
     parameters: dict[str, Any] = field(default_factory=dict)
     requires_rows: bool = True
     maximum_attempts: int = 1
+    # The code-defined child workflow this activity dispatches, resolved
+    # activity-side at load time. Persisting the classification in durable
+    # history keeps replay deterministic even if the workflow registry changes
+    # between the run and its replay. None for query/module activities.
+    code_workflow_name: str | None = None
 
 
 @dataclass

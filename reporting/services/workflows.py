@@ -286,12 +286,16 @@ def activity_definitions() -> dict[str, dict[str, Any]]:
             "output_schema": _module_type_schema(module, "activity_output_type", dict[str, Any]),
             "config_fields": config_fields,
         }
+    # Reject collisions against every registered workflow, enabled or not: a
+    # module named after a disabled workflow would look valid in the editor
+    # but be classified as that child workflow at dispatch and fail at runtime.
+    collisions = set(definitions) & set(WORKFLOW_REGISTRY)
+    if collisions:
+        raise ValueError(f"Activity modules collide with code-defined workflow names: {sorted(collisions)}")
     for name in enabled_workflow_names():
         spec = get_enabled_workflow_spec(name)
         if spec is None:
             continue
-        if name in definitions:
-            raise ValueError(f"Code-defined workflow '{name}' collides with an activity module of the same name")
         definitions[name] = {
             "description": spec.description,
             "input_required": spec.requires_rows,

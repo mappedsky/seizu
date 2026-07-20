@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -237,6 +238,25 @@ async def test_validate_definition_checks_query_and_reserved_input(mocker):
         ]
     )
     assert "reserved" in (await workflows.validate_definition(body) or "")
+
+
+def test_activity_definitions_reject_module_named_like_disabled_workflow(mocker):
+    # A module named after ANY registered workflow — enabled or not — must be
+    # rejected: it would look valid in the editor but be classified as that
+    # child workflow at dispatch and fail at runtime.
+    mocker.patch("reporting.settings.TEMPORAL_ENABLED_WORKFLOWS", ["cve_repo_report"])
+    mocker.patch.object(
+        workflows.scheduled_query_modules,
+        "get_configured_action_names",
+        return_value=["cartography_sync"],
+    )
+    mocker.patch.object(
+        workflows.scheduled_query_modules,
+        "get_module",
+        return_value=SimpleNamespace(action_config_schema=lambda: []),
+    )
+    with pytest.raises(ValueError, match="collide"):
+        workflows.activity_definitions()
 
 
 async def test_validate_definition_rejects_workflow_sub_type(mocker):
