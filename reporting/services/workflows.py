@@ -135,6 +135,16 @@ def _migrate_activity(activity: WorkflowActivity) -> WorkflowActivity:
     workflow_name = parameters.pop("workflow", None)
     if not isinstance(workflow_name, str) or workflow_name not in WORKFLOW_REGISTRY:
         return activity
+    spec = WORKFLOW_REGISTRY[workflow_name]
+    if not spec.requires_rows:
+        # The old dispatcher's base schema always exposed max_rows and
+        # query_return_attribute, regardless of whether the selected workflow
+        # consumed rows, and the frontend defaulted them in. The top-level
+        # activity type for a rowless workflow (e.g. cartography_sync) has no
+        # such fields, so a stray value here would be rejected as an extra
+        # input by the strict activity config model.
+        parameters.pop("max_rows", None)
+        parameters.pop("query_return_attribute", None)
     if workflow_name == "cartography_sync":
         parameters = _migrate_cartography_parameters(parameters)
     return activity.model_copy(update={"type": workflow_name, "parameters": parameters})

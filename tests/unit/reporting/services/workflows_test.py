@@ -151,6 +151,65 @@ def test_stored_cartography_modules_migrate_to_module_runs():
     assert "workflow" not in activity.parameters
 
 
+def test_stored_cartography_drops_stray_max_rows_and_query_return_attribute():
+    # The old dispatcher's base schema always populated max_rows and
+    # query_return_attribute for every temporal action regardless of the
+    # selected workflow's row requirement; cartography_sync's new top-level
+    # schema has no such fields, so a leftover value must not survive
+    # migration (it would fail save-time validation as an extra input).
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "output": "sync",
+                        "parameters": {
+                            "workflow": "cartography_sync",
+                            "modules": ["github"],
+                            "max_rows": 200,
+                            "query_return_attribute": "details",
+                        },
+                    }
+                ]
+            }
+        ],
+    )
+    activity = workflows.normalized_stages(item)[0].activities[0]
+    assert activity.type == "cartography_sync"
+    assert "max_rows" not in activity.parameters
+    assert "query_return_attribute" not in activity.parameters
+
+
+def test_row_consuming_workflow_keeps_max_rows_and_query_return_attribute():
+    item = _legacy_item(
+        cypher="",
+        actions=[],
+        stages=[
+            {"activities": [{"type": "query", "output": "rows", "parameters": {"cypher": "RETURN 1"}}]},
+            {
+                "activities": [
+                    {
+                        "type": "workflow",
+                        "input": "rows",
+                        "output": "report",
+                        "parameters": {
+                            "workflow": "cve_repo_report",
+                            "max_rows": 50,
+                            "query_return_attribute": "details",
+                        },
+                    }
+                ]
+            },
+        ],
+    )
+    activity = workflows.normalized_stages(item)[1].activities[0]
+    assert activity.type == "cve_repo_report"
+    assert activity.parameters == {"max_rows": 50, "query_return_attribute": "details"}
+
+
 def test_stored_cartography_pipeline_migrates_flattened():
     pipeline = '{"stages": [{"runs": [{"module": "aws", "params": {"aws_sync_all_profiles": true}},'
     pipeline += ' {"module": "github"}]}, {"runs": [{"module": "cve"}]}]}'
