@@ -54,7 +54,13 @@ def _mock_client(mocker, *, executions=None, handle=None):
     return client, captured
 
 
-def _mock_handle(events, *, status=temporalio.client.WorkflowExecutionStatus.COMPLETED, pending=()):
+def _mock_handle(
+    events,
+    *,
+    status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+    pending=(),
+    result=None,
+):
     handle = MagicMock()
     handle.describe = AsyncMock(
         return_value=SimpleNamespace(
@@ -66,6 +72,7 @@ def _mock_handle(events, *, status=temporalio.client.WorkflowExecutionStatus.COM
         )
     )
     handle.fetch_history_events = lambda **kwargs: _aiter(events)
+    handle.result = AsyncMock(return_value=result)
     return handle
 
 
@@ -184,6 +191,75 @@ async def test_list_workflow_runs(mocker):
     assert runs[0].history_length == 42
     assert runs[1].start_time is None
     assert runs[2].workflow_name == "configured"
+
+
+async def test_list_workflow_runs_reports_mutex_waiting(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:request"
+    mutex_id = f"seizu-configured-workflow-mutex:{_SQ_ID}"
+    executions = [
+        SimpleNamespace(
+            id=workflow_id,
+            run_id="run-waiting",
+            status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            close_time=None,
+            history_length=3,
+        )
+    ]
+    handle = _mock_handle(
+        [
+            _event(
+                1,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=mutex_id,
+                        workflow_type=common_pb.WorkflowType(name="seizu_configured_workflow_execution"),
+                    )
+                ),
+            ),
+            _event(
+                2,
+                start_child_workflow_execution_failed_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionFailedEventAttributes(initiated_event_id=1)
+                ),
+            ),
+        ],
+        status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+    )
+    _mock_client(mocker, executions=executions, handle=handle)
+
+    runs = await temporal_runs.list_workflow_runs(_SQ_ID, limit=10)
+
+    assert len(runs) == 1
+    assert runs[0].status == "waiting"
+
+
+async def test_list_workflow_runs_reports_deduplicated_run_as_skipped(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:deduplicated"
+    executions = [
+        SimpleNamespace(
+            id=workflow_id,
+            run_id="run-skipped",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            close_time=datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
+            history_length=4,
+        )
+    ]
+    handle = _mock_handle(
+        [],
+        result={
+            "status": "skipped",
+            "skipped_reason": "workflow already has a waiting run",
+        },
+    )
+    _mock_client(mocker, executions=executions, handle=handle)
+
+    runs = await temporal_runs.list_workflow_runs(_SQ_ID, limit=10)
+
+    assert len(runs) == 1
+    assert runs[0].status == "skipped"
+    handle.result.assert_awaited_once()
 
 
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):
@@ -460,6 +536,137 @@ async def test_get_workflow_run_detail_folds_child_workflows(mocker):
     assert failed.status == "failed"
     assert "child failed" in failed.failure
     assert "cartography aws exited 1" in failed.failure
+
+
+async def test_get_workflow_run_detail_reports_mutex_waiting(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:request"
+    mutex_id = f"seizu-configured-workflow-mutex:{_SQ_ID}"
+    events = [
+        _event(
+            1,
+            start_child_workflow_execution_initiated_event_attributes=(
+                history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                    workflow_id=mutex_id,
+                    workflow_type=common_pb.WorkflowType(name="seizu_configured_workflow_execution"),
+                )
+            ),
+        ),
+        _event(
+            2,
+            start_child_workflow_execution_failed_event_attributes=(
+                history_pb.StartChildWorkflowExecutionFailedEventAttributes(initiated_event_id=1)
+            ),
+        ),
+    ]
+    handle = _mock_handle(events, status=temporalio.client.WorkflowExecutionStatus.RUNNING)
+    _mock_client(mocker, handle=handle)
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1")
+
+    assert detail is not None
+    assert detail.status == "waiting"
+    assert detail.activities[0].status == "waiting"
+    assert detail.activities[0].last_attempt_failure == "another run of this child workflow is in progress"
+
+
+async def test_cancel_waiting_workflow_run(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:request"
+    mutex_id = f"seizu-configured-workflow-mutex:{_SQ_ID}"
+    handle = _mock_handle(
+        [
+            _event(
+                1,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=mutex_id,
+                        workflow_type=common_pb.WorkflowType(name="seizu_configured_workflow_execution"),
+                    )
+                ),
+            ),
+            _event(
+                2,
+                start_child_workflow_execution_failed_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionFailedEventAttributes(initiated_event_id=1)
+                ),
+            ),
+        ],
+        status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+    )
+    handle.signal = AsyncMock()
+    _mock_client(mocker, handle=handle)
+
+    assert await temporal_runs.cancel_waiting_workflow_run(_SQ_ID, workflow_id, "run-1") is True
+    handle.signal.assert_awaited_once_with("cancel_waiting")
+
+
+async def test_cancel_waiting_workflow_run_rejects_running_or_foreign(mocker):
+    handle = _mock_handle([], status=temporalio.client.WorkflowExecutionStatus.RUNNING)
+    handle.signal = AsyncMock()
+    get_client = mocker.patch.object(temporal_runs, "_get_client", new=AsyncMock())
+
+    assert await temporal_runs.cancel_waiting_workflow_run("other", _WORKFLOW_ID, "run-1") is False
+    get_client.assert_not_awaited()
+
+    get_client.return_value = MagicMock(get_workflow_handle=MagicMock(return_value=handle))
+    assert await temporal_runs.cancel_waiting_workflow_run(_SQ_ID, _WORKFLOW_ID, "run-1") is False
+    handle.signal.assert_not_awaited()
+
+
+async def test_get_workflow_run_detail_includes_serialized_execution_activities(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:request"
+    mutex_id = f"seizu-configured-workflow-mutex:{_SQ_ID}"
+    parent = _mock_handle(
+        [
+            _event(
+                1,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=mutex_id,
+                        workflow_type=common_pb.WorkflowType(name="seizu_configured_workflow_execution"),
+                    )
+                ),
+            ),
+            _event(
+                2,
+                child_workflow_execution_started_event_attributes=(
+                    history_pb.ChildWorkflowExecutionStartedEventAttributes(
+                        initiated_event_id=1,
+                        workflow_execution=common_pb.WorkflowExecution(
+                            workflow_id=mutex_id,
+                            run_id="mutex-run-1",
+                        ),
+                    )
+                ),
+            ),
+        ],
+        status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+    )
+    nested = _mock_handle(
+        [
+            _event(
+                1,
+                activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                    activity_id="stage:1:activity:1:query:query",
+                    activity_type=common_pb.ActivityType(name="execute_configured_query"),
+                ),
+            )
+        ],
+        status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+    )
+    client = MagicMock()
+    client.get_workflow_handle.side_effect = lambda requested_id, **_kwargs: (
+        nested if requested_id == mutex_id else parent
+    )
+    mocker.patch.object(temporal_runs, "_get_client", new=AsyncMock(return_value=client))
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, workflow_id, "run-1")
+
+    assert detail is not None
+    assert [activity.activity_id for activity in detail.activities] == [
+        mutex_id,
+        "stage:1:activity:1:query:query",
+    ]
+    assert detail.activities[1].activity_type == "execute_configured_query"
 
 
 async def test_get_workflow_run_detail_merges_pending(mocker):

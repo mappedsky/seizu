@@ -97,6 +97,7 @@ beforeEach(() => {
   useWorkflowMutations.mockReturnValue({
     updateWorkflow: jest.fn(),
     runWorkflow: jest.fn(),
+    cancelWorkflowRun: jest.fn(),
   });
 });
 

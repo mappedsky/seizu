@@ -1,16 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
   Alert,
   Box,
+  Button,
   Chip,
   Typography,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { Highlight, themes } from 'prism-react-renderer';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
+import CancelIcon from '@mui/icons-material/Cancel';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import RunDetailPre from 'src/components/RunDetailPre';
@@ -204,13 +206,21 @@ function ActivityAccordion({ activity }: { activity: WorkflowRunActivity }) {
 function RunAccordion({
   run,
   loadDetail,
+  cancelRun,
 }: {
   run: WorkflowRunSummary;
   loadDetail: (run: WorkflowRunSummary) => Promise<WorkflowRunDetail>;
+  cancelRun?: (run: WorkflowRunSummary) => Promise<void>;
 }) {
   const [detail, setDetail] = useState<WorkflowRunDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState(false);
+  const [displayStatus, setDisplayStatus] = useState(run.status);
+
+  useEffect(() => {
+    setDisplayStatus(run.status);
+  }, [run.status]);
 
   const handleExpand = (_event: unknown, expanded: boolean) => {
     if (!expanded || detail !== null || loading) return;
@@ -246,15 +256,37 @@ function RunAccordion({
             )}
           </Box>
           <Chip
-            label={temporalStatusLabel(run.status)}
+            label={temporalStatusLabel(displayStatus)}
             size="small"
             variant="outlined"
-            color={temporalStatusColor(run.status)}
+            color={temporalStatusColor(displayStatus)}
             sx={{ ml: 'auto', mr: 1, flexShrink: 0 }}
           />
         </Box>
       </AccordionSummary>
       <AccordionDetails>
+        {displayStatus === 'waiting' && cancelRun ? (
+          <Button
+            color="warning"
+            disabled={canceling}
+            size="small"
+            startIcon={
+              canceling ? <ConstellationSpinner size={18} /> : <CancelIcon />
+            }
+            variant="outlined"
+            onClick={() => {
+              setCanceling(true);
+              setError(null);
+              cancelRun(run)
+                .then(() => setDisplayStatus('cancel_requested'))
+                .catch(() => setError('Failed to cancel this waiting run.'))
+                .finally(() => setCanceling(false));
+            }}
+            sx={{ mb: 1.5 }}
+          >
+            {canceling ? 'Canceling…' : 'Cancel waiting run'}
+          </Button>
+        ) : null}
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3, mb: 1.5 }}>
           <Box>
             <Typography variant="caption" color="text.secondary">
@@ -324,11 +356,13 @@ export default function TemporalRunList({
   runs,
   error,
   loadDetail,
+  cancelRun,
   emptyMessage = 'No Temporal runs are visible yet.',
 }: {
   runs: WorkflowRunSummary[] | null;
   error: Error | null;
   loadDetail: (run: WorkflowRunSummary) => Promise<WorkflowRunDetail>;
+  cancelRun?: (run: WorkflowRunSummary) => Promise<void>;
   emptyMessage?: string;
 }) {
   if (error)
@@ -352,7 +386,12 @@ export default function TemporalRunList({
   return (
     <Box>
       {runs.map((run) => (
-        <RunAccordion key={run.run_id} run={run} loadDetail={loadDetail} />
+        <RunAccordion
+          key={run.run_id}
+          run={run}
+          loadDetail={loadDetail}
+          cancelRun={cancelRun}
+        />
       ))}
     </Box>
   );

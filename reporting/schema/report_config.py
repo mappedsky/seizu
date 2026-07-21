@@ -365,8 +365,8 @@ class WorkflowRunSummary(BaseModel):
     workflow_id: str
     run_id: str
     workflow_name: str
-    # Lower-cased Temporal WorkflowExecutionStatus: running, completed, failed,
-    # canceled, terminated, continued_as_new, timed_out, or unknown.
+    # Lower-cased Temporal WorkflowExecutionStatus, plus application-level
+    # ``waiting``, ``skipped``, or ``canceled`` configured-workflow outcomes.
     status: str
     start_time: str | None = None
     close_time: str | None = None
@@ -387,8 +387,8 @@ class WorkflowRunActivity(BaseModel):
 
     activity_id: str
     activity_type: str
-    # scheduled, running, cancel_requested, paused, completed, failed,
-    # timed_out, or canceled.
+    # scheduled, waiting, running, cancel_requested, paused, completed,
+    # failed, timed_out, canceled, or terminated.
     status: str
     attempts: int = 1
     maximum_attempts: int | None = None

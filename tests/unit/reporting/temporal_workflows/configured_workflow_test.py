@@ -10,6 +10,8 @@ from temporalio.worker import Worker
 
 from reporting.temporal_workflows.configured_workflow import (
     ConfiguredWorkflow,
+    ConfiguredWorkflowExecution,
+    ConfiguredWorkflowWaitingSlot,
     ConfiguredWorkflowWatchPoll,
     _activity_maximum_attempts,
 )
@@ -78,6 +80,10 @@ async def _query(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
 
 
 _settled: list[str] = []
+_query_gate: asyncio.Event | None = None
+_first_query_started: asyncio.Event | None = None
+_active_queries = 0
+_maximum_active_queries = 0
 
 
 @activity.defn(name="execute_configured_query")
@@ -92,6 +98,21 @@ async def _query_one_fails(value: ConfiguredQueryInput) -> ConfiguredActivityOut
 @activity.defn(name="execute_configured_query")
 async def _query_empty(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
     return ConfiguredActivityOutput(output_id=value.output_id, value=[], metadata={"status": "completed"})
+
+
+@activity.defn(name="execute_configured_query")
+async def _query_blocked(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    global _active_queries, _maximum_active_queries
+    assert _query_gate is not None
+    assert _first_query_started is not None
+    _active_queries += 1
+    _maximum_active_queries = max(_maximum_active_queries, _active_queries)
+    _first_query_started.set()
+    try:
+        await _query_gate.wait()
+        return ConfiguredActivityOutput(output_id=value.output_id, value=[], metadata={"status": "completed"})
+    finally:
+        _active_queries -= 1
 
 
 @activity.defn(name="execute_configured_activity")
@@ -233,7 +254,13 @@ async def _execute(*activities):
         async with Worker(
             env.client,
             task_queue=queue,
-            workflows=[ConfiguredWorkflow, _ExampleWorkflow, _FakeCartographySyncWorkflow],
+            workflows=[
+                ConfiguredWorkflow,
+                ConfiguredWorkflowExecution,
+                ConfiguredWorkflowWaitingSlot,
+                _ExampleWorkflow,
+                _FakeCartographySyncWorkflow,
+            ],
             activities=list(activities),
         ):
             return await env.client.execute_workflow(
@@ -250,7 +277,12 @@ async def _execute_watch(check_activity):
         async with Worker(
             env.client,
             task_queue=queue,
-            workflows=[ConfiguredWorkflow, ConfiguredWorkflowWatchPoll],
+            workflows=[
+                ConfiguredWorkflow,
+                ConfiguredWorkflowExecution,
+                ConfiguredWorkflowWaitingSlot,
+                ConfiguredWorkflowWatchPoll,
+            ],
             activities=[check_activity, _load, _query, _action, _record],
         ):
             return await env.client.execute_workflow(
@@ -269,6 +301,114 @@ async def test_stages_run_and_publish_named_outputs():
         {"output": "second", "status": "completed", "row_count": 1},
         {"output": "logged", "status": "completed"},
     ]
+
+
+async def test_overlapping_runs_allow_only_one_waiter():
+    global _query_gate, _first_query_started, _active_queries, _maximum_active_queries
+    _query_gate = asyncio.Event()
+    _first_query_started = asyncio.Event()
+    _active_queries = 0
+    _maximum_active_queries = 0
+    queue = f"configured-overlap-{uuid.uuid4()}"
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=queue,
+            workflows=[ConfiguredWorkflow, ConfiguredWorkflowExecution, ConfiguredWorkflowWaitingSlot],
+            activities=[_load, _query_blocked, _action, _record],
+        ):
+            first = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-overlap"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            await asyncio.wait_for(_first_query_started.wait(), timeout=5)
+            second = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-overlap"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            # Let the second parent process its first child-start attempt.
+            # Fetching history here would make the time-skipping test server
+            # repeatedly advance the 30-second retry timer while the first
+            # activity is intentionally gated.
+            await asyncio.sleep(0.1)
+            assert _active_queries == 2  # the first run's two parallel stage-1 queries only
+            assert _maximum_active_queries == 2
+            third = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-overlap"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            with env.auto_time_skipping_disabled():
+                skipped = await asyncio.wait_for(third.result(), timeout=5)
+            assert skipped["status"] == "skipped"
+            assert skipped["skipped_reason"] == "workflow already has a waiting run"
+            _query_gate.set()
+            with env.auto_time_skipping_disabled():
+                await asyncio.wait_for(first.result(), timeout=5)
+            await env.sleep(30)
+            with env.auto_time_skipping_disabled():
+                await asyncio.wait_for(second.result(), timeout=5)
+
+    assert _maximum_active_queries == 2
+
+
+async def test_canceling_waiter_releases_waiting_slot():
+    global _query_gate, _first_query_started, _active_queries, _maximum_active_queries
+    _query_gate = asyncio.Event()
+    _first_query_started = asyncio.Event()
+    _active_queries = 0
+    _maximum_active_queries = 0
+    queue = f"configured-cancel-waiter-{uuid.uuid4()}"
+
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        async with Worker(
+            env.client,
+            task_queue=queue,
+            workflows=[ConfiguredWorkflow, ConfiguredWorkflowExecution, ConfiguredWorkflowWaitingSlot],
+            activities=[_load, _query_blocked, _action, _record],
+        ):
+            first = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-cancel-waiter"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            await asyncio.wait_for(_first_query_started.wait(), timeout=5)
+            waiting = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-cancel-waiter"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            await asyncio.sleep(0.1)
+
+            await waiting.signal("cancel_waiting")
+            with env.auto_time_skipping_disabled():
+                canceled = await asyncio.wait_for(waiting.result(), timeout=5)
+            assert canceled["status"] == "canceled"
+
+            replacement = await env.client.start_workflow(
+                "seizu_configured_workflow",
+                ConfiguredWorkflowInvocation(workflow_id="workflow-cancel-waiter"),
+                id=f"workflow-{uuid.uuid4()}",
+                task_queue=queue,
+            )
+            await asyncio.sleep(0.1)
+            _query_gate.set()
+            with env.auto_time_skipping_disabled():
+                await asyncio.wait_for(first.result(), timeout=5)
+            await env.sleep(30)
+            with env.auto_time_skipping_disabled():
+                result = await asyncio.wait_for(replacement.result(), timeout=5)
+
+    assert result["status"] == "completed"
+    assert _maximum_active_queries == 2
 
 
 async def test_returns_skip_reason():
