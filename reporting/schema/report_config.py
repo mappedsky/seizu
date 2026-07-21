@@ -304,6 +304,7 @@ class WorkflowItem(BaseModel):
     workflow_id: str
     name: str
     stages: list[WorkflowStage]
+    trigger_workflows: list[str] = Field(default_factory=list)
     schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
@@ -327,6 +328,7 @@ class WorkflowVersion(BaseModel):
     name: str
     version: int
     stages: list[WorkflowStage]
+    trigger_workflows: list[str] = Field(default_factory=list)
     schedule: ScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True

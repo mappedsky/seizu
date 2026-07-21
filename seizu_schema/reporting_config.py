@@ -831,6 +831,24 @@ class Workflow(BaseModel):
     watch_scans: list[ScheduledQueryWatchScan] = Field(default_factory=list)
     enabled: bool = True
     stages: list[WorkflowStage] = Field(min_length=1)
+    trigger_workflows: list[str] = Field(
+        default_factory=list,
+        description="Workflow IDs to start after all stages complete successfully.",
+    )
+
+    @field_validator("trigger_workflows")
+    @classmethod
+    def validate_trigger_workflows(cls, value: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for workflow_id in value:
+            workflow_id = workflow_id.strip()
+            if not workflow_id:
+                raise ValueError("triggered workflow IDs must not be empty")
+            if workflow_id not in seen:
+                result.append(workflow_id)
+                seen.add(workflow_id)
+        return result
 
     @model_validator(mode="after")
     def validate_references(self) -> "Workflow":

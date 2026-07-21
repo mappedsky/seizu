@@ -89,6 +89,7 @@ const initial: WorkflowItem = {
       ],
     },
   ],
+  trigger_workflows: [],
   current_version: 2,
   created_at: '2026-01-01T00:00:00+00:00',
   updated_at: '2026-01-02T00:00:00+00:00',
@@ -166,6 +167,37 @@ it('edits staged activities and serializes query parameters and output reference
   ).toEqual(['updated first', 'second']);
   expect(request.stages[1].activities[0].input).toBe('findings');
   expect(request.stages[1].activities[0].output).toBe('first_notification');
+});
+
+it('supports manual workflows and post-completion workflow triggers', async () => {
+  const onSave = jest.fn().mockResolvedValue(undefined);
+  const downstream: WorkflowItem = {
+    ...initial,
+    workflow_id: 'workflow-2',
+    name: 'Downstream',
+  };
+  render(
+    <WorkflowDialog
+      open
+      initial={{ ...initial, schedule: null }}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      workflowOptions={[initial, downstream]}
+      onClose={jest.fn()}
+      onSave={onSave}
+    />,
+  );
+
+  expect(screen.getByRole('radio', { name: 'Manual' })).toBeChecked();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Downstream' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
+
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(onSave.mock.calls[0][0]).toMatchObject({
+    schedule: null,
+    watch_scans: [],
+    trigger_workflows: ['workflow-2'],
+  });
 });
 
 const cartographySchemas: Record<string, ActionConfigFieldDef[]> = {

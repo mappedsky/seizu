@@ -29,6 +29,7 @@ export interface WorkflowItem {
   workflow_id: string;
   name: string;
   stages: WorkflowStage[];
+  trigger_workflows: string[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;
@@ -48,6 +49,7 @@ export interface WorkflowItem {
 export interface WorkflowRequest {
   name: string;
   stages: WorkflowStage[];
+  trigger_workflows: string[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;

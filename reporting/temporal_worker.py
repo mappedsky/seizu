@@ -29,6 +29,7 @@ from reporting.temporal_workflows.activities import (
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
+    trigger_configured_workflows,
 )
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
 from reporting.temporal_workflows.configured_workflow import (
@@ -76,6 +77,7 @@ async def _run_worker() -> None:
                 build_code_workflow_input,
                 normalize_code_workflow_output,
                 record_configured_workflow_result,
+                trigger_configured_workflows,
                 run_repo_cve_chat,
                 run_dependency_remediation,
                 get_pr_ci_status,

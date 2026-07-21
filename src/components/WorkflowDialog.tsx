@@ -273,6 +273,7 @@ export default function WorkflowDialog({
   activityTypes,
   activitySchemas,
   activityDefinitions = {},
+  workflowOptions = [],
   onClose,
   onSave,
 }: {
@@ -281,13 +282,22 @@ export default function WorkflowDialog({
   activityTypes: string[];
   activitySchemas: Record<string, ActionConfigFieldDef[]>;
   activityDefinitions?: Record<string, WorkflowActivityDefinition>;
+  workflowOptions?: WorkflowItem[];
   onClose: () => void;
   onSave: (request: WorkflowRequest) => Promise<void>;
 }) {
   const [name, setName] = useState(initial?.name ?? '');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-  const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
-    initial?.watch_scans.length ? 'watch_scans' : 'schedule',
+  const [triggerType, setTriggerType] = useState<
+    'manual' | 'schedule' | 'watch_scans'
+  >(
+    initial === null
+      ? 'schedule'
+      : initial.watch_scans.length
+        ? 'watch_scans'
+        : initial.schedule
+          ? 'schedule'
+          : 'manual',
   );
   const defaultSchedule: ScheduleSpec =
     initial?.schedule ??
@@ -297,6 +307,9 @@ export default function WorkflowDialog({
   );
   const [watchScans, setWatchScans] = useState<WorkflowWatchScan[]>(
     initial?.watch_scans ?? [],
+  );
+  const [triggerWorkflows, setTriggerWorkflows] = useState<string[]>(
+    initial?.trigger_workflows ?? [],
   );
   const [stages, setStages] = useState<StageForm[]>(stageForms(initial));
   const [comment, setComment] = useState('');
@@ -580,6 +593,7 @@ export default function WorkflowDialog({
         enabled,
         schedule: triggerType === 'schedule' ? schedule : null,
         watch_scans: triggerType === 'watch_scans' ? watchScans : [],
+        trigger_workflows: triggerWorkflows,
         stages: serializedStages,
         comment: comment.trim() || null,
       });
@@ -628,10 +642,15 @@ export default function WorkflowDialog({
                 value={triggerType}
                 onChange={(event) =>
                   setTriggerType(
-                    event.target.value as 'schedule' | 'watch_scans',
+                    event.target.value as 'manual' | 'schedule' | 'watch_scans',
                   )
                 }
               >
+                <FormControlLabel
+                  value="manual"
+                  control={<Radio />}
+                  label="Manual"
+                />
                 <FormControlLabel
                   value="schedule"
                   control={<Radio />}
@@ -644,7 +663,12 @@ export default function WorkflowDialog({
                 />
               </RadioGroup>
             </FormControl>
-            {triggerType === 'schedule' ? (
+            {triggerType === 'manual' ? (
+              <Typography color="text.secondary" variant="body2">
+                This workflow runs only when started manually or triggered by
+                another workflow.
+              </Typography>
+            ) : triggerType === 'schedule' ? (
               <ScheduleSpecEditor
                 initial={defaultSchedule}
                 onChange={setSchedule}
@@ -713,6 +737,52 @@ export default function WorkflowDialog({
                 ))}
               </Box>
             )}
+            <Divider />
+            <FormControl component="fieldset">
+              <FormLabel component="legend">On successful completion</FormLabel>
+              <Typography
+                color="text.secondary"
+                variant="body2"
+                sx={{ mb: 0.5 }}
+              >
+                Start any selected workflows after all stages finish.
+              </Typography>
+              {workflowOptions.filter(
+                (workflow) => workflow.workflow_id !== initial?.workflow_id,
+              ).length ? (
+                workflowOptions
+                  .filter(
+                    (workflow) => workflow.workflow_id !== initial?.workflow_id,
+                  )
+                  .map((workflow) => (
+                    <FormControlLabel
+                      key={workflow.workflow_id}
+                      control={
+                        <Checkbox
+                          checked={triggerWorkflows.includes(
+                            workflow.workflow_id,
+                          )}
+                          onChange={(event) =>
+                            setTriggerWorkflows((current) =>
+                              event.target.checked
+                                ? [...current, workflow.workflow_id]
+                                : current.filter(
+                                    (workflowId) =>
+                                      workflowId !== workflow.workflow_id,
+                                  ),
+                            )
+                          }
+                        />
+                      }
+                      label={workflow.name}
+                    />
+                  ))
+              ) : (
+                <Typography color="text.secondary" variant="body2">
+                  No other workflows are available.
+                </Typography>
+              )}
+            </FormControl>
             <Divider />
             <Box
               sx={{

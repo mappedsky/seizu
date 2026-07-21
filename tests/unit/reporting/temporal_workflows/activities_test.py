@@ -26,6 +26,7 @@ from reporting.temporal_workflows.activities import (
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
+    trigger_configured_workflows,
 )
 from reporting.temporal_workflows.shared import (
     CiFixInput,
@@ -37,6 +38,7 @@ from reporting.temporal_workflows.shared import (
     PrCiStatusInput,
     PrCiStatusResult,
     RepoChatInput,
+    TriggerConfiguredWorkflowsRequest,
 )
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -70,6 +72,48 @@ async def test_load_configured_workflow_builds_definition(mocker):
     assert result.stages[1].activities[0].type == "log"
     assert result.stages[0].activities[0].maximum_attempts == 3
     assert result.stages[1].activities[0].maximum_attempts == 1
+
+
+async def test_trigger_configured_workflows_skips_missing_and_cycles(mocker, caplog):
+    get = mocker.patch(
+        "reporting.temporal_workflows.activities.report_store.get_scheduled_query",
+        mocker.AsyncMock(
+            side_effect=lambda workflow_id: (
+                _workflow_item()
+                if workflow_id == "workflow-2"
+                else _workflow_item(created_by="other-user")
+                if workflow_id == "foreign"
+                else None
+            )
+        ),
+    )
+    run = mocker.patch(
+        "reporting.temporal_workflows.activities.workflow_schedules.run_triggered",
+        mocker.AsyncMock(return_value=("temporal-2", "run-2")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        started = await trigger_configured_workflows(
+            TriggerConfiguredWorkflowsRequest(
+                source_workflow_id="workflow-1",
+                source_creator_user_id="user-1",
+                source_run_id="source-run",
+                workflow_ids=["workflow-2", "missing", "foreign", "workflow-0"],
+                lineage=["workflow-0"],
+            )
+        )
+
+    assert started == ["temporal-2"]
+    run.assert_awaited_once_with(
+        "workflow-2",
+        source_workflow_id="workflow-1",
+        source_run_id="source-run",
+        lineage=["workflow-0", "workflow-1"],
+    )
+    assert get.await_count == 3
+    assert "Skipping missing triggered workflow" in caplog.text
+    assert "Skipping triggered workflow owned by another user" in caplog.text
+    assert "Skipping cyclic triggered workflow" in caplog.text
 
 
 async def test_load_configured_workflow_missing_and_disabled(mocker):

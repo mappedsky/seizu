@@ -303,6 +303,9 @@ export default function Workflows() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
+          workflowOptions={workflows.filter(
+            (workflow) => workflow.created_by === currentUser?.user_id,
+          )}
           onClose={() => setDialogOpen(false)}
           onSave={save}
         />

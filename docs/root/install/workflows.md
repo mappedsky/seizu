@@ -1,8 +1,8 @@
 # Workflows
 
 Workflows are Seizu's durable automation pipelines. A workflow has an ordered
-list of **stages** and either a UTC time schedule or a set of SyncMetadata
-watch filters. Activities in one stage start in parallel; the next stage starts
+list of **stages** and either a UTC time schedule, a set of SyncMetadata
+watch filters, or no automatic trigger (manual). Activities in one stage start in parallel; the next stage starts
 only after every activity in the current stage succeeds. Temporal owns the
 schedule and execution history, so runs are not tied to a single polling
 process and missed ticks can be caught up after downtime.
@@ -24,7 +24,8 @@ The editor supports:
 - adding activities, reordering them within a stage, or moving them between stages;
 - assigning every activity a named output and selecting an earlier-stage output as its input;
 - activity-specific parameter forms supplied by the enabled module; and
-- interval, hourly, daily, monthly, or SyncMetadata watch triggers.
+- manual-only, interval, hourly, daily, monthly, or SyncMetadata watch triggers; and
+- selecting one or more independent workflows to start after every stage succeeds.
 
 Output names use `lower_snake_case` and are unique across the workflow. An
 activity may reference only an output from an earlier stage, which keeps
@@ -45,6 +46,13 @@ top-level type transparently on read; new saves must use the top-level types.
 
 When one activity fails, the other activities already running in that stage
 are allowed to settle. The workflow then fails and no later stage starts.
+Post-completion workflows start only after every stage succeeds. They are
+independent top-level Temporal executions: each keeps its own schedule,
+versioned definition, overlap mutex, and run history. If a selected workflow
+has since been deleted, the source run logs a warning and continues. Saving an
+edited workflow removes deleted targets from its trigger list. Chaining keeps
+the normal owner boundary: a workflow can trigger only workflows owned by the
+same user.
 
 Query outputs are streamed only up to the configured `max_rows`, rather than
 materializing an unbounded Neo4j result first. Row-consuming activity forms
@@ -58,6 +66,9 @@ at-least-once; a module may opt into up to ten attempts with an
 **Run now** starts a Temporal execution immediately, including for a disabled
 workflow. Disabling a workflow pauses its Temporal Schedule but deliberately
 does not prevent an operator-requested run.
+
+A manual workflow has no Temporal Schedule. It can still be started with
+**Run now** or by another workflow's post-completion trigger.
 
 ## Scheduling behavior
 
@@ -93,6 +104,7 @@ workflows:
       hour: 9
       minute: 0
     enabled: true
+    trigger_workflows: ["1234567890"]
     stages:
       - activities:
           - type: query

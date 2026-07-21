@@ -165,6 +165,16 @@ def build_schedule(item: ScheduledQueryItem) -> Schedule:
 
 
 async def reconcile(item: ScheduledQueryItem) -> None:
+    if item.schedule is None and not item.watch_scans and item.frequency is None:
+        # Manual/trigger-only definitions have no Temporal Schedule. Remove a
+        # previously configured schedule when the trigger is changed to manual.
+        await delete_schedule(item.scheduled_query_id)
+        await report_store.set_workflow_schedule_sync_status(
+            item.scheduled_query_id,
+            "synced",
+            synced_at=datetime.now(tz=UTC).isoformat(),
+        )
+        return
     client = await get_client()
     handle = client.get_schedule_handle(schedule_id(item.scheduled_query_id))
     schedule = build_schedule(item)
@@ -249,6 +259,33 @@ async def run_now(
         handle = await client.start_workflow(
             "seizu_configured_workflow",
             ConfiguredWorkflowInvocation(workflow_id=workflow_id, manual=True),
+            id=temporal_workflow_id,
+            task_queue=settings.TEMPORAL_TASK_QUEUE,
+        )
+    except WorkflowAlreadyStartedError:
+        handle = client.get_workflow_handle(temporal_workflow_id)
+    return temporal_workflow_id, handle.result_run_id
+
+
+async def run_triggered(
+    workflow_id: str,
+    *,
+    source_workflow_id: str,
+    source_run_id: str,
+    lineage: list[str],
+) -> tuple[str, str | None]:
+    """Start an independent configured workflow after another completes."""
+
+    client = await get_client()
+    temporal_workflow_id = f"{RUN_ID_PREFIX}{workflow_id}:trigger:{source_workflow_id}:{source_run_id}"
+    try:
+        handle = await client.start_workflow(
+            "seizu_configured_workflow",
+            ConfiguredWorkflowInvocation(
+                workflow_id=workflow_id,
+                manual=True,
+                trigger_lineage=lineage,
+            ),
             id=temporal_workflow_id,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
         )

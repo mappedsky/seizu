@@ -25,6 +25,7 @@ from reporting.temporal_workflows.shared import (
     ConfiguredStage,
     ConfiguredWorkflowDefinition,
     ConfiguredWorkflowInvocation,
+    TriggerConfiguredWorkflowsRequest,
 )
 
 
@@ -127,6 +128,21 @@ async def _action(value: ConfiguredActivityInput) -> ConfiguredActivityOutput:
 @activity.defn(name="record_configured_workflow_result")
 async def _record(value: dict) -> None:
     return None
+
+
+@activity.defn(name="load_configured_workflow")
+async def _load_with_triggers(invocation: ConfiguredWorkflowInvocation) -> ConfiguredWorkflowDefinition:
+    definition = await _load(invocation)
+    definition.trigger_workflows = ["workflow-2"]
+    return definition
+
+
+@activity.defn(name="trigger_configured_workflows")
+async def _trigger_workflows(value: TriggerConfiguredWorkflowsRequest) -> list[str]:
+    assert value.source_workflow_id == "workflow-1"
+    assert value.source_creator_user_id == "user-1"
+    assert value.workflow_ids == ["workflow-2"]
+    return ["seizu-workflow:workflow-2:triggered"]
 
 
 @activity.defn(name="check_configured_workflow_watch")
@@ -301,6 +317,20 @@ async def test_stages_run_and_publish_named_outputs():
         {"output": "second", "status": "completed", "row_count": 1},
         {"output": "logged", "status": "completed"},
     ]
+
+
+async def test_successful_pipeline_starts_post_completion_workflows():
+    result = await _execute(
+        _load_with_triggers,
+        _query,
+        _action,
+        _trigger_workflows,
+        _record,
+    )
+    assert result["activity_results"][-1] == {
+        "triggered_workflows": 1,
+        "temporal_workflow_ids": ["seizu-workflow:workflow-2:triggered"],
+    }
 
 
 async def test_overlapping_runs_allow_only_one_waiter():
