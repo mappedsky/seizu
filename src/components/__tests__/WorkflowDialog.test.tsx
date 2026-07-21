@@ -17,7 +17,9 @@ jest.mock('src/hooks/useSyncMetadataValues', () => ({
   }),
 }));
 
-jest.setTimeout(10_000);
+// MUI dialog/autocomplete transitions are substantially slower when this file
+// runs as part of the complete frontend suite than in isolation.
+jest.setTimeout(30_000);
 
 afterEach(cleanup);
 
