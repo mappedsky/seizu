@@ -1,0 +1,13 @@
+# Default permission relationships from Cartography 0.139.0.
+- target_label: AzureSQLServer
+  permissions:
+  - Microsoft.Sql/servers/delete
+  relationship_name: CAN_MANAGE
+- target_label: AzureSQLServer
+  permissions:
+  - Microsoft.Sql/servers/read
+  relationship_name: CAN_READ
+- target_label: AzureSQLServer
+  permissions:
+  - Microsoft.Sql/servers/write
+  relationship_name: CAN_WRITE

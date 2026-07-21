@@ -83,7 +83,10 @@ The fixed paths are:
 - custom analysis jobs: `/etc/cartography/analysis`
 
 The compose services mount the report and analysis roots from
-`.compose/cartography/`. All supported credential settings are listed in
+`.compose/cartography/`. `make up` also initializes the file-valued mounts in
+that directory from `.config/dev/cartography/`, including Cartography's pinned
+default AWS, Azure, and GCP permission maps. Existing files are preserved so
+deployments can customize them. All supported credential settings are listed in
 `.env.example`; only populate credentials for enabled modules. Every
 deployment-facing module credential is prefixed with `CARTOGRAPHY_`, so shared
 Seizu chat, remediation, and integration credentials cannot be selected by

@@ -724,10 +724,12 @@ services:
       - nostart
     volumes:
       - ./.compose/cartography/aws-config:/srv/cartography/.aws/config
+      - ./.compose/cartography/azure_permission_relationships.yaml:/etc/cartography/azure_permission_relationships.yaml:ro
       - ./.compose/cartography/gcp-credentials.json:/etc/cartography/gcp-credentials.json:ro
+      - ./.compose/cartography/gcp_permission_relationships.yaml:/etc/cartography/gcp_permission_relationships.yaml:ro
       - ./.compose/cartography/oci-config:/var/cartography/.oci/config:ro
-      - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml
-      - ./.compose/cartography/kube.config:/etc/cartography/kube.config
+      - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml:ro
+      - ./.compose/cartography/kube.config:/etc/cartography/kube.config:ro
       - ./.compose/cartography/reports:/etc/cartography/reports:ro
       - ./.compose/cartography/analysis:/etc/cartography/analysis:ro
     environment:
@@ -811,10 +813,12 @@ services:
         condition: service_healthy
     volumes:
       - ./.compose/cartography/aws-config:/srv/cartography/.aws/config
+      - ./.compose/cartography/azure_permission_relationships.yaml:/etc/cartography/azure_permission_relationships.yaml:ro
       - ./.compose/cartography/gcp-credentials.json:/etc/cartography/gcp-credentials.json:ro
+      - ./.compose/cartography/gcp_permission_relationships.yaml:/etc/cartography/gcp_permission_relationships.yaml:ro
       - ./.compose/cartography/oci-config:/var/cartography/.oci/config:ro
-      - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml
-      - ./.compose/cartography/kube.config:/etc/cartography/kube.config
+      - ./.compose/cartography/permission_relationships.yaml:/etc/cartography/permission_relationships.yaml:ro
+      - ./.compose/cartography/kube.config:/etc/cartography/kube.config:ro
       - ./.compose/cartography/reports:/etc/cartography/reports:ro
       - ./.compose/cartography/analysis:/etc/cartography/analysis:ro
       # Dev live-reload parity with the other workers.

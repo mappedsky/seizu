@@ -1,0 +1,68 @@
+# Default permission relationships from Cartography 0.139.0.
+- target_label: GCPBucket
+  permissions:
+  - storage.objects.get
+  relationship_name: CAN_READ
+- target_label: GCPBucket
+  permissions:
+  - storage.objects.create
+  - storage.objects.update
+  relationship_name: CAN_WRITE
+- target_label: GCPBucket
+  permissions:
+  - storage.objects.delete
+  relationship_name: CAN_DELETE
+- target_label: GCPSecretManagerSecret
+  permissions:
+  - secretmanager.versions.access
+  relationship_name: CAN_READ
+- target_label: GCPBigQueryDataset
+  permissions:
+  - bigquery.tables.getData
+  relationship_name: CAN_READ
+- target_label: GCPBigQueryDataset
+  permissions:
+  - bigquery.tables.updateData
+  relationship_name: CAN_WRITE
+- target_label: GCPBigQueryDataset
+  permissions:
+  - bigquery.tables.delete
+  - bigquery.datasets.delete
+  relationship_name: CAN_DELETE
+- target_label: GCPBigQueryTable
+  permissions:
+  - bigquery.tables.getData
+  relationship_name: CAN_READ
+- target_label: GCPBigQueryTable
+  permissions:
+  - bigquery.tables.updateData
+  relationship_name: CAN_WRITE
+- target_label: GCPBigQueryTable
+  permissions:
+  - bigquery.tables.delete
+  relationship_name: CAN_DELETE
+- target_label: GCPCryptoKey
+  permissions:
+  - cloudkms.cryptoKeyVersions.useToDecrypt
+  relationship_name: CAN_DECRYPT
+- target_label: GCPCryptoKey
+  permissions:
+  - cloudkms.cryptoKeyVersions.useToEncrypt
+  relationship_name: CAN_ENCRYPT
+- target_label: GCPArtifactRegistryRepository
+  permissions:
+  - artifactregistry.repositories.downloadArtifacts
+  relationship_name: CAN_READ
+- target_label: GCPArtifactRegistryRepository
+  permissions:
+  - artifactregistry.repositories.uploadArtifacts
+  relationship_name: CAN_WRITE
+- target_label: GCPServiceAccount
+  permissions:
+  - iam.serviceAccounts.actAs
+  - iam.serviceAccounts.getAccessToken
+  - iam.serviceAccounts.implicitDelegation
+  - iam.serviceAccounts.signBlob
+  - iam.serviceAccounts.signJwt
+  - iam.serviceAccounts.getOpenIdToken
+  relationship_name: CAN_IMPERSONATE
