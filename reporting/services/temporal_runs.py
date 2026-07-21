@@ -50,6 +50,8 @@ _ENUM_PREFIXES = (
     "RETRY_STATE_",
 )
 _SCHEDULE_TIME_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
+_CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX = "seizu-configured-workflow-mutex:"
+_CONFIGURED_RESULT_STATUSES = frozenset(("completed", "skipped", "canceled"))
 
 
 class TemporalUnavailableError(Exception):
@@ -123,6 +125,24 @@ def _enum_label(name: str) -> str:
 
 def _status_name(status: Any) -> str:
     return _enum_label(status.name) if status is not None else "unknown"
+
+
+async def _configured_workflow_result_status(handle: Any) -> str | None:
+    """Return a configured workflow's application-level terminal status.
+
+    Temporal marks any normally returned result as completed, including runs
+    the workflow deliberately skipped because the waiting slot was occupied.
+    Read the small terminal result so the API can distinguish those outcomes.
+    Older or undecodable results retain Temporal's visibility status.
+    """
+
+    try:
+        result = await handle.result()
+    except Exception as exc:
+        logger.debug("Could not decode configured workflow result status: %s", exc)
+        return None
+    status = result.get("status") if isinstance(result, dict) else getattr(result, "status", None)
+    return status if status in _CONFIGURED_RESULT_STATUSES else None
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -201,6 +221,7 @@ async def list_workflow_runs(
     query = " OR ".join(f"WorkflowId STARTS_WITH {_quote(prefix)}" for prefix in prefixes)
     client = await _get_client()
     runs: list[WorkflowRunSummary] = []
+    completed_configured: list[tuple[WorkflowRunSummary, Any]] = []
     # Triggered configured runs may own child workflow IDs beneath the same
     # prefix. Read extra visibility candidates so those filtered children do
     # not crowd top-level runs out of the requested page.
@@ -209,19 +230,30 @@ async def list_workflow_runs(
         async for execution in client.list_workflows(query, limit=visibility_limit):
             if not workflow_id_matches(sq_id, execution.id):
                 continue
-            runs.append(
-                WorkflowRunSummary(
-                    workflow_id=execution.id,
-                    run_id=execution.run_id,
-                    workflow_name=_workflow_name(execution.id, configured_name),
-                    status=_status_name(execution.status),
-                    start_time=_isoformat(execution.start_time),
-                    close_time=_isoformat(execution.close_time),
-                    history_length=execution.history_length,
-                )
+            status = _status_name(execution.status)
+            if status == "running":
+                handle = client.get_workflow_handle(execution.id, run_id=execution.run_id)
+                if await _is_waiting_for_workflow_mutex(handle):
+                    status = "waiting"
+            run = WorkflowRunSummary(
+                workflow_id=execution.id,
+                run_id=execution.run_id,
+                workflow_name=_workflow_name(execution.id, configured_name),
+                status=status,
+                start_time=_isoformat(execution.start_time),
+                close_time=_isoformat(execution.close_time),
+                history_length=execution.history_length,
             )
+            runs.append(run)
+            if status == "completed" and execution.id.startswith("seizu-workflow:"):
+                completed_configured.append((run, client.get_workflow_handle(execution.id, run_id=execution.run_id)))
             if len(runs) >= limit:
                 break
+        result_statuses = await asyncio.gather(
+            *(_configured_workflow_result_status(handle) for _, handle in completed_configured)
+        )
+        for (run, _), result_status in zip(completed_configured, result_statuses, strict=True):
+            run.status = result_status or run.status
     except temporalio.service.RPCError as exc:
         _raise_if_unavailable(exc)
         raise
@@ -268,16 +300,55 @@ async def get_workflow_run_detail(
         _raise_if_unavailable(exc)
         raise
     _merge_pending_activities(activities, description.raw_description.pending_activities)
+    status = _status_name(description.status)
+    if status == "running" and any(activity.status == "waiting" for activity in activities.values()):
+        status = "waiting"
+    elif status == "completed" and workflow_id.startswith("seizu-workflow:"):
+        status = await _configured_workflow_result_status(handle) or status
     return WorkflowRunDetail(
         workflow_id=workflow_id,
         run_id=description.run_id,
         workflow_name=_workflow_name(workflow_id, configured_name),
-        status=_status_name(description.status),
+        status=status,
         start_time=_isoformat(description.start_time),
         close_time=_isoformat(description.close_time),
         failure=workflow_failure,
         activities=list(activities.values()),
     )
+
+
+async def cancel_waiting_workflow_run(
+    sq_id: str,
+    workflow_id: str,
+    run_id: str,
+) -> bool:
+    """Cancel a run only while it is waiting for the workflow mutex.
+
+    Returns False for a foreign/missing run or one that is no longer waiting.
+    The history check intentionally happens immediately before the cancellation
+    signal so this endpoint cannot be used as a general running-workflow stop.
+    """
+
+    import temporalio.service
+
+    if not workflow_id_matches(sq_id, workflow_id):
+        return False
+    client = await _get_client()
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    try:
+        description = await handle.describe()
+        if _status_name(description.status) != "running" or not await _is_waiting_for_workflow_mutex(handle):
+            return False
+        await handle.signal("cancel_waiting")
+    except temporalio.service.RPCError as exc:
+        if exc.status in (
+            temporalio.service.RPCStatusCode.NOT_FOUND,
+            temporalio.service.RPCStatusCode.INVALID_ARGUMENT,
+        ):
+            return False
+        _raise_if_unavailable(exc)
+        raise
+    return True
 
 
 def _raise_if_unavailable(exc: Any) -> None:
@@ -288,6 +359,27 @@ def _raise_if_unavailable(exc: Any) -> None:
         temporalio.service.RPCStatusCode.DEADLINE_EXCEEDED,
     ):
         raise TemporalUnavailableError(str(exc)) from exc
+
+
+async def _is_waiting_for_workflow_mutex(handle: "temporalio.client.WorkflowHandle[Any, Any]") -> bool:
+    """Return whether the latest mutex-child start attempt is blocked."""
+
+    mutex_attempts: set[int] = set()
+    waiting = False
+    async for event in handle.fetch_history_events():
+        if event.HasField("start_child_workflow_execution_initiated_event_attributes"):
+            attrs = event.start_child_workflow_execution_initiated_event_attributes
+            if attrs.workflow_id.startswith(_CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX):
+                mutex_attempts.add(event.event_id)
+        elif event.HasField("start_child_workflow_execution_failed_event_attributes"):
+            attrs = event.start_child_workflow_execution_failed_event_attributes
+            if attrs.initiated_event_id in mutex_attempts:
+                waiting = True
+        elif event.HasField("child_workflow_execution_started_event_attributes"):
+            attrs = event.child_workflow_execution_started_event_attributes
+            if attrs.initiated_event_id in mutex_attempts:
+                waiting = False
+    return waiting
 
 
 async def _collect_activities(
@@ -309,6 +401,7 @@ async def _collect_activities(
     # fresh record starts once the previous execution for that ID is terminal.
     child_records: dict[str, WorkflowRunActivity] = {}  # child workflow id → open record
     initiated_event_child: dict[int, str] = {}
+    mutex_execution: tuple[str, str] | None = None
     _CHILD_TERMINAL = ("completed", "failed", "timed_out", "canceled", "terminated")
 
     def _for_scheduled_event(event_id: int) -> WorkflowRunActivity | None:
@@ -420,6 +513,11 @@ async def _collect_activities(
             if record is not None:
                 record.status = "running"
                 record.started_at = _event_time(event)
+                if record.activity_id.startswith(_CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX):
+                    mutex_execution = (
+                        child_started.workflow_execution.workflow_id,
+                        child_started.workflow_execution.run_id,
+                    )
         elif event.HasField("child_workflow_execution_completed_event_attributes"):
             child_completed = event.child_workflow_execution_completed_event_attributes
             record = _for_initiated_event(child_completed.initiated_event_id)
@@ -460,6 +558,20 @@ async def _collect_activities(
             workflow_failure = _failure_summary(failed_attrs.failure if failed_attrs.HasField("failure") else None)
         elif event.HasField("workflow_execution_terminated_event_attributes"):
             workflow_failure = event.workflow_execution_terminated_event_attributes.reason or "terminated"
+
+    # The mutex child owns the real configured activities. Fold its history
+    # into the parent detail so serialization does not hide the stage-level
+    # activity information that the API exposed before the mutex wrapper.
+    if mutex_execution is not None:
+        client = await _get_client()
+        mutex_handle = client.get_workflow_handle(mutex_execution[0], run_id=mutex_execution[1])
+        nested, nested_failure = await _collect_activities(
+            mutex_handle,
+            include_payload_previews=include_payload_previews,
+        )
+        for key, activity in nested.items():
+            activities[key if key not in activities else f"{mutex_execution[0]}:{key}"] = activity
+        workflow_failure = workflow_failure or nested_failure
 
     return activities, workflow_failure
 

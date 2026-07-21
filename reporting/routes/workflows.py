@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
@@ -193,3 +193,39 @@ async def get_workflow_run(
     if detail is None:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     return detail
+
+
+@router.post(
+    "/api/v1/workflows/{workflow_id}/runs/{temporal_workflow_id}/{run_id}/cancel",
+    status_code=204,
+)
+async def cancel_waiting_workflow_run(
+    workflow_id: str,
+    temporal_workflow_id: str,
+    run_id: str,
+    current: CurrentUser = Depends(require_permission(Permission.WORKFLOWS_WRITE)),
+) -> Response:
+    try:
+        await workflows.require_owned_item(workflow_id, current.user.user_id)
+        canceled = await temporal_runs.cancel_waiting_workflow_run(
+            workflow_id,
+            temporal_workflow_id,
+            run_id,
+        )
+    except workflows.WorkflowNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except temporal_runs.TemporalUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="Temporal is unavailable") from exc
+    if not canceled:
+        raise HTTPException(status_code=409, detail="Workflow run is no longer waiting")
+    logger.info(
+        "Waiting workflow run cancellation requested",
+        extra={
+            "type": "AUDIT",
+            "workflow_id": workflow_id,
+            "temporal_workflow_id": temporal_workflow_id,
+            "run_id": run_id,
+            "user": current.user.user_id,
+        },
+    )
+    return Response(status_code=204)

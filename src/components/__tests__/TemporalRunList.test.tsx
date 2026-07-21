@@ -1,4 +1,12 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import TemporalRunList from 'src/components/TemporalRunList';
 import {
   WorkflowRunDetail,
@@ -67,4 +75,49 @@ it('shows a clear empty state', () => {
   expect(
     screen.getByText('No Temporal runs are visible yet.'),
   ).toBeInTheDocument();
+});
+
+it('allows a waiting workflow run to be canceled', async () => {
+  const waitingRun = { ...run, status: 'waiting' };
+  let resolveCancel: (() => void) | undefined;
+  const cancelRun = jest.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      }),
+  );
+  render(
+    <TemporalRunList
+      runs={[waitingRun]}
+      error={null}
+      loadDetail={jest.fn().mockResolvedValue({ ...detail, status: 'waiting' })}
+      cancelRun={cancelRun}
+    />,
+  );
+
+  fireEvent.click(
+    screen.getByRole('button', { name: /seizu_configured_workflow/ }),
+  );
+  await screen.findByText('Activities (1)');
+  const cancelButton = screen.getByRole('button', {
+    name: 'Cancel waiting run',
+  });
+  fireEvent.click(cancelButton);
+
+  expect(cancelRun).toHaveBeenCalledWith(waitingRun);
+  const cancelingButton = screen.getByRole('button', { name: /Canceling/ });
+  expect(cancelingButton).toBeDisabled();
+  expect(
+    within(cancelingButton).getByRole('progressbar', { name: 'Loading' }),
+  ).toBeVisible();
+  expect(screen.getByText('Waiting')).toBeInTheDocument();
+
+  await act(async () => resolveCancel?.());
+
+  await waitFor(() => {
+    expect(screen.getByText('Cancel Requested')).toBeInTheDocument();
+  });
+  expect(
+    screen.queryByRole('button', { name: /Cancel waiting run|Canceling/ }),
+  ).not.toBeInTheDocument();
 });

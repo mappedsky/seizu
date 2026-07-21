@@ -33,11 +33,11 @@ def _item(**updates):
     return ScheduledQueryItem.model_validate(values)
 
 
-def test_build_interval_schedule_uses_buffer_one():
+def test_build_interval_schedule_allows_global_overlap_limiter():
     schedule = workflow_schedules.build_schedule(_item(schedule={"type": "interval", "interval_minutes": 15}))
 
     assert schedule.spec.intervals[0].every.total_seconds() == 900
-    assert schedule.policy.overlap.name == "BUFFER_ONE"
+    assert schedule.policy.overlap.name == "ALLOW_ALL"
     assert schedule.state.paused is False
 
 

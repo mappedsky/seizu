@@ -151,7 +151,9 @@ def build_schedule(item: ScheduledQueryItem) -> Schedule:
         ),
         spec=_temporal_spec(item),
         policy=SchedulePolicy(
-            overlap=ScheduleOverlapPolicy.BUFFER_ONE,
+            # Global overlap handling lives in ConfiguredWorkflow so manual,
+            # watch, and scheduled triggers share one running/one waiting cap.
+            overlap=ScheduleOverlapPolicy.ALLOW_ALL,
             catchup_window=timedelta(days=365),
             pause_on_failure=False,
         ),

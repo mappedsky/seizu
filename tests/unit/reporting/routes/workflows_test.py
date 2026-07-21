@@ -266,3 +266,25 @@ async def test_run_detail_reader_does_not_receive_payload_previews(mocker):
         include_payload_previews=False,
         configured_name="Notify",
     )
+
+
+async def test_cancel_waiting_workflow_run(mocker):
+    mocker.patch(
+        "reporting.routes.workflows.workflows.require_owned_item",
+        new=AsyncMock(return_value=_stored_item()),
+    )
+    cancel = mocker.patch(
+        "reporting.routes.workflows.temporal_runs.cancel_waiting_workflow_run",
+        new=AsyncMock(return_value=True),
+    )
+    path = "/api/v1/workflows/workflow-1/runs/temporal-id/run-id/cancel"
+
+    response = await _request("POST", path)
+
+    assert response.status_code == 204
+    cancel.assert_awaited_once_with("workflow-1", "temporal-id", "run-id")
+
+    cancel.return_value = False
+    response = await _request("POST", path)
+    assert response.status_code == 409
+    assert response.json()["error"] == "Workflow run is no longer waiting"

@@ -254,6 +254,11 @@ export function useWorkflowMutations(): {
   ) => Promise<WorkflowItem>;
   deleteWorkflow: (id: string) => Promise<void>;
   runWorkflow: (id: string) => Promise<void>;
+  cancelWorkflowRun: (
+    workflowId: string,
+    temporalWorkflowId: string,
+    runId: string,
+  ) => Promise<void>;
 } {
   const { accessToken } = useContext(AuthContext);
   const mutate = useCallback(
@@ -292,6 +297,12 @@ export function useWorkflowMutations(): {
     },
     runWorkflow: async (id) => {
       await mutate(`/api/v1/workflows/${encodeURIComponent(id)}/run`, 'POST');
+    },
+    cancelWorkflowRun: async (workflowId, temporalWorkflowId, runId) => {
+      await mutate(
+        `/api/v1/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(temporalWorkflowId)}/${encodeURIComponent(runId)}/cancel`,
+        'POST',
+      );
     },
   };
 }

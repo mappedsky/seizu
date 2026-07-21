@@ -238,7 +238,8 @@ export default function WorkflowView() {
     refresh: refreshRuns,
   } = useWorkflowRuns(id ?? null);
   const fetchRunDetail = useWorkflowRunDetail();
-  const { updateWorkflow, runWorkflow } = useWorkflowMutations();
+  const { updateWorkflow, runWorkflow, cancelWorkflowRun } =
+    useWorkflowMutations();
   const [editOpen, setEditOpen] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [activityConfig, setActivityConfig] = useState<{
@@ -444,6 +445,18 @@ export default function WorkflowView() {
             runs={runs}
             error={runsError}
             loadDetail={loadRunDetail}
+            cancelRun={
+              canMutate
+                ? async (run) => {
+                    await cancelWorkflowRun(
+                      workflow.workflow_id,
+                      run.workflow_id,
+                      run.run_id,
+                    );
+                    refreshRuns();
+                  }
+                : undefined
+            }
           />
         </CardContent>
       </Card>
