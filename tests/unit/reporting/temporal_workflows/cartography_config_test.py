@@ -33,9 +33,15 @@ def test_module_param_fields_map_registry_flags():
     assert aws_fields["aws_sync_all_profiles"].type == "boolean"
     assert aws_fields["aws_sync_all_profiles"].default is True
     assert aws_fields["aws_requested_syncs"].type == "string"
-    # Modules without flags produce empty sub-forms.
+    # Modules without configurable flags produce empty sub-forms; fixed
+    # env-var/path flags do not become schedule-author-controlled fields.
     assert cartography_config.module_param_fields("create-indexes") == []
-    assert cartography_config.module_param_fields("github") == []
+    github_fields = {f.name: f for f in cartography_config.module_param_fields("github")}
+    assert github_fields["github_commit_lookback_days"].type == "number"
+
+    metadata_fields = {f.name: f for f in cartography_config.module_param_fields("cve_metadata")}
+    assert metadata_fields["cve_metadata_src"].type == "string_list"
+    assert metadata_fields["cve_metadata_src"].options == ["nvd", "epss"]
 
 
 def test_enabled_modules_honors_allowlist(mocker):
@@ -81,7 +87,7 @@ def test_validate_rejects_malformed_run_entries():
 
 
 def test_validate_rejects_unknown_and_disabled(mocker):
-    error = cartography_config.validate_config({"module_runs": _runs("gcp")})
+    error = cartography_config.validate_config({"module_runs": _runs("not-a-module")})
     assert "not enabled" in error
     mocker.patch("reporting.settings.CARTOGRAPHY_ENABLED_MODULES", ["cve"])
     error = cartography_config.validate_config({"module_runs": _runs("github")})

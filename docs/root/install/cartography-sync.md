@@ -50,24 +50,72 @@ Cartography warns that concurrent jobs for the same resource type race on their 
 
 Different modules still run concurrently — the mutex is per module name (conservatively treating e.g. two `aws` runs with different `aws_requested_syncs` subsets as conflicting).
 
-## Supported modules
+## Supported modules and options
 
-The registry (`cartography_sync/registry.py`) defines each module's CLI mapping. Credentials always use cartography's `--*-env-var` indirection with **fixed env-var names** — schedule authors never supply env-var names, file paths, or the Neo4j URI.
+The registry (`cartography_sync/registry.py`) defines each module's CLI mapping. Credentials always use Cartography's `--*-env-var` indirection with **fixed `CARTOGRAPHY_*` env-var names** — schedule authors never supply env-var names, file paths, or the Neo4j URI.
 
-| Module | Credentials (worker env) | User-settable params |
-|---|---|---|
-| `aws` | mounted AWS config (`/srv/cartography/.aws/config`) or `AWS_*` env | `aws_sync_all_profiles` (bool, default true), `aws_requested_syncs` |
-| `github` | `GITHUB_TOKEN` (base64 JSON config) | — |
-| `cve` | — | — |
-| `cve_metadata` | `NIST_NVD_TOKEN` | — |
-| `crowdstrike` | `CROWDSTRIKE_CLIENT_ID` + `CROWDSTRIKE_CLIENT_SECRET` | — |
-| `kubernetes` | mounted kubeconfig (`/etc/cartography/kube.config`) | — |
-| `okta` | `OKTA_API_KEY` | `okta_org_id` |
-| `pagerduty` | `PAGERDUTY_API_KEY` | — |
+The registry covers every top-level intelligence module shipped in Cartography
+0.139.0:
+
+`airbyte`, `aibom`, `anthropic`, `aws`, `azure`, `bigfix`, `circleci`,
+`cloudflare`, `crowdstrike`, `cve`, `cve_metadata`, `databricks`,
+`digitalocean`, `docker_scout`, `duo`, `gcp`, `github`, `gitlab`,
+`googleworkspace`, `gsuite`, `jamf`, `jumpcloud`, `kandji`, `keycloak`,
+`kubernetes`, `lastpass`, `microsoft`, `oci`, `okta`, `ontology`, `openai`,
+`pagerduty`, `salesforce`, `scaleway`, `semgrep`, `sentry`, `sentinelone`,
+`slack`, `snipeit`, `socketdev`, `spacelift`, `subimage`, `syft`, `tailscale`,
+`tenable`, `trivy`, `ubuntu`, `vercel`, `workday`, and `workos`, plus the
+structural `create-indexes` and `analysis` stages.
+
+Every canonical module-specific CLI option is represented. Typed value options
+appear in the module-run form. Credential env-var-name options and path options
+do not: the registry supplies those as reviewed constants. Deprecated aliases
+(`entra` credential names and the legacy report-source flag groups) are not
+emitted because their canonical replacements provide the same functionality.
+
+The fixed paths are:
+
+- AWS, Azure, and GCP permission maps: `/etc/cartography/*permission_relationships.yaml`
+- GCP application credentials: `/etc/cartography/gcp-credentials.json`
+- OCI configuration: `/var/cartography/.oci/config`
+- Kubernetes kubeconfig: `/etc/cartography/kube.config`
+- Docker Scout, Trivy, Syft, AIBOM, and Semgrep reports: `/etc/cartography/reports/<module>`
+- custom analysis jobs: `/etc/cartography/analysis`
+
+The compose services mount the report and analysis roots from
+`.compose/cartography/`. `make up` also initializes the file-valued mounts in
+that directory from `.config/dev/cartography/`, including Cartography's pinned
+default AWS, Azure, and GCP permission maps. Existing files are preserved so
+deployments can customize them. All supported credential settings are listed in
+`.env.example`; only populate credentials for enabled modules. Every
+deployment-facing module credential is prefixed with `CARTOGRAPHY_`, so shared
+Seizu chat, remediation, and integration credentials cannot be selected by
+accident. Modules that support alternate authentication (Databricks,
+Salesforce, Spacelift, and Tailscale) copy whichever declared alternatives are
+present.
+
+CLI `--*-env-var` options read the prefixed names directly. Only upstream SDKs
+that mandate conventional names are translated in the scrubbed subprocess
+environment, for example `CARTOGRAPHY_AWS_PROFILE` → `AWS_PROFILE` and
+`CARTOGRAPHY_GOOGLE_APPLICATION_CREDENTIALS` →
+`GOOGLE_APPLICATION_CREDENTIALS`. The dedicated worker itself receives only
+the prefixed deployment setting.
+
+GitHub's preferred setting is `CARTOGRAPHY_GITHUB_CONFIG`, containing the
+complete base64-encoded Cartography GitHub configuration. The JSON inside it
+contains the bare PAT in its `token` field. The historical
+`CARTOGRAPHY_GITHUB_TOKEN` name remains a deprecated compatibility alias for
+the same encoded configuration; it never means a bare token.
+
+Existing deployments must rename the earlier unprefixed intel settings:
+`NIST_NVD_TOKEN`, `CROWDSTRIKE_CLIENT_ID`, `CROWDSTRIKE_CLIENT_SECRET`,
+`PAGERDUTY_API_KEY`, and `OKTA_API_KEY` now have the `CARTOGRAPHY_` prefix.
+They are intentionally not read as fallbacks because doing so would recreate
+the cross-service configuration collision this namespace prevents.
 
 `CARTOGRAPHY_ENABLED_MODULES` narrows which modules schedules may use (empty → all). It is enforced three times: at save time, at dispatch, and again by the sync worker itself — the worker holds the credentials, so it rejects disabled modules even for a forged Temporal payload. Adding a module means adding a registry entry (name, flags, credential env vars) — a code change by design, so the allowlist stays reviewed.
 
-The registry is reviewed against a specific cartography release, so the sync image pins the upstream by tag **and digest** (`Dockerfile.cartography`; Dependabot bumps it deliberately). After bumping the pin, run `make cartography_contract_test` — it verifies inside the image that every registry flag still exists in that release's CLI.
+The registry is reviewed against a specific cartography release, so the sync image pins the upstream by tag **and digest** (`Dockerfile.cartography`; Dependabot bumps it deliberately). After bumping the pin, run `make cartography_contract_test` — it verifies the version, the complete module set, and every canonical option module-by-module against the installed CLI.
 
 ## Settings
 
@@ -85,8 +133,8 @@ The **sync worker** reads plain env vars (it does not use Seizu settings):
 
 - `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `CARTOGRAPHY_TASK_QUEUE`
 - `CARTOGRAPHY_ENABLED_MODULES` (the worker-side allowlist; keep it aligned with the web/dispatcher value)
-- `CARTOGRAPHY_NEO4J_URI` (required) and, when Neo4j auth is on, `CARTOGRAPHY_NEO4J_USER` + `NEO4J_PASSWORD` (the password rides only in the subprocess environment, never in argv)
-- the intel-module credentials from the table above
+- `CARTOGRAPHY_NEO4J_URI` (required) and, when Neo4j auth is on, `CARTOGRAPHY_NEO4J_USER` + `CARTOGRAPHY_NEO4J_PASSWORD` (translated to the upstream password name only in the subprocess environment; it never appears in argv)
+- the enabled intel modules' credentials from `.env.example`
 - `CARTOGRAPHY_BIN` (default `cartography`; used by tests)
 
 ## Security model
@@ -98,7 +146,7 @@ Schedule configuration reaches a shell-adjacent surface (the cartography CLI), s
 3. **No user-controlled env-var names, paths, or URIs.** Credential flags and file paths are fixed constants; the Neo4j URI comes from the worker's own environment.
 4. **Worker-side re-validation.** The activity payload carries `module` + `params`, never a command; the worker re-validates against the registry and rebuilds argv itself, so a forged Temporal payload cannot escape the allowlist.
 5. **Environment scrubbing.** The cartography subprocess sees a minimal base environment plus only the env vars its module's registry entry declares.
-6. **Secrets isolation.** The sync container holds only cartography intel credentials — no LLM keys, GitHub remediation token, or report-store credentials — and the reporting workers never receive the intel credentials.
+6. **Secrets isolation.** The sync container holds only Cartography intel credentials — never Seizu chat keys, the GitHub remediation token, or report-store credentials — and the reporting workers never receive the intel credentials.
 7. **Operator gates and RBAC.** `TEMPORAL_ENABLED_WORKFLOWS`, `CARTOGRAPHY_ENABLED_MODULES` (enforced at save, at dispatch, and again by the credential-bearing sync worker), and the usual `scheduled_queries:write` (admin-managed) requirement for creating or editing schedules.
 8. **Reviewed, pinned CLI.** The image pins cartography by tag + digest so the flag allowlist can't drift against an unreviewed upstream; `make cartography_contract_test` re-verifies the registry against the pinned CLI.
 

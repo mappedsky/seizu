@@ -24,6 +24,7 @@ from cartography_sync.registry import (
     ENUM,
     MODULE_REGISTRY,
     NUMBER,
+    STRING_LIST,
     FlagSpec,
     validate_module_params,
 )
@@ -61,6 +62,8 @@ def _field_type(flag: FlagSpec) -> str:
         return "number"
     if flag.type == ENUM:
         return "select"
+    if flag.type == STRING_LIST:
+        return "string_list"
     return "string"
 
 
@@ -75,7 +78,7 @@ def module_param_fields(module: str) -> list[ActionConfigFieldDef]:
             required=False,
             description=flag.description or None,
             default=flag.default,
-            options=list(flag.choices) if flag.type == ENUM else None,
+            options=list(flag.choices) if flag.type in (ENUM, STRING_LIST) else None,
             minimum=flag.min_value,
             maximum=flag.max_value,
         )

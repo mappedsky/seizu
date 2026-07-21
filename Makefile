@@ -252,11 +252,11 @@ sync_k8s:
 
 .PHONY: sync_crowdstrike
 sync_crowdstrike:
-	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,crowdstrike,analysis --crowdstrike-client-id-env-var=CROWDSTRIKE_CLIENT_ID --crowdstrike-client-secret-env-var=CROWDSTRIKE_CLIENT_SECRET
+	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,crowdstrike,analysis --crowdstrike-client-id-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID --crowdstrike-client-secret-env-var=CARTOGRAPHY_CROWDSTRIKE_CLIENT_SECRET
 
 .PHONY: sync_github
 sync_github:
-	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,github,analysis --github-config-env-var=GITHUB_TOKEN
+	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,github,analysis --github-config-env-var=CARTOGRAPHY_GITHUB_CONFIG
 
 .PHONY: sync_cve
 sync_cve:
@@ -264,4 +264,4 @@ sync_cve:
 
 .PHONY: sync_cve_metadata
 sync_cve_metadata:
-	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,cve_metadata,analysis --cve-metadata-nist-api-key-env-var=NIST_NVD_TOKEN
+	docker compose run cartography --neo4j-uri=bolt://neo4j:7687 --selected-modules=create-indexes,cve_metadata,analysis --cve-metadata-nist-api-key-env-var=CARTOGRAPHY_NIST_NVD_TOKEN

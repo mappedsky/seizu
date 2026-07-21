@@ -12,9 +12,11 @@ Env vars:
 - ``CARTOGRAPHY_TASK_QUEUE`` (default ``seizu-cartography``)
 - ``CARTOGRAPHY_ENABLED_MODULES`` (worker-side module allowlist; empty → all)
 - ``CARTOGRAPHY_NEO4J_URI`` (required; e.g. ``bolt://neo4j:7687``)
-- ``CARTOGRAPHY_NEO4J_USER`` / ``NEO4J_PASSWORD`` (optional Neo4j auth)
+- ``CARTOGRAPHY_NEO4J_USER`` / ``CARTOGRAPHY_NEO4J_PASSWORD`` (optional Neo4j auth)
 - ``CARTOGRAPHY_BIN`` (default ``cartography``)
-- intel-module credentials per the registry (``GITHUB_TOKEN``, …)
+- ``CARTOGRAPHY_STATSD_ENABLED`` / ``CARTOGRAPHY_STATSD_HOST`` (optional metrics)
+- prefixed intel-module credentials per the registry
+  (``CARTOGRAPHY_GITHUB_CONFIG``, …)
 """
 
 import asyncio
