@@ -176,27 +176,49 @@ it('supports manual workflows and post-completion workflow triggers', async () =
     workflow_id: 'workflow-2',
     name: 'Downstream',
   };
+  const another: WorkflowItem = {
+    ...initial,
+    workflow_id: 'workflow-3',
+    name: 'Another workflow',
+  };
   render(
     <WorkflowDialog
       open
       initial={{ ...initial, schedule: null }}
       activityTypes={['query', 'log']}
       activitySchemas={schemas}
-      workflowOptions={[initial, downstream]}
+      workflowOptions={[initial, downstream, another]}
       onClose={jest.fn()}
       onSave={onSave}
     />,
   );
 
   expect(screen.getByRole('radio', { name: 'Manual' })).toBeChecked();
-  fireEvent.click(screen.getByRole('checkbox', { name: 'Downstream' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
+  const firstWorkflow = screen.getByRole('combobox', { name: 'Workflow 1' });
+  fireEvent.change(firstWorkflow, { target: { value: 'Down' } });
+  fireEvent.click(await screen.findByRole('option', { name: 'Downstream' }));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
+  const secondWorkflow = screen.getByRole('combobox', { name: 'Workflow 2' });
+  fireEvent.mouseDown(secondWorkflow);
+  expect(
+    screen.queryByRole('option', { name: 'Downstream' }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(
+    await screen.findByRole('option', { name: 'Another workflow' }),
+  );
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove triggered workflow 1' }),
+  );
   fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
 
   await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
   expect(onSave.mock.calls[0][0]).toMatchObject({
     schedule: null,
     watch_scans: [],
-    trigger_workflows: ['workflow-2'],
+    trigger_workflows: ['workflow-3'],
   });
 });
 
