@@ -86,6 +86,8 @@ jobs:
       - name: Install packages
         run: bun install
       - name: Install pre-commit
-        run: uv tool install pre-commit
+        # 4.6.1's Node hook installer is incompatible with npm 11 bundled by
+        # our pinned Node release (it fails before ESLint can run).
+        run: uv tool install pre-commit==4.5.1
       - name: Run pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
