@@ -29,6 +29,7 @@ export interface WorkflowItem {
   workflow_id: string;
   name: string;
   stages: WorkflowStage[];
+  trigger_workflows: string[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;
@@ -48,6 +49,7 @@ export interface WorkflowItem {
 export interface WorkflowRequest {
   name: string;
   stages: WorkflowStage[];
+  trigger_workflows: string[];
   schedule: ScheduleSpec | null;
   watch_scans: WorkflowWatchScan[];
   enabled: boolean;
@@ -104,7 +106,7 @@ async function apiError(response: Response, fallback: string): Promise<Error> {
   }
 }
 
-export function useWorkflowsList(): {
+export function useWorkflowsList(options: { poll?: boolean } = {}): {
   workflows: WorkflowItem[];
   loading: boolean;
   error: Error | null;
@@ -119,19 +121,37 @@ export function useWorkflowsList(): {
   const refresh = useCallback(() => setTick((value) => value + 1), []);
 
   useEffect(() => {
-    if (auth_required && !accessToken) return;
-    setLoading(true);
+    if (auth_required && !accessToken) return undefined;
+    const controller = new AbortController();
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
     setError(null);
-    fetch('/api/v1/workflows', { headers: headers(accessToken) })
+    fetch('/api/v1/workflows', {
+      headers: headers(accessToken),
+      signal: controller.signal,
+    })
       .then(async (response) => {
         if (!response.ok)
           throw await apiError(response, 'Failed to load workflows.');
         return response.json() as Promise<{ workflows: WorkflowItem[] }>;
       })
-      .then((data) => setWorkflows(data.workflows ?? []))
-      .catch((reason: Error) => setError(reason))
-      .finally(() => setLoading(false));
-  }, [accessToken, auth_required, tick]);
+      .then((data) => {
+        if (!cancelled) setWorkflows(data.workflows ?? []);
+      })
+      .catch((reason: Error) => {
+        if (!cancelled && reason.name !== 'AbortError') setError(reason);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+        if (options.poll !== false) pollTimer = setTimeout(refresh, 5000);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [accessToken, auth_required, options.poll, refresh, tick]);
 
   return { workflows, loading, error, refresh };
 }

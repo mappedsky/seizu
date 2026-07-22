@@ -17,7 +17,9 @@ jest.mock('src/hooks/useSyncMetadataValues', () => ({
   }),
 }));
 
-jest.setTimeout(10_000);
+// MUI dialog/autocomplete transitions are substantially slower when this file
+// runs as part of the complete frontend suite than in isolation.
+jest.setTimeout(30_000);
 
 afterEach(cleanup);
 
@@ -89,6 +91,7 @@ const initial: WorkflowItem = {
       ],
     },
   ],
+  trigger_workflows: [],
   current_version: 2,
   created_at: '2026-01-01T00:00:00+00:00',
   updated_at: '2026-01-02T00:00:00+00:00',
@@ -166,6 +169,76 @@ it('edits staged activities and serializes query parameters and output reference
   ).toEqual(['updated first', 'second']);
   expect(request.stages[1].activities[0].input).toBe('findings');
   expect(request.stages[1].activities[0].output).toBe('first_notification');
+});
+
+it('supports manual workflows and post-completion workflow triggers', async () => {
+  const onSave = jest.fn().mockResolvedValue(undefined);
+  const downstream: WorkflowItem = {
+    ...initial,
+    workflow_id: 'workflow-2',
+    name: 'Downstream',
+  };
+  const another: WorkflowItem = {
+    ...initial,
+    workflow_id: 'workflow-3',
+    name: 'Another workflow',
+  };
+  render(
+    <WorkflowDialog
+      open
+      initial={{ ...initial, schedule: null }}
+      activityTypes={['query', 'log']}
+      activitySchemas={schemas}
+      workflowOptions={[initial, downstream, another]}
+      onClose={jest.fn()}
+      onSave={onSave}
+    />,
+  );
+
+  expect(screen.getByRole('radio', { name: 'Manual' })).toBeChecked();
+  expect(screen.getByText('No workflows to be triggered.')).toBeInTheDocument();
+  expect(
+    screen.queryByText(
+      'Trigger any selected workflow after all stages finish.',
+    ),
+  ).not.toBeInTheDocument();
+  fireEvent.mouseOver(
+    screen.getByRole('button', {
+      name: 'Help for On successful completion',
+    }),
+  );
+  expect(
+    await screen.findByRole('tooltip', {
+      name: 'Trigger any selected workflow after all stages finish.',
+    }),
+  ).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
+  const firstWorkflow = screen.getByRole('combobox', { name: 'Workflow 1' });
+  fireEvent.change(firstWorkflow, { target: { value: 'Down' } });
+  fireEvent.click(await screen.findByRole('option', { name: 'Downstream' }));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
+  const secondWorkflow = screen.getByRole('combobox', { name: 'Workflow 2' });
+  fireEvent.mouseDown(secondWorkflow);
+  expect(
+    screen.queryByRole('option', { name: 'Downstream' }),
+  ).not.toBeInTheDocument();
+  fireEvent.click(
+    await screen.findByRole('option', { name: 'Another workflow' }),
+  );
+
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Remove triggered workflow 1' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow' }));
+
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(onSave.mock.calls[0][0]).toMatchObject({
+    schedule: null,
+    watch_scans: [],
+    trigger_workflows: ['workflow-3'],
+  });
 });
 
 const cartographySchemas: Record<string, ActionConfigFieldDef[]> = {

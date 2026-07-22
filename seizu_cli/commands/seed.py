@@ -400,7 +400,17 @@ def _seed_workflows(config: Any, force: bool, dry_run: bool) -> None:
                     cypher = activity["parameters"].get("cypher", "")
                     activity["parameters"]["cypher"] = config.queries.get(cypher, cypher)
         current = existing.get(definition.name)
-        comparable = {key: payload[key] for key in ("name", "schedule", "watch_scans", "enabled", "stages")}
+        comparable = {
+            key: payload[key]
+            for key in (
+                "name",
+                "schedule",
+                "watch_scans",
+                "enabled",
+                "stages",
+                "trigger_workflows",
+            )
+        }
         changed = force or current is None or any(current.get(key) != value for key, value in comparable.items())
         if not changed:
             console.print(f"  [dim][skip][/dim] workflow '{definition.name}' (unchanged)")
@@ -817,6 +827,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
                             "watch_scans",
                             "enabled",
                             "stages",
+                            "trigger_workflows",
                         )
                     }
                 )

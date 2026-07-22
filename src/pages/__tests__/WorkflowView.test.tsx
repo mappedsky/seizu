@@ -9,6 +9,7 @@ jest.mock('src/hooks/useWorkflowsApi', () => ({
   useWorkflowRuns: jest.fn(),
   useWorkflowRunDetail: jest.fn(),
   useWorkflowMutations: jest.fn(),
+  useWorkflowsList: jest.fn(),
 }));
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: () => () => true,
@@ -25,6 +26,7 @@ const useWorkflow = workflowsApi.useWorkflow as jest.Mock;
 const useWorkflowRuns = workflowsApi.useWorkflowRuns as jest.Mock;
 const useWorkflowRunDetail = workflowsApi.useWorkflowRunDetail as jest.Mock;
 const useWorkflowMutations = workflowsApi.useWorkflowMutations as jest.Mock;
+const useWorkflowsList = workflowsApi.useWorkflowsList as jest.Mock;
 const useCurrentUser = currentUserHook.useCurrentUser as jest.Mock;
 
 beforeEach(() => {
@@ -59,6 +61,7 @@ beforeEach(() => {
           ],
         },
       ],
+      trigger_workflows: [],
       schedule: { type: 'interval', interval_minutes: 60 },
       watch_scans: [],
       enabled: true,
@@ -98,6 +101,12 @@ beforeEach(() => {
     updateWorkflow: jest.fn(),
     runWorkflow: jest.fn(),
     cancelWorkflowRun: jest.fn(),
+  });
+  useWorkflowsList.mockReturnValue({
+    workflows: [],
+    loading: false,
+    error: null,
+    refresh: jest.fn(),
   });
 });
 

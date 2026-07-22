@@ -42,6 +42,7 @@ import {
   useWorkflowMutations,
   useWorkflowRunDetail,
   useWorkflowRuns,
+  useWorkflowsList,
 } from 'src/hooks/useWorkflowsApi';
 import { describeSchedule } from 'src/scheduleSpec';
 import { temporalStatusColor, temporalStatusLabel } from 'src/temporalStatus';
@@ -232,6 +233,7 @@ export default function WorkflowView() {
   const hasPermission = usePermissions();
   const currentUser = useCurrentUser();
   const { workflow, loading, error, refresh } = useWorkflow(id ?? null);
+  const { workflows: workflowOptions } = useWorkflowsList({ poll: false });
   const {
     runs,
     error: runsError,
@@ -394,6 +396,18 @@ export default function WorkflowView() {
             <DetailItem label="Pipeline">
               {workflow.stages.length} stages · {activityCount} activities
             </DetailItem>
+            <DetailItem label="Then run">
+              {workflow.trigger_workflows.length
+                ? workflow.trigger_workflows
+                    .map(
+                      (workflowId) =>
+                        workflowOptions.find(
+                          (option) => option.workflow_id === workflowId,
+                        )?.name ?? 'Unavailable workflow',
+                    )
+                    .join(', ')
+                : 'None'}
+            </DetailItem>
             <DetailItem label="Owner">
               <UserDisplay userId={workflow.created_by} />
             </DetailItem>
@@ -468,6 +482,9 @@ export default function WorkflowView() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
+          workflowOptions={workflowOptions.filter(
+            (option) => option.created_by === currentUser?.user_id,
+          )}
           onClose={() => setEditOpen(false)}
           onSave={async (request: WorkflowRequest) => {
             await updateWorkflow(workflow.workflow_id, request);

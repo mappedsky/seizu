@@ -15,6 +15,9 @@ class ConfiguredWorkflowInvocation:
     # Set only by the watch-poll parent after it has already observed a new
     # SyncMetadata value. Keeping the default preserves old Temporal payloads.
     watch_checked: bool = False
+    # Workflow IDs already visited by a post-completion trigger chain. This
+    # prevents a configured A -> B -> A cycle from starting forever.
+    trigger_lineage: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -54,7 +57,17 @@ class ConfiguredWorkflowDefinition:
     creator_user_id: str
     version: int
     stages: list[ConfiguredStage] = field(default_factory=list)
+    trigger_workflows: list[str] = field(default_factory=list)
     skipped_reason: str | None = None
+
+
+@dataclass
+class TriggerConfiguredWorkflowsRequest:
+    source_workflow_id: str
+    source_creator_user_id: str
+    source_run_id: str
+    workflow_ids: list[str] = field(default_factory=list)
+    lineage: list[str] = field(default_factory=list)
 
 
 @dataclass

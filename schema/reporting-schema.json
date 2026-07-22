@@ -1250,6 +1250,14 @@
                     "minItems": 1,
                     "title": "Stages",
                     "type": "array"
+                },
+                "trigger_workflows": {
+                    "description": "Workflow IDs to start after all stages complete successfully.",
+                    "items": {
+                        "type": "string"
+                    },
+                    "title": "Trigger Workflows",
+                    "type": "array"
                 }
             },
             "required": [

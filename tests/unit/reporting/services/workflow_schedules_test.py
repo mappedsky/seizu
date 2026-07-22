@@ -192,6 +192,48 @@ async def test_reconcile_updates_existing_schedule(mocker):
     assert update.schedule.spec.intervals[0].every == timedelta(hours=2)
 
 
+async def test_reconcile_manual_workflow_removes_temporal_schedule(mocker):
+    delete = mocker.patch.object(
+        workflow_schedules,
+        "delete_schedule",
+        new=mocker.AsyncMock(),
+    )
+    status = mocker.patch.object(
+        workflow_schedules.report_store,
+        "set_workflow_schedule_sync_status",
+        new=mocker.AsyncMock(),
+    )
+
+    await workflow_schedules.reconcile(_item())
+
+    delete.assert_awaited_once_with("workflow-1")
+    assert status.await_args.args[:2] == ("workflow-1", "synced")
+
+
+async def test_run_triggered_starts_independent_workflow_with_lineage(mocker):
+    handle = SimpleNamespace(result_run_id="run-2")
+    client = SimpleNamespace(start_workflow=mocker.AsyncMock(return_value=handle))
+    mocker.patch.object(
+        workflow_schedules,
+        "get_client",
+        new=mocker.AsyncMock(return_value=client),
+    )
+
+    workflow_id, run_id = await workflow_schedules.run_triggered(
+        "workflow-2",
+        source_workflow_id="workflow-1",
+        source_run_id="source-run",
+        lineage=["workflow-0", "workflow-1"],
+    )
+
+    assert workflow_id == "seizu-workflow:workflow-2:trigger:workflow-1:source-run"
+    assert run_id == "run-2"
+    invocation = client.start_workflow.await_args.args[1]
+    assert invocation.workflow_id == "workflow-2"
+    assert invocation.manual is True
+    assert invocation.trigger_lineage == ["workflow-0", "workflow-1"]
+
+
 async def test_reconcile_by_id_handles_missing_manual_and_error(mocker):
     get = mocker.patch.object(
         workflow_schedules.report_store,

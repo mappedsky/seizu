@@ -117,6 +117,21 @@ def test_stored_workflow_activity_with_unknown_name_stays_unmigrated():
     assert activity.parameters == {"workflow": "not-registered"}
 
 
+def test_canonical_workflow_projects_post_completion_triggers():
+    item = _legacy_item(
+        cypher="",
+        stages=_body().model_dump()["stages"],
+        actions=[
+            {
+                "action_type": "trigger_workflow",
+                "action_config": {"workflow_id": "workflow-2"},
+            }
+        ],
+    )
+
+    assert workflows.item_to_workflow(item).trigger_workflows == ["workflow-2"]
+
+
 def test_stored_cartography_modules_migrate_to_module_runs():
     item = _legacy_item(
         cypher="",
@@ -417,6 +432,52 @@ async def test_create_and_update_persist_stages(mocker):
     assert update.await_args.kwargs["comment"] == "change"
     update.return_value = None
     assert await workflows.update("missing", body, "editor") is None
+
+
+async def test_create_and_update_drop_missing_and_self_trigger_targets(mocker):
+    stored = _legacy_item(stages=_body().model_dump()["stages"], actions=[], cypher="")
+    get = mocker.patch.object(
+        workflows.report_store,
+        "get_scheduled_query",
+        new=AsyncMock(
+            side_effect=lambda workflow_id: (
+                stored
+                if workflow_id == "workflow-2"
+                else stored.model_copy(update={"created_by": "other-user"})
+                if workflow_id == "foreign"
+                else None
+            )
+        ),
+    )
+    create = mocker.patch.object(
+        workflows.report_store,
+        "create_scheduled_query",
+        new=AsyncMock(return_value=stored),
+    )
+    update = mocker.patch.object(
+        workflows.report_store,
+        "update_scheduled_query",
+        new=AsyncMock(return_value=stored),
+    )
+    body = _body(trigger_workflows=["workflow-2", "missing", "foreign"])
+
+    await workflows.create(body, "user-1")
+    assert create.await_args.kwargs["actions"] == [
+        {
+            "action_type": "trigger_workflow",
+            "action_config": {"workflow_id": "workflow-2"},
+        }
+    ]
+
+    body = _body(trigger_workflows=["workflow-1", "workflow-2", "missing", "foreign"])
+    await workflows.update("workflow-1", body, "user-1")
+    assert update.await_args.kwargs["actions"] == [
+        {
+            "action_type": "trigger_workflow",
+            "action_config": {"workflow_id": "workflow-2"},
+        }
+    ]
+    assert "workflow-1" not in [call.args[0] for call in get.await_args_list]
 
 
 async def test_managed_mutations_are_owner_scoped(mocker):

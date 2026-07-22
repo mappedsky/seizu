@@ -28,6 +28,7 @@ from reporting.services import (
     mcp_runtime,
     report_store,
     sandbox_remediation,
+    workflow_schedules,
 )
 from reporting.services import (
     workflows as workflow_service,
@@ -57,6 +58,7 @@ from reporting.temporal_workflows.shared import (
     PrCiStatusResult,
     RepoChatInput,
     RepoChatResult,
+    TriggerConfiguredWorkflowsRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,7 +141,66 @@ async def load_configured_workflow(
         creator_user_id=item.created_by,
         version=item.current_version,
         stages=stages,
+        trigger_workflows=workflow_service.triggered_workflow_ids(item),
     )
+
+
+@activity.defn
+async def trigger_configured_workflows(request: TriggerConfiguredWorkflowsRequest) -> list[str]:
+    """Start configured workflows independently after their source succeeds."""
+
+    started: list[str] = []
+    failures: list[Exception] = []
+    lineage = [*request.lineage, request.source_workflow_id]
+    for workflow_id in request.workflow_ids:
+        if workflow_id in lineage:
+            logger.warning(
+                "Skipping cyclic triggered workflow",
+                extra={
+                    "source_workflow_id": request.source_workflow_id,
+                    "trigger_workflow_id": workflow_id,
+                },
+            )
+            continue
+        target = await report_store.get_scheduled_query(workflow_id)
+        if target is None:
+            logger.warning(
+                "Skipping missing triggered workflow",
+                extra={
+                    "source_workflow_id": request.source_workflow_id,
+                    "trigger_workflow_id": workflow_id,
+                },
+            )
+            continue
+        if target.created_by != request.source_creator_user_id:
+            logger.warning(
+                "Skipping triggered workflow owned by another user",
+                extra={
+                    "source_workflow_id": request.source_workflow_id,
+                    "trigger_workflow_id": workflow_id,
+                },
+            )
+            continue
+        try:
+            temporal_workflow_id, _ = await workflow_schedules.run_triggered(
+                workflow_id,
+                source_workflow_id=request.source_workflow_id,
+                source_run_id=request.source_run_id,
+                lineage=lineage,
+            )
+            started.append(temporal_workflow_id)
+        except Exception as exc:
+            failures.append(exc)
+            logger.exception(
+                "Unable to start triggered workflow",
+                extra={
+                    "source_workflow_id": request.source_workflow_id,
+                    "trigger_workflow_id": workflow_id,
+                },
+            )
+    if failures:
+        raise failures[0]
+    return started
 
 
 @activity.defn

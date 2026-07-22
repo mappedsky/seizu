@@ -49,6 +49,7 @@ function triggerLabel(item: WorkflowItem): string {
 
 const nameColumnSx = { ...listTablePrimaryCellSx, width: '28%' };
 const statusColumnSx = { width: 160 };
+const lastRunColumnSx = { width: 184 };
 const enabledColumnSx = { width: 120 };
 const versionColumnSx = { width: 96 };
 const updatedColumnSx = { width: 184 };
@@ -164,6 +165,15 @@ export default function Workflows() {
             variant="outlined"
           />
         ),
+      },
+      {
+        key: 'last_run_at',
+        label: 'Last Run',
+        cellSx: lastRunColumnSx,
+        render: (item) =>
+          item.last_run_at
+            ? new Date(item.last_run_at).toLocaleString()
+            : 'Never',
       },
       {
         key: 'enabled',
@@ -303,6 +313,9 @@ export default function Workflows() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
+          workflowOptions={workflows.filter(
+            (workflow) => workflow.created_by === currentUser?.user_id,
+          )}
           onClose={() => setDialogOpen(false)}
           onSave={save}
         />

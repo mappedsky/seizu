@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -30,6 +31,7 @@ from reporting.temporal_workflows import (
 )
 
 LEGACY_QUERY_OUTPUT = "query"
+TRIGGER_WORKFLOW_ACTION = "trigger_workflow"
 
 
 class WorkflowDefinitionError(ValueError):
@@ -161,11 +163,61 @@ def normalized_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[
     ]
 
 
+def triggered_workflow_ids(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[str]:
+    """Project canonical post-completion triggers from the versioned envelope.
+
+    Canonical workflows already reserve ``actions`` (legacy records use them
+    as activity stages), so this keeps the new field versioned on both report
+    store backends without introducing a SQL compatibility migration.
+    """
+
+    if item.stages is None:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for action in item.actions:
+        if action.get("action_type") != TRIGGER_WORKFLOW_ACTION:
+            continue
+        workflow_id = (action.get("action_config") or {}).get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id and workflow_id not in seen:
+            result.append(workflow_id)
+            seen.add(workflow_id)
+    return result
+
+
+def _trigger_actions(workflow_ids: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "action_type": TRIGGER_WORKFLOW_ACTION,
+            "action_config": {"workflow_id": workflow_id},
+        }
+        for workflow_id in workflow_ids
+    ]
+
+
+async def _existing_trigger_workflows(
+    workflow_ids: list[str],
+    *,
+    owner_user_id: str,
+    exclude: str | None = None,
+) -> list[str]:
+    """Drop missing or foreign targets at save time, retaining order."""
+
+    candidates = [workflow_id for workflow_id in workflow_ids if workflow_id != exclude]
+    records = await asyncio.gather(*(report_store.get_scheduled_query(workflow_id) for workflow_id in candidates))
+    return [
+        workflow_id
+        for workflow_id, record in zip(candidates, records, strict=True)
+        if record is not None and record.created_by == owner_user_id
+    ]
+
+
 def item_to_workflow(item: ScheduledQueryItem) -> WorkflowItem:
     return WorkflowItem(
         workflow_id=item.scheduled_query_id,
         name=item.name,
         stages=normalized_stages(item),
+        trigger_workflows=triggered_workflow_ids(item),
         schedule=item.schedule,
         watch_scans=item.watch_scans,
         enabled=item.enabled,
@@ -189,6 +241,7 @@ def version_to_workflow(version: ScheduledQueryVersion) -> WorkflowVersion:
         name=version.name,
         version=version.version,
         stages=normalized_stages(version),
+        trigger_workflows=triggered_workflow_ids(version),
         schedule=version.schedule,
         watch_scans=version.watch_scans,
         enabled=version.enabled,
@@ -391,6 +444,10 @@ async def validate_definition(body: CreateWorkflowRequest) -> str | None:
 
 
 async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
+    trigger_workflows = await _existing_trigger_workflows(
+        body.trigger_workflows,
+        owner_user_id=created_by,
+    )
     item = await report_store.create_scheduled_query(
         name=body.name,
         cypher="",
@@ -399,7 +456,7 @@ async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
         schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=[value.model_dump() for value in body.watch_scans],
         enabled=body.enabled,
-        actions=[],
+        actions=_trigger_actions(trigger_workflows),
         created_by=created_by,
         stages=[stage.model_dump() for stage in body.stages],
     )
@@ -407,6 +464,11 @@ async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
 
 
 async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str) -> WorkflowItem | None:
+    trigger_workflows = await _existing_trigger_workflows(
+        body.trigger_workflows,
+        owner_user_id=updated_by,
+        exclude=workflow_id,
+    )
     item = await report_store.update_scheduled_query(
         sq_id=workflow_id,
         name=body.name,
@@ -416,7 +478,7 @@ async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str)
         schedule=body.schedule.model_dump() if body.schedule else None,
         watch_scans=[value.model_dump() for value in body.watch_scans],
         enabled=body.enabled,
-        actions=[],
+        actions=_trigger_actions(trigger_workflows),
         updated_by=updated_by,
         comment=body.comment,
         stages=[stage.model_dump() for stage in body.stages],

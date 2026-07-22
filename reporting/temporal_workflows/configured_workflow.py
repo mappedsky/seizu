@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
         load_configured_workflow,
         normalize_code_workflow_output,
         record_configured_workflow_result,
+        trigger_configured_workflows,
     )
     from reporting.temporal_workflows.shared import (
         CodeWorkflowInputRequest,
@@ -27,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         ConfiguredQueryInput,
         ConfiguredWorkflowInvocation,
         ConfiguredWorkflowResult,
+        TriggerConfiguredWorkflowsRequest,
     )
 
 
@@ -44,6 +46,7 @@ WORKFLOW_WAITING_SLOT_ID_PREFIX = "seizu-configured-workflow-waiting:"
 _WORKFLOW_MUTEX_POLL_SECONDS = 30
 _WORKFLOW_MUTEX_PATCH = "configured-workflow-mutex-v1"
 _WORKFLOW_SINGLE_WAITER_PATCH = "configured-workflow-single-waiter-v1"
+_WORKFLOW_TRIGGERS_PATCH = "configured-workflow-post-completion-triggers-v1"
 
 
 @workflow.defn(name="seizu_configured_workflow")
@@ -306,6 +309,28 @@ async def _run_configured_workflow(invocation: ConfiguredWorkflowInvocation) -> 
                 # payload conversion and validation.
                 outputs[result.output_id] = result
                 summaries.append({"output": result.output_id, **result.metadata})
+        if workflow.patched(_WORKFLOW_TRIGGERS_PATCH):
+            trigger_workflows = list(getattr(definition, "trigger_workflows", []))
+            if trigger_workflows:
+                started = await workflow.execute_activity(
+                    trigger_configured_workflows,
+                    TriggerConfiguredWorkflowsRequest(
+                        source_workflow_id=definition.workflow_id,
+                        source_creator_user_id=definition.creator_user_id,
+                        source_run_id=workflow.info().run_id,
+                        workflow_ids=trigger_workflows,
+                        lineage=list(getattr(invocation, "trigger_lineage", [])),
+                    ),
+                    activity_id="trigger_workflows",
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                summaries.append(
+                    {
+                        "triggered_workflows": len(started),
+                        "temporal_workflow_ids": started,
+                    }
+                )
         await workflow.execute_activity(
             record_configured_workflow_result,
             {"workflow_id": definition.workflow_id, "status": "success", "error": None},

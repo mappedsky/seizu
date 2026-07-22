@@ -90,6 +90,7 @@ export default function WorkflowHistory() {
                   await updateWorkflow(id, {
                     name: version.name,
                     stages: version.stages,
+                    trigger_workflows: version.trigger_workflows,
                     schedule: version.schedule,
                     watch_scans: version.watch_scans,
                     enabled: version.enabled,

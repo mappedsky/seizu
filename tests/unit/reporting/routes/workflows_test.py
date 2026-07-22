@@ -51,9 +51,14 @@ def _stored_item():
 
 
 async def test_list_workflows_returns_canonical_shape(mocker):
+    item = _stored_item().model_copy(update={"last_run_status": "success"})
     mocker.patch(
         "reporting.routes.workflows.report_store.list_scheduled_queries",
-        new=AsyncMock(return_value=[_stored_item()]),
+        new=AsyncMock(return_value=[item]),
+    )
+    active_statuses = mocker.patch(
+        "reporting.routes.workflows.temporal_runs.list_active_workflow_statuses",
+        new=AsyncMock(return_value={"workflow-1": "running"}),
     )
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.get("/api/v1/workflows")
@@ -62,6 +67,25 @@ async def test_list_workflows_returns_canonical_shape(mocker):
     workflow = response.json()["workflows"][0]
     assert workflow["workflow_id"] == "workflow-1"
     assert workflow["stages"][0]["activities"][0]["output"] == "critical"
+    assert workflow["last_run_status"] == "running"
+    active_statuses.assert_awaited_once()
+
+
+async def test_list_workflows_falls_back_to_last_result_when_temporal_is_unavailable(mocker):
+    item = _stored_item().model_copy(update={"last_run_status": "success"})
+    mocker.patch(
+        "reporting.routes.workflows.report_store.list_scheduled_queries",
+        new=AsyncMock(return_value=[item]),
+    )
+    mocker.patch(
+        "reporting.routes.workflows.temporal_runs.list_active_workflow_statuses",
+        new=AsyncMock(side_effect=temporal_runs.TemporalUnavailableError()),
+    )
+
+    response = await _request("GET", "/api/v1/workflows")
+
+    assert response.status_code == 200
+    assert response.json()["workflows"][0]["last_run_status"] == "success"
 
 
 async def test_create_workflow_reconciles_schedule(mocker):

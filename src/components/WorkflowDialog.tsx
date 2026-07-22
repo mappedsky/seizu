@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useMemo, useState } from 'react';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Checkbox,
@@ -61,6 +62,7 @@ type ActivityForm = WorkflowActivity & {
   moduleRuns: ModuleRunForm[];
 };
 type StageForm = { editorId: string; activities: ActivityForm[] };
+type TriggerWorkflowForm = { editorId: string; workflowId: string };
 
 function displayValue(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
@@ -115,6 +117,15 @@ function stageForms(initial: WorkflowItem | null): StageForm[] {
     activities: stage.activities.map(activityForm),
   }));
   return clearInvalidInputs(forms);
+}
+
+function triggerWorkflowForms(
+  initial: WorkflowItem | null,
+): TriggerWorkflowForm[] {
+  return (initial?.trigger_workflows ?? []).map((workflowId) => ({
+    editorId: editorId('trigger-workflow'),
+    workflowId,
+  }));
 }
 
 function nextOutputName(stages: StageForm[], stageIndex: number): string {
@@ -273,6 +284,7 @@ export default function WorkflowDialog({
   activityTypes,
   activitySchemas,
   activityDefinitions = {},
+  workflowOptions = [],
   onClose,
   onSave,
 }: {
@@ -281,13 +293,22 @@ export default function WorkflowDialog({
   activityTypes: string[];
   activitySchemas: Record<string, ActionConfigFieldDef[]>;
   activityDefinitions?: Record<string, WorkflowActivityDefinition>;
+  workflowOptions?: WorkflowItem[];
   onClose: () => void;
   onSave: (request: WorkflowRequest) => Promise<void>;
 }) {
   const [name, setName] = useState(initial?.name ?? '');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
-  const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
-    initial?.watch_scans.length ? 'watch_scans' : 'schedule',
+  const [triggerType, setTriggerType] = useState<
+    'manual' | 'schedule' | 'watch_scans'
+  >(
+    initial === null
+      ? 'schedule'
+      : initial.watch_scans.length
+        ? 'watch_scans'
+        : initial.schedule
+          ? 'schedule'
+          : 'manual',
   );
   const defaultSchedule: ScheduleSpec =
     initial?.schedule ??
@@ -298,6 +319,9 @@ export default function WorkflowDialog({
   const [watchScans, setWatchScans] = useState<WorkflowWatchScan[]>(
     initial?.watch_scans ?? [],
   );
+  const [triggerWorkflows, setTriggerWorkflows] = useState<
+    TriggerWorkflowForm[]
+  >(triggerWorkflowForms(initial));
   const [stages, setStages] = useState<StageForm[]>(stageForms(initial));
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
@@ -474,6 +498,8 @@ export default function WorkflowDialog({
     if (!name.trim()) return setError('Name is required.');
     if (triggerType === 'schedule' && schedule === null)
       return setError('Complete the schedule before saving.');
+    if (triggerWorkflows.some((workflow) => !workflow.workflowId))
+      return setError('Select a workflow for every completion trigger.');
     if (!stages.length || stages.some((stage) => !stage.activities.length))
       return setError('Every workflow requires at least one non-empty stage.');
 
@@ -580,6 +606,9 @@ export default function WorkflowDialog({
         enabled,
         schedule: triggerType === 'schedule' ? schedule : null,
         watch_scans: triggerType === 'watch_scans' ? watchScans : [],
+        trigger_workflows: triggerWorkflows.map(
+          (workflow) => workflow.workflowId,
+        ),
         stages: serializedStages,
         comment: comment.trim() || null,
       });
@@ -628,10 +657,15 @@ export default function WorkflowDialog({
                 value={triggerType}
                 onChange={(event) =>
                   setTriggerType(
-                    event.target.value as 'schedule' | 'watch_scans',
+                    event.target.value as 'manual' | 'schedule' | 'watch_scans',
                   )
                 }
               >
+                <FormControlLabel
+                  value="manual"
+                  control={<Radio />}
+                  label="Manual"
+                />
                 <FormControlLabel
                   value="schedule"
                   control={<Radio />}
@@ -644,7 +678,12 @@ export default function WorkflowDialog({
                 />
               </RadioGroup>
             </FormControl>
-            {triggerType === 'schedule' ? (
+            {triggerType === 'manual' ? (
+              <Typography color="text.secondary" variant="body2">
+                This workflow runs only when started manually or triggered by
+                another workflow.
+              </Typography>
+            ) : triggerType === 'schedule' ? (
               <ScheduleSpecEditor
                 initial={defaultSchedule}
                 onChange={setSchedule}
@@ -713,6 +752,142 @@ export default function WorkflowDialog({
                 ))}
               </Box>
             )}
+            <Divider />
+            <Box>
+              <Box
+                sx={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <FormLabel component="div">
+                    On successful completion
+                  </FormLabel>
+                  <Tooltip
+                    title="Trigger any selected workflow after all stages finish."
+                    placement="top"
+                    arrow
+                    describeChild
+                  >
+                    <IconButton
+                      aria-label="Help for On successful completion"
+                      size="small"
+                    >
+                      <HelpOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+                <Button
+                  startIcon={<AddIcon />}
+                  disabled={
+                    triggerWorkflows.some((workflow) => !workflow.workflowId) ||
+                    workflowOptions.filter(
+                      (workflow) =>
+                        workflow.workflow_id !== initial?.workflow_id &&
+                        !triggerWorkflows.some(
+                          (selected) =>
+                            selected.workflowId === workflow.workflow_id,
+                        ),
+                    ).length === 0
+                  }
+                  onClick={() =>
+                    setTriggerWorkflows((current) => [
+                      ...current,
+                      {
+                        editorId: editorId('trigger-workflow'),
+                        workflowId: '',
+                      },
+                    ])
+                  }
+                >
+                  Add workflow
+                </Button>
+              </Box>
+              {triggerWorkflows.length === 0 ? (
+                <Typography color="text.secondary" variant="body2">
+                  No workflows to be triggered.
+                </Typography>
+              ) : null}
+              {triggerWorkflows.map((trigger, triggerIndex) => {
+                const selectedByAnotherRow = new Set(
+                  triggerWorkflows
+                    .filter((item) => item.editorId !== trigger.editorId)
+                    .map((item) => item.workflowId)
+                    .filter(Boolean),
+                );
+                const optionIds = workflowOptions
+                  .filter(
+                    (workflow) =>
+                      workflow.workflow_id !== initial?.workflow_id &&
+                      !selectedByAnotherRow.has(workflow.workflow_id),
+                  )
+                  .map((workflow) => workflow.workflow_id);
+                if (
+                  trigger.workflowId &&
+                  !optionIds.includes(trigger.workflowId)
+                ) {
+                  optionIds.unshift(trigger.workflowId);
+                }
+                const workflowName = (workflowId: string) =>
+                  workflowOptions.find(
+                    (workflow) => workflow.workflow_id === workflowId,
+                  )?.name ?? 'Unavailable workflow';
+                return (
+                  <Box
+                    key={trigger.editorId}
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 1,
+                      mt: 1,
+                    }}
+                  >
+                    <Autocomplete
+                      options={optionIds}
+                      value={trigger.workflowId || null}
+                      getOptionLabel={workflowName}
+                      getOptionDisabled={(workflowId) =>
+                        !workflowOptions.some(
+                          (workflow) => workflow.workflow_id === workflowId,
+                        )
+                      }
+                      onChange={(_event, workflowId) =>
+                        setTriggerWorkflows((current) =>
+                          current.map((item) =>
+                            item.editorId === trigger.editorId
+                              ? { ...item, workflowId: workflowId ?? '' }
+                              : item,
+                          ),
+                        )
+                      }
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label={`Workflow ${triggerIndex + 1}`}
+                          size="small"
+                        />
+                      )}
+                      size="small"
+                      sx={{ flex: 1 }}
+                    />
+                    <IconButton
+                      aria-label={`Remove triggered workflow ${triggerIndex + 1}`}
+                      onClick={() =>
+                        setTriggerWorkflows((current) =>
+                          current.filter(
+                            (item) => item.editorId !== trigger.editorId,
+                          ),
+                        )
+                      }
+                    >
+                      <DeleteOutlineIcon />
+                    </IconButton>
+                  </Box>
+                );
+              })}
+            </Box>
             <Divider />
             <Box
               sx={{
