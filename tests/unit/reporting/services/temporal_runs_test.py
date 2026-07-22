@@ -93,6 +93,10 @@ def test_workflow_id_matches():
         _SQ_ID,
         f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z",
     )
+    assert temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:trigger:source-workflow:source-run",
+    )
 
 
 def test_workflow_id_matches_rejects_foreign_ids():
@@ -109,6 +113,10 @@ def test_workflow_id_matches_rejects_foreign_ids():
     assert not temporal_runs.workflow_id_matches(
         _SQ_ID,
         f"seizu-workflow:{_SQ_ID}:run:2026-07-16T12:00:00Z:stage:1:activity:1:child",
+    )
+    assert not temporal_runs.workflow_id_matches(
+        _SQ_ID,
+        f"seizu-workflow:{_SQ_ID}:trigger:source:run:stage:1:activity:1:child",
     )
     assert not temporal_runs.workflow_id_matches(
         _SQ_ID,
@@ -265,6 +273,54 @@ async def test_list_workflow_runs_reports_deduplicated_run_as_skipped(mocker):
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):
     client, _ = _mock_client(mocker)
     assert await temporal_runs.list_workflow_runs('sq" OR WorkflowId="x', limit=10) == []
+
+
+async def test_list_active_workflow_statuses_uses_one_visibility_query(mocker):
+    waiting_id = f"seizu-workflow:{_SQ_ID}:manual:newest"
+    running_id = "seizu-workflow:other-workflow:manual:current"
+    executions = [
+        SimpleNamespace(
+            id=waiting_id,
+            run_id="run-waiting",
+            status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+        ),
+        SimpleNamespace(
+            id=running_id,
+            run_id="run-running",
+            status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+        ),
+    ]
+    waiting_handle = _mock_handle(
+        [
+            _event(
+                1,
+                start_child_workflow_execution_initiated_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                        workflow_id=f"seizu-configured-workflow-mutex:{_SQ_ID}",
+                        workflow_type=common_pb.WorkflowType(name="seizu_configured_workflow_execution"),
+                    )
+                ),
+            ),
+            _event(
+                2,
+                start_child_workflow_execution_failed_event_attributes=(
+                    history_pb.StartChildWorkflowExecutionFailedEventAttributes(initiated_event_id=1)
+                ),
+            ),
+        ],
+        status=temporalio.client.WorkflowExecutionStatus.RUNNING,
+    )
+    running_handle = _mock_handle([], status=temporalio.client.WorkflowExecutionStatus.RUNNING)
+    client, captured = _mock_client(mocker, executions=executions)
+    client.get_workflow_handle = MagicMock(
+        side_effect=lambda workflow_id, run_id: waiting_handle if workflow_id == waiting_id else running_handle
+    )
+
+    statuses = await temporal_runs.list_active_workflow_statuses([_SQ_ID, "other-workflow"])
+
+    assert statuses == {_SQ_ID: "waiting", "other-workflow": "running"}
+    assert captured["query"] == ('ExecutionStatus = "Running" AND WorkflowId STARTS_WITH "seizu-workflow:"')
+    assert captured["limit"] is None
 
 
 async def test_list_watch_runs_excludes_poll_and_uses_definition_name(mocker):

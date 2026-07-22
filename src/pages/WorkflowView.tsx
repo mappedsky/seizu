@@ -233,7 +233,7 @@ export default function WorkflowView() {
   const hasPermission = usePermissions();
   const currentUser = useCurrentUser();
   const { workflow, loading, error, refresh } = useWorkflow(id ?? null);
-  const { workflows: workflowOptions } = useWorkflowsList();
+  const { workflows: workflowOptions } = useWorkflowsList({ poll: false });
   const {
     runs,
     error: runsError,

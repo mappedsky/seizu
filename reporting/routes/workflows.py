@@ -28,8 +28,19 @@ router = APIRouter()
 async def list_workflows(
     current: CurrentUser = Depends(require_permission(Permission.WORKFLOWS_READ)),
 ) -> WorkflowListResponse:
+    workflow_items = [workflows.item_to_workflow(item) for item in await report_store.list_scheduled_queries()]
+    try:
+        active_statuses = await temporal_runs.list_active_workflow_statuses(item.workflow_id for item in workflow_items)
+    except Exception:
+        # Workflow definitions remain useful when Temporal visibility is
+        # temporarily unavailable; fall back to their persisted last result.
+        logger.warning("Unable to load active workflow statuses", exc_info=True)
+        active_statuses = {}
     return WorkflowListResponse(
-        workflows=[workflows.item_to_workflow(item) for item in await report_store.list_scheduled_queries()]
+        workflows=[
+            item.model_copy(update={"last_run_status": active_statuses.get(item.workflow_id, item.last_run_status)})
+            for item in workflow_items
+        ]
     )
 
 

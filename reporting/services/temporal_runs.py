@@ -92,6 +92,9 @@ def workflow_id_matches(sq_id: str, workflow_id: str) -> bool:
     if workflow_id.startswith(f"{configured_id}:manual:"):
         suffix = workflow_id.removeprefix(f"{configured_id}:manual:")
         return bool(suffix) and ":stage:" not in suffix and ":activity:" not in suffix
+    if workflow_id.startswith(f"{configured_id}:trigger:"):
+        suffix = workflow_id.removeprefix(f"{configured_id}:trigger:")
+        return bool(suffix) and ":stage:" not in suffix and ":activity:" not in suffix
     if re.fullmatch(rf"{re.escape(configured_id)}:run:{_SCHEDULE_TIME_RE}", workflow_id):
         return True
     # Temporal Schedule actions append the nominal schedule time to the
@@ -258,6 +261,49 @@ async def list_workflow_runs(
         _raise_if_unavailable(exc)
         raise
     return runs
+
+
+async def list_active_workflow_statuses(workflow_ids: Iterable[str]) -> dict[str, str]:
+    """Return the newest active Temporal status for each configured workflow.
+
+    A single visibility query keeps the workflows list from issuing one
+    Temporal request per row. Visibility is StartTime-descending, matching the
+    run-detail view's choice when overlapping executions are active.
+    """
+
+    candidates = tuple(dict.fromkeys(workflow_ids))
+    if not candidates:
+        return {}
+
+    import temporalio.service
+
+    client = await _get_client()
+    statuses: dict[str, str] = {}
+    query = 'ExecutionStatus = "Running" AND WorkflowId STARTS_WITH "seizu-workflow:"'
+    try:
+        async for execution in client.list_workflows(query):
+            workflow_id = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate not in statuses and workflow_id_matches(candidate, execution.id)
+                ),
+                None,
+            )
+            if workflow_id is None:
+                continue
+            status = _status_name(execution.status)
+            if status == "running":
+                handle = client.get_workflow_handle(execution.id, run_id=execution.run_id)
+                if await _is_waiting_for_workflow_mutex(handle):
+                    status = "waiting"
+            statuses[workflow_id] = status
+            if len(statuses) == len(candidates):
+                break
+    except temporalio.service.RPCError as exc:
+        _raise_if_unavailable(exc)
+        raise
+    return statuses
 
 
 async def get_workflow_run_detail(
