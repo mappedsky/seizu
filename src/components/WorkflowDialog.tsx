@@ -761,7 +761,24 @@ export default function WorkflowDialog({
                   alignItems: 'center',
                 }}
               >
-                <FormLabel component="div">On successful completion</FormLabel>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <FormLabel component="div">
+                    On successful completion
+                  </FormLabel>
+                  <Tooltip
+                    title="Trigger any selected workflow after all stages finish."
+                    placement="top"
+                    arrow
+                    describeChild
+                  >
+                    <IconButton
+                      aria-label="Help for On successful completion"
+                      size="small"
+                    >
+                      <HelpOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
                 <Button
                   startIcon={<AddIcon />}
                   disabled={
@@ -788,16 +805,9 @@ export default function WorkflowDialog({
                   Add workflow
                 </Button>
               </Box>
-              <Typography
-                color="text.secondary"
-                variant="body2"
-                sx={{ mb: 0.5 }}
-              >
-                Start any selected workflows after all stages finish.
-              </Typography>
               {triggerWorkflows.length === 0 ? (
                 <Typography color="text.secondary" variant="body2">
-                  No workflows will be started.
+                  No workflows to be triggered.
                 </Typography>
               ) : null}
               {triggerWorkflows.map((trigger, triggerIndex) => {

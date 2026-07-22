@@ -196,6 +196,23 @@ it('supports manual workflows and post-completion workflow triggers', async () =
   );
 
   expect(screen.getByRole('radio', { name: 'Manual' })).toBeChecked();
+  expect(screen.getByText('No workflows to be triggered.')).toBeInTheDocument();
+  expect(
+    screen.queryByText(
+      'Trigger any selected workflow after all stages finish.',
+    ),
+  ).not.toBeInTheDocument();
+  fireEvent.mouseOver(
+    screen.getByRole('button', {
+      name: 'Help for On successful completion',
+    }),
+  );
+  expect(
+    await screen.findByRole('tooltip', {
+      name: 'Trigger any selected workflow after all stages finish.',
+    }),
+  ).toBeInTheDocument();
+
   fireEvent.click(screen.getByRole('button', { name: 'Add workflow' }));
   const firstWorkflow = screen.getByRole('combobox', { name: 'Workflow 1' });
   fireEvent.change(firstWorkflow, { target: { value: 'Down' } });
