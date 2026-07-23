@@ -6,37 +6,157 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+The headline of this release is **staged, configurable Temporal workflows**:
+scheduled queries grow into `Workflow`s with sequential stages, parallel
+activities per stage, and named outputs referenced by later stages — served
+from a new top-level `/app/workflows` page and `/api/v1/workflows` API, with
+the old scheduled-query UI/API kept as a compatibility alias. Cartography
+intel syncs move onto the same engine via a dedicated Temporal worker image.
 
-**Code-defined workflows are top-level activity types** (#223)
-- The generic `workflow` activity sub-type (and the legacy `temporal`
-  scheduled-query action) is removed. `cve_repo_report`,
+This release has real breaking edges — an env var rename with no
+back-compat shim, and a rejected-on-save (though transparently
+migrated-on-read) legacy activity shape — see
+[Breaking changes](#breaking-changes-unreleased) and
+[Upgrade notes](#upgrade-notes-unreleased) before deploying.
+
+### ⚠️ Breaking changes {#breaking-changes-unreleased}
+
+- **Cartography credential env vars are now namespaced** (#228). `NIST_NVD_TOKEN`,
+  `CROWDSTRIKE_CLIENT_ID`, `CROWDSTRIKE_CLIENT_SECRET`, `PAGERDUTY_API_KEY`, and
+  `OKTA_API_KEY` are renamed to `CARTOGRAPHY_NIST_NVD_TOKEN`,
+  `CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID`, `CARTOGRAPHY_CROWDSTRIKE_CLIENT_SECRET`,
+  `CARTOGRAPHY_PAGERDUTY_API_KEY`, and `CARTOGRAPHY_OKTA_API_KEY`, alongside many
+  new `CARTOGRAPHY_<MODULE>_*` variables covering the rest of Cartography
+  0.139.0's intel modules. **There is no fallback to the old names** — rename
+  them in your `.env` or the corresponding module silently syncs without
+  credentials after upgrading.
+- **Code-defined workflows are top-level activity types, not a generic
+  `workflow` sub-type** (#227, addresses #223). `cve_repo_report`,
   `cve_dependency_remediation`, and `cartography_sync` are now their own
   activity types in the workflow editor; a new `WorkflowSpec` in
   `WORKFLOW_REGISTRY` automatically becomes one.
-- **Breaking on save, migrated on read:** stored definitions using
-  `type: workflow` + `parameters.workflow` keep running — they are migrated
-  transparently when loaded (including by the Temporal worker) — but new saves
-  must use the top-level types. Editing a legacy definition in the UI saves it
-  in the canonical shape.
-- The cartography activity config is now an ordered **Intel modules** list
-  (`module_runs`: `{module, params}` entries executed sequentially, with an
-  "Add intel module" button and per-module parameter sub-forms). The
-  `modules` and advanced `pipeline` JSON fields are removed (stored configs
-  are migrated on read). `create-indexes` and `analysis` are no longer
-  injected implicitly — they are ordinary selectable modules; place
-  create-indexes before ingestion and analysis after it (migrated configs get
-  them materialized explicitly, preserving behavior). Parallel syncs are
-  expressed as multiple cartography activities in one workflow stage.
-- Operators with a custom `WORKFLOW_ACTIVITY_MODULES` value should drop
-  `reporting.scheduled_query_modules.workflow` (or `.temporal`) from it; stale
-  entries are skipped with a warning instead of failing worker startup. The
-  deprecated legacy scheduled-query worker (`ENABLE_SCHEDULED_QUERIES=true`)
-  can no longer execute stored `temporal` actions.
-- `GET /api/v1/config` no longer serves `workflow_activity_dependent_schemas`
-  (per-workflow fields are inlined into each type's
-  `workflow_activity_definitions` entry), and
-  `scheduled_query_action_dependent_schemas` is now always empty.
+  - **Breaking on save, migrated on read:** stored definitions using
+    `type: workflow` + `parameters.workflow` (and the legacy `temporal`
+    scheduled-query action) keep running — they're migrated transparently
+    when loaded, including by the Temporal worker — but new saves must use
+    the top-level types. Editing a legacy definition in the UI saves it in
+    the canonical shape. Anything that creates/updates workflow or
+    scheduled-query definitions directly against the REST/MCP API (rather
+    than through the UI) with the old shape will start getting rejected.
+  - The cartography activity config is now an ordered **Intel modules** list
+    (`module_runs`: `{module, params}` entries executed sequentially, with an
+    "Add intel module" button and per-module parameter sub-forms). The
+    `modules` and advanced `pipeline` JSON fields are removed (stored configs
+    are migrated on read). `create-indexes` and `analysis` are no longer
+    injected implicitly — they're ordinary selectable modules; migrated
+    configs get them materialized explicitly, preserving behavior.
+  - Operators with a custom `WORKFLOW_ACTIVITY_MODULES` value should drop
+    `reporting.scheduled_query_modules.workflow` (or `.temporal`) from it;
+    stale entries are skipped with a warning instead of failing worker
+    startup. The deprecated legacy scheduled-query worker
+    (`ENABLE_SCHEDULED_QUERIES=true`) can no longer execute stored `temporal`
+    actions.
+  - `GET /api/v1/config` no longer serves `workflow_activity_dependent_schemas`
+    (per-workflow fields are inlined into each type's
+    `workflow_activity_definitions` entry), and
+    `scheduled_query_action_dependent_schemas` is now always empty.
+- **Legacy `/api/v1/scheduled-queries/*` endpoints and CLI/MCP scheduled-query
+  tools only project "legacy-representable" items** (#221). A definition
+  saved with multiple stages, cross-stage output references, or the new
+  `trigger_workflows` chaining is no longer visible through the old
+  endpoints — they 404 it — even though it's fully manageable through the
+  new `/api/v1/workflows/*` API and `/app/workflows` UI. Existing
+  single-stage definitions are unaffected until edited into the new shape.
+
+### Added
+
+**Staged configurable workflows** (#221)
+- Scheduled queries are now `Workflow`s: an ordered list of **stages**, each
+  running its activities **in parallel**; an activity can reference a named
+  output from any earlier stage as input (query is an ordinary activity;
+  its result is exposed to later stages as `$input`). New top-level
+  `/app/workflows` page and `WorkflowItem`/`WorkflowVersion` REST API
+  (`/api/v1/workflows`, plus `/versions` history), alongside the existing
+  `/app/scheduled-queries` page and `/api/v1/scheduled-queries` API, which
+  remain as compatibility aliases.
+- New permissions `workflows:read`/`write`/`delete`, mapped 1:1 onto the
+  existing `scheduled_queries:read`/`write`/`delete` built-in role grants.
+  Custom roles that grant one alias transparently gain the other **for one
+  compatibility release** — plan to add the `workflows:*` permissions
+  explicitly to custom roles before they're removed.
+
+**Cartography syncs via Temporal** (#219, #228)
+- New `cartography_sync` workflow type runs Cartography intel-module syncs
+  as ordinary workflow stages (sequential stages, parallel module runs per
+  stage) instead of by hand, dispatched to a dedicated
+  `seizu-cartography-worker` service/image holding only cartography
+  credentials. Concurrent runs of the same module serialize on a Temporal
+  child-workflow-ID mutex (`seizu-cartography-module:{module}`; waits are
+  visible in the run history UI).
+- `#228` widens the registry to cover every Cartography 0.139.0 intel module
+  (see Breaking changes above for the credential env var rename that comes
+  with it) and pins the sync-worker image to `0.139.0` by tag + digest.
+  `make build_cartography_worker` / `make cartography_contract_test` verify
+  the registry's flags against the pinned CLI.
+
+**Post-completion workflow triggers & serialized runs** (#230, #231)
+- A workflow's `trigger_workflows` list starts other workflows after it
+  completes, letting operators chain pipelines (e.g. a sync feeding a
+  report-refresh workflow) without a shared external scheduler.
+- Overlapping runs of the *same* workflow definition (scheduled, watch-poll,
+  manual, and chained triggers all included) now serialize: a second run
+  waits for the first via a durable Temporal mutex instead of racing it; a
+  third overlapping run is skipped outright rather than queuing unbounded.
+  The workflow list and detail pages show live run status, including
+  "waiting" runs.
+
+**Other**
+- Docs for the chat assistant's full settings reference, permissions, and
+  the orchestrator; Pages deploys switched to `actions/deploy-pages` so a
+  green docs build can no longer silently ship a stale site (#218).
+
+### Fixed
+
+- CI checks (CodeQL, and the dependency-remediation PR-CI-watch loop) now
+  run correctly against pull requests opened from forks, unblocking
+  fork-mode (`REMEDIATION_USE_FORK`) remediation PRs that were previously
+  stuck with no analysis ever posted (#225, #226).
+
+### Security
+
+- Bumped `mcp` 1.27.1 → 1.28.1 (#224).
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CARTOGRAPHY_<MODULE>_*` | — | Namespaced per-module credentials; **renamed**, see Breaking changes |
+| `CARTOGRAPHY_TASK_QUEUE` | — | Task queue the dedicated cartography sync worker listens on |
+| `CARTOGRAPHY_MODULE_WAIT_SECONDS` | — | Bound on waiting for a same-module mutex before failing the run |
+
+### Upgrade notes {#upgrade-notes-unreleased}
+
+1. **Rename cartography credential env vars** before upgrading any
+   deployment that runs the cartography profile or the Temporal
+   `cartography_sync` workflow: `NIST_NVD_TOKEN` →
+   `CARTOGRAPHY_NIST_NVD_TOKEN`, `CROWDSTRIKE_CLIENT_ID`/`_SECRET` →
+   `CARTOGRAPHY_CROWDSTRIKE_CLIENT_ID`/`_SECRET`, `PAGERDUTY_API_KEY` →
+   `CARTOGRAPHY_PAGERDUTY_API_KEY`, `OKTA_API_KEY` →
+   `CARTOGRAPHY_OKTA_API_KEY`. Check `.env.example` for the full expanded set
+   if you sync other modules.
+2. **If anything other than the Seizu UI writes workflow or scheduled-query
+   definitions** (a script against the REST/MCP API, an IaC template, a
+   seeded YAML using a `type: workflow` activity), update it to the
+   top-level activity types before this release — existing *stored* data
+   migrates transparently on read, but new saves in the old shape are
+   rejected.
+3. **Audit custom (non-built-in) roles** that grant `scheduled_queries:*`
+   and add the matching `workflows:*` permission explicitly — the automatic
+   alias is a one-release compatibility bridge, not a permanent equivalence.
+4. **If you have automation against `/api/v1/scheduled-queries/*`**, be
+   aware that any definition edited into a multi-stage/cross-stage shape
+   will disappear from those endpoints (404) — migrate that automation to
+   `/api/v1/workflows/*`.
 
 ## [3.1.0] - 2026-07-13
 
