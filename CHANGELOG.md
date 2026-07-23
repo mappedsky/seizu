@@ -4,7 +4,7 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.0.0] - 2026-07-23
 
 The headline of this release is **staged, configurable Temporal workflows**:
 scheduled queries grow into `Workflow`s with sequential stages, parallel
@@ -16,10 +16,10 @@ intel syncs move onto the same engine via a dedicated Temporal worker image.
 This release has real breaking edges — an env var rename with no
 back-compat shim, and a rejected-on-save (though transparently
 migrated-on-read) legacy activity shape — see
-[Breaking changes](#breaking-changes-unreleased) and
-[Upgrade notes](#upgrade-notes-unreleased) before deploying.
+[Breaking changes](#breaking-changes-400) and
+[Upgrade notes](#upgrade-notes-400) before deploying.
 
-### ⚠️ Breaking changes {#breaking-changes-unreleased}
+### ⚠️ Breaking changes {#breaking-changes-400}
 
 - **Cartography credential env vars are now namespaced** (#228). `NIST_NVD_TOKEN`,
   `CROWDSTRIKE_CLIENT_ID`, `CROWDSTRIKE_CLIENT_SECRET`, `PAGERDUTY_API_KEY`, and
@@ -134,7 +134,7 @@ migrated-on-read) legacy activity shape — see
 | `CARTOGRAPHY_TASK_QUEUE` | — | Task queue the dedicated cartography sync worker listens on |
 | `CARTOGRAPHY_MODULE_WAIT_SECONDS` | — | Bound on waiting for a same-module mutex before failing the run |
 
-### Upgrade notes {#upgrade-notes-unreleased}
+### Upgrade notes {#upgrade-notes-400}
 
 1. **Rename cartography credential env vars** before upgrading any
    deployment that runs the cartography profile or the Temporal
