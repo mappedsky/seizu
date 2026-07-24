@@ -22,6 +22,7 @@ from reporting.temporal_workflows.activities import (
     execute_configured_query,
     get_pr_ci_status,
     load_configured_workflow,
+    normalize_code_workflow_output,
     record_configured_workflow_result,
     run_dependency_ci_fix,
     run_dependency_remediation,
@@ -31,6 +32,7 @@ from reporting.temporal_workflows.activities import (
 from reporting.temporal_workflows.shared import (
     CiFixInput,
     CodeWorkflowInputRequest,
+    CodeWorkflowOutputRequest,
     ConfiguredQueryInput,
     ConfiguredWorkflowInvocation,
     DependencyRemediationInput,
@@ -220,6 +222,47 @@ async def test_load_configured_workflow_resolves_code_workflow_row_requirement(m
     assert migrated.code_workflow_name == "cartography_sync"
     assert result.stages[1].activities[0].requires_rows is True
     assert result.stages[1].activities[0].code_workflow_name == "cve_repo_report"
+
+
+async def test_normalize_code_workflow_output_reports_partial_failure(mocker):
+    spec = WorkflowSpec(
+        name="example",
+        description="test",
+        input_factory=lambda context: context.rows,
+        output_type=dict[str, Any],
+        summarize_output=lambda value: "completed_with_errors" if value.get("failed") else "completed",
+    )
+    mocker.patch(
+        "reporting.temporal_workflows.activities.get_enabled_workflow_spec",
+        return_value=spec,
+    )
+
+    ok_result = await normalize_code_workflow_output(
+        CodeWorkflowOutputRequest(output_id="out", workflow_name="example", value={"failed": False})
+    )
+    assert ok_result.metadata["status"] == "completed"
+
+    partial_failure_result = await normalize_code_workflow_output(
+        CodeWorkflowOutputRequest(output_id="out", workflow_name="example", value={"failed": True})
+    )
+    assert partial_failure_result.metadata["status"] == "completed_with_errors"
+
+
+async def test_normalize_code_workflow_output_defaults_to_completed_without_a_summarizer(mocker):
+    spec = WorkflowSpec(
+        name="example",
+        description="test",
+        input_factory=lambda context: context.rows,
+    )
+    mocker.patch(
+        "reporting.temporal_workflows.activities.get_enabled_workflow_spec",
+        return_value=spec,
+    )
+
+    result = await normalize_code_workflow_output(
+        CodeWorkflowOutputRequest(output_id="out", workflow_name="example", value={})
+    )
+    assert result.metadata["status"] == "completed"
 
 
 def test_configured_activity_results_use_converter_safe_type_hints():

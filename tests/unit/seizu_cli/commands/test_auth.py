@@ -36,28 +36,38 @@ def mock_client(mocker: pytest.MonkeyPatch) -> MagicMock:
 
 def test_whoami_shows_user_info(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
-        "user_id": "u1",
-        "email": "alice@example.com",
-        "display_name": "Alice",
-        "last_login": "2024-01-01T00:00:00Z",
+        "user": {
+            "user_id": "u1",
+            "email": "alice@example.com",
+            "display_name": "Alice",
+            "last_login": "2024-01-01T00:00:00Z",
+            "role": "seizu-admin",
+        },
+        "permissions": ["workflows:read", "workflows:write"],
     }
     result = runner.invoke(app, ["whoami"])
     assert result.exit_code == 0
     assert "u1" in result.output
     assert "alice@example.com" in result.output
     assert "Alice" in result.output
+    assert "seizu-admin" in result.output
+    assert "workflows:write" in result.output
     mock_client.get.assert_called_once_with("/api/v1/me")
 
 
 def test_whoami_without_display_name(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
-        "user_id": "u2",
-        "email": "bob@example.com",
-        "last_login": "2024-01-01T00:00:00Z",
+        "user": {
+            "user_id": "u2",
+            "email": "bob@example.com",
+            "last_login": "2024-01-01T00:00:00Z",
+        },
+        "permissions": [],
     }
     result = runner.invoke(app, ["whoami"])
     assert result.exit_code == 0
     assert "bob@example.com" in result.output
+    assert "(none)" in result.output
 
 
 def test_whoami_api_error(mock_client: MagicMock) -> None:

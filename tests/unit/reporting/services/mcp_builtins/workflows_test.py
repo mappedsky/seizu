@@ -125,7 +125,7 @@ async def test_delete_and_run_branches(mocker):
     assert "error" in await builtin._delete({"workflow_id": "missing"}, _user())
     delete.side_effect = None
     assert await builtin._delete({"workflow_id": "workflow-1"}, _user()) == {"workflow_id": "workflow-1"}
-    delete.assert_awaited_with("workflow-1", "user-1")
+    delete.assert_awaited_with("workflow-1")
 
     run = mocker.patch.object(
         builtin.workflows,

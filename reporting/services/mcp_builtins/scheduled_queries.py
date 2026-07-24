@@ -93,7 +93,7 @@ async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dic
     user = _require_user(current_user)
     sq_id = args["scheduled_query_id"]
     try:
-        await workflows.require_owned_item(sq_id, user.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         return {"error": "Scheduled query not found"}
     body = CreateScheduledQueryRequest.model_validate({k: v for k, v in args.items() if k != "scheduled_query_id"})
@@ -122,10 +122,10 @@ async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dic
 
 
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
-    user = _require_user(current_user)
+    _require_user(current_user)
     sq_id = args["scheduled_query_id"]
     try:
-        await workflows.require_owned_item(sq_id, user.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         return {"error": "Scheduled query not found"}
     await workflow_schedules.delete_schedule(sq_id)
@@ -136,10 +136,10 @@ async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dic
 
 
 async def _run(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
-    user = _require_user(current_user)
+    _require_user(current_user)
     sq_id = args["scheduled_query_id"]
     try:
-        await workflows.require_owned_item(sq_id, user.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         return {"error": "Scheduled query not found"}
     run_requested_at = await report_store.request_scheduled_query_run(sq_id)

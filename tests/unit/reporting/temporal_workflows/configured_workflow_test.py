@@ -447,6 +447,30 @@ async def test_returns_skip_reason():
     assert result["skipped_reason"] == "disabled"
 
 
+_recorded_results: list[dict] = []
+
+
+@activity.defn(name="record_configured_workflow_result")
+async def _record_capturing(value: dict) -> None:
+    _recorded_results.append(value)
+
+
+@activity.defn(name="execute_configured_query")
+async def _query_second_completed_with_errors(value: ConfiguredQueryInput) -> ConfiguredActivityOutput:
+    # Mimics a code-defined workflow activity that reports a partial failure
+    # it deliberately swallowed rather than raise (e.g. cve_dependency_remediation
+    # recording one failed dependency out of several).
+    status = "completed_with_errors" if value.output_id == "second" else "completed"
+    return ConfiguredActivityOutput(output_id=value.output_id, value=[], metadata={"status": status})
+
+
+async def test_partial_activity_failure_marks_overall_status_completed_with_errors():
+    _recorded_results.clear()
+    result = await _execute(_load, _query_second_completed_with_errors, _action, _record_capturing)
+    assert result["status"] == "completed_with_errors"
+    assert _recorded_results[-1]["status"] == "success_with_errors"
+
+
 async def test_failed_stage_waits_for_started_siblings_and_stops():
     _settled.clear()
     with pytest.raises(Exception):

@@ -77,8 +77,12 @@ def whoami() -> None:
         _die(exc)
         return
 
-    console.print(f"[bold]User ID[/bold]: {data['user_id']}")
-    if data.get("display_name"):
-        console.print(f"[bold]Name[/bold]: {data['display_name']}")
-    console.print(f"[bold]Email[/bold]: {data['email']}")
-    console.print(f"[bold]Last login[/bold]: {data.get('last_login', '')}")
+    user = data["user"]
+    console.print(f"[bold]User ID[/bold]: {user['user_id']}")
+    if user.get("display_name"):
+        console.print(f"[bold]Name[/bold]: {user['display_name']}")
+    console.print(f"[bold]Email[/bold]: {user['email']}")
+    console.print(f"[bold]Last login[/bold]: {user.get('last_login', '')}")
+    console.print(f"[bold]Role[/bold]: {user.get('role') or '(none)'}")
+    permissions = data.get("permissions", [])
+    console.print(f"[bold]Permissions[/bold]: {', '.join(permissions) if permissions else '(none)'}")

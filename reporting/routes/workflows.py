@@ -86,7 +86,7 @@ async def delete_workflow(
     current: CurrentUser = Depends(require_permission(Permission.WORKFLOWS_DELETE)),
 ) -> WorkflowIdResponse:
     try:
-        await workflows.delete_managed(workflow_id, current.user.user_id)
+        await workflows.delete_managed(workflow_id)
     except workflows.WorkflowNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -105,7 +105,7 @@ async def run_workflow(
     current: CurrentUser = Depends(require_permission(Permission.WORKFLOWS_WRITE)),
 ) -> WorkflowRunRequestedResponse:
     try:
-        temporal_workflow_id, run_id = await workflows.run_managed(workflow_id, current.user.user_id)
+        temporal_workflow_id, run_id = await workflows.run_managed(workflow_id)
     except workflows.WorkflowNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -217,7 +217,7 @@ async def cancel_waiting_workflow_run(
     current: CurrentUser = Depends(require_permission(Permission.WORKFLOWS_WRITE)),
 ) -> Response:
     try:
-        await workflows.require_owned_item(workflow_id, current.user.user_id)
+        await workflows.require_existing_item(workflow_id)
         canceled = await temporal_runs.cancel_waiting_workflow_run(
             workflow_id,
             temporal_workflow_id,

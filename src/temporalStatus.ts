@@ -2,6 +2,7 @@ export function temporalStatusLabel(status: string | null): string {
   if (!status) return 'Not run';
   if (status === 'success') return 'Completed';
   if (status === 'failure') return 'Failed';
+  if (status === 'success_with_errors') return 'Completed With Errors';
   return status
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -22,6 +23,8 @@ export function temporalStatusColor(
     case 'canceled':
     case 'cancel_requested':
     case 'paused':
+    case 'completed_with_errors':
+    case 'success_with_errors':
       return 'warning';
     case 'failure':
     case 'failed':

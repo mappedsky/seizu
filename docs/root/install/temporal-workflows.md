@@ -65,6 +65,17 @@ definition's prefix. The web service therefore needs
 history in memory, so runs disappear on restart; for full event payloads and
 worker state, use the Temporal Web UI.
 
+**"Completed with errors":** a code-defined workflow activity can finish
+without raising while still reporting a partial failure it deliberately chose
+not to retry (one failed dependency remediation, one PR whose CI never went
+green, one repo's CVE chat session erroring, a cartography module run that
+failed). `WorkflowSpec.summarize_output` inspects that activity's own result
+and surfaces `completed_with_errors` for it instead of a blanket `completed`;
+`ConfiguredWorkflow` in turn records the overall run (`last_run_status`) as
+`success_with_errors` rather than `success` when any activity reports this.
+Both values are gated by a `workflow.patched(...)` marker so histories
+recorded before this existed keep replaying deterministically as `success`.
+
 ## The cve_repo_report workflow
 
 Input: the scheduled query's result rows, each carrying at least a `repo` key (repository fullname). Per repository, sequentially:

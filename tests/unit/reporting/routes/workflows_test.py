@@ -151,7 +151,7 @@ async def test_get_update_and_delete_workflow(mocker):
         new=AsyncMock(),
     )
     assert (await _request("DELETE", "/api/v1/workflows/workflow-1")).status_code == 200
-    delete.assert_awaited_once_with("workflow-1", "user-1")
+    delete.assert_awaited_once_with("workflow-1")
     delete.side_effect = WorkflowNotFoundError("Workflow not found")
     assert (await _request("DELETE", "/api/v1/workflows/missing")).status_code == 404
 
@@ -294,7 +294,7 @@ async def test_run_detail_reader_does_not_receive_payload_previews(mocker):
 
 async def test_cancel_waiting_workflow_run(mocker):
     mocker.patch(
-        "reporting.routes.workflows.workflows.require_owned_item",
+        "reporting.routes.workflows.workflows.require_existing_item",
         new=AsyncMock(return_value=_stored_item()),
     )
     cancel = mocker.patch(

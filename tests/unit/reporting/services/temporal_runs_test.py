@@ -270,6 +270,32 @@ async def test_list_workflow_runs_reports_deduplicated_run_as_skipped(mocker):
     handle.result.assert_awaited_once()
 
 
+async def test_list_workflow_runs_reports_partial_failure_from_result_status(mocker):
+    workflow_id = f"seizu-workflow:{_SQ_ID}:manual:partial-failure"
+    executions = [
+        SimpleNamespace(
+            id=workflow_id,
+            run_id="run-partial",
+            status=temporalio.client.WorkflowExecutionStatus.COMPLETED,
+            start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            close_time=datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
+            history_length=4,
+        )
+    ]
+    handle = _mock_handle(
+        [],
+        result={"status": "completed_with_errors", "version": 1, "activity_results": []},
+    )
+    _mock_client(mocker, executions=executions, handle=handle)
+
+    runs = await temporal_runs.list_workflow_runs(_SQ_ID, limit=10)
+
+    assert len(runs) == 1
+    # A code-defined workflow activity that reported (rather than raised) a
+    # partial failure must not be flattened back into a plain "completed".
+    assert runs[0].status == "completed_with_errors"
+
+
 async def test_list_workflow_runs_rejects_unquotable_sq_id(mocker):
     client, _ = _mock_client(mocker)
     assert await temporal_runs.list_workflow_runs('sq" OR WorkflowId="x', limit=10) == []

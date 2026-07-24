@@ -51,7 +51,7 @@ _ENUM_PREFIXES = (
 )
 _SCHEDULE_TIME_RE = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z"
 _CONFIGURED_WORKFLOW_MUTEX_ID_PREFIX = "seizu-configured-workflow-mutex:"
-_CONFIGURED_RESULT_STATUSES = frozenset(("completed", "skipped", "canceled"))
+_CONFIGURED_RESULT_STATUSES = frozenset(("completed", "completed_with_errors", "skipped", "canceled"))
 
 
 class TemporalUnavailableError(Exception):
