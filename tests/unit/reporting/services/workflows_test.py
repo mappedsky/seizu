@@ -471,10 +471,9 @@ async def test_create_and_update_drop_only_missing_and_self_trigger_targets(mock
 
 
 async def test_managed_mutations_permit_any_user_with_access(mocker):
-    """Mutation is gated by RBAC permission at the route layer, not by who
-
-    created or last edited the item — any user reaching these service
-    functions may act on any existing workflow, regardless of created_by.
+    """Mutation is gated by RBAC permission at the route layer, not by
+    ownership — any user reaching these service functions may act on any
+    existing workflow, regardless of created_by.
     """
     created_by_other = _legacy_item(
         stages=_body().model_dump()["stages"],
@@ -487,6 +486,7 @@ async def test_managed_mutations_permit_any_user_with_access(mocker):
         "get_scheduled_query",
         new=AsyncMock(return_value=created_by_other),
     )
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
     update = mocker.patch.object(workflows, "update", new=AsyncMock(return_value=created_by_other))
     delete = mocker.patch.object(workflows.report_store, "delete_scheduled_query", new=AsyncMock(return_value=True))
     run = mocker.patch.object(
