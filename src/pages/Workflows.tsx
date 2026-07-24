@@ -26,7 +26,6 @@ import {
   WorkflowActivityDefinition,
 } from 'src/config.context';
 import { usePermissions } from 'src/hooks/usePermissions';
-import { useCurrentUser } from 'src/hooks/useCurrentUser';
 import {
   WorkflowItem,
   WorkflowRequest,
@@ -58,7 +57,6 @@ const updatedByColumnSx = { width: 160 };
 export default function Workflows() {
   const navigate = useNavigate();
   const hasPermission = usePermissions();
-  const currentUser = useCurrentUser();
   const { workflows, loading, error, refresh } = useWorkflowsList();
   const { createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow } =
     useWorkflowMutations();
@@ -212,13 +210,12 @@ export default function Workflows() {
         label: '',
         cellSx: listTableActionColumnSx,
         render: (item) => {
-          const isOwner = item.created_by === currentUser?.user_id;
           const actions: RowMenuAction[] = [
             {
               key: 'run',
               label: 'Run now',
               icon: <PlayArrowIcon />,
-              disabled: !hasPermission('workflows:write') || !isOwner,
+              disabled: !hasPermission('workflows:write'),
               onClick: async () => {
                 setOperationError(null);
                 try {
@@ -237,7 +234,7 @@ export default function Workflows() {
               key: 'edit',
               label: 'Edit',
               icon: <EditIcon />,
-              disabled: !hasPermission('workflows:write') || !isOwner,
+              disabled: !hasPermission('workflows:write'),
               onClick: () => openEdit(item),
             },
             {
@@ -252,7 +249,7 @@ export default function Workflows() {
               label: 'Delete',
               icon: <DeleteIcon />,
               destructive: true,
-              disabled: !hasPermission('workflows:delete') || !isOwner,
+              disabled: !hasPermission('workflows:delete'),
               onClick: () => setDeleteTarget(item),
             },
           ];
@@ -260,7 +257,7 @@ export default function Workflows() {
         },
       },
     ],
-    [currentUser?.user_id, hasPermission, navigate, refresh, runWorkflow],
+    [hasPermission, navigate, refresh, runWorkflow],
   );
 
   return (
@@ -313,9 +310,7 @@ export default function Workflows() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
-          workflowOptions={workflows.filter(
-            (workflow) => workflow.created_by === currentUser?.user_id,
-          )}
+          workflowOptions={workflows}
           onClose={() => setDialogOpen(false)}
           onSave={save}
         />

@@ -1,5 +1,8 @@
 from temporalio.converter import DataConverter
 
+from cartography_sync.shared import STATUS_COMPLETED as CARTOGRAPHY_STATUS_COMPLETED
+from cartography_sync.shared import STATUS_COMPLETED_WITH_ERRORS as CARTOGRAPHY_STATUS_COMPLETED_WITH_ERRORS
+from cartography_sync.shared import CartographySyncResult
 from reporting.temporal_workflows import (
     WORKFLOW_REGISTRY,
     WorkflowInputContext,
@@ -8,8 +11,13 @@ from reporting.temporal_workflows import (
     get_workflow_spec,
 )
 from reporting.temporal_workflows.shared import (
+    STATUS_COMPLETED_WITH_ERRORS,
     ConfiguredActivityOutput,
     CveDependencyRemediationInput,
+    CveDependencyRemediationResult,
+    CveRepoReportResult,
+    DependencyRemediationResult,
+    RepoChatResult,
     group_rows_by_repo,
     group_rows_by_repo_package,
     normalize_configured_rows,
@@ -108,6 +116,63 @@ def test_group_rows_by_repo():
     assert set(grouped) == {"org/a", "org/b"}
     assert [row["cve_id"] for row in grouped["org/a"]] == ["CVE-1", "CVE-3"]
     assert [row["cve_id"] for row in grouped["org/b"]] == ["CVE-2"]
+
+
+def test_cve_repo_report_summary_status():
+    spec = get_workflow_spec("cve_repo_report")
+    assert spec is not None
+    all_ok = CveRepoReportResult(
+        per_repo=[RepoChatResult(repo="org/a", thread_id="t1", summary="ok", status="completed")]
+    )
+    assert spec.summary_status(all_ok) == "completed"
+
+    one_failed = CveRepoReportResult(
+        per_repo=[
+            RepoChatResult(repo="org/a", thread_id="t1", summary="ok", status="completed"),
+            RepoChatResult(repo="org/b", thread_id=None, summary="", status="failed"),
+        ]
+    )
+    assert spec.summary_status(one_failed) == STATUS_COMPLETED_WITH_ERRORS
+
+
+def test_cve_dependency_remediation_summary_status():
+    spec = get_workflow_spec("cve_dependency_remediation")
+    assert spec is not None
+    all_ok = CveDependencyRemediationResult(
+        per_dependency=[DependencyRemediationResult(repo="org/a", package="requests", status="completed")]
+    )
+    assert spec.summary_status(all_ok) == "completed"
+
+    activity_failed = CveDependencyRemediationResult(
+        per_dependency=[DependencyRemediationResult(repo="org/a", package="requests", status="failed")]
+    )
+    assert spec.summary_status(activity_failed) == STATUS_COMPLETED_WITH_ERRORS
+
+    # The remediation activity itself succeeded (opened/updated a PR) but the
+    # PR's CI never went green — still a partial failure worth surfacing.
+    ci_failed = CveDependencyRemediationResult(
+        per_dependency=[
+            DependencyRemediationResult(repo="org/a", package="requests", status="completed", ci_status="ci_failed")
+        ]
+    )
+    assert spec.summary_status(ci_failed) == STATUS_COMPLETED_WITH_ERRORS
+
+    ci_passed = CveDependencyRemediationResult(
+        per_dependency=[
+            DependencyRemediationResult(repo="org/a", package="requests", status="completed", ci_status="passed")
+        ]
+    )
+    assert spec.summary_status(ci_passed) == "completed"
+
+
+def test_cartography_sync_summary_status():
+    spec = get_workflow_spec("cartography_sync")
+    assert spec is not None
+    assert spec.summary_status(CartographySyncResult(status=CARTOGRAPHY_STATUS_COMPLETED)) == "completed"
+    assert (
+        spec.summary_status(CartographySyncResult(status=CARTOGRAPHY_STATUS_COMPLETED_WITH_ERRORS))
+        == STATUS_COMPLETED_WITH_ERRORS
+    )
 
 
 def test_group_rows_by_repo_package():

@@ -39,7 +39,7 @@ class WorkflowDefinitionError(ValueError):
 
 
 class WorkflowNotFoundError(LookupError):
-    """A workflow is missing or is not owned by the requesting user."""
+    """A workflow is missing, or (for the legacy scheduled-queries shape) not representable there."""
 
 
 def _legacy_stages(item: ScheduledQueryItem | ScheduledQueryVersion) -> list[WorkflowStage]:
@@ -198,18 +198,13 @@ def _trigger_actions(workflow_ids: list[str]) -> list[dict[str, Any]]:
 async def _existing_trigger_workflows(
     workflow_ids: list[str],
     *,
-    owner_user_id: str,
     exclude: str | None = None,
 ) -> list[str]:
-    """Drop missing or foreign targets at save time, retaining order."""
+    """Drop missing or self-referencing targets at save time, retaining order."""
 
     candidates = [workflow_id for workflow_id in workflow_ids if workflow_id != exclude]
     records = await asyncio.gather(*(report_store.get_scheduled_query(workflow_id) for workflow_id in candidates))
-    return [
-        workflow_id
-        for workflow_id, record in zip(candidates, records, strict=True)
-        if record is not None and record.created_by == owner_user_id
-    ]
+    return [workflow_id for workflow_id, record in zip(candidates, records, strict=True) if record is not None]
 
 
 def item_to_workflow(item: ScheduledQueryItem) -> WorkflowItem:
@@ -444,10 +439,7 @@ async def validate_definition(body: CreateWorkflowRequest) -> str | None:
 
 
 async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
-    trigger_workflows = await _existing_trigger_workflows(
-        body.trigger_workflows,
-        owner_user_id=created_by,
-    )
+    trigger_workflows = await _existing_trigger_workflows(body.trigger_workflows)
     item = await report_store.create_scheduled_query(
         name=body.name,
         cypher="",
@@ -464,11 +456,7 @@ async def create(body: CreateWorkflowRequest, created_by: str) -> WorkflowItem:
 
 
 async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str) -> WorkflowItem | None:
-    trigger_workflows = await _existing_trigger_workflows(
-        body.trigger_workflows,
-        owner_user_id=updated_by,
-        exclude=workflow_id,
-    )
+    trigger_workflows = await _existing_trigger_workflows(body.trigger_workflows, exclude=workflow_id)
     item = await report_store.update_scheduled_query(
         sq_id=workflow_id,
         name=body.name,
@@ -486,18 +474,22 @@ async def update(workflow_id: str, body: CreateWorkflowRequest, updated_by: str)
     return item_to_workflow(item) if item is not None else None
 
 
-async def require_owned_item(
+async def require_existing_item(
     workflow_id: str,
-    user_id: str,
     *,
     legacy_only: bool = False,
 ) -> ScheduledQueryItem:
-    """Return an owner-mutable definition or use indistinguishable 404 semantics."""
+    """Return the workflow definition, or raise if missing.
+
+    Mutation is gated purely by RBAC permission (``workflows:write`` /
+    ``workflows:delete``), not by who created or last edited the item — any
+    permitted user may act on any workflow. ``legacy_only`` additionally
+    404s when the item can't be represented in the legacy scheduled-queries
+    shape (it already uses canonical-only features).
+    """
 
     item = await report_store.get_scheduled_query(workflow_id)
-    if item is None or item.created_by != user_id or (legacy_only and not legacy_representable(item)):
-        # Deliberately use identical missing/not-owner semantics so callers
-        # cannot use mutation endpoints to enumerate other users' workflows.
+    if item is None or (legacy_only and not legacy_representable(item)):
         raise WorkflowNotFoundError("Workflow not found")
     return item
 
@@ -516,7 +508,7 @@ async def update_managed(
     body: CreateWorkflowRequest,
     owner_user_id: str,
 ) -> WorkflowItem:
-    await require_owned_item(workflow_id, owner_user_id)
+    await require_existing_item(workflow_id)
     if error := await validate_definition(body):
         raise WorkflowDefinitionError(error)
     updated = await update(workflow_id, body, owner_user_id)
@@ -527,8 +519,8 @@ async def update_managed(
     return item_to_workflow(refreshed) if refreshed is not None else updated
 
 
-async def delete_managed(workflow_id: str, owner_user_id: str) -> None:
-    await require_owned_item(workflow_id, owner_user_id)
+async def delete_managed(workflow_id: str) -> None:
+    await require_existing_item(workflow_id)
     # Delete the external trigger first. If Temporal is unavailable the stored
     # definition remains, making retry safe and preventing an orphan schedule.
     await workflow_schedules.delete_schedule(workflow_id)
@@ -536,8 +528,8 @@ async def delete_managed(workflow_id: str, owner_user_id: str) -> None:
         raise WorkflowNotFoundError("Workflow not found")
 
 
-async def run_managed(workflow_id: str, owner_user_id: str) -> tuple[str, str | None]:
-    await require_owned_item(workflow_id, owner_user_id)
+async def run_managed(workflow_id: str) -> tuple[str, str | None]:
+    await require_existing_item(workflow_id)
     return await workflow_schedules.run_now(workflow_id)
 
 

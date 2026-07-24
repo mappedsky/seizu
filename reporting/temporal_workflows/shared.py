@@ -7,6 +7,14 @@ of I/O and heavy imports (dataclasses and pure functions only).
 from dataclasses import dataclass, field
 from typing import Any
 
+# Emitted by WorkflowSpec.summary_status() (and surfaced in a code-defined
+# workflow activity's ConfiguredActivityOutput.metadata["status"]) when the
+# workflow returned normally but its own result indicates a partial failure
+# it deliberately chose not to raise for (e.g. a per-dependency remediation
+# error, a cartography module failure) — as opposed to "completed", meaning
+# every unit of work the workflow reports on actually succeeded.
+STATUS_COMPLETED_WITH_ERRORS = "completed_with_errors"
+
 
 @dataclass
 class ConfiguredWorkflowInvocation:

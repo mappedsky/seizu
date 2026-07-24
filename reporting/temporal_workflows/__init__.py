@@ -15,8 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from cartography_sync.shared import CartographySyncResult
+from cartography_sync.shared import STATUS_COMPLETED, CartographySyncResult
 from reporting.temporal_workflows.shared import (
+    STATUS_COMPLETED_WITH_ERRORS,
     CveDependencyRemediationInput,
     CveDependencyRemediationResult,
     CveRepoReportInput,
@@ -84,9 +85,18 @@ class WorkflowSpec:
     # optional validator for the submitted activity parameters.
     config_fields: Callable[[], list["ActionConfigFieldDef"]] | None = None
     config_validator: Callable[[dict[str, Any]], str | None] | None = None
+    # Inspects the validated output_type instance for a partial failure the
+    # workflow chose to report rather than raise (e.g. one failed dependency
+    # remediation out of several). Returns STATUS_COMPLETED_WITH_ERRORS or
+    # "completed". Workflows without one (the dict[str, Any] default output
+    # type) are assumed always fully successful when they return at all.
+    summarize_output: Callable[[Any], str] | None = None
 
     def build_input(self, context: WorkflowInputContext) -> object:
         return self.input_factory(context)
+
+    def summary_status(self, value: Any) -> str:
+        return self.summarize_output(value) if self.summarize_output is not None else "completed"
 
 
 def _cartography_sync_input(context: WorkflowInputContext) -> object:
@@ -107,6 +117,34 @@ def _cartography_config_validator(action_config: dict[str, Any]) -> str | None:
     return cartography_config.validate_config(action_config)
 
 
+def _cve_repo_report_summary(value: CveRepoReportResult) -> str:
+    if any(repo_result.status != "completed" for repo_result in value.per_repo):
+        return STATUS_COMPLETED_WITH_ERRORS
+    return "completed"
+
+
+# ci_status values meaning the PR is in a genuinely good end state ("" means
+# CI watching was disabled or skipped, e.g. a run that only refreshed an
+# already-open PR). Every other terminal ci_status (ci_failed, fix_failed,
+# timed_out, error, no_checks, pr_closed, failures_commented) means the PR
+# never reached passing CI, even though the remediation activity itself
+# reported "completed" (it opened/updated the PR successfully).
+_REMEDIATION_OK_CI_STATUSES = frozenset({"", "passed", "fixed", "merged"})
+
+
+def _cve_dependency_remediation_summary(value: CveDependencyRemediationResult) -> str:
+    for dependency_result in value.per_dependency:
+        if dependency_result.status != "completed":
+            return STATUS_COMPLETED_WITH_ERRORS
+        if dependency_result.ci_status not in _REMEDIATION_OK_CI_STATUSES:
+            return STATUS_COMPLETED_WITH_ERRORS
+    return "completed"
+
+
+def _cartography_sync_summary(value: CartographySyncResult) -> str:
+    return "completed" if value.status == STATUS_COMPLETED else STATUS_COMPLETED_WITH_ERRORS
+
+
 WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
     "cve_repo_report": WorkflowSpec(
         name="cve_repo_report",
@@ -117,6 +155,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
         ),
         input_factory=_cve_repo_report_input,
         output_type=CveRepoReportResult,
+        summarize_output=_cve_repo_report_summary,
     ),
     "cve_dependency_remediation": WorkflowSpec(
         name="cve_dependency_remediation",
@@ -131,6 +170,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
         ),
         input_factory=_cve_dependency_remediation_input,
         output_type=CveDependencyRemediationResult,
+        summarize_output=_cve_dependency_remediation_summary,
     ),
     "cartography_sync": WorkflowSpec(
         name="cartography_sync",
@@ -145,6 +185,7 @@ WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
         config_fields=_cartography_config_fields,
         config_validator=_cartography_config_validator,
         output_type=CartographySyncResult,
+        summarize_output=_cartography_sync_summary,
     ),
 }
 

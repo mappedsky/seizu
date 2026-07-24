@@ -96,7 +96,7 @@ async def update_scheduled_query(
 ) -> Any:
     """Update a scheduled query."""
     try:
-        await workflows.require_owned_item(sq_id, current.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
     err = validate_action_configs(body.actions)
@@ -144,7 +144,7 @@ async def run_scheduled_query(
     if it is disabled (so it can be tested before enabling).
     """
     try:
-        await workflows.require_owned_item(sq_id, current.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
     run_requested_at = await report_store.request_scheduled_query_run(sq_id)
@@ -277,7 +277,7 @@ async def delete_scheduled_query(
 ) -> ScheduledQueryIdResponse:
     """Delete a scheduled query."""
     try:
-        await workflows.require_owned_item(sq_id, current.user.user_id, legacy_only=True)
+        await workflows.require_existing_item(sq_id, legacy_only=True)
     except workflows.WorkflowNotFoundError:
         raise HTTPException(status_code=404, detail="Scheduled query not found")
     try:

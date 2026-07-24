@@ -32,7 +32,6 @@ import {
   WorkflowActivityDefinition,
 } from 'src/config.context';
 import { usePermissions } from 'src/hooks/usePermissions';
-import { useCurrentUser } from 'src/hooks/useCurrentUser';
 import {
   WorkflowActivity,
   WorkflowItem,
@@ -231,7 +230,6 @@ export default function WorkflowView() {
   const { id } = useParams();
   const navigate = useNavigate();
   const hasPermission = usePermissions();
-  const currentUser = useCurrentUser();
   const { workflow, loading, error, refresh } = useWorkflow(id ?? null);
   const { workflows: workflowOptions } = useWorkflowsList({ poll: false });
   const {
@@ -289,9 +287,7 @@ export default function WorkflowView() {
     (total, stage) => total + stage.activities.length,
     0,
   );
-  const canMutate =
-    workflow.created_by === currentUser?.user_id &&
-    hasPermission('workflows:write');
+  const canMutate = hasPermission('workflows:write');
   const loadRunDetail = (run: WorkflowRunSummary) =>
     fetchRunDetail(workflow.workflow_id, run.workflow_id, run.run_id);
 
@@ -482,9 +478,7 @@ export default function WorkflowView() {
           activityTypes={activityConfig.types}
           activitySchemas={activityConfig.schemas}
           activityDefinitions={activityConfig.definitions}
-          workflowOptions={workflowOptions.filter(
-            (option) => option.created_by === currentUser?.user_id,
-          )}
+          workflowOptions={workflowOptions}
           onClose={() => setEditOpen(false)}
           onSave={async (request: WorkflowRequest) => {
             await updateWorkflow(workflow.workflow_id, request);

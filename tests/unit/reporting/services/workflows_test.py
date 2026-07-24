@@ -434,20 +434,12 @@ async def test_create_and_update_persist_stages(mocker):
     assert await workflows.update("missing", body, "editor") is None
 
 
-async def test_create_and_update_drop_missing_and_self_trigger_targets(mocker):
+async def test_create_and_update_drop_only_missing_and_self_trigger_targets(mocker):
     stored = _legacy_item(stages=_body().model_dump()["stages"], actions=[], cypher="")
     get = mocker.patch.object(
         workflows.report_store,
         "get_scheduled_query",
-        new=AsyncMock(
-            side_effect=lambda workflow_id: (
-                stored
-                if workflow_id == "workflow-2"
-                else stored.model_copy(update={"created_by": "other-user"})
-                if workflow_id == "foreign"
-                else None
-            )
-        ),
+        new=AsyncMock(side_effect=lambda workflow_id: stored if workflow_id in ("workflow-2", "foreign") else None),
     )
     create = mocker.patch.object(
         workflows.report_store,
@@ -461,47 +453,72 @@ async def test_create_and_update_drop_missing_and_self_trigger_targets(mocker):
     )
     body = _body(trigger_workflows=["workflow-2", "missing", "foreign"])
 
+    # Any existing workflow is a valid trigger target regardless of who created
+    # or last edited it — only missing/self-referencing ids are dropped.
     await workflows.create(body, "user-1")
     assert create.await_args.kwargs["actions"] == [
-        {
-            "action_type": "trigger_workflow",
-            "action_config": {"workflow_id": "workflow-2"},
-        }
+        {"action_type": "trigger_workflow", "action_config": {"workflow_id": "workflow-2"}},
+        {"action_type": "trigger_workflow", "action_config": {"workflow_id": "foreign"}},
     ]
 
     body = _body(trigger_workflows=["workflow-1", "workflow-2", "missing", "foreign"])
     await workflows.update("workflow-1", body, "user-1")
     assert update.await_args.kwargs["actions"] == [
-        {
-            "action_type": "trigger_workflow",
-            "action_config": {"workflow_id": "workflow-2"},
-        }
+        {"action_type": "trigger_workflow", "action_config": {"workflow_id": "workflow-2"}},
+        {"action_type": "trigger_workflow", "action_config": {"workflow_id": "foreign"}},
     ]
     assert "workflow-1" not in [call.args[0] for call in get.await_args_list]
 
 
-async def test_managed_mutations_are_owner_scoped(mocker):
-    foreign = _legacy_item(
+async def test_managed_mutations_permit_any_user_with_access(mocker):
+    """Mutation is gated by RBAC permission at the route layer, not by
+    ownership — any user reaching these service functions may act on any
+    existing workflow, regardless of created_by.
+    """
+    created_by_other = _legacy_item(
         stages=_body().model_dump()["stages"],
         actions=[],
         cypher="",
         created_by="other-user",
     )
+    mocker.patch.object(
+        workflows.report_store,
+        "get_scheduled_query",
+        new=AsyncMock(return_value=created_by_other),
+    )
+    mocker.patch.object(workflows, "validate_query", new=AsyncMock(return_value=ValidationResult()))
+    update = mocker.patch.object(workflows, "update", new=AsyncMock(return_value=created_by_other))
+    delete = mocker.patch.object(workflows.report_store, "delete_scheduled_query", new=AsyncMock(return_value=True))
+    run = mocker.patch.object(
+        workflows.workflow_schedules, "run_now", new=AsyncMock(return_value=("temporal-id", None))
+    )
+    mocker.patch.object(workflows.workflow_schedules, "reconcile_by_id", new=AsyncMock())
+    mocker.patch.object(workflows.workflow_schedules, "delete_schedule", new=AsyncMock())
+
+    await workflows.update_managed("workflow-1", _body(), "user-1")
+    update.assert_awaited()
+    await workflows.delete_managed("workflow-1")
+    delete.assert_awaited()
+    await workflows.run_managed("workflow-1")
+    run.assert_awaited()
+
+
+async def test_managed_mutations_404_for_missing_workflow(mocker):
     get = mocker.patch.object(
         workflows.report_store,
         "get_scheduled_query",
-        new=AsyncMock(return_value=foreign),
+        new=AsyncMock(return_value=None),
     )
     update = mocker.patch.object(workflows, "update", new=AsyncMock())
     delete = mocker.patch.object(workflows.report_store, "delete_scheduled_query", new=AsyncMock())
     run = mocker.patch.object(workflows.workflow_schedules, "run_now", new=AsyncMock())
 
     with pytest.raises(workflows.WorkflowNotFoundError):
-        await workflows.update_managed("workflow-1", _body(), "user-1")
+        await workflows.update_managed("missing", _body(), "user-1")
     with pytest.raises(workflows.WorkflowNotFoundError):
-        await workflows.delete_managed("workflow-1", "user-1")
+        await workflows.delete_managed("missing")
     with pytest.raises(workflows.WorkflowNotFoundError):
-        await workflows.run_managed("workflow-1", "user-1")
+        await workflows.run_managed("missing")
 
     get.assert_awaited()
     update.assert_not_awaited()
@@ -510,7 +527,7 @@ async def test_managed_mutations_are_owner_scoped(mocker):
 
 
 async def test_delete_managed_removes_schedule_before_record(mocker):
-    owned = _legacy_item(
+    stored = _legacy_item(
         stages=_body().model_dump()["stages"],
         actions=[],
         cypher="",
@@ -518,7 +535,7 @@ async def test_delete_managed_removes_schedule_before_record(mocker):
     mocker.patch.object(
         workflows.report_store,
         "get_scheduled_query",
-        new=AsyncMock(return_value=owned),
+        new=AsyncMock(return_value=stored),
     )
     remove_schedule = mocker.patch.object(
         workflows.workflow_schedules,
@@ -532,7 +549,7 @@ async def test_delete_managed_removes_schedule_before_record(mocker):
     )
 
     with pytest.raises(RuntimeError, match="Temporal offline"):
-        await workflows.delete_managed("workflow-1", "user-1")
+        await workflows.delete_managed("workflow-1")
 
     remove_schedule.assert_awaited_once_with("workflow-1")
     delete_record.assert_not_awaited()

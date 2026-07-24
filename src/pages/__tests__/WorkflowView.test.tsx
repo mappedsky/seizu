@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import WorkflowView from 'src/pages/WorkflowView';
-import * as currentUserHook from 'src/hooks/useCurrentUser';
+import * as permissionsHook from 'src/hooks/usePermissions';
 import * as workflowsApi from 'src/hooks/useWorkflowsApi';
 
 jest.mock('src/hooks/useWorkflowsApi', () => ({
@@ -12,10 +12,7 @@ jest.mock('src/hooks/useWorkflowsApi', () => ({
   useWorkflowsList: jest.fn(),
 }));
 jest.mock('src/hooks/usePermissions', () => ({
-  usePermissions: () => () => true,
-}));
-jest.mock('src/hooks/useCurrentUser', () => ({
-  useCurrentUser: jest.fn(),
+  usePermissions: jest.fn(),
 }));
 jest.mock('src/components/UserDisplay', () => ({
   __esModule: true,
@@ -27,56 +24,58 @@ const useWorkflowRuns = workflowsApi.useWorkflowRuns as jest.Mock;
 const useWorkflowRunDetail = workflowsApi.useWorkflowRunDetail as jest.Mock;
 const useWorkflowMutations = workflowsApi.useWorkflowMutations as jest.Mock;
 const useWorkflowsList = workflowsApi.useWorkflowsList as jest.Mock;
-const useCurrentUser = currentUserHook.useCurrentUser as jest.Mock;
+const usePermissions = permissionsHook.usePermissions as jest.Mock;
+
+const baseWorkflow = {
+  workflow_id: 'workflow-1',
+  name: 'CVE pipeline',
+  stages: [
+    {
+      activities: [
+        {
+          type: 'query',
+          input: null,
+          output: 'findings',
+          parameters: { cypher: 'RETURN 1' },
+        },
+      ],
+    },
+    {
+      activities: [
+        {
+          type: 'log',
+          input: 'findings',
+          output: 'logged',
+          parameters: {},
+        },
+      ],
+    },
+  ],
+  trigger_workflows: [],
+  schedule: { type: 'interval', interval_minutes: 60 },
+  watch_scans: [],
+  enabled: true,
+  current_version: 3,
+  created_at: '2026-07-01T00:00:00Z',
+  updated_at: '2026-07-17T00:00:00Z',
+  created_by: 'user-1',
+  updated_by: 'user-1',
+  last_run_status: 'success',
+  last_run_at: '2026-07-17T00:00:00Z',
+  last_errors: [],
+  schedule_sync_status: 'synced' as const,
+  schedule_sync_error: null,
+  schedule_synced_at: '2026-07-17T00:00:00Z',
+};
 
 beforeEach(() => {
-  useCurrentUser.mockReturnValue({ user_id: 'user-1' });
+  usePermissions.mockReturnValue(() => true);
   global.fetch = jest.fn().mockResolvedValue({
     ok: true,
     json: async () => ({}),
   }) as unknown as typeof fetch;
   useWorkflow.mockReturnValue({
-    workflow: {
-      workflow_id: 'workflow-1',
-      name: 'CVE pipeline',
-      stages: [
-        {
-          activities: [
-            {
-              type: 'query',
-              input: null,
-              output: 'findings',
-              parameters: { cypher: 'RETURN 1' },
-            },
-          ],
-        },
-        {
-          activities: [
-            {
-              type: 'log',
-              input: 'findings',
-              output: 'logged',
-              parameters: {},
-            },
-          ],
-        },
-      ],
-      trigger_workflows: [],
-      schedule: { type: 'interval', interval_minutes: 60 },
-      watch_scans: [],
-      enabled: true,
-      current_version: 3,
-      created_at: '2026-07-01T00:00:00Z',
-      updated_at: '2026-07-17T00:00:00Z',
-      created_by: 'user-1',
-      updated_by: 'user-1',
-      last_run_status: 'success',
-      last_run_at: '2026-07-17T00:00:00Z',
-      last_errors: [],
-      schedule_sync_status: 'synced',
-      schedule_sync_error: null,
-      schedule_synced_at: '2026-07-17T00:00:00Z',
-    },
+    workflow: baseWorkflow,
     loading: false,
     error: null,
     refresh: jest.fn(),
@@ -140,8 +139,8 @@ it('shows workflow status, compact stages, and recent Temporal runs', async () =
   expect(screen.getByText('seizu_configured_workflow')).toBeInTheDocument();
 });
 
-it('disables mutation actions for a non-owner', async () => {
-  useCurrentUser.mockReturnValue({ user_id: 'other-user' });
+it('disables mutation actions without workflows:write permission, regardless of who created the workflow', async () => {
+  usePermissions.mockReturnValue(() => false);
 
   render(
     <MemoryRouter initialEntries={['/app/workflows/workflow-1']}>
@@ -154,4 +153,29 @@ it('disables mutation actions for a non-owner', async () => {
   await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
   expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled();
+});
+
+it('enables mutation actions with workflows:write permission even for a workflow created by someone else', async () => {
+  useWorkflow.mockReturnValue({
+    workflow: {
+      ...baseWorkflow,
+      created_by: 'other-user',
+      updated_by: 'other-user',
+    },
+    loading: false,
+    error: null,
+    refresh: jest.fn(),
+  });
+
+  render(
+    <MemoryRouter initialEntries={['/app/workflows/workflow-1']}>
+      <Routes>
+        <Route path="/app/workflows/:id" element={<WorkflowView />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole('button', { name: 'Edit' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Run now' })).toBeEnabled();
 });

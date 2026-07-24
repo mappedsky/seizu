@@ -360,13 +360,14 @@ async def normalize_code_workflow_output(input: CodeWorkflowOutputRequest) -> Co
         )
     try:
         adapter = TypeAdapter(spec.output_type)
-        value = adapter.dump_python(adapter.validate_python(input.value), mode="json")
+        validated = adapter.validate_python(input.value)
+        value = adapter.dump_python(validated, mode="json")
     except ValidationError as exc:
         raise ApplicationError(
             f"Output from workflow '{input.workflow_name}' does not match its schema: {exc}",
             non_retryable=True,
         ) from exc
-    metadata: dict[str, Any] = {"status": "completed", "workflow": input.workflow_name}
+    metadata: dict[str, Any] = {"status": spec.summary_status(validated), "workflow": input.workflow_name}
     if isinstance(value, list):
         value, bounds = bounded_json_rows(
             value,

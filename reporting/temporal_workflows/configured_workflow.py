@@ -20,6 +20,7 @@ with workflow.unsafe.imports_passed_through():
         trigger_configured_workflows,
     )
     from reporting.temporal_workflows.shared import (
+        STATUS_COMPLETED_WITH_ERRORS,
         CodeWorkflowInputRequest,
         CodeWorkflowOutputRequest,
         ConfiguredActivity,
@@ -47,6 +48,7 @@ _WORKFLOW_MUTEX_POLL_SECONDS = 30
 _WORKFLOW_MUTEX_PATCH = "configured-workflow-mutex-v1"
 _WORKFLOW_SINGLE_WAITER_PATCH = "configured-workflow-single-waiter-v1"
 _WORKFLOW_TRIGGERS_PATCH = "configured-workflow-post-completion-triggers-v1"
+_WORKFLOW_PARTIAL_FAILURE_STATUS_PATCH = "configured-workflow-partial-failure-status-v1"
 
 
 @workflow.defn(name="seizu_configured_workflow")
@@ -331,14 +333,19 @@ async def _run_configured_workflow(invocation: ConfiguredWorkflowInvocation) -> 
                         "temporal_workflow_ids": started,
                     }
                 )
+        had_partial_failure = workflow.patched(_WORKFLOW_PARTIAL_FAILURE_STATUS_PATCH) and any(
+            summary.get("status") == STATUS_COMPLETED_WITH_ERRORS for summary in summaries
+        )
+        result_status = STATUS_COMPLETED_WITH_ERRORS if had_partial_failure else "completed"
+        recorded_status = "success_with_errors" if had_partial_failure else "success"
         await workflow.execute_activity(
             record_configured_workflow_result,
-            {"workflow_id": definition.workflow_id, "status": "success", "error": None},
+            {"workflow_id": definition.workflow_id, "status": recorded_status, "error": None},
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
         return ConfiguredWorkflowResult(
-            status="completed",
+            status=result_status,
             version=definition.version,
             activity_results=summaries,
         )

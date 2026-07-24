@@ -79,21 +79,20 @@ async def _update(args: dict[str, Any], current_user: CurrentUser | None) -> dic
 
 
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    _user(current_user)
     workflow_id = args["workflow_id"]
     try:
-        await workflows.delete_managed(workflow_id, _user(current_user).user.user_id)
+        await workflows.delete_managed(workflow_id)
     except workflows.WorkflowNotFoundError as exc:
         return {"error": str(exc)}
     return {"workflow_id": workflow_id}
 
 
 async def _run(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
+    _user(current_user)
     workflow_id = args["workflow_id"]
     try:
-        temporal_workflow_id, run_id = await workflows.run_managed(
-            workflow_id,
-            _user(current_user).user.user_id,
-        )
+        temporal_workflow_id, run_id = await workflows.run_managed(workflow_id)
     except workflows.WorkflowNotFoundError as exc:
         return {"error": str(exc)}
     return {"workflow_id": workflow_id, "temporal_workflow_id": temporal_workflow_id, "run_id": run_id}
