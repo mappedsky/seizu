@@ -172,15 +172,6 @@ async def trigger_configured_workflows(request: TriggerConfiguredWorkflowsReques
                 },
             )
             continue
-        if target.created_by != request.source_creator_user_id:
-            logger.warning(
-                "Skipping triggered workflow owned by another user",
-                extra={
-                    "source_workflow_id": request.source_workflow_id,
-                    "trigger_workflow_id": workflow_id,
-                },
-            )
-            continue
         try:
             temporal_workflow_id, _ = await workflow_schedules.run_triggered(
                 workflow_id,

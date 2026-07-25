@@ -318,7 +318,6 @@ async def _run_configured_workflow(invocation: ConfiguredWorkflowInvocation) -> 
                     trigger_configured_workflows,
                     TriggerConfiguredWorkflowsRequest(
                         source_workflow_id=definition.workflow_id,
-                        source_creator_user_id=definition.creator_user_id,
                         source_run_id=workflow.info().run_id,
                         workflow_ids=trigger_workflows,
                         lineage=list(getattr(invocation, "trigger_lineage", [])),
