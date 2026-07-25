@@ -522,6 +522,94 @@ async def test_get_workflow_run_detail_activities(mocker):
     assert failed.failure == "RuntimeError: boom; caused by: root cause"
 
 
+async def test_get_workflow_run_detail_surfaces_domain_failure_without_raising(mocker):
+    # DependencyRemediationResult (and RepoChatResult/CartographyModuleResult)
+    # intentionally catch their own errors and return status="failed" instead
+    # of raising, so Temporal alone would mark the activity "completed".
+    events = [
+        _event(
+            1,
+            activity_task_scheduled_event_attributes=history_pb.ActivityTaskScheduledEventAttributes(
+                activity_id="1",
+                activity_type=common_pb.ActivityType(name="run_dependency_remediation"),
+            ),
+        ),
+        _event(
+            2,
+            activity_task_completed_event_attributes=history_pb.ActivityTaskCompletedEventAttributes(
+                scheduled_event_id=1,
+                result=_payloads(
+                    {
+                        "repo": "mappedsky/confidant",
+                        "package": "pyasn1",
+                        "status": "failed",
+                        "error": "Command exited with code 128: permission denied",
+                        "output_tail": "...",
+                    }
+                ),
+            ),
+        ),
+    ]
+    handle = _mock_handle(events)
+    _mock_client(mocker, handle=handle)
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1", include_payload_previews=True)
+
+    assert detail is not None
+    activity = detail.activities[0]
+    assert activity.status == "failed"
+    assert activity.failure == "Command exited with code 128: permission denied"
+    assert activity.result_preview is not None
+
+
+async def test_get_workflow_run_detail_surfaces_domain_failure_for_child_workflow(mocker):
+    child_id = "seizu-cartography-module:aws"
+    events = [
+        _event(
+            1,
+            start_child_workflow_execution_initiated_event_attributes=(
+                history_pb.StartChildWorkflowExecutionInitiatedEventAttributes(
+                    workflow_id=child_id,
+                    workflow_type=common_pb.WorkflowType(name="cartography_module"),
+                )
+            ),
+        ),
+        _event(
+            2,
+            child_workflow_execution_started_event_attributes=(
+                history_pb.ChildWorkflowExecutionStartedEventAttributes(initiated_event_id=1)
+            ),
+        ),
+        _event(
+            3,
+            child_workflow_execution_completed_event_attributes=(
+                history_pb.ChildWorkflowExecutionCompletedEventAttributes(
+                    initiated_event_id=1,
+                    result=_payloads({"module": "aws", "status": "failed", "output_tail": "boom"}),
+                )
+            ),
+        ),
+    ]
+    handle = _mock_handle(events)
+    _mock_client(mocker, handle=handle)
+
+    detail = await temporal_runs.get_workflow_run_detail(_SQ_ID, _WORKFLOW_ID, "run-1")
+
+    assert detail is not None
+    activity = detail.activities[0]
+    assert activity.status == "failed"
+    assert activity.failure == "boom"
+
+
+async def test_domain_failure_ignores_non_failed_status_and_non_dict_values():
+    assert temporal_runs._domain_failure({"status": "completed"}) is None
+    assert temporal_runs._domain_failure({"status": "completed_with_errors"}) is None
+    assert temporal_runs._domain_failure(["not", "a", "dict"]) is None
+    assert temporal_runs._domain_failure(None) is None
+    assert temporal_runs._domain_failure({"status": "failed"}) == "failed"
+    assert temporal_runs._domain_failure({"status": "failed", "error": ""}) == "failed"
+
+
 async def test_get_workflow_run_detail_folds_child_workflows(mocker):
     child_id = "seizu-cartography-module:aws"
     events = [
