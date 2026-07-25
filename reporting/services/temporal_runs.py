@@ -177,7 +177,11 @@ def _failure_summary(failure: "temporalio.api.failure.v1.Failure | None") -> str
     return "; caused by: ".join(parts) or None
 
 
-def _payload_preview(payloads: "Iterable[temporalio.api.common.v1.Payload]") -> str | None:
+_UNDECODABLE = object()
+
+
+def _decode_result(payloads: "Iterable[temporalio.api.common.v1.Payload]") -> Any:
+    """Decode a completed activity/child-workflow result, or ``_UNDECODABLE``."""
     import temporalio.converter
 
     items = list(payloads)
@@ -185,12 +189,43 @@ def _payload_preview(payloads: "Iterable[temporalio.api.common.v1.Payload]") -> 
         return None
     try:
         values = temporalio.converter.DataConverter.default.payload_converter.from_payloads(items)
-        rendered = json.dumps(values[0] if len(values) == 1 else values, default=str)
     except Exception:
+        return _UNDECODABLE
+    return values[0] if len(values) == 1 else values
+
+
+def _render_preview(value: Any) -> str | None:
+    if value is None:
+        return None
+    if value is _UNDECODABLE:
         return "<undecodable payload>"
+    rendered = json.dumps(value, default=str)
     if len(rendered) > PAYLOAD_PREVIEW_MAX_CHARS:
         rendered = rendered[:PAYLOAD_PREVIEW_MAX_CHARS] + "…"
     return rendered
+
+
+def _payload_preview(payloads: "Iterable[temporalio.api.common.v1.Payload]") -> str | None:
+    return _render_preview(_decode_result(payloads))
+
+
+def _domain_failure(value: Any) -> str | None:
+    """Surface a domain-level failure a result carries without ever raising.
+
+    Several code-workflow result dataclasses (``DependencyRemediationResult``,
+    ``RepoChatResult``, ``CartographyModuleResult``, ...) intentionally catch
+    their own errors and return ``status="failed"`` instead of raising, so
+    that one bad item doesn't fail/retry the whole activity or duplicate side
+    effects (e.g. PRs). Temporal only sees a normal return in that case, so
+    history events alone would always mark the activity "completed". These
+    result shapes are the only ones with a bare top-level ``status`` field
+    (wrapper types like ``ConfiguredActivityOutput`` nest it under
+    ``metadata``), so this can't misfire on arbitrary query-result rows.
+    """
+    if not isinstance(value, dict) or value.get("status") != "failed":
+        return None
+    error = value.get("error") or value.get("output_tail")
+    return error if isinstance(error, str) and error else "failed"
 
 
 async def list_workflow_runs(
@@ -487,12 +522,14 @@ async def _collect_activities(
             completed = event.activity_task_completed_event_attributes
             activity = _for_scheduled_event(completed.scheduled_event_id)
             if activity is not None:
-                activity.status = "completed"
+                result_value = _decode_result(completed.result.payloads if completed.HasField("result") else [])
+                domain_failure = _domain_failure(result_value)
+                activity.status = "failed" if domain_failure else "completed"
                 activity.closed_at = _event_time(event)
+                if domain_failure:
+                    activity.failure = domain_failure
                 if include_payload_previews:
-                    activity.result_preview = _payload_preview(
-                        completed.result.payloads if completed.HasField("result") else []
-                    )
+                    activity.result_preview = _render_preview(result_value)
         elif event.HasField("activity_task_failed_event_attributes"):
             failed = event.activity_task_failed_event_attributes
             activity = _for_scheduled_event(failed.scheduled_event_id)
@@ -568,12 +605,16 @@ async def _collect_activities(
             child_completed = event.child_workflow_execution_completed_event_attributes
             record = _for_initiated_event(child_completed.initiated_event_id)
             if record is not None:
-                record.status = "completed"
+                result_value = _decode_result(
+                    child_completed.result.payloads if child_completed.HasField("result") else []
+                )
+                domain_failure = _domain_failure(result_value)
+                record.status = "failed" if domain_failure else "completed"
                 record.closed_at = _event_time(event)
+                if domain_failure:
+                    record.failure = domain_failure
                 if include_payload_previews:
-                    record.result_preview = _payload_preview(
-                        child_completed.result.payloads if child_completed.HasField("result") else []
-                    )
+                    record.result_preview = _render_preview(result_value)
         elif event.HasField("child_workflow_execution_failed_event_attributes"):
             child_failed = event.child_workflow_execution_failed_event_attributes
             record = _for_initiated_event(child_failed.initiated_event_id)
