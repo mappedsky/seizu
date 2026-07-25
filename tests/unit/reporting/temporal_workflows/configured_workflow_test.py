@@ -140,7 +140,6 @@ async def _load_with_triggers(invocation: ConfiguredWorkflowInvocation) -> Confi
 @activity.defn(name="trigger_configured_workflows")
 async def _trigger_workflows(value: TriggerConfiguredWorkflowsRequest) -> list[str]:
     assert value.source_workflow_id == "workflow-1"
-    assert value.source_creator_user_id == "user-1"
     assert value.workflow_ids == ["workflow-2"]
     return ["seizu-workflow:workflow-2:triggered"]
 

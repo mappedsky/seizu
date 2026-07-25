@@ -72,7 +72,6 @@ class ConfiguredWorkflowDefinition:
 @dataclass
 class TriggerConfiguredWorkflowsRequest:
     source_workflow_id: str
-    source_creator_user_id: str
     source_run_id: str
     workflow_ids: list[str] = field(default_factory=list)
     lineage: list[str] = field(default_factory=list)

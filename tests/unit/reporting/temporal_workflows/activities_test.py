@@ -76,7 +76,7 @@ async def test_load_configured_workflow_builds_definition(mocker):
     assert result.stages[1].activities[0].maximum_attempts == 1
 
 
-async def test_trigger_configured_workflows_skips_missing_and_cycles(mocker, caplog):
+async def test_trigger_configured_workflows_allows_cross_owner_skips_missing_and_cycles(mocker, caplog):
     get = mocker.patch(
         "reporting.temporal_workflows.activities.report_store.get_scheduled_query",
         mocker.AsyncMock(
@@ -91,30 +91,39 @@ async def test_trigger_configured_workflows_skips_missing_and_cycles(mocker, cap
     )
     run = mocker.patch(
         "reporting.temporal_workflows.activities.workflow_schedules.run_triggered",
-        mocker.AsyncMock(return_value=("temporal-2", "run-2")),
+        mocker.AsyncMock(side_effect=[("temporal-2", "run-2"), ("temporal-foreign", "run-foreign")]),
     )
 
     with caplog.at_level(logging.WARNING):
         started = await trigger_configured_workflows(
             TriggerConfiguredWorkflowsRequest(
                 source_workflow_id="workflow-1",
-                source_creator_user_id="user-1",
                 source_run_id="source-run",
                 workflow_ids=["workflow-2", "missing", "foreign", "workflow-0"],
                 lineage=["workflow-0"],
             )
         )
 
-    assert started == ["temporal-2"]
-    run.assert_awaited_once_with(
-        "workflow-2",
-        source_workflow_id="workflow-1",
-        source_run_id="source-run",
-        lineage=["workflow-0", "workflow-1"],
-    )
+    # Trigger targets fire regardless of who created them relative to the
+    # source workflow — mutation/dispatch is permission-gated at the route
+    # layer, not by created_by identity (matches require_existing_item).
+    assert started == ["temporal-2", "temporal-foreign"]
+    assert run.await_args_list == [
+        mocker.call(
+            "workflow-2",
+            source_workflow_id="workflow-1",
+            source_run_id="source-run",
+            lineage=["workflow-0", "workflow-1"],
+        ),
+        mocker.call(
+            "foreign",
+            source_workflow_id="workflow-1",
+            source_run_id="source-run",
+            lineage=["workflow-0", "workflow-1"],
+        ),
+    ]
     assert get.await_count == 3
     assert "Skipping missing triggered workflow" in caplog.text
-    assert "Skipping triggered workflow owned by another user" in caplog.text
     assert "Skipping cyclic triggered workflow" in caplog.text
 
 
