@@ -15,10 +15,16 @@ Never install bun, node, uv, or Python on the host. Always use `docker compose r
 **Frontend (`seizu-node`):**
 ```bash
 docker compose run --rm seizu-node bun add <package>
-docker compose run --rm seizu-node bun test --watchAll=false              # all tests
+docker compose run --rm seizu-node bun run test:ci                       # all tests
 docker compose run --rm seizu-node bun test src/path/to.test.tsx --watchAll=false
 docker compose run --rm seizu-node bun run type-check
 ```
+> Run the **full** suite through `test:ci`, not bare `bun test`. All 64 files
+> share one Bun process and per-test wall time grows several times over as the
+> run progresses, so the heaviest component tests cross Bun's 5s default and
+> fail as timeouts — a different test each run. The script passes
+> `--timeout 30000`; `bunfig.toml` has no equivalent setting and a preloaded
+> `jest.setTimeout()` does not apply.
 
 **Backend (`seizu`):**
 ```bash
