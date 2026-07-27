@@ -294,6 +294,21 @@ async def set_workflow_schedule_sync_status(
     )
 
 
+async def set_chat_schedule_sync_status(
+    sc_id: str,
+    status: str,
+    *,
+    error: str | None = None,
+    synced_at: str | None = None,
+) -> None:
+    await get_store().set_chat_schedule_sync_status(
+        sc_id,
+        status,
+        error=error,
+        synced_at=synced_at,
+    )
+
+
 async def acquire_scheduled_query_lock(sq_id: str, expected_last_scheduled_at: str | None) -> bool:
     return await get_store().acquire_scheduled_query_lock(
         sq_id=sq_id, expected_last_scheduled_at=expected_last_scheduled_at

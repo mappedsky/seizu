@@ -33,7 +33,7 @@ The list shows each schedule's trigger and the status of its last run; run error
 
 ### Running a schedule on demand
 
-Choose **Run now** from a schedule's **⋮** menu — on a list row or on the detail view (owner only) — to request an immediate run without waiting for the trigger. The worker picks the request up on its next poll (`CHAT_SCHEDULES_POLL_SECONDS`) and runs the schedule as usual — **even if it is disabled**, so you can test a schedule before enabling it. The same is available via `POST /api/v1/chat/schedules/<id>/run`.
+Choose **Run now** from a schedule's **⋮** menu — on a list row or on the detail view (owner only) — to start an immediate run without waiting for the trigger. The run starts right away and executes as usual — **even if the schedule is disabled**, so you can test a schedule before enabling it. The same is available via `POST /api/v1/chat/schedules/<id>/run`.
 
 ## Run sessions
 
@@ -41,7 +41,18 @@ Each run creates a chat session owned by the schedule's creator, but these sessi
 
 ## How runs execute
 
-The `seizu-scheduled-chats` worker (`python -m reporting.scheduled_chats`) polls for due schedules and runs each as a headless agent session **owned by the schedule's creator**:
+Each schedule is reconciled into a **Temporal Schedule** that starts a
+`seizu_scheduled_chat` workflow; the workflow runs one activity, which drives a
+headless agent session **owned by the schedule's creator**. The
+`seizu-temporal-worker` service hosts both the workflow and the reconciliation
+loop, so **scheduled chats require a reachable Temporal server** (interactive
+chat does not).
+
+Triggers map onto Temporal directly: hourly schedules become interval specs
+anchored on the last run, daily/monthly become calendar specs, and a
+`watch_scans` trigger becomes a lightweight poll workflow that only creates a
+visible run when a matching scan has actually updated. Disabling a schedule
+pauses its Temporal Schedule rather than deleting it.
 
 - The creator's RBAC permissions apply to every tool call, resolved from the last role claim seen on one of their authenticated requests. Archived users' schedules stop running and record failures.
 - Stored role claims do not refresh in the background. An identity-provider
@@ -51,15 +62,17 @@ The `seizu-scheduled-chats` worker (`python -m reporting.scheduled_chats`) polls
   must be immediate.
 - Action confirmations are bypassed only while the creator holds `chat:bypass_permissions`; otherwise confirmation-gated tools fail closed for the run.
 - The headless system prompt tells the model nobody is present: it won't ask for confirmation and summarizes any blocked action instead of retrying.
-- A distributed lock guarantees one run per due window even with multiple workers.
+- A run that is still going when the next firing comes due causes that firing to be **skipped** rather than queued, so a slow schedule cannot pile up runs.
+- Runs are not retried: an agent session is expensive and non-idempotent, so a failure is recorded rather than repeated.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAT_SCHEDULES_ENABLED` | `true` | Master switch: gates the API routes, the sidebar UI, and the worker. Requires `CHAT_ENABLED`. |
-| `CHAT_SCHEDULES_POLL_SECONDS` | `20` | Worker polling interval. |
+| `CHAT_SCHEDULES_ENABLED` | `true` | Master switch: gates the API routes, the sidebar UI, and schedule reconciliation. Requires `CHAT_ENABLED`. |
 | `CHAT_SCHEDULE_TIMEOUT_SECONDS` | `600` | Timeout for one headless agent session. |
+| `WORKFLOW_RECONCILE_SECONDS` | `30` | How often stored schedules are reconciled into Temporal Schedules (shared with workflows). |
+| `WORKFLOW_WATCH_POLL_SECONDS` | `20` | Poll interval for `watch_scans` triggers (shared with workflows). |
 
 Scheduled and interactive runs use the same router and chat orchestrator.
 A persisted run-level budget tracks input/output
@@ -81,4 +94,4 @@ thinking models have enough output room to emit the final structured plan.
 Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`,
 and `failure`. The transcript metadata includes the final budget ledger.
 
-The worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`); see the [chat assistant documentation](chat.html). Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.
+The temporal worker needs the same chat configuration as the web app (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) plus `TEMPORAL_ADDRESS`/`TEMPORAL_NAMESPACE`; see the [chat assistant](chat.html) and [Temporal workflows](temporal-workflows.html) documentation. Note that `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so meaningful runs need a real LLM provider.

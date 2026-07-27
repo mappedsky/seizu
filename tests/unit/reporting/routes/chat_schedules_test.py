@@ -15,6 +15,23 @@ def _chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
 
 
+@pytest.fixture(autouse=True)
+def _stub_temporal(mocker):
+    """Keep route tests off Temporal; reconciliation is tested separately."""
+    mocker.patch(
+        "reporting.services.chat_schedules.reconcile_by_id",
+        mocker.AsyncMock(),
+    )
+    mocker.patch(
+        "reporting.services.chat_schedules.delete_schedule",
+        mocker.AsyncMock(),
+    )
+    mocker.patch(
+        "reporting.services.chat_schedules.run_now",
+        mocker.AsyncMock(return_value=("seizu-scheduled-chat:sc-1:manual:key", "run-1")),
+    )
+
+
 _FAKE_USER = User(
     user_id="test-user-id",
     sub="sub",
@@ -73,6 +90,11 @@ async def test_requires_chat_schedule_permission(mocker):
 async def test_create_scheduled_chat(mocker):
     create_mock = mocker.patch(
         "reporting.routes.chat_schedules.report_store.create_scheduled_chat",
+        mocker.AsyncMock(return_value=_schedule()),
+    )
+    # Create re-reads the record after reconciling to pick up sync status.
+    mocker.patch(
+        "reporting.routes.chat_schedules.report_store.get_scheduled_chat",
         mocker.AsyncMock(return_value=_schedule()),
     )
     app = _make_app()

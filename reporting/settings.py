@@ -247,8 +247,6 @@ WORKFLOW_RECONCILE_SECONDS = int_env("WORKFLOW_RECONCILE_SECONDS", 30)
 # UI) are enabled: gates the /api/v1/chat/schedules routes, the frontend UI,
 # and the scheduled chats worker. Requires CHAT_ENABLED.
 CHAT_SCHEDULES_ENABLED = bool_env("CHAT_SCHEDULES_ENABLED", True)
-# How often (seconds) the scheduled chats worker polls for due schedules.
-CHAT_SCHEDULES_POLL_SECONDS = int_env("CHAT_SCHEDULES_POLL_SECONDS", 20)
 # Timeout in seconds for one scheduled headless agent session.
 CHAT_SCHEDULE_TIMEOUT_SECONDS = int_env("CHAT_SCHEDULE_TIMEOUT_SECONDS", 600)
 

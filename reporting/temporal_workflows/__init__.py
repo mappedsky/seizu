@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from cartography_sync.shared import STATUS_COMPLETED, CartographySyncResult
 from reporting.temporal_workflows.shared import (
     STATUS_COMPLETED_WITH_ERRORS,
+    AgentChatResult,
     CveDependencyRemediationInput,
     CveDependencyRemediationResult,
     CveRepoReportInput,
@@ -145,7 +146,50 @@ def _cartography_sync_summary(value: CartographySyncResult) -> str:
     return "completed" if value.status == STATUS_COMPLETED else STATUS_COMPLETED_WITH_ERRORS
 
 
+def _agent_chat_input(context: WorkflowInputContext) -> object:
+    from reporting.temporal_workflows import agent_chat_config
+
+    return agent_chat_config.build_input(context)
+
+
+def _agent_chat_config_fields() -> list["ActionConfigFieldDef"]:
+    from reporting.temporal_workflows import agent_chat_config
+
+    return agent_chat_config.config_fields()
+
+
+def _agent_chat_config_validator(action_config: dict[str, Any]) -> str | None:
+    from reporting.temporal_workflows import agent_chat_config
+
+    return agent_chat_config.validate_config(action_config)
+
+
+# A run that ends anything but cleanly (failed, blocked, out of budget) still
+# returns a result, so surface it as a partial failure rather than success.
+_AGENT_CHAT_OK_STATUSES = frozenset({"success", "partial"})
+
+
+def _agent_chat_summary(value: AgentChatResult) -> str:
+    return "completed" if value.status in _AGENT_CHAT_OK_STATUSES else STATUS_COMPLETED_WITH_ERRORS
+
+
 WORKFLOW_REGISTRY: dict[str, WorkflowSpec] = {
+    "agent_chat": WorkflowSpec(
+        name="agent_chat",
+        description=(
+            "Runs an AI chat session as the workflow's creator with a prompt you"
+            " write. Optionally consumes an earlier stage's rows as untrusted"
+            " evidence, and publishes the session's summary as its output for"
+            " later stages to act on."
+        ),
+        input_factory=_agent_chat_input,
+        # An input reference is optional: the prompt alone is a valid run.
+        requires_rows=False,
+        config_fields=_agent_chat_config_fields,
+        config_validator=_agent_chat_config_validator,
+        output_type=AgentChatResult,
+        summarize_output=_agent_chat_summary,
+    ),
     "cve_repo_report": WorkflowSpec(
         name="cve_repo_report",
         description=(

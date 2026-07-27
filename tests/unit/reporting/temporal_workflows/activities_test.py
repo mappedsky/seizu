@@ -462,7 +462,7 @@ def _input() -> RepoChatInput:
 
 async def test_run_repo_cve_chat(mocker):
     mocker.patch(
-        "reporting.temporal_workflows.activities.resolve_stored_user",
+        "reporting.services.agent_run.resolve_stored_user",
         mocker.AsyncMock(return_value=_current_user()),
     )
     render = mocker.patch(
@@ -509,7 +509,7 @@ async def test_run_repo_cve_chat(mocker):
 
 async def test_run_repo_cve_chat_escapes_untrusted_cve_delimiters(mocker):
     mocker.patch(
-        "reporting.temporal_workflows.activities.resolve_stored_user",
+        "reporting.services.agent_run.resolve_stored_user",
         mocker.AsyncMock(return_value=_current_user()),
     )
     render = mocker.patch(
@@ -536,7 +536,7 @@ async def test_run_repo_cve_chat_escapes_untrusted_cve_delimiters(mocker):
 
 async def test_identity_failure_is_non_retryable(mocker):
     mocker.patch(
-        "reporting.temporal_workflows.activities.resolve_stored_user",
+        "reporting.services.agent_run.resolve_stored_user",
         mocker.AsyncMock(side_effect=HeadlessIdentityError("User 'user-1' is archived")),
     )
 
@@ -547,7 +547,7 @@ async def test_identity_failure_is_non_retryable(mocker):
 
 async def test_blocked_skill_render_is_non_retryable(mocker):
     mocker.patch(
-        "reporting.temporal_workflows.activities.resolve_stored_user",
+        "reporting.services.agent_run.resolve_stored_user",
         mocker.AsyncMock(return_value=_current_user()),
     )
     mocker.patch(

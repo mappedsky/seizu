@@ -1677,6 +1677,38 @@ class DynamoDBReportStore(ReportStore):
 
         await asyncio.to_thread(_op)
 
+    async def set_chat_schedule_sync_status(
+        self,
+        sc_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        def _op() -> None:
+            values = {
+                ":status": status,
+                ":error": error,
+                ":synced_at": synced_at,
+            }
+            expression = (
+                "SET schedule_sync_status = :status, schedule_sync_error = :error, schedule_synced_at = :synced_at"
+            )
+            table = _get_table()
+            # The list partition holds a duplicate of the metadata item; the
+            # reconciler reads schedules through it, so both must be updated.
+            for key in (
+                {"PK": _scheduled_chat_pk(sc_id), "SK": _SK_METADATA},
+                {"PK": _PK_SCHEDULED_CHAT_LIST, "SK": _scheduled_chat_pk(sc_id)},
+            ):
+                table.update_item(
+                    Key=key,
+                    UpdateExpression=expression,
+                    ExpressionAttributeValues=values,
+                )
+
+        await asyncio.to_thread(_op)
+
     async def list_scheduled_chats(self, user_id: str | None = None) -> list[ScheduledChatItem]:
         def _op() -> list[ScheduledChatItem]:
             table = _get_table()

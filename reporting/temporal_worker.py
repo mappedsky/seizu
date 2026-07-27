@@ -16,21 +16,27 @@ from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
-from reporting.services import workflow_schedules
+from reporting.services import chat_schedules, workflow_schedules
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     check_configured_workflow_watch,
+    check_scheduled_chat_watch,
     execute_configured_activity,
     execute_configured_query,
     get_pr_ci_status,
     load_configured_workflow,
+    load_scheduled_chat,
     normalize_code_workflow_output,
     record_configured_workflow_result,
+    record_scheduled_chat_run_result,
+    run_agent_chat_session,
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
+    run_scheduled_chat_session,
     trigger_configured_workflows,
 )
+from reporting.temporal_workflows.agent_chat import AgentChatWorkflow
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
 from reporting.temporal_workflows.configured_workflow import (
     ConfiguredWorkflow,
@@ -40,6 +46,7 @@ from reporting.temporal_workflows.configured_workflow import (
 )
 from reporting.temporal_workflows.cve_dependency_remediation import CveDependencyRemediationWorkflow
 from reporting.temporal_workflows.cve_repo_report import CveRepoReportWorkflow
+from reporting.temporal_workflows.scheduled_chat import ScheduledChatWatchPoll, ScheduledChatWorkflow
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
@@ -68,6 +75,9 @@ async def _run_worker() -> None:
                 ConfiguredWorkflowExecution,
                 ConfiguredWorkflowWaitingSlot,
                 ConfiguredWorkflowWatchPoll,
+                ScheduledChatWorkflow,
+                ScheduledChatWatchPoll,
+                AgentChatWorkflow,
             ],
             activities=[
                 load_configured_workflow,
@@ -82,6 +92,11 @@ async def _run_worker() -> None:
                 run_dependency_remediation,
                 get_pr_ci_status,
                 run_dependency_ci_fix,
+                load_scheduled_chat,
+                check_scheduled_chat_watch,
+                run_scheduled_chat_session,
+                record_scheduled_chat_run_result,
+                run_agent_chat_session,
             ],
         )
         logger.info(
@@ -107,6 +122,13 @@ async def _reconcile_loop() -> None:
             await workflow_schedules.reconcile_all()
         except Exception:
             logger.exception("Workflow Schedule reconciliation pass failed")
+        if settings.CHAT_ENABLED and settings.CHAT_SCHEDULES_ENABLED:
+            # Separate try/except: a chat-side failure must not stop workflow
+            # schedules from reconciling.
+            try:
+                await chat_schedules.reconcile_all()
+            except Exception:
+                logger.exception("Scheduled chat Schedule reconciliation pass failed")
         try:
             await asyncio.wait_for(
                 _shutdown_event.wait(),

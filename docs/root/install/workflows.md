@@ -37,12 +37,19 @@ Cypher is now a normal `query` activity, so it can run in any stage and more
 than once in one workflow. Its optional input is available to Cypher as
 `$input`; `input` is therefore reserved and cannot also be configured as a
 static query parameter. Query activities output a list of result-row objects.
-Each registered code-defined Temporal workflow (e.g. `cve_repo_report`,
-`cve_dependency_remediation`, `cartography_sync`) is its own activity type: the
-activity starts the child workflow, waits for it, and exposes the child's
-typed result as its named output. Stored definitions using the former
-`workflow` activity sub-type (with a `workflow` parameter) are migrated to the
-top-level type transparently on read; new saves must use the top-level types.
+Each registered code-defined Temporal workflow (e.g. `agent_chat`,
+`cve_repo_report`, `cve_dependency_remediation`, `cartography_sync`) is its own
+activity type: the activity starts the child workflow, waits for it, and
+exposes the child's typed result as its named output. Stored definitions using
+the former `workflow` activity sub-type (with a `workflow` parameter) are
+migrated to the top-level type transparently on read; new saves must use the
+top-level types.
+
+`agent_chat` is the general-purpose AI activity: you write the prompt, and it
+runs a headless agent session as the workflow's creator, publishing the
+session's summary as its output. Its input reference is optional — referenced
+rows are passed to the agent as untrusted evidence rather than instructions.
+See the [Temporal workflows documentation](temporal-workflows.html#the-agent-chat-workflow).
 
 When one activity fails, the other activities already running in that stage
 are allowed to settle. The workflow then fails and no later stage starts.
