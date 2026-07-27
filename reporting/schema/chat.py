@@ -103,10 +103,14 @@ class ScheduledChatItem(BaseModel):
     last_run_at: str | None = None
     last_errors: list[dict[str, str]] = Field(default_factory=list)
     last_scheduled_at: str | None = None
-    # Set by "run now": the worker runs the schedule on its next poll when
-    # this is newer than last_scheduled_at (even when the schedule is
-    # disabled, so owners can test before enabling).
+    # Set by "run now"; also consumed by schedule reconciliation to recover a
+    # request whose immediate start failed. A run-now runs even when the
+    # schedule is disabled, so owners can test before enabling.
     run_requested_at: str | None = None
+    # Temporal Schedule reconciliation state, mirroring ScheduledQueryItem.
+    schedule_sync_status: Literal["synced", "pending", "error"] = "pending"
+    schedule_sync_error: str | None = None
+    schedule_synced_at: str | None = None
 
 
 class ScheduledChatVersion(BaseModel):

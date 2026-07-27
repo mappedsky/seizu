@@ -310,6 +310,9 @@ class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     last_errors: list[dict[str, str]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     last_scheduled_at: str | None = None
     run_requested_at: str | None = None
+    schedule_sync_status: str = "pending"
+    schedule_sync_error: str | None = None
+    schedule_synced_at: str | None = None
 
 
 class ScheduledChatVersionRecord(SQLModel, table=True):  # type: ignore
@@ -1195,6 +1198,24 @@ class SQLModelReportStore(ReportStore):
     ) -> None:
         async with AsyncSession(_get_engine()) as session:
             record = await session.get(ScheduledQueryRecord, workflow_id)
+            if record is None:
+                return
+            record.schedule_sync_status = status
+            record.schedule_sync_error = error
+            record.schedule_synced_at = synced_at
+            session.add(record)
+            await session.commit()
+
+    async def set_chat_schedule_sync_status(
+        self,
+        sc_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ScheduledChatRecord, sc_id)
             if record is None:
                 return
             record.schedule_sync_status = status

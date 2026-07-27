@@ -295,6 +295,17 @@ class ReportStore(ABC):
         """Persist Temporal Schedule reconciliation status."""
 
     @abstractmethod
+    async def set_chat_schedule_sync_status(
+        self,
+        sc_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        synced_at: str | None = None,
+    ) -> None:
+        """Persist a scheduled chat's Temporal Schedule reconciliation status."""
+
+    @abstractmethod
     async def delete_scheduled_query(self, sq_id: str) -> bool:
         """Delete a scheduled query and all its versions. Returns False if not found."""
 

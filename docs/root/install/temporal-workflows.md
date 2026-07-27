@@ -9,7 +9,8 @@ editor (e.g. `cve_repo_report`, `cve_dependency_remediation`,
 durable, awaited child workflow. The first built-in workflow,
 `cve_repo_report`, runs an AI chat session per affected repository that
 evaluates newly discovered CVEs and creates or updates a versioned findings
-report.
+report. `agent_chat` is the general-purpose version of that idea: you supply
+the prompt.
 
 ## Architecture
 
@@ -48,7 +49,7 @@ Interactive chat requires per-action confirmation before mutating tools run. A h
 - When the creator does not hold it, confirmation-gated tools fail closed for the run; the headless system-prompt addendum tells the model to note the block in its summary and move on.
 - Chat-safe gating (`chat_safe_only`) and the creator's RBAC permissions are enforced on top, unchanged.
 
-The same permission gates the chat UI's optional "Bypass confirmations" mode and the `agent_chat` scheduled query action (see the [scheduled queries documentation](scheduled-queries.html)).
+The same permission gates the chat UI's optional "Bypass confirmations" mode, the `agent_chat` workflow activity, and scheduled chats.
 
 ## Run visibility in the UI
 
@@ -76,6 +77,53 @@ and surfaces `completed_with_errors` for it instead of a blanket `completed`;
 Both values are gated by a `workflow.patched(...)` marker so histories
 recorded before this existed keep replaying deterministically as `success`.
 
+## The agent_chat workflow
+
+The general-purpose AI activity: instead of a fixed task, you supply the
+prompt. Use it to run an agent step inside a larger pipeline — triage what a
+query returned, write a summary report, or act on another activity's output.
+
+- **Input is optional.** With no input reference it just runs the prompt. When
+  it does reference an earlier stage's output, those rows are passed to the
+  agent as untrusted evidence (JSON-encoded and escaped inside an
+  `<untrusted_graph_data>` block behind an explicit security-boundary
+  preamble), never as instructions. `max_rows` and `query_return_attribute`
+  control which rows reach the prompt.
+- **Output is named**, so a later stage can consume it: `status`, `thread_id`,
+  `summary`, `error`, and the run's `budget`.
+- **Config:** `prompt` (required), `session_title`, `skill` (an optional stored
+  skill rendered into the prompt as `skillset__skill`, with its required tools
+  pre-unlocked), and `timeout_minutes`.
+- Like every headless surface it runs as the workflow's creator, under their
+  RBAC, with confirmations bypassed only when they hold
+  `chat:bypass_permissions`. The run is not retried — an agent session is
+  expensive and non-idempotent — and a run that ends anything but cleanly
+  (failed, blocked, out of budget) reports `completed_with_errors`.
+
+A worked example:
+
+```yaml
+stages:
+  - activities:
+      - type: query
+        output: stale_admins
+        parameters:
+          cypher: |
+            MATCH (u:User) WHERE u.admin AND u.last_login < $cutoff
+            RETURN {user: u.email, last_login: u.last_login} AS details
+          parameters: [{name: cutoff, value: "2026-01-01"}]
+  - activities:
+      - type: agent_chat
+        input: stale_admins
+        output: admin_review
+        parameters:
+          prompt: |
+            Review these dormant admin accounts and write a short risk summary
+            into the report "Dormant admin review", creating it if missing.
+          session_title: Dormant admin review
+          timeout_minutes: 10
+```
+
 ## The cve_repo_report workflow
 
 Input: the scheduled query's result rows, each carrying at least a `repo` key (repository fullname). Per repository, sequentially:
@@ -93,11 +141,13 @@ instructions. Keep this boundary when adding fields or workflows. It reduces
 prompt-injection risk but does not make graph data trusted; retain normal RBAC,
 chat-safe tool filtering, result limits, and bypass audit logging.
 
-Temporal activities use the same `run_headless_chat()` entry point as scheduled
-chats. They therefore share token/cost accounting, role-specific model
-selection, degradation behavior, terminal statuses, and the final budget
-ledger. Temporal remains optional: scheduled chats and interactive chat do not
-require a Temporal server.
+Temporal activities use the same `run_agent_session()` entry point as scheduled
+chats (`reporting/services/agent_run.py`, which wraps `run_headless_chat()`).
+They therefore share identity resolution, the untrusted-evidence boundary,
+token/cost accounting, role-specific model selection, degradation behavior,
+terminal statuses, and the final budget ledger. Scheduled chats also run on
+Temporal (see the [scheduled chats documentation](chat-schedules.html)), so a
+Temporal server is required for them; interactive chat is not.
 
 The seeded scheduled query **New CVEs affecting repositories** watches the
 mappedsky GitHub organization sync and selects open `SecurityIssue` nodes whose
@@ -340,7 +390,7 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
 | `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of code-defined workflows exposed as top-level activity types (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow editor only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (editor) and the temporal worker (enforcement). |
-| `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Per-repository AI chat activity timeout. |
+| `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Default AI chat activity timeout (per repository for `cve_repo_report`; the default for `agent_chat`'s `timeout_minutes`). |
 | `SANDBOX_AGENT_PROVIDER` | `claude` | Coding-agent CLI: `claude` (Claude Code), `codex`, or `opencode`. `opencode` is multi-provider — set `SANDBOX_AGENT_MODEL` to a `provider/model` id (e.g. `deepseek/deepseek-v4-pro`) and it uses that provider's key, reusing the same global `*_API_KEY` (e.g. `DEEPSEEK_API_KEY`) the chat assistant uses. For opencode, an explicit `SANDBOX_AGENT_API_KEY` must belong to the model's provider — an Anthropic key with a `deepseek/…` model is exported as `DEEPSEEK_API_KEY` and fails auth. |
 | `SANDBOX_AGENT_TEMPLATE` | `""` (official) | E2B sandbox template. Empty → the provider's official prebuilt template (E2B ships first-party `claude`/`codex`/`opencode` images with the CLI installed), which removes the per-run `npm install` and its postinstall scripts from the flow. A template name → that template (e.g. a self-pinned copy). `none` → the plain base image (the run installs the CLI itself). Ignored on self-hosted backends (`SANDBOX_DOMAIN` set): E2B templates are a cloud feature, and the idempotent install step covers those. The template provides tools only, never credentials, so the phase isolation above is unchanged. |
 | `SANDBOX_AGENT_API_KEY` | `""` | Static API key for the CLI, exported only to the agent phase. Empty → falls back to `ANTHROPIC_API_KEY` for `claude`. Prefer the key command below. |
@@ -365,7 +415,7 @@ The remediation workflow also uses the sandbox provider configuration
 (`SANDBOX_API_KEY`, `SANDBOX_DOMAIN`; see [Sandbox delegation](sandbox.md)) —
 `SANDBOX_ENABLED` and the chat tool are not required.
 
-The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) for workflows that drive headless chat sessions (`cve_repo_report`); for that workflow, `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so exercising it end-to-end requires a real LLM provider. The `cve_dependency_remediation` workflow does not use the chat LLM at all — it needs the sandbox provider (`SANDBOX_API_KEY`/`SANDBOX_DOMAIN`) and `REMEDIATION_*` configuration instead.
+The worker also needs the chat configuration (`CHAT_LLM_*`, `CHAT_CHECKPOINT_*`) for workflows that drive headless chat sessions (`cve_repo_report`, `agent_chat`) and for scheduled chats; for those, `CHAT_LLM_PROVIDER=mock` echoes input and cannot call tools, so exercising them end-to-end requires a real LLM provider. The `cve_dependency_remediation` workflow does not use the chat LLM at all — it needs the sandbox provider (`SANDBOX_API_KEY`/`SANDBOX_DOMAIN`) and `REMEDIATION_*` configuration instead.
 
 ### Ephemeral credential-proxy sandbox
 

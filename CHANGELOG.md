@@ -4,6 +4,48 @@ All notable changes to Seizu are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### ⚠️ Breaking changes
+
+- **Scheduled chats now require Temporal.** The `seizu-scheduled-chats` worker
+  (`python -m reporting.scheduled_chats`), its Compose service, and its
+  `seizu-scheduled-chats` console script are removed; the
+  `seizu-temporal-worker` service now reconciles and runs scheduled chats
+  alongside workflows. Deployments running chat without a Temporal server must
+  stand one up, and must give the temporal worker the chat configuration
+  (`CHAT_ENABLED`, `CHAT_SCHEDULES_ENABLED`, `CHAT_SCHEDULE_TIMEOUT_SECONDS`,
+  `CHAT_LLM_*`, `CHAT_CHECKPOINT_*`).
+- **`CHAT_SCHEDULES_POLL_SECONDS` is removed.** There is no polling loop left to
+  tune; reconciliation cadence is `WORKFLOW_RECONCILE_SECONDS` and watch-scan
+  polling is `WORKFLOW_WATCH_POLL_SECONDS`, both shared with workflows.
+
+### Added
+
+- **`agent_chat` workflow activity** — the general-purpose AI activity. You
+  supply the prompt; it runs a headless agent session as the workflow's creator
+  and publishes the session summary as a named output later stages can consume.
+  Its input reference is optional, and referenced rows are passed to the agent
+  as untrusted evidence rather than instructions. Config: `prompt`,
+  `session_title`, `skill`, `timeout_minutes`, `max_rows`,
+  `query_return_attribute`.
+- Scheduled chats expose `schedule_sync_status`, `schedule_sync_error`, and
+  `schedule_synced_at`, mirroring workflows (migration
+  `0004_chat_schedule_sync_fields`).
+
+### Changed
+
+- Scheduled chats run as durable **Temporal Schedules** instead of a 20-second
+  polling loop that executed every schedule serially. Disabling a schedule now
+  pauses its Schedule; a run that overruns its next firing causes that firing to
+  be skipped rather than queued; runs are not retried.
+- `POST /api/v1/chat/schedules/<id>/run` starts the run immediately instead of
+  waiting for the next poll. The route, its permissions, and its response are
+  unchanged.
+- Internal: trigger semantics are shared by workflows and scheduled chats via
+  `reporting/services/schedule_reconciler.py`, and both headless agent surfaces
+  now go through `reporting/services/agent_run.py:run_agent_session()`.
+
 ## [4.0.0] - 2026-07-23
 
 The headline of this release is **staged, configurable Temporal workflows**:

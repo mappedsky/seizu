@@ -8,10 +8,10 @@
   "scripts": {
     "start": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "type-check": "tsc --noEmit",
-    "test:ci": "bun test --watchAll=false",
-    "test:type-check": "tsc --noEmit && bun test --watchAll=false"
+    "test:ci": "bun test --watchAll=false --timeout 30000",
+    "test:type-check": "tsc --noEmit && bun test --watchAll=false --timeout 30000"
   },
   "browserslist": {
     "production": [

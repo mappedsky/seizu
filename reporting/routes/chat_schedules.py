@@ -22,7 +22,7 @@ from reporting.schema.chat import (
     ScheduledChatVersion,
     ScheduledChatVersionListResponse,
 )
-from reporting.services import report_store
+from reporting.services import chat_schedules, report_store
 from reporting.services.chat_graph import load_thread_messages
 
 logger = logging.getLogger(__name__)
@@ -83,14 +83,11 @@ async def create_scheduled_chat(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
 ) -> ScheduledChatItem:
     """Create a scheduled chat owned by the requesting user."""
-    item = await report_store.create_scheduled_chat(
-        name=body.name,
-        prompt=body.prompt,
-        schedule=body.schedule.model_dump() if body.schedule else None,
-        watch_scans=body.watch_scans,
-        enabled=body.enabled,
-        created_by=current.user.user_id,
-    )
+    try:
+        item = await chat_schedules.create_managed(body, current.user.user_id)
+    except Exception as exc:
+        logger.exception("Unable to create scheduled chat")
+        raise HTTPException(status_code=503, detail="Temporal is unavailable") from exc
     logger.info(
         "Scheduled chat created",
         extra={"type": "AUDIT", "scheduled_chat_id": item.scheduled_chat_id, "user": current.user.user_id},
@@ -160,18 +157,13 @@ async def update_scheduled_chat(
 ) -> ScheduledChatItem:
     """Update one of the requesting user's scheduled chats."""
     await _owned_schedule(sc_id, current)
-    item = await report_store.update_scheduled_chat(
-        sc_id=sc_id,
-        name=body.name,
-        prompt=body.prompt,
-        schedule=body.schedule.model_dump() if body.schedule else None,
-        watch_scans=body.watch_scans,
-        enabled=body.enabled,
-        updated_by=current.user.user_id,
-        comment=body.comment,
-    )
-    if item is None:
-        raise HTTPException(status_code=404, detail="Scheduled chat not found")
+    try:
+        item = await chat_schedules.update_managed(sc_id, body, current.user.user_id)
+    except chat_schedules.ScheduledChatNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unable to update scheduled chat", extra={"scheduled_chat_id": sc_id})
+        raise HTTPException(status_code=503, detail="Temporal is unavailable") from exc
     logger.info(
         "Scheduled chat updated",
         extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},
@@ -188,16 +180,19 @@ async def run_scheduled_chat(
     sc_id: str,
     current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
 ) -> ScheduledChatRunRequestedResponse:
-    """Request an immediate run of one of the requesting user's scheduled chats.
+    """Start an immediate run of one of the requesting user's scheduled chats.
 
-    The worker picks the request up on its next poll and runs the schedule
-    (as its owner) even if it is disabled, so it can be tested before
-    enabling.
+    The run starts right away (as the schedule's owner) even if the schedule
+    is disabled, so it can be tested before enabling.
     """
     await _owned_schedule(sc_id, current)
-    run_requested_at = await report_store.request_scheduled_chat_run(sc_id)
-    if run_requested_at is None:
-        raise HTTPException(status_code=404, detail="Scheduled chat not found")
+    try:
+        run_requested_at = await chat_schedules.run_managed(sc_id)
+    except chat_schedules.ScheduledChatNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unable to start scheduled chat run", extra={"scheduled_chat_id": sc_id})
+        raise HTTPException(status_code=503, detail="Temporal is unavailable") from exc
     logger.info(
         "Scheduled chat run requested",
         extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},
@@ -237,7 +232,13 @@ async def delete_scheduled_chat(
 ) -> None:
     """Delete one of the requesting user's scheduled chats."""
     await _owned_schedule(sc_id, current)
-    await report_store.delete_scheduled_chat(sc_id)
+    try:
+        await chat_schedules.delete_managed(sc_id)
+    except chat_schedules.ScheduledChatNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unable to delete scheduled chat", extra={"scheduled_chat_id": sc_id})
+        raise HTTPException(status_code=503, detail="Temporal is unavailable") from exc
     logger.info(
         "Scheduled chat deleted",
         extra={"type": "AUDIT", "scheduled_chat_id": sc_id, "user": current.user.user_id},

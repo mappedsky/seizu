@@ -292,6 +292,66 @@ class CveDependencyRemediationResult:
     per_dependency: list[DependencyRemediationResult] = field(default_factory=list)
 
 
+@dataclass
+class ScheduledChatInvocation:
+    """Identifies the scheduled chat a run belongs to.
+
+    ``manual`` marks a run-now (it bypasses the enabled/trigger checks);
+    ``watch_checked`` marks a run the watch-poll workflow already qualified.
+    """
+
+    scheduled_chat_id: str = ""
+    manual: bool = False
+    watch_checked: bool = False
+
+
+@dataclass
+class ScheduledChatDefinition:
+    """The resolved schedule a run executes, or the reason it was skipped."""
+
+    scheduled_chat_id: str = ""
+    creator_user_id: str = ""
+    name: str = ""
+    prompt: str = ""
+    timeout_seconds: int = 600
+    version: int = 0
+    skipped_reason: str | None = None
+
+
+@dataclass
+class ScheduledChatRunResult:
+    # success | partial | budget_exhausted | blocked | failure | skipped
+    status: str = "success"
+    thread_id: str = ""
+    summary: str = ""
+    error: str | None = None
+    budget: dict[str, Any] | None = None
+
+
+@dataclass
+class AgentChatInput:
+    """Input for the ``agent_chat`` workflow module."""
+
+    workflow_id: str = ""
+    creator_user_id: str = ""
+    prompt: str = ""
+    session_title: str = "Workflow chat"
+    timeout_seconds: int = 600
+    skill: str | None = None
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class AgentChatResult:
+    """The ``agent_chat`` activity's named output, consumable by later stages."""
+
+    status: str = "success"
+    thread_id: str = ""
+    summary: str = ""
+    error: str | None = None
+    budget: dict[str, Any] | None = None
+
+
 def group_rows_by_repo(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Group result rows by their "repo" key; rows without one are dropped."""
     grouped: dict[str, list[dict[str, Any]]] = {}

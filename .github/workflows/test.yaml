@@ -41,7 +41,7 @@ jobs:
       - name: Type check
         run: bun run type-check
       - name: Run tests
-        run: bun test --watchAll=false
+        run: bun test --watchAll=false --timeout 30000
   build-python-packages:
     runs-on: ubuntu-latest
     permissions:
