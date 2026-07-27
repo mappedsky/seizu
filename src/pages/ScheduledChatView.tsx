@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Helmet } from 'react-helmet';
 import {
@@ -52,6 +52,9 @@ import { pageContentSx } from 'src/theme/layout';
 // ---------------------------------------------------------------------------
 // Run transcript rendering
 // ---------------------------------------------------------------------------
+
+// How often an in-flight run's transcript and the run list are refreshed.
+const RUN_POLL_MS = 5000;
 
 function RunDetailRow({ detail }: { detail: ScheduledChatRunDetail }) {
   const hasContent = Boolean(detail.arguments || detail.body);
@@ -203,14 +206,44 @@ function RunAccordion({
     ScheduledChatTranscriptMessage[] | null
   >(null);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
-  const handleExpand = (_event: unknown, expanded: boolean) => {
-    if (!expanded || transcript !== null) return;
-    fetchHistory(scheduleId, session.thread_id)
-      .then(setTranscript)
-      .catch(() => setError('Failed to load this run.'));
-  };
   const status = session.run_status ?? 'unknown';
+  const isRunning = status === 'running';
+
+  const handleExpand = (_event: unknown, expanded: boolean) =>
+    setOpen(expanded);
+
+  // Load when the panel opens, and keep polling while the run is still
+  // underway — otherwise the panel shows whatever happened to be persisted at
+  // the instant it was first opened and never catches up. `transcript` is
+  // deliberately not a dependency: it changes on every poll, which would
+  // re-arm the interval each time.
+  useEffect(() => {
+    if (!open) return undefined;
+
+    let cancelled = false;
+    const load = () =>
+      fetchHistory(scheduleId, session.thread_id)
+        .then((messages) => {
+          if (!cancelled) setTranscript(messages);
+        })
+        .catch(() => {
+          if (!cancelled) setError('Failed to load this run.');
+        });
+
+    void load();
+    if (!isRunning)
+      return () => {
+        cancelled = true;
+      };
+    const timer = setInterval(() => void load(), RUN_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [open, isRunning, fetchHistory, scheduleId, session.thread_id]);
+
   const statusColor =
     status === 'completed' || status === 'success'
       ? 'success'
@@ -427,20 +460,39 @@ function ScheduledChatView() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [runMessage, setRunMessage] = useState<string | null>(null);
 
+  const loadSessions = useCallback(async () => {
+    if (!id) return;
+    try {
+      setSessions(await fetchSessions(id));
+    } catch {
+      setSessionsError('Failed to load runs.');
+    }
+  }, [id, fetchSessions]);
+
+  const hasRunningSession = (sessions ?? []).some(
+    (session) => session.run_status === 'running',
+  );
+
+  // Load once on mount, then keep polling only while a run is in flight, so
+  // its status and any new messages land without a manual reload. "Run now"
+  // refreshes explicitly, which is what starts this polling.
   useEffect(() => {
-    let cancelled = false;
     if (!id) return undefined;
-    fetchSessions(id)
-      .then((result) => {
-        if (!cancelled) setSessions(result);
-      })
-      .catch(() => {
-        if (!cancelled) setSessionsError('Failed to load runs.');
-      });
+    let cancelled = false;
+    const load = () => {
+      if (!cancelled) void loadSessions();
+    };
+    load();
+    if (!hasRunningSession)
+      return () => {
+        cancelled = true;
+      };
+    const timer = setInterval(load, RUN_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
-  }, [id, fetchSessions]);
+  }, [id, loadSessions, hasRunningSession]);
 
   const isOwner = Boolean(
     schedule && currentUser && schedule.created_by === currentUser.user_id,
@@ -464,11 +516,10 @@ function ScheduledChatView() {
     if (!schedule) return;
     try {
       await runSchedule(schedule.scheduled_chat_id);
-      setRunMessage(
-        `Run requested for "${schedule.name}". The worker will pick it up on its next poll.`,
-      );
+      setRunMessage(`Started a run of "${schedule.name}".`);
+      await loadSessions();
     } catch {
-      setRunMessage('Failed to request run. Please try again.');
+      setRunMessage('Failed to start run. Please try again.');
     }
   };
 
@@ -480,7 +531,7 @@ function ScheduledChatView() {
       onClick: () => void handleRunNow(),
       disabled: !canEdit,
       tooltip: canEdit
-        ? 'Runs on the worker’s next poll, even if disabled'
+        ? 'Runs immediately, even if disabled'
         : 'Only the schedule owner can run this scheduled chat.',
     },
     {

@@ -155,6 +155,9 @@ describe('ScheduledChatView', () => {
   afterEach(() => {
     cleanup();
     jest.restoreAllMocks();
+    // Unconditional: a test that fakes timers and then fails would otherwise
+    // leak them into every test that runs after it.
+    jest.useRealTimers();
   });
 
   it('shows detail panels, the edit button, and the actions menu', async () => {
@@ -195,9 +198,54 @@ describe('ScheduledChatView', () => {
     await act(async () => {});
 
     expect(runSchedule).toHaveBeenCalledWith('sc1');
+    // Runs now start immediately rather than on a worker's next poll.
     expect(
-      screen.getByText(/run requested for "daily cve digest"/i),
+      screen.getByText(/started a run of "daily cve digest"/i),
     ).toBeInTheDocument();
+  });
+
+  it('keeps refreshing an in-flight run so its output appears as it is produced', async () => {
+    // Runs start immediately, so a user expands one mid-run: the transcript is
+    // near-empty at that moment and must not be cached in that state.
+    jest.useFakeTimers();
+    mockUseScheduledChatSessions.mockReturnValue(
+      jest.fn().mockResolvedValue([
+        {
+          thread_id: '12345',
+          title: 'Daily CVE digest – 2026-01-02',
+          created_at: '2026-01-02T00:00:00Z',
+          updated_at: '2026-01-02T00:00:05Z',
+          run_status: 'running',
+          run_errors: [],
+        },
+      ]),
+    );
+    const fetchHistory = jest
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'm1', role: 'user', text: 'Summarize new critical CVEs' },
+      ])
+      .mockResolvedValue([
+        { id: 'm1', role: 'user', text: 'Summarize new critical CVEs' },
+        { id: 'm2', role: 'assistant', text: 'Digest complete.' },
+      ]);
+    mockUseSessionHistory.mockReturnValue(fetchHistory);
+
+    render(<ScheduledChatView />, { wrapper: Wrapper });
+    await act(async () => {});
+
+    fireEvent.click(screen.getByText('Daily CVE digest – 2026-01-02'));
+    await act(async () => {});
+
+    // Only the prompt has been persisted so far.
+    expect(screen.queryByText('Digest complete.')).not.toBeInTheDocument();
+
+    await act(async () => {
+      jest.advanceTimersByTime(5000);
+    });
+
+    expect(fetchHistory.mock.calls.length).toBeGreaterThan(1);
+    expect(screen.getByText('Digest complete.')).toBeInTheDocument();
   });
 
   it('expands a run to show the transcript with a details section', async () => {

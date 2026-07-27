@@ -152,7 +152,7 @@ function ScheduledChats() {
         onClick: () => void handleRunNow(schedule),
         disabled: !isOwner,
         tooltip: isOwner
-          ? 'Runs on the worker’s next poll, even if disabled'
+          ? 'Runs immediately, even if disabled'
           : 'Only the schedule owner can run this scheduled chat.',
       },
       {
