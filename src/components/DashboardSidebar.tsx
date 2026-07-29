@@ -3,6 +3,7 @@ import { Box, Drawer, List } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import Dashboard from '@mui/icons-material/Dashboard';
 import Insights from '@mui/icons-material/Insights';
+import Workspaces from '@mui/icons-material/Workspaces';
 import Article from '@mui/icons-material/Article';
 import Terminal from '@mui/icons-material/Terminal';
 import Chat from '@mui/icons-material/Chat';
@@ -66,6 +67,18 @@ function DashboardSidebar({
       title: 'Reports',
       subItems: reportSubitems.length > 0 ? reportSubitems : undefined,
     },
+    // Flat link only: NavItem renders one level of subItems, and a space tree
+    // (space -> sub-space -> report) is three. The tree lives on the space
+    // detail page instead.
+    ...(hasPermission('spaces:read')
+      ? [
+          {
+            href: '/app/spaces',
+            icon: Workspaces,
+            title: 'Spaces',
+          },
+        ]
+      : []),
     ...(hasPermission('query:execute')
       ? [
           {

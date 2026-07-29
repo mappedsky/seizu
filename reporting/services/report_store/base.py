@@ -28,6 +28,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
+from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
 
 
 def initial_report_config(name: str) -> dict[str, Any]:
@@ -89,8 +90,17 @@ class ReportStore(ABC):
         name: str,
         created_by: str,
         access: ReportAccess | None = None,
+        space_id: str | None = None,
+        subspace_id: str | None = None,
+        space_overview: bool = False,
     ) -> ReportListItem:
-        """Create a report with an initial version and return its metadata."""
+        """Create a report with an initial version and return its metadata.
+
+        The space arguments are not validated here — callers go through
+        ``reporting.services.spaces.resolve_report_space`` first. ``create_space``
+        is the only caller that passes ``space_overview=True``, and it does so
+        inside the same write that creates the space.
+        """
 
     @abstractmethod
     async def save_report_version(
@@ -114,6 +124,26 @@ class ReportStore(ABC):
         access: ReportAccess | None = None,
     ) -> ReportListItem | None:
         """Update report visibility without creating a new report version."""
+
+    @abstractmethod
+    async def update_report_space(
+        self,
+        report_id: str,
+        space_id: str | None,
+        subspace_id: str | None,
+        updated_by: str,
+        user_id: str | None = None,
+    ) -> ReportListItem | None:
+        """Set a report's space membership without creating a new report version.
+
+        Replace semantics: both arguments describe the desired final state, so
+        moving a report to a different space without naming a sub-space clears
+        the sub-space. Cross-entity validity (the sub-space belongs to the
+        space, the report is not an overview report) is the caller's
+        responsibility — see ``reporting.services.spaces``.
+
+        Returns None if the report does not exist or is not visible to the user.
+        """
 
     @abstractmethod
     async def delete_report(self, report_id: str, user_id: str | None = None) -> bool:
@@ -308,6 +338,121 @@ class ReportStore(ABC):
     @abstractmethod
     async def delete_scheduled_query(self, sq_id: str) -> bool:
         """Delete a scheduled query and all its versions. Returns False if not found."""
+
+    # ------------------------------------------------------------------
+    # Spaces
+    #
+    # Flat records: no version history and no access scope. Spaces are
+    # globally visible; the reports listed inside one are still filtered by
+    # the report's own visibility.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_spaces(self) -> list[SpaceListItem]:
+        """Return all spaces."""
+
+    @abstractmethod
+    async def get_space(self, space_id: str) -> SpaceListItem | None:
+        """Return a space, or None if it does not exist."""
+
+    @abstractmethod
+    async def create_space(
+        self,
+        name: str,
+        description: str,
+        created_by: str,
+    ) -> SpaceListItem:
+        """Create a space and its overview report atomically.
+
+        Generates both IDs; the returned item carries ``overview_report_id``.
+        The overview report is an ordinary report created **public** with
+        ``space_id`` set and ``space_overview=True``. Public because spaces are
+        globally visible, so a private overview would render the space broken
+        for everyone but its creator.
+
+        The two-way pointer (``space.overview_report_id`` and
+        ``report.space_overview``) is written here and never mutated
+        afterwards; only ``delete_space`` removes it.
+        """
+
+    @abstractmethod
+    async def update_space(
+        self,
+        space_id: str,
+        name: str,
+        description: str,
+        updated_by: str,
+    ) -> SpaceListItem | None:
+        """Rename a space. Returns None if it does not exist."""
+
+    @abstractmethod
+    async def delete_space(self, space_id: str) -> SpaceDeleteResult:
+        """Delete an empty space, along with its overview report and sub-spaces.
+
+        A space is empty when it holds no member reports other than
+        ``overview_report_id``. Sub-spaces do not block the delete: they are
+        grouping labels, and with no member reports left nothing references
+        them, so they are removed with the space.
+
+        Emptiness is evaluated **without** per-user visibility filtering —
+        filtering it would let a space holding another user's private report
+        read as empty and be deleted, orphaning that report.
+        """
+
+    @abstractmethod
+    async def list_space_reports(
+        self,
+        space_id: str,
+        user_id: str | None = None,
+    ) -> list[ReportListItem]:
+        """Return the reports filed in a space that are visible to the user.
+
+        Includes the overview report; callers rendering the space sidebar
+        filter it out. Pass ``user_id=None`` for an unfiltered view.
+        """
+
+    # ------------------------------------------------------------------
+    # Sub-spaces (nested under spaces)
+    #
+    # Grouping labels only: no detail page, no version history. Deleting one
+    # leaves member reports with an unresolvable subspace_id, which reads as
+    # "ungrouped" — see reporting/routes/spaces.py.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_subspaces(self, space_id: str) -> list[SubspaceItem]:
+        """Return the sub-spaces of a space."""
+
+    @abstractmethod
+    async def get_subspace(self, subspace_id: str) -> SubspaceItem | None:
+        """Return a sub-space, or None if it does not exist."""
+
+    @abstractmethod
+    async def create_subspace(
+        self,
+        space_id: str,
+        name: str,
+        created_by: str,
+    ) -> SubspaceItem | None:
+        """Create a sub-space. Returns None if the space does not exist."""
+
+    @abstractmethod
+    async def update_subspace(
+        self,
+        subspace_id: str,
+        name: str,
+        updated_by: str,
+    ) -> SubspaceItem | None:
+        """Rename a sub-space. Returns None if it does not exist."""
+
+    @abstractmethod
+    async def delete_subspace(self, subspace_id: str) -> bool:
+        """Delete a sub-space. Returns False if it does not exist.
+
+        Member reports are left untouched; their now-dangling ``subspace_id``
+        renders as ungrouped rather than triggering an unbounded,
+        non-transactional fan-out write.
+        """
 
     # ------------------------------------------------------------------
     # Toolsets

@@ -45,6 +45,9 @@ class ReportListItem(BaseModel):
     updated_by: str
     access: ReportAccess
     pinned: bool = False
+    space_id: str | None = None
+    subspace_id: str | None = None
+    space_overview: bool = False
 
     @field_validator("current_version", mode="before")
     @classmethod
@@ -68,6 +71,12 @@ class ReportVersion(BaseModel):
     report_updated_by: str
     access: ReportAccess
     query_capabilities: dict[str, str] | None = None
+    # Denormalised from the parent report record, like report_created_by above.
+    # Space membership is unversioned: it is never written into a version item
+    # or into `config`, so restoring an old version cannot relocate a report.
+    space_id: str | None = None
+    subspace_id: str | None = None
+    space_overview: bool = False
 
     @field_validator("version", mode="before")
     @classmethod
@@ -113,6 +122,8 @@ class CreateReportRequest(BaseModel):
     """Request body for POST /api/v1/reports."""
 
     name: str
+    space_id: str | None = None
+    subspace_id: str | None = None
 
 
 class PinReportRequest(BaseModel):
@@ -148,9 +159,17 @@ class CreateVersionRequest(BaseModel):
 
 
 class CloneReportRequest(BaseModel):
-    """Request body for POST /api/v1/reports/<id>/clone."""
+    """Request body for POST /api/v1/reports/<id>/clone.
+
+    When ``space_id`` is null or omitted the clone inherits the source report's
+    space and sub-space; cloning inside a space is the common case, and there
+    is no way to clone an in-space report to no space in one call. A clone is
+    never an overview report, whatever the source was.
+    """
 
     name: str
+    space_id: str | None = None
+    subspace_id: str | None = None
 
 
 class User(BaseModel):

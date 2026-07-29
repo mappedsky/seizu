@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from reporting.schema.space_config import SpaceDeleteResult
 from reporting.services import report_store
 from reporting.services.report_store.dynamodb import DynamoDBReportStore
 from reporting.services.report_store.sql import SQLModelReportStore
@@ -140,6 +141,18 @@ def mock_store():
         "delete_role": True,
         "list_role_versions": [],
         "get_role_version": None,
+        "update_report_space": None,
+        "list_spaces": [],
+        "get_space": None,
+        "create_space": None,
+        "update_space": None,
+        "delete_space": SpaceDeleteResult.DELETED,
+        "list_space_reports": [],
+        "list_subspaces": [],
+        "get_subspace": None,
+        "create_subspace": None,
+        "update_subspace": None,
+        "delete_subspace": True,
     }
     for name, return_value in async_methods.items():
         setattr(store, name, AsyncMock(return_value=return_value))
@@ -179,7 +192,104 @@ async def test_list_report_versions_delegates(mock_store):
 
 async def test_create_report_delegates(mock_store):
     await report_store.create_report(name="My Report", created_by="u@x.com")
-    mock_store.create_report.assert_called_once_with(name="My Report", created_by="u@x.com", access=None)
+    mock_store.create_report.assert_called_once_with(
+        name="My Report",
+        created_by="u@x.com",
+        access=None,
+        space_id=None,
+        subspace_id=None,
+        space_overview=False,
+    )
+
+
+async def test_create_report_delegates_space_membership(mock_store):
+    await report_store.create_report(
+        name="My Report",
+        created_by="u@x.com",
+        space_id="sp1",
+        subspace_id="ss1",
+    )
+    mock_store.create_report.assert_called_once_with(
+        name="My Report",
+        created_by="u@x.com",
+        access=None,
+        space_id="sp1",
+        subspace_id="ss1",
+        space_overview=False,
+    )
+
+
+async def test_update_report_space_delegates(mock_store):
+    await report_store.update_report_space(
+        report_id="rid1",
+        space_id="sp1",
+        subspace_id=None,
+        updated_by="u@x.com",
+        user_id="u@x.com",
+    )
+    mock_store.update_report_space.assert_called_once_with(
+        report_id="rid1",
+        space_id="sp1",
+        subspace_id=None,
+        updated_by="u@x.com",
+        user_id="u@x.com",
+    )
+
+
+async def test_list_spaces_delegates(mock_store):
+    result = await report_store.list_spaces()
+    mock_store.list_spaces.assert_called_once()
+    assert result == []
+
+
+async def test_get_space_delegates(mock_store):
+    await report_store.get_space("sp1")
+    mock_store.get_space.assert_called_once_with("sp1")
+
+
+async def test_create_space_delegates(mock_store):
+    await report_store.create_space(name="Cloud", description="d", created_by="u@x.com")
+    mock_store.create_space.assert_called_once_with(name="Cloud", description="d", created_by="u@x.com")
+
+
+async def test_update_space_delegates(mock_store):
+    await report_store.update_space(space_id="sp1", name="Cloud", description="d", updated_by="u@x.com")
+    mock_store.update_space.assert_called_once_with(space_id="sp1", name="Cloud", description="d", updated_by="u@x.com")
+
+
+async def test_delete_space_delegates(mock_store):
+    await report_store.delete_space("sp1")
+    mock_store.delete_space.assert_called_once_with("sp1")
+
+
+async def test_list_space_reports_delegates(mock_store):
+    await report_store.list_space_reports("sp1", user_id="u@x.com")
+    mock_store.list_space_reports.assert_called_once_with("sp1", user_id="u@x.com")
+
+
+async def test_list_subspaces_delegates(mock_store):
+    await report_store.list_subspaces("sp1")
+    mock_store.list_subspaces.assert_called_once_with("sp1")
+
+
+async def test_get_subspace_delegates(mock_store):
+    await report_store.get_subspace("ss1")
+    mock_store.get_subspace.assert_called_once_with("ss1")
+
+
+async def test_create_subspace_delegates(mock_store):
+    await report_store.create_subspace(space_id="sp1", name="Net", created_by="u@x.com")
+    mock_store.create_subspace.assert_called_once_with(space_id="sp1", name="Net", created_by="u@x.com")
+
+
+async def test_update_subspace_delegates(mock_store):
+    await report_store.update_subspace(subspace_id="ss1", name="Net", updated_by="u@x.com")
+    mock_store.update_subspace.assert_called_once_with(subspace_id="ss1", name="Net", updated_by="u@x.com")
+
+
+async def test_delete_subspace_delegates(mock_store):
+    await report_store.delete_subspace("ss1")
+    mock_store.delete_subspace.assert_called_once_with("ss1")
 
 
 async def test_save_report_version_delegates(mock_store):

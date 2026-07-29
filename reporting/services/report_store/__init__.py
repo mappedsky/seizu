@@ -24,6 +24,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
+from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
 from reporting.services.report_store.base import ReportStore
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,18 @@ async def create_report(
     name: str,
     created_by: str,
     access: ReportAccess | None = None,
+    space_id: str | None = None,
+    subspace_id: str | None = None,
+    space_overview: bool = False,
 ) -> ReportListItem:
-    return await get_store().create_report(name=name, created_by=created_by, access=access)
+    return await get_store().create_report(
+        name=name,
+        created_by=created_by,
+        access=access,
+        space_id=space_id,
+        subspace_id=subspace_id,
+        space_overview=space_overview,
+    )
 
 
 async def save_report_version(
@@ -125,8 +136,88 @@ async def update_report_visibility(
     )
 
 
+async def update_report_space(
+    report_id: str,
+    space_id: str | None,
+    subspace_id: str | None,
+    updated_by: str,
+    user_id: str | None = None,
+) -> ReportListItem | None:
+    return await get_store().update_report_space(
+        report_id=report_id,
+        space_id=space_id,
+        subspace_id=subspace_id,
+        updated_by=updated_by,
+        user_id=user_id,
+    )
+
+
 async def delete_report(report_id: str, user_id: str | None = None) -> bool:
     return await get_store().delete_report(report_id, user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# Spaces
+# ---------------------------------------------------------------------------
+
+
+async def list_spaces() -> list[SpaceListItem]:
+    return await get_store().list_spaces()
+
+
+async def get_space(space_id: str) -> SpaceListItem | None:
+    return await get_store().get_space(space_id)
+
+
+async def create_space(name: str, description: str, created_by: str) -> SpaceListItem:
+    return await get_store().create_space(name=name, description=description, created_by=created_by)
+
+
+async def update_space(
+    space_id: str,
+    name: str,
+    description: str,
+    updated_by: str,
+) -> SpaceListItem | None:
+    return await get_store().update_space(
+        space_id=space_id,
+        name=name,
+        description=description,
+        updated_by=updated_by,
+    )
+
+
+async def delete_space(space_id: str) -> SpaceDeleteResult:
+    return await get_store().delete_space(space_id)
+
+
+async def list_space_reports(space_id: str, user_id: str | None = None) -> list[ReportListItem]:
+    return await get_store().list_space_reports(space_id, user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# Sub-spaces
+# ---------------------------------------------------------------------------
+
+
+async def list_subspaces(space_id: str) -> list[SubspaceItem]:
+    return await get_store().list_subspaces(space_id)
+
+
+async def get_subspace(subspace_id: str) -> SubspaceItem | None:
+    return await get_store().get_subspace(subspace_id)
+
+
+async def create_subspace(space_id: str, name: str, created_by: str) -> SubspaceItem | None:
+    return await get_store().create_subspace(space_id=space_id, name=name, created_by=created_by)
+
+
+async def update_subspace(subspace_id: str, name: str, updated_by: str) -> SubspaceItem | None:
+    return await get_store().update_subspace(subspace_id=subspace_id, name=name, updated_by=updated_by)
+
+
+async def delete_subspace(subspace_id: str) -> bool:
+    return await get_store().delete_subspace(subspace_id)
 
 
 async def pin_report(

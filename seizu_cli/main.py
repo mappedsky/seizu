@@ -7,13 +7,14 @@ import typer
 from seizu_cli import auth, state
 from seizu_cli import config as cli_config
 from seizu_cli.commands import auth as auth_commands
-from seizu_cli.commands import reports, scheduled_queries, seed, skillsets, toolsets, workflows
+from seizu_cli.commands import reports, scheduled_queries, seed, skillsets, spaces, toolsets, workflows
 
 app = typer.Typer(
     help="Seizu CLI — manage reports, workflows, and toolsets via the Seizu API.",
     no_args_is_help=True,
 )
 app.add_typer(reports.app, name="reports")
+app.add_typer(spaces.app, name="spaces")
 app.add_typer(scheduled_queries.app, name="scheduled-queries")
 app.add_typer(workflows.app, name="workflows")
 app.add_typer(toolsets.app, name="toolsets")
@@ -64,6 +65,8 @@ def main(
         seizu login                    # authenticate (opens browser URL)
         seizu reports list             # list reports
         seizu reports clone <id> <name> # clone a report
+        seizu spaces list              # list spaces
+        seizu spaces show <space_id>   # show a space's sub-spaces and reports
         seizu scheduled-queries list   # list scheduled queries
         seizu toolsets list            # list toolsets
         seizu toolsets tools list <toolset_id>

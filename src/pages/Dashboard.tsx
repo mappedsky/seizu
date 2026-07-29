@@ -29,11 +29,15 @@ function Dashboard() {
     <ReportView
       report={report}
       title="Dashboard"
+      showTitle
       queryCapabilities={queryCapabilities}
       boxSx={{
         backgroundColor: 'background.default',
         minHeight: '100%',
-        py: 3,
+        // Bottom padding only, matching ReportView's default. The clearance
+        // under the pinned toolbar comes from its spacer, so adding top padding
+        // here would double it.
+        pb: 3,
       }}
       toolbarActions={({ onRefresh, refreshedAtLabel }) => (
         <Tooltip title={refreshedAtLabel ?? 'Refresh data'}>

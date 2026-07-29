@@ -5,6 +5,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import ReportsList from 'src/pages/ReportsList';
 import * as reportsApiModule from 'src/hooks/useReportsApi';
 import * as permissionsModule from 'src/hooks/usePermissions';
+import * as spacesApiModule from 'src/hooks/useSpacesApi';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissionState: jest.fn(),
@@ -15,10 +16,43 @@ jest.mock('src/components/UserDisplay', () => ({
   default: ({ userId }: { userId: string }) => <>{userId}</>,
 }));
 
+jest.mock('src/hooks/useSpacesApi', () => ({
+  useSpacesList: jest.fn(),
+  useSubspacesList: jest.fn(),
+}));
+
 const mockUsePermissionState =
   permissionsModule.usePermissionState as jest.MockedFunction<
     typeof permissionsModule.usePermissionState
   >;
+const mockUseSpacesList = spacesApiModule.useSpacesList as unknown as jest.Mock;
+const mockUseSubspacesList =
+  spacesApiModule.useSubspacesList as unknown as jest.Mock;
+
+const SPACES = [
+  {
+    space_id: 'sp1',
+    name: 'Cloud Security',
+    description: '',
+    overview_report_id: 'ovr1',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    created_by: 'alice',
+    updated_by: 'alice',
+  },
+];
+
+const SUBSPACES = [
+  {
+    subspace_id: 'ss1',
+    space_id: 'sp1',
+    name: 'Network',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    created_by: 'alice',
+    updated_by: 'alice',
+  },
+];
 const theme = createTheme();
 
 function LocationTracker() {
@@ -40,6 +74,9 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
     updated_by: 'bob',
     access: { scope: 'public' },
     pinned: true,
+    space_id: null,
+    subspace_id: null,
+    space_overview: false,
   },
   {
     report_id: 'r2',
@@ -52,6 +89,9 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
     updated_by: '',
     access: { scope: 'private' },
     pinned: false,
+    space_id: null,
+    subspace_id: null,
+    space_overview: false,
   },
 ];
 
@@ -84,6 +124,7 @@ describe('ReportsList', () => {
   let cloneReport: jest.Mock;
   let updateReportVisibility: jest.Mock;
   let deleteReport: jest.Mock;
+  let setReportSpace: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -107,6 +148,18 @@ describe('ReportsList', () => {
     });
     updateReportVisibility = jest.fn();
     deleteReport = jest.fn();
+    setReportSpace = jest.fn().mockResolvedValue(REPORTS[0]);
+    mockUseSpacesList.mockReturnValue({
+      spaces: SPACES,
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+    mockUseSubspacesList.mockReturnValue({
+      subspaces: SUBSPACES,
+      loading: false,
+      error: null,
+    });
     mockUsePermissionState.mockReturnValue({
       hasPermission: (permission: string) =>
         ['reports:write', 'reports:delete', 'reports:set_dashboard'].includes(
@@ -147,6 +200,7 @@ describe('ReportsList', () => {
       pinReport: jest.fn(),
       updateReportVisibility,
       deleteReport,
+      setReportSpace,
     });
   });
 
@@ -250,5 +304,349 @@ describe('ReportsList', () => {
     expect(
       screen.getByText('Report must be unpinned before it can be deleted'),
     ).toBeInTheDocument();
+  }, 15_000);
+
+  it('shows the space column and links to the space', () => {
+    mockUseReportsList.mockReturnValue({
+      reports: [{ ...REPORTS[0], space_id: 'sp1' }, REPORTS[1]],
+      total: 2,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    // The Space column is hideBelow="md", so at the test viewport it is in the
+    // DOM but display:none — hence getByText / hidden:true rather than a role
+    // query, matching how the other responsive columns are asserted above.
+    expect(screen.getByText('Space')).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'Cloud Security', hidden: true }),
+    ).toHaveAttribute('href', '/app/spaces/sp1');
+  });
+
+  it('moves a report into a space and sub-space', async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+    await user.click(screen.getByRole('menuitem', { name: /move to space/i }));
+
+    await user.click(screen.getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
+    await user.click(screen.getByRole('combobox', { name: 'Sub-space' }));
+    await user.click(screen.getByRole('option', { name: 'Network' }));
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', 'ss1');
+    });
+  }, 15_000);
+
+  it('disables the sub-space select until a space is chosen', async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+    await user.click(screen.getByRole('menuitem', { name: /move to space/i }));
+
+    // Mirrors the API rule, so the user cannot build a request that 400s.
+    expect(screen.getByRole('combobox', { name: 'Sub-space' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  }, 15_000);
+
+  it('resets the sub-space when the space changes', async () => {
+    mockUseReportsList.mockReturnValue({
+      reports: [{ ...REPORTS[0], space_id: 'sp1', subspace_id: 'ss1' }],
+      total: 1,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+    await user.click(screen.getByRole('menuitem', { name: /move to space/i }));
+    await user.click(screen.getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'None' }));
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledWith('r1', null, null);
+    });
+  }, 15_000);
+
+  it('disables the move action on a space overview report', async () => {
+    mockUseReportsList.mockReturnValue({
+      reports: [{ ...REPORTS[0], space_id: 'sp1', space_overview: true }],
+      total: 1,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+
+    expect(
+      screen.getByRole('menuitem', { name: /move to space/i }),
+    ).toHaveAttribute('aria-disabled', 'true');
+  }, 15_000);
+
+  // -------------------------------------------------------------------------
+  // Bulk actions
+  // -------------------------------------------------------------------------
+
+  it('shows no selection bar until a row is selected', () => {
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    expect(screen.queryByText(/selected$/)).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Move to space' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('reveals bulk actions once rows are selected', async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getAllByRole('checkbox', { name: 'Select row' })[0],
+    );
+
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Move to space' }),
+    ).toBeInTheDocument();
+  }, 15_000);
+
+  it('selects every row on the page from the header checkbox', async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+  }, 15_000);
+
+  it('bulk pins every selected report', async () => {
+    const pinReport = jest.fn().mockResolvedValue(undefined);
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      cloneReport,
+      saveReportVersion: jest.fn(),
+      setDashboardReport: jest.fn(),
+      pinReport,
+      updateReportVisibility,
+      deleteReport,
+      setReportSpace,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Pin' }));
+
+    await waitFor(() => {
+      expect(pinReport).toHaveBeenCalledTimes(2);
+    });
+    expect(pinReport).toHaveBeenCalledWith('r1', true);
+    expect(pinReport).toHaveBeenCalledWith('r2', true);
+  }, 15_000);
+
+  it('bulk moves every selected report into the chosen space', async () => {
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Move to space' }));
+    await user.click(screen.getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledTimes(2);
+    });
+    expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null);
+    expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
+  }, 15_000);
+
+  it('skips overview reports when bulk moving', async () => {
+    mockUseReportsList.mockReturnValue({
+      reports: [
+        { ...REPORTS[0], space_id: 'sp1', space_overview: true },
+        REPORTS[1],
+      ],
+      total: 2,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Move to space' }));
+    await user.click(screen.getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+
+    // The overview report is filtered out rather than 409-ing.
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledTimes(1);
+    });
+    expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
+  }, 15_000);
+
+  it('reports per-report failures without aborting the rest of the batch', async () => {
+    setReportSpace
+      .mockRejectedValueOnce(new Error('nope'))
+      .mockResolvedValueOnce(REPORTS[1]);
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Move to space' }));
+    await user.click(screen.getByRole('combobox', { name: 'Space' }));
+    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
+    await user.click(screen.getByRole('button', { name: 'Move' }));
+
+    // Both were attempted, and the failure is surfaced by name.
+    await waitFor(() => {
+      expect(setReportSpace).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText(/Executive Risk: nope/)).toBeInTheDocument();
+  }, 15_000);
+
+  it('hides the checkbox column without reports:write', () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: () => false,
+      loading: false,
+      currentUser: null,
+    });
+
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    expect(screen.queryByRole('checkbox', { name: 'Select row' })).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Overview-report guards (each of these 409s in the backend)
+  // -------------------------------------------------------------------------
+
+  function renderWithOverviewReport() {
+    mockUseReportsList.mockReturnValue({
+      reports: [
+        { ...REPORTS[0], space_id: 'sp1', space_overview: true, pinned: false },
+      ],
+      total: 1,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    return userEvent.setup({ delay: null });
+  }
+
+  it('disables Unpublish on a space overview report', async () => {
+    const user = renderWithOverviewReport();
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+
+    // The overview report is created public and cannot go private. A disabled
+    // MUI MenuItem also carries pointer-events: none, so it is unclickable —
+    // asserting aria-disabled is the observable part.
+    expect(
+      screen.getByRole('menuitem', { name: /unpublish/i }),
+    ).toHaveAttribute('aria-disabled', 'true');
+    expect(updateReportVisibility).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('disables Delete on a space overview report', async () => {
+    const user = renderWithOverviewReport();
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+
+    // It goes away with its space, never on its own.
+    expect(screen.getByRole('menuitem', { name: /delete/i })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    expect(deleteReport).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it('still allows Publish on a private report', async () => {
+    // Guard only the private-ward direction: Publish stays available.
+    mockUseReportsList.mockReturnValue({
+      reports: [{ ...REPORTS[1], created_by: 'alice' }],
+      total: 1,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+
+    expect(
+      screen.getByRole('menuitem', { name: /publish/i }),
+    ).not.toHaveAttribute('aria-disabled', 'true');
+  }, 15_000);
+
+  it('skips overview reports when bulk deleting', async () => {
+    mockUseReportsList.mockReturnValue({
+      reports: [
+        { ...REPORTS[0], space_id: 'sp1', space_overview: true },
+        REPORTS[1],
+      ],
+      total: 2,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(deleteReport).toHaveBeenCalledTimes(1);
+    });
+    expect(deleteReport).toHaveBeenCalledWith('r2');
   }, 15_000);
 });

@@ -10,6 +10,7 @@ It is well suited for building reporting for tools like `cartography <https://gi
 Seizu includes:
 
 * A configuration-driven react/mui frontend, with support for a dashboard, arbitrary reports, using a row/panel based layout with various panel types for visualizing data
+* **Spaces** for grouping related reports, with optional sub-spaces for organizing within a space and an auto-created overview report as each space's landing page
 * An interactive **Query Console** for running ad-hoc Cypher queries, with graph, table, and raw result views, and a collapsible database schema browser showing available node labels, relationship types, and property keys
 * Temporal-backed **Workflows** with sequential stages, parallel activities, named outputs, and time or graph-event schedules
 * An **MCP server** at ``/api/v1/mcp`` that exposes user-defined Cypher-backed tools to LLM agents such as Claude
@@ -26,6 +27,7 @@ Documentation
 
 * `Installation documentation <https://mappedsky.github.io/seizu/install/backend.html>`_
 * `Dashboard configuration <https://mappedsky.github.io/seizu/install/dashboard.html>`_
+* `Spaces documentation <https://mappedsky.github.io/seizu/install/spaces.html>`_
 * `CLI documentation <https://mappedsky.github.io/seizu/install/cli.html>`_
 * `Security guidance <https://mappedsky.github.io/seizu/install/security.html>`_
 * `Query Console <https://mappedsky.github.io/seizu/install/query-console.html>`_
@@ -46,6 +48,7 @@ Documentation
     install/quickstart
     install/backend
     install/dashboard
+    install/spaces
     install/cli
     install/security
     install/query-console

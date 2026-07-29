@@ -62,6 +62,8 @@ import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { pageContentSx } from 'src/theme/layout';
 
 const CHAT_MESSAGE_THROTTLE_MS = 50;
+// Matches the API's max_length on the session title (reporting/schema/chat.py).
+const MAX_SESSION_TITLE_LENGTH = 200;
 const CHAT_HISTORY_POLL_INTERVAL_MS = 2000;
 const CHAT_HISTORY_POLL_MAX_ATTEMPTS = 30;
 const OUTPUT_LIMIT_NOTICE =
@@ -1009,9 +1011,12 @@ export default function ChatInterface() {
     if (!activeSession || activeSession.title || !activeThreadId) return;
     if (autoTitleAttemptRef.current === activeThreadId) return;
     if (!firstUserMessageText) return;
+    // Store the full opening message (up to the API's limit) rather than a
+    // 40-character preview: the sidebar truncates visually with CSS, so a
+    // pre-truncated title left the hover tooltip showing the ellipsis too.
     const title =
-      firstUserMessageText.length > 40
-        ? `${firstUserMessageText.slice(0, 40).trimEnd()}…`
+      firstUserMessageText.length > MAX_SESSION_TITLE_LENGTH
+        ? `${firstUserMessageText.slice(0, MAX_SESSION_TITLE_LENGTH - 1).trimEnd()}…`
         : firstUserMessageText;
     autoTitleAttemptRef.current = activeThreadId;
     setAutoTitleError(null);

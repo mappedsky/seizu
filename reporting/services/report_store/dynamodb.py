@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -36,6 +36,7 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
+from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
 from reporting.services.report_store.base import ReportStore, initial_report_config
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,30 @@ _PK_USER_LOOKUP = "USER_LOOKUP"
 # Scheduled queries — list index PK for listing all scheduled queries.
 _PK_SCHEDULED_QUERY_LIST = "SCHEDULED_QUERY_LIST"
 _PK_SCHEDULED_CHAT_LIST = "SCHEDULED_CHAT_LIST"
+# Spaces — list index PK for listing all spaces. Sub-spaces get one list
+# partition per parent space, mirroring TOOLSET_LIST / TOOL_LIST#{toolset_id}.
+_PK_SPACE_LIST = "SPACE_LIST"
+# Sparse GSI over the existing `space_id` attribute, so a space's reports can be
+# fetched directly instead of filtering the whole REPORT_LIST partition.
+#
+# Keyed (space_id, SK) rather than on a dedicated attribute: `space_id` already
+# exists on every item that has one, so the index needs no new attribute and no
+# backfill. Several item types carry it — a report's #METADATA copy, its
+# REPORT_LIST copy, and sub-space items — so queries add a
+# begins_with(SK, "REPORT#") key condition to read only the REPORT_LIST copies,
+# which is what the list-item converter consumes. Items with no space_id are
+# absent from the index entirely.
+_GSI_SPACE_REPORTS = "space_reports_index"
+_GSI_SPACE_REPORTS_KEY_SCHEMA = [
+    {"AttributeName": "space_id", "KeyType": "HASH"},
+    {"AttributeName": "SK", "KeyType": "RANGE"},
+]
+# Whether this process has found the GSI usable. None until first probed.
+# The index is optional: production tables are managed outside the app
+# (DYNAMODB_CREATE_TABLE defaults to false), so a deployment may not have it yet
+# and must keep working. Set once per process — adding the index to a live table
+# takes effect for new processes.
+_space_reports_index_available: bool | None = None
 # Toolsets — list index PK for listing all toolsets.
 _PK_TOOLSET_LIST = "TOOLSET_LIST"
 # Skillsets — list index PK for listing all skillsets.
@@ -119,6 +144,193 @@ def _floats_to_decimal(value: Any) -> Any:
 
 def _report_pk(report_id: str) -> str:
     return f"REPORT#{report_id}"
+
+
+def _report_list_sk(report_id: str) -> str:
+    return f"REPORT#{report_id}"
+
+
+# The attributes that make up a report record. The #METADATA item and the
+# REPORT_LIST index item each hold a full copy, so both are always built from
+# one dict (see _report_record) — listing reads only the REPORT_LIST copy, so a
+# field written to one and forgotten on the other goes wrong silently.
+_REPORT_RECORD_FIELDS = (
+    "report_id",
+    "name",
+    "current_version",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "access",
+    "pinned",
+    "space_id",
+    "subspace_id",
+    "space_overview",
+)
+
+
+def _report_record(meta: Mapping[str, Any], **overrides: Any) -> dict[str, Any]:
+    """Build a report record from a stored #METADATA item plus overrides.
+
+    Pass an empty mapping when creating a report and supply every field as an
+    override.
+    """
+    record: dict[str, Any] = {field: meta.get(field) for field in _REPORT_RECORD_FIELDS}
+    record.update(overrides)
+    record["pinned"] = bool(record.get("pinned", False))
+    record["space_overview"] = bool(record.get("space_overview", False))
+    return record
+
+
+def _report_record_items(record: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Stamp a report record into its #METADATA and REPORT_LIST items."""
+    report_id = record["report_id"]
+    return (
+        {"PK": _report_pk(report_id), "SK": _SK_METADATA, **record},
+        {"PK": _PK_REPORT_LIST, "SK": _report_list_sk(report_id), **record},
+    )
+
+
+def _new_report_items(
+    *,
+    report_id: str,
+    name: str,
+    created_by: str,
+    now: str,
+    access: ReportAccess,
+    space_id: str | None = None,
+    subspace_id: str | None = None,
+    space_overview: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    """Build the four items a brand-new report is made of.
+
+    Returned rather than written so ``create_space`` can put a space and its
+    overview report in one transaction.
+    """
+    record = _report_record(
+        {},
+        report_id=report_id,
+        name=name,
+        current_version=1,
+        created_at=now,
+        updated_at=now,
+        created_by=created_by,
+        updated_by=created_by,
+        access=access.model_dump(),
+        pinned=False,
+        space_id=space_id,
+        subspace_id=subspace_id,
+        space_overview=space_overview,
+    )
+    metadata_item, list_item = _report_record_items(record)
+    version_item: dict[str, Any] = {
+        "PK": _report_pk(report_id),
+        "SK": _version_sk(1),
+        "report_id": report_id,
+        "name": name,
+        "version": 1,
+        "config": initial_report_config(name),
+        "created_at": now,
+        "created_by": created_by,
+        "comment": "Initial version",
+    }
+    latest_item: dict[str, Any] = {**version_item, "SK": _SK_LATEST}
+    return metadata_item, list_item, version_item, latest_item
+
+
+def _ensure_space_reports_index(dynamodb: Any) -> None:
+    """Add the space-reports GSI to an already-existing table, if it is missing.
+
+    Only reached when DYNAMODB_CREATE_TABLE is on, i.e. the app owns the schema.
+    Tables managed by IaC need the index added there; until then queries fall
+    back to filtering the report list (see _query_space_reports_via_index).
+    """
+    table = dynamodb.Table(settings.DYNAMODB_TABLE_NAME)
+    existing = {index["IndexName"] for index in (table.global_secondary_indexes or [])}
+    if _GSI_SPACE_REPORTS in existing:
+        return
+    try:
+        dynamodb.meta.client.update_table(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            AttributeDefinitions=[
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "space_id", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexUpdates=[{"Create": _space_reports_gsi_definition()}],
+        )
+        logger.info(
+            "Creating DynamoDB space-reports GSI",
+            extra={"table": settings.DYNAMODB_TABLE_NAME, "index": _GSI_SPACE_REPORTS},
+        )
+    except botocore.exceptions.ClientError as exc:
+        # A concurrent worker may be creating it, and only one GSI can be built
+        # at a time. Either way the fallback keeps queries correct.
+        logger.warning(
+            "Could not add the space-reports GSI",
+            extra={
+                "table": settings.DYNAMODB_TABLE_NAME,
+                "index": _GSI_SPACE_REPORTS,
+                "error": str(exc),
+            },
+        )
+
+
+def _space_reports_gsi_definition() -> dict[str, Any]:
+    return {
+        "IndexName": _GSI_SPACE_REPORTS,
+        "KeySchema": _GSI_SPACE_REPORTS_KEY_SCHEMA,
+        # ALL: the list-item converter reads essentially every attribute, so an
+        # INCLUDE projection would have to name all of them and would still
+        # fetch the same bytes.
+        "Projection": {"ProjectionType": "ALL"},
+    }
+
+
+def _query_space_reports_via_index(table: Any, space_id: str) -> list[dict[str, Any]] | None:
+    """Return a space's report list items via the GSI, or None if unavailable.
+
+    None means the index is missing or not yet queryable, and the caller should
+    fall back to filtering the REPORT_LIST partition.
+    """
+    global _space_reports_index_available
+    if _space_reports_index_available is False:
+        return None
+    try:
+        items = _query_all_sync(
+            table,
+            IndexName=_GSI_SPACE_REPORTS,
+            KeyConditionExpression="space_id = :space_id AND begins_with(SK, :prefix)",
+            ExpressionAttributeValues={":space_id": space_id, ":prefix": "REPORT#"},
+        )
+    except botocore.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in {"ValidationException", "ResourceNotFoundException", "IndexNotFoundException"}:
+            raise
+        _space_reports_index_available = False
+        logger.warning(
+            "Space reports GSI unavailable; falling back to scanning the report list",
+            extra={"index": _GSI_SPACE_REPORTS, "code": code},
+        )
+        return None
+    _space_reports_index_available = True
+    return items
+
+
+def _query_all_sync(table: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """Query a partition, following LastEvaluatedKey to the end.
+
+    DynamoDB caps a Query response at 1 MB; without the loop a large partition
+    is silently truncated.
+    """
+    items: list[dict[str, Any]] = []
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return items
+        kwargs["ExclusiveStartKey"] = last_key
 
 
 def _version_sk(version: int) -> str:
@@ -444,6 +656,9 @@ def _report_list_item_from_item(item: dict[str, Any]) -> ReportListItem:
         updated_by=item["updated_by"],
         access=item["access"],
         pinned=bool(item.get("pinned", False)),
+        space_id=item.get("space_id"),
+        subspace_id=item.get("subspace_id"),
+        space_overview=bool(item.get("space_overview", False)),
     )
 
 
@@ -459,6 +674,11 @@ def _report_version_from_item(item: dict[str, Any], meta: dict[str, Any]) -> Rep
         report_created_by=meta["created_by"],
         report_updated_by=meta["updated_by"],
         access=meta["access"],
+        # Denormalised from the parent record — space membership is
+        # unversioned, so it is read from meta and never from the version item.
+        space_id=meta.get("space_id"),
+        subspace_id=meta.get("subspace_id"),
+        space_overview=bool(meta.get("space_overview", False)),
     )
 
 
@@ -516,6 +736,51 @@ def _scheduled_chat_version_from_item(item: dict) -> ScheduledChatVersion:
         created_at=item["created_at"],
         created_by=item["created_by"],
         comment=item.get("comment"),
+    )
+
+
+def _space_pk(space_id: str) -> str:
+    return f"SPACE#{space_id}"
+
+
+def _space_list_sk(space_id: str) -> str:
+    return f"SPACE#{space_id}"
+
+
+def _subspace_pk(subspace_id: str) -> str:
+    return f"SUBSPACE#{subspace_id}"
+
+
+def _subspace_list_pk(space_id: str) -> str:
+    return f"SUBSPACE_LIST#{space_id}"
+
+
+def _subspace_list_sk(subspace_id: str) -> str:
+    return f"SUBSPACE#{subspace_id}"
+
+
+def _space_from_item(item: dict) -> SpaceListItem:
+    return SpaceListItem(
+        space_id=item["space_id"],
+        name=item["name"],
+        description=item.get("description", ""),
+        overview_report_id=item["overview_report_id"],
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+        created_by=item["created_by"],
+        updated_by=item.get("updated_by"),
+    )
+
+
+def _subspace_from_item(item: dict) -> SubspaceItem:
+    return SubspaceItem(
+        subspace_id=item["subspace_id"],
+        space_id=item["space_id"],
+        name=item["name"],
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+        created_by=item["created_by"],
+        updated_by=item.get("updated_by"),
     )
 
 
@@ -902,6 +1167,7 @@ class DynamoDBReportStore(ReportStore):
             dynamodb = get_boto_resource()
             existing_names = [t.name for t in dynamodb.tables.all()]
             if settings.DYNAMODB_TABLE_NAME in existing_names:
+                _ensure_space_reports_index(dynamodb)
                 return
             try:
                 dynamodb.create_table(
@@ -913,7 +1179,9 @@ class DynamoDBReportStore(ReportStore):
                     AttributeDefinitions=[
                         {"AttributeName": "PK", "AttributeType": "S"},
                         {"AttributeName": "SK", "AttributeType": "S"},
+                        {"AttributeName": "space_id", "AttributeType": "S"},
                     ],
+                    GlobalSecondaryIndexes=[_space_reports_gsi_definition()],
                     BillingMode="PAY_PER_REQUEST",
                 )
                 logger.info(
@@ -925,6 +1193,7 @@ class DynamoDBReportStore(ReportStore):
                     "DynamoDB table already exists (created by another worker)",
                     extra={"table": settings.DYNAMODB_TABLE_NAME},
                 )
+                _ensure_space_reports_index(dynamodb)
 
         await asyncio.to_thread(_op)
 
@@ -933,11 +1202,11 @@ class DynamoDBReportStore(ReportStore):
 
         def _op() -> list[ReportListItem]:
             table = _get_table()
-            resp = table.query(
+            items = _query_all_sync(
+                table,
                 KeyConditionExpression="PK = :pk",
                 ExpressionAttributeValues={":pk": _PK_REPORT_LIST},
             )
-            items = resp.get("Items", [])
             return [_report_list_item_from_item(item) for item in items if _report_visible_to_user(item, user_id)]
 
         return await asyncio.to_thread(_op)
@@ -1034,55 +1303,29 @@ class DynamoDBReportStore(ReportStore):
         name: str,
         created_by: str,
         access: ReportAccess | None = None,
+        space_id: str | None = None,
+        subspace_id: str | None = None,
+        space_overview: bool = False,
     ) -> ReportListItem:
         """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
-        config = initial_report_config(name)
 
-        metadata_item = {
-            "PK": _report_pk(report_id),
-            "SK": _SK_METADATA,
-            "report_id": report_id,
-            "name": name,
-            "current_version": 1,
-            "created_at": now,
-            "updated_at": now,
-            "created_by": created_by,
-            "updated_by": created_by,
-            "access": report_access.model_dump(),
-            "pinned": False,
-        }
-        list_item = {
-            "PK": _PK_REPORT_LIST,
-            "SK": f"REPORT#{report_id}",
-            "report_id": report_id,
-            "name": name,
-            "current_version": 1,
-            "created_at": now,
-            "updated_at": now,
-            "created_by": created_by,
-            "updated_by": created_by,
-            "access": report_access.model_dump(),
-            "pinned": False,
-        }
-        version_item: dict[str, Any] = {
-            "PK": _report_pk(report_id),
-            "SK": _version_sk(1),
-            "report_id": report_id,
-            "name": name,
-            "version": 1,
-            "config": config,
-            "created_at": now,
-            "created_by": created_by,
-            "comment": "Initial version",
-        }
-        latest_item: dict[str, Any] = {**version_item, "SK": _SK_LATEST}
+        items = _new_report_items(
+            report_id=report_id,
+            name=name,
+            created_by=created_by,
+            now=now,
+            access=report_access,
+            space_id=space_id,
+            subspace_id=subspace_id,
+            space_overview=space_overview,
+        )
 
         def _op() -> None:
             table = _get_table()
-            _transact_put_sync(table, metadata_item, list_item, version_item, latest_item)
+            _transact_put_sync(table, *items)
 
         await asyncio.to_thread(_op)
         return ReportListItem(
@@ -1095,6 +1338,9 @@ class DynamoDBReportStore(ReportStore):
             updated_by=created_by,
             access=report_access,
             pinned=False,
+            space_id=space_id,
+            subspace_id=subspace_id,
+            space_overview=space_overview,
         )
 
     async def save_report_version(
@@ -1136,32 +1382,18 @@ class DynamoDBReportStore(ReportStore):
                 "comment": comment,
             }
             latest_item = {**version_item, "SK": _SK_LATEST}
-            metadata_item = {
-                "PK": _report_pk(report_id),
-                "SK": _SK_METADATA,
-                "report_id": report_id,
-                "name": report_name,
-                "current_version": version,
-                "created_at": meta["created_at"],
-                "updated_at": now,
-                "created_by": meta["created_by"],
-                "updated_by": created_by,
-                "access": meta["access"],
-                "pinned": pinned,
-            }
-            list_item = {
-                "PK": _PK_REPORT_LIST,
-                "SK": f"REPORT#{report_id}",
-                "report_id": report_id,
-                "name": report_name,
-                "current_version": version,
-                "created_at": meta["created_at"],
-                "updated_at": now,
-                "created_by": meta["created_by"],
-                "updated_by": created_by,
-                "access": meta["access"],
-                "pinned": pinned,
-            }
+            # Everything not overridden here — including space membership — is
+            # carried over from the stored record, so saving a version never
+            # unfiles a report.
+            record = _report_record(
+                meta,
+                name=report_name,
+                current_version=version,
+                updated_at=now,
+                updated_by=created_by,
+                pinned=pinned,
+            )
+            metadata_item, list_item = _report_record_items(record)
 
             _transact_put_sync(
                 table,
@@ -1189,26 +1421,43 @@ class DynamoDBReportStore(ReportStore):
 
             now = datetime.now(tz=UTC).isoformat()
             new_access = access.model_dump() if access is not None else meta["access"]
-            updated = {
-                **meta,
-                "updated_at": now,
-                "updated_by": updated_by,
-                "access": new_access,
-            }
-            list_item = {
-                "PK": _PK_REPORT_LIST,
-                "SK": f"REPORT#{report_id}",
-                "report_id": report_id,
-                "name": meta["name"],
-                "current_version": meta["current_version"],
-                "created_at": meta["created_at"],
-                "updated_at": now,
-                "created_by": meta["created_by"],
-                "updated_by": updated_by,
-                "access": new_access,
-                "pinned": bool(meta.get("pinned", False)),
-            }
-            _transact_put_sync(table, updated, list_item)
+            record = _report_record(
+                meta,
+                updated_at=now,
+                updated_by=updated_by,
+                access=new_access,
+            )
+            metadata_item, list_item = _report_record_items(record)
+            _transact_put_sync(table, metadata_item, list_item)
+            return _report_list_item_from_item(list_item)
+
+        return await asyncio.to_thread(_op)
+
+    async def update_report_space(
+        self,
+        report_id: str,
+        space_id: str | None,
+        subspace_id: str | None,
+        updated_by: str,
+        user_id: str | None = None,
+    ) -> ReportListItem | None:
+        def _op() -> ReportListItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _report_pk(report_id), "SK": _SK_METADATA})
+            meta = resp.get("Item")
+            if not meta or not _report_visible_to_user(meta, user_id):
+                return None
+
+            now = datetime.now(tz=UTC).isoformat()
+            record = _report_record(
+                meta,
+                updated_at=now,
+                updated_by=updated_by,
+                space_id=space_id,
+                subspace_id=subspace_id,
+            )
+            metadata_item, list_item = _report_record_items(record)
+            _transact_put_sync(table, metadata_item, list_item)
             return _report_list_item_from_item(list_item)
 
         return await asyncio.to_thread(_op)
@@ -2172,6 +2421,318 @@ class DynamoDBReportStore(ReportStore):
                 UpdateExpression="SET archived_at = :t",
                 ExpressionAttributeValues={":t": now},
             )
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    # ------------------------------------------------------------------
+    # Spaces
+    # ------------------------------------------------------------------
+
+    async def list_spaces(self) -> list[SpaceListItem]:
+        def _op() -> list[SpaceListItem]:
+            table = _get_table()
+            items = _query_all_sync(
+                table,
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _PK_SPACE_LIST},
+            )
+            return [_space_from_item(item) for item in items]
+
+        return await asyncio.to_thread(_op)
+
+    async def get_space(self, space_id: str) -> SpaceListItem | None:
+        def _op() -> SpaceListItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            return _space_from_item(item) if item else None
+
+        return await asyncio.to_thread(_op)
+
+    async def create_space(
+        self,
+        name: str,
+        description: str,
+        created_by: str,
+    ) -> SpaceListItem:
+        space_id = generate_report_id()
+        overview_report_id = generate_report_id()
+        now = datetime.now(tz=UTC).isoformat()
+
+        base = _strip_none(
+            {
+                "space_id": space_id,
+                "name": name,
+                "description": description,
+                "overview_report_id": overview_report_id,
+                "created_at": now,
+                "updated_at": now,
+                "created_by": created_by,
+                "updated_by": created_by,
+            }
+        )
+        space_items = (
+            {"PK": _space_pk(space_id), "SK": _SK_METADATA, **base},
+            {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id), **base},
+        )
+        # Public: spaces are globally visible, so a private overview report
+        # would leave every non-owner looking at a broken space.
+        report_items = _new_report_items(
+            report_id=overview_report_id,
+            name=name,
+            created_by=created_by,
+            now=now,
+            access=ReportAccess(scope="public"),
+            space_id=space_id,
+            space_overview=True,
+        )
+
+        def _op() -> None:
+            table = _get_table()
+            _transact_put_sync(table, *space_items, *report_items)
+
+        await asyncio.to_thread(_op)
+        return SpaceListItem(
+            space_id=space_id,
+            name=name,
+            description=description,
+            overview_report_id=overview_report_id,
+            created_at=now,
+            updated_at=now,
+            created_by=created_by,
+            updated_by=created_by,
+        )
+
+    async def update_space(
+        self,
+        space_id: str,
+        name: str,
+        description: str,
+        updated_by: str,
+    ) -> SpaceListItem | None:
+        def _op() -> SpaceListItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return None
+            now = datetime.now(tz=UTC).isoformat()
+            base = _strip_none(
+                {
+                    "space_id": space_id,
+                    "name": name,
+                    "description": description,
+                    "overview_report_id": existing["overview_report_id"],
+                    "created_at": existing["created_at"],
+                    "updated_at": now,
+                    "created_by": existing["created_by"],
+                    "updated_by": updated_by,
+                }
+            )
+            _transact_put_sync(
+                table,
+                {"PK": _space_pk(space_id), "SK": _SK_METADATA, **base},
+                {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id), **base},
+            )
+            return _space_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def delete_space(self, space_id: str) -> SpaceDeleteResult:
+        def _op() -> SpaceDeleteResult:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            space = resp.get("Item")
+            if not space:
+                return SpaceDeleteResult.NOT_FOUND
+
+            overview_report_id = space["overview_report_id"]
+            # Unfiltered on purpose: a member report the caller cannot see
+            # still keeps the space non-empty, so deleting cannot orphan it.
+            # Sub-spaces deliberately do not block — see delete_space in base.py.
+            members = _query_space_reports_via_index(table, space_id)
+            if members is None:
+                members = [
+                    item
+                    for item in _query_all_sync(
+                        table,
+                        KeyConditionExpression="PK = :pk",
+                        ExpressionAttributeValues={":pk": _PK_REPORT_LIST},
+                    )
+                    if item.get("space_id") == space_id
+                ]
+            if any(item["report_id"] != overview_report_id for item in members):
+                return SpaceDeleteResult.NOT_EMPTY
+
+            report_items = _query_all_sync(
+                table,
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _report_pk(overview_report_id)},
+                ProjectionExpression="PK, SK",
+            )
+            keys_to_delete = [{"PK": item["PK"], "SK": item["SK"]} for item in report_items]
+            keys_to_delete.append({"PK": _PK_REPORT_LIST, "SK": _report_list_sk(overview_report_id)})
+            keys_to_delete.append({"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            keys_to_delete.append({"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id)})
+
+            # Sub-spaces go with the space. They are only grouping labels, and
+            # with no member reports left there is nothing referencing them.
+            for subspace in _query_all_sync(
+                table,
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _subspace_list_pk(space_id)},
+            ):
+                keys_to_delete.append({"PK": _subspace_pk(subspace["subspace_id"]), "SK": _SK_METADATA})
+                keys_to_delete.append({"PK": _subspace_list_pk(space_id), "SK": subspace["SK"]})
+
+            dashboard_resp = table.get_item(Key={"PK": _PK_DASHBOARD, "SK": _SK_DASHBOARD_POINTER})
+            dashboard_item = dashboard_resp.get("Item")
+            if dashboard_item and dashboard_item.get("report_id") == overview_report_id:
+                keys_to_delete.append({"PK": _PK_DASHBOARD, "SK": _SK_DASHBOARD_POINTER})
+
+            with table.batch_writer() as batch:
+                for key in keys_to_delete:
+                    batch.delete_item(Key=key)
+            return SpaceDeleteResult.DELETED
+
+        return await asyncio.to_thread(_op)
+
+    async def list_space_reports(
+        self,
+        space_id: str,
+        user_id: str | None = None,
+    ) -> list[ReportListItem]:
+        def _op() -> list[ReportListItem]:
+            table = _get_table()
+            items = _query_space_reports_via_index(table, space_id)
+            if items is None:
+                # No usable GSI: read the whole report list and filter. Costs
+                # RCU proportional to the total report count rather than to the
+                # space's, so the index is worth having.
+                items = [
+                    item
+                    for item in _query_all_sync(
+                        table,
+                        KeyConditionExpression="PK = :pk",
+                        ExpressionAttributeValues={":pk": _PK_REPORT_LIST},
+                    )
+                    if item.get("space_id") == space_id
+                ]
+            return [_report_list_item_from_item(item) for item in items if _report_visible_to_user(item, user_id)]
+
+        return await asyncio.to_thread(_op)
+
+    # ------------------------------------------------------------------
+    # Sub-spaces (nested under spaces)
+    # ------------------------------------------------------------------
+
+    async def list_subspaces(self, space_id: str) -> list[SubspaceItem]:
+        def _op() -> list[SubspaceItem]:
+            table = _get_table()
+            items = _query_all_sync(
+                table,
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _subspace_list_pk(space_id)},
+            )
+            return [_subspace_from_item(item) for item in items]
+
+        return await asyncio.to_thread(_op)
+
+    async def get_subspace(self, subspace_id: str) -> SubspaceItem | None:
+        def _op() -> SubspaceItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA})
+            item = resp.get("Item")
+            return _subspace_from_item(item) if item else None
+
+        return await asyncio.to_thread(_op)
+
+    async def create_subspace(
+        self,
+        space_id: str,
+        name: str,
+        created_by: str,
+    ) -> SubspaceItem | None:
+        def _op() -> SubspaceItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            if not resp.get("Item"):
+                return None
+            subspace_id = generate_report_id()
+            now = datetime.now(tz=UTC).isoformat()
+            base = _strip_none(
+                {
+                    "subspace_id": subspace_id,
+                    "space_id": space_id,
+                    "name": name,
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_by": created_by,
+                    "updated_by": created_by,
+                }
+            )
+            _transact_put_sync(
+                table,
+                {"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA, **base},
+                {"PK": _subspace_list_pk(space_id), "SK": _subspace_list_sk(subspace_id), **base},
+            )
+            return _subspace_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def update_subspace(
+        self,
+        subspace_id: str,
+        name: str,
+        updated_by: str,
+    ) -> SubspaceItem | None:
+        def _op() -> SubspaceItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return None
+            space_id = existing["space_id"]
+            now = datetime.now(tz=UTC).isoformat()
+            base = _strip_none(
+                {
+                    "subspace_id": subspace_id,
+                    "space_id": space_id,
+                    "name": name,
+                    "created_at": existing["created_at"],
+                    "updated_at": now,
+                    "created_by": existing["created_by"],
+                    "updated_by": updated_by,
+                }
+            )
+            _transact_put_sync(
+                table,
+                {"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA, **base},
+                {"PK": _subspace_list_pk(space_id), "SK": _subspace_list_sk(subspace_id), **base},
+            )
+            return _subspace_from_item(base)
+
+        return await asyncio.to_thread(_op)
+
+    async def delete_subspace(self, subspace_id: str) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return False
+            # Member reports are deliberately left alone: an unresolvable
+            # subspace_id reads as ungrouped, which beats an unbounded
+            # non-transactional fan-out write over every member report.
+            with table.batch_writer() as batch:
+                batch.delete_item(Key={"PK": _subspace_pk(subspace_id), "SK": _SK_METADATA})
+                batch.delete_item(
+                    Key={
+                        "PK": _subspace_list_pk(existing["space_id"]),
+                        "SK": _subspace_list_sk(subspace_id),
+                    }
+                )
             return True
 
         return await asyncio.to_thread(_op)

@@ -84,6 +84,23 @@ describe('DashboardSidebar', () => {
     );
   });
 
+  it('hides Spaces when spaces:read is absent', () => {
+    renderSidebar([]);
+
+    expect(
+      screen.queryByRole('link', { name: 'Spaces' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows Spaces when spaces:read is present', () => {
+    renderSidebar(['spaces:read']);
+
+    expect(screen.getByRole('link', { name: 'Spaces' })).toHaveAttribute(
+      'href',
+      '/app/spaces',
+    );
+  });
+
   it('shows Chat when chat:use is present', () => {
     renderSidebar(['chat:use']);
 
