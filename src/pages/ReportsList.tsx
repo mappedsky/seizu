@@ -58,11 +58,6 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
 import UserDisplay from 'src/components/UserDisplay';
 import type { BackState } from 'src/navigation';
-import {
-  OVERVIEW_CANNOT_MOVE,
-  OVERVIEW_DELETE_VIA_SPACE,
-  OVERVIEW_MUST_STAY_PUBLIC,
-} from 'src/spaces';
 import { pageContentSx } from 'src/theme/layout';
 
 // ---------------------------------------------------------------------------
@@ -220,9 +215,9 @@ function ReportsList() {
    * stopping at the first one.
    *
    * A partial failure is the normal case, not the exception: publishing is
-   * owner-only, and overview reports refuse to move or be deleted. The backend
+   * owner-only, and a report may be pinned or the dashboard. The backend
    * enforces those per report, so the honest UI is to attempt each one and say
-   * which were skipped.
+   * which failed.
    */
   const runBulk = async (
     label: string,
@@ -331,28 +326,20 @@ function ReportsList() {
           <PublicIcon fontSize="small" />
         ),
         onClick: () => handleToggleAccess(report),
-        // Unpublishing a space overview report is rejected with 409: the space
-        // is globally visible, so its landing page has to be too.
-        disabled: !canUpdateAccess || (isPublic && report.space_overview),
-        tooltip:
-          isPublic && report.space_overview
-            ? OVERVIEW_MUST_STAY_PUBLIC
-            : canUpdateAccess
-              ? undefined
-              : 'Only the report owner can publish or unpublish',
+        disabled: !canUpdateAccess,
+        tooltip: canUpdateAccess
+          ? undefined
+          : 'Only the report owner can publish or unpublish',
       },
       {
         key: 'space',
         label: 'Move to space…',
         icon: <DriveFileMoveIcon fontSize="small" />,
         onClick: () => setMoveTarget(report),
-        // The overview report is an artefact of its space and stays put.
-        disabled: !canWrite || report.space_overview,
-        tooltip: report.space_overview
-          ? OVERVIEW_CANNOT_MOVE
-          : canWrite
-            ? undefined
-            : 'You do not have permission to move reports',
+        disabled: !canWrite,
+        tooltip: canWrite
+          ? undefined
+          : 'You do not have permission to move reports',
       },
       {
         key: 'pin',
@@ -376,13 +363,10 @@ function ReportsList() {
           setDeleteTarget(report);
           setDeleteError(null);
         },
-        // An overview report is deleted with its space, never on its own.
-        disabled: !canDelete || report.space_overview,
-        tooltip: report.space_overview
-          ? OVERVIEW_DELETE_VIA_SPACE
-          : canDelete
-            ? undefined
-            : 'You do not have permission to delete reports',
+        disabled: !canDelete,
+        tooltip: canDelete
+          ? undefined
+          : 'You do not have permission to delete reports',
         destructive: true,
         dividerBefore: true,
       },
@@ -814,12 +798,7 @@ function ReportsList() {
           currentSubspaceId={null}
           onClose={() => setBulkMoveOpen(false)}
           onConfirm={async (spaceId, subspaceId) => {
-            // Overview reports cannot leave their space (409), so they are
-            // filtered out rather than reported as failures.
-            const movable = selectedReports.filter(
-              (report) => !report.space_overview,
-            );
-            await runBulk('Move to space', movable, (report) =>
+            await runBulk('Move to space', selectedReports, (report) =>
               setReportSpace(report.report_id, spaceId, subspaceId),
             );
           }}
@@ -833,27 +812,14 @@ function ReportsList() {
         error={bulkDeleteError}
         onClose={() => setBulkDeleteOpen(false)}
         onConfirm={async () => {
-          const deletable = selectedReports.filter(
-            (report) => !report.space_overview,
-          );
-          const ok = await runBulk('Delete', deletable, (report) =>
+          const ok = await runBulk('Delete', selectedReports, (report) =>
             deleteReport(report.report_id),
           );
           if (ok) setBulkDeleteOpen(false);
         }}
       >
-        Permanently delete{' '}
-        <strong>
-          {selectedReports.filter((r) => !r.space_overview).length}
-        </strong>{' '}
-        report(s) and all their versions? This cannot be undone.
-        {selectedReports.some((r) => r.space_overview) && (
-          <>
-            {' '}
-            Space overview reports in the selection are skipped — delete their
-            space instead.
-          </>
-        )}
+        Permanently delete <strong>{selectedReports.length}</strong> report(s)
+        and all their versions? This cannot be undone.
       </ConfirmDeleteDialog>
 
       {/* Delete confirmation dialog */}

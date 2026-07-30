@@ -15,10 +15,7 @@ from reporting.schema.report_config import (
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
 from reporting.services.spaces import (
-    ProtectedReportError,
     SpaceValidationError,
-    ensure_report_deletable,
-    ensure_visibility_change_allowed,
     resolve_clone_space,
     resolve_report_space,
 )
@@ -92,13 +89,6 @@ async def _create_version(args: dict[str, Any], current_user: CurrentUser | None
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
     report_id = args["report_id"]
-    meta = await report_store.get_report_metadata(report_id, user_id=user.user.user_id)
-    if not meta:
-        return {"error": "Report not found"}
-    try:
-        ensure_report_deletable(meta)
-    except ProtectedReportError as exc:
-        return {"error": str(exc)}
     ok = await report_store.delete_report(report_id, user_id=user.user.user_id)
     if not ok:
         return {"error": "Report not found"}
@@ -191,10 +181,6 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
         return {"error": "Report not found"}
     if body.access is not None and meta.created_by != user.user.user_id:
         return {"error": "Only the report owner can update report access"}
-    try:
-        ensure_visibility_change_allowed(meta, body.access)
-    except ProtectedReportError as exc:
-        return {"error": str(exc)}
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:

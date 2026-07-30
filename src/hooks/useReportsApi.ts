@@ -54,7 +54,6 @@ export interface ReportListItem {
   pinned: boolean;
   space_id: string | null;
   subspace_id: string | null;
-  space_overview: boolean;
 }
 
 export interface ReportAccess {
@@ -75,7 +74,6 @@ export interface ReportVersion {
   query_capabilities?: Record<string, string>;
   space_id: string | null;
   subspace_id: string | null;
-  space_overview: boolean;
 }
 
 const REPORT_QUERY_CAPABILITIES_QUERY = '?include_query_capabilities=true';
@@ -410,7 +408,11 @@ export function useAllReports(): {
 }
 
 export function useReportsMutations(): {
-  createReport: (name: string) => Promise<ReportListItem>;
+  createReport: (
+    name: string,
+    spaceId?: string | null,
+    subspaceId?: string | null,
+  ) => Promise<ReportListItem>;
   cloneReport: (reportId: string, name: string) => Promise<ReportListItem>;
   updateReportVisibility: (
     reportId: string,
@@ -434,16 +436,28 @@ export function useReportsMutations(): {
   const { accessToken } = useContext(AuthContext);
 
   const createReport = useCallback(
-    async (name: string): Promise<ReportListItem> => {
+    async (
+      name: string,
+      spaceId: string | null = null,
+      subspaceId: string | null = null,
+    ): Promise<ReportListItem> => {
       const res = await fetch('/api/v1/reports', {
         method: 'POST',
         headers: {
           ...getApiHeaders(accessToken),
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({
+          name,
+          space_id: spaceId,
+          subspace_id: subspaceId,
+        }),
       });
-      if (!res.ok) throw new Error(`Failed to create report: ${res.status}`);
+      if (!res.ok)
+        throw new Error(
+          await errorMessage(res, `Failed to create report: ${res.status}`),
+        );
+      broadcastReportsUpdated();
       return res.json();
     },
     [accessToken],

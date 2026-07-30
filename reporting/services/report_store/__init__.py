@@ -96,7 +96,6 @@ async def create_report(
     access: ReportAccess | None = None,
     space_id: str | None = None,
     subspace_id: str | None = None,
-    space_overview: bool = False,
 ) -> ReportListItem:
     return await get_store().create_report(
         name=name,
@@ -104,7 +103,6 @@ async def create_report(
         access=access,
         space_id=space_id,
         subspace_id=subspace_id,
-        space_overview=space_overview,
     )
 
 
@@ -189,6 +187,18 @@ async def update_space(
 
 async def delete_space(space_id: str) -> SpaceDeleteResult:
     return await get_store().delete_space(space_id)
+
+
+async def set_space_overview(
+    space_id: str,
+    report_id: str | None,
+    updated_by: str,
+) -> SpaceListItem | None:
+    return await get_store().set_space_overview(
+        space_id=space_id,
+        report_id=report_id,
+        updated_by=updated_by,
+    )
 
 
 async def list_space_reports(space_id: str, user_id: str | None = None) -> list[ReportListItem]:

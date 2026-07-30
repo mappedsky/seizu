@@ -1,27 +1,21 @@
-"""Cross-entity rules for report space membership.
+"""Cross-entity validation for spaces.
 
-Lives outside the route layer so every transport shares one implementation.
-REST and MCP both mutate reports, and rules enforced in only one of them are
-rules an authorized caller can walk around.
+Lives outside the route layer so REST and MCP share one implementation — both
+create and clone reports, and validation written twice drifts.
+
+These are validations, not invariants: they reject a bad request up front but
+nothing enforces them afterwards. Membership and the overview pointer are both
+allowed to go stale, and are resolved lazily at the API boundary instead, which
+is what lets every report in a space stay an ordinary report.
 """
 
-from reporting.schema.report_config import ReportAccess, ReportListItem
 from reporting.services import report_store
-from reporting.services.report_store.base import (
-    OVERVIEW_IMMOBILE,
-    OVERVIEW_MUST_BE_PUBLIC,
-    OVERVIEW_UNDELETABLE,
-    ProtectedReportError,
-)
 
 __all__ = [
-    "ProtectedReportError",
     "SpaceValidationError",
-    "ensure_report_deletable",
-    "ensure_report_movable",
-    "ensure_visibility_change_allowed",
-    "resolve_report_space",
     "resolve_clone_space",
+    "resolve_overview_report",
+    "resolve_report_space",
 ]
 
 
@@ -32,28 +26,6 @@ class SpaceValidationError(Exception):
     pydantic failures surface as 422, and these are semantic rather than
     structural problems with the request.
     """
-
-
-def ensure_report_movable(report: ReportListItem) -> None:
-    """Reject moving a space's overview report. Callers map this to HTTP 409."""
-    if report.space_overview:
-        raise ProtectedReportError(OVERVIEW_IMMOBILE)
-
-
-def ensure_report_deletable(report: ReportListItem) -> None:
-    """Reject deleting a space's overview report. Callers map this to HTTP 409."""
-    if report.space_overview:
-        raise ProtectedReportError(OVERVIEW_UNDELETABLE)
-
-
-def ensure_visibility_change_allowed(report: ReportListItem, access: ReportAccess | None) -> None:
-    """Reject making a space's overview report private.
-
-    Spaces are globally visible, so a private overview would leave every
-    non-owner looking at an empty space.
-    """
-    if access is not None and access.scope == "private" and report.space_overview:
-        raise ProtectedReportError(OVERVIEW_MUST_BE_PUBLIC)
 
 
 async def resolve_report_space(
@@ -86,6 +58,24 @@ async def resolve_report_space(
     return space_id, subspace_id
 
 
+async def resolve_overview_report(space_id: str, report_id: str | None) -> str | None:
+    """Validate a report proposed as a space's overview, and return it.
+
+    The target must be filed in this space; ``None`` clears the pointer. This is
+    a validation rather than an invariant: nothing stops the report being moved
+    out or deleted later, and the pointer is resolved lazily so it simply reads
+    as "no overview" if that happens.
+    """
+    if report_id is None:
+        return None
+    report = await report_store.get_report_metadata(report_id)
+    if report is None:
+        raise SpaceValidationError("Report not found")
+    if report.space_id != space_id:
+        raise SpaceValidationError("A space overview must be a report filed in that space")
+    return report_id
+
+
 async def resolve_clone_space(
     source_space_id: str | None,
     source_subspace_id: str | None,
@@ -95,8 +85,7 @@ async def resolve_clone_space(
     """Pick the space a clone lands in.
 
     With no requested space the clone inherits the source's placement — cloning
-    inside a space is the common case. The overview flag is never inherited;
-    only ``create_space`` sets it.
+    inside a space is the common case.
     """
     if requested_space_id is None:
         return source_space_id, source_subspace_id

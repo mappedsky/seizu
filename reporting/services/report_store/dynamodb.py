@@ -38,14 +38,7 @@ from reporting.schema.report_config import (
     User,
 )
 from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
-from reporting.services.report_store.base import (
-    OVERVIEW_IMMOBILE,
-    OVERVIEW_MUST_BE_PUBLIC,
-    OVERVIEW_UNDELETABLE,
-    ProtectedReportError,
-    ReportStore,
-    initial_report_config,
-)
+from reporting.services.report_store.base import ReportStore, initial_report_config
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +173,6 @@ _REPORT_RECORD_FIELDS = (
     "pinned",
     "space_id",
     "subspace_id",
-    "space_overview",
 )
 
 
@@ -193,7 +185,6 @@ def _report_record(meta: Mapping[str, Any], **overrides: Any) -> dict[str, Any]:
     record: dict[str, Any] = {field: meta.get(field) for field in _REPORT_RECORD_FIELDS}
     record.update(overrides)
     record["pinned"] = bool(record.get("pinned", False))
-    record["space_overview"] = bool(record.get("space_overview", False))
     return record
 
 
@@ -215,13 +206,8 @@ def _new_report_items(
     access: ReportAccess,
     space_id: str | None = None,
     subspace_id: str | None = None,
-    space_overview: bool = False,
 ) -> tuple[dict[str, Any], ...]:
-    """Build the four items a brand-new report is made of.
-
-    Returned rather than written so ``create_space`` can put a space and its
-    overview report in one transaction.
-    """
+    """Build the four items a brand-new report is made of."""
     record = _report_record(
         {},
         report_id=report_id,
@@ -235,7 +221,6 @@ def _new_report_items(
         pinned=False,
         space_id=space_id,
         subspace_id=subspace_id,
-        space_overview=space_overview,
     )
     metadata_item, list_item = _report_record_items(record)
     version_item: dict[str, Any] = {
@@ -683,7 +668,6 @@ def _report_list_item_from_item(item: dict[str, Any]) -> ReportListItem:
         pinned=bool(item.get("pinned", False)),
         space_id=item.get("space_id"),
         subspace_id=item.get("subspace_id"),
-        space_overview=bool(item.get("space_overview", False)),
     )
 
 
@@ -703,7 +687,6 @@ def _report_version_from_item(item: dict[str, Any], meta: dict[str, Any]) -> Rep
         # unversioned, so it is read from meta and never from the version item.
         space_id=meta.get("space_id"),
         subspace_id=meta.get("subspace_id"),
-        space_overview=bool(meta.get("space_overview", False)),
     )
 
 
@@ -789,7 +772,7 @@ def _space_from_item(item: dict) -> SpaceListItem:
         space_id=item["space_id"],
         name=item["name"],
         description=item.get("description", ""),
-        overview_report_id=item["overview_report_id"],
+        overview_report_id=item.get("overview_report_id"),
         created_at=item["created_at"],
         updated_at=item["updated_at"],
         created_by=item["created_by"],
@@ -1330,7 +1313,6 @@ class DynamoDBReportStore(ReportStore):
         access: ReportAccess | None = None,
         space_id: str | None = None,
         subspace_id: str | None = None,
-        space_overview: bool = False,
     ) -> ReportListItem:
         """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
@@ -1345,7 +1327,6 @@ class DynamoDBReportStore(ReportStore):
             access=report_access,
             space_id=space_id,
             subspace_id=subspace_id,
-            space_overview=space_overview,
         )
 
         def _op() -> None:
@@ -1365,7 +1346,6 @@ class DynamoDBReportStore(ReportStore):
             pinned=False,
             space_id=space_id,
             subspace_id=subspace_id,
-            space_overview=space_overview,
         )
 
     async def save_report_version(
@@ -1444,9 +1424,6 @@ class DynamoDBReportStore(ReportStore):
             if not meta:
                 return None
 
-            if access is not None and access.scope == "private" and meta.get("space_overview"):
-                raise ProtectedReportError(OVERVIEW_MUST_BE_PUBLIC)
-
             now = datetime.now(tz=UTC).isoformat()
             new_access = access.model_dump() if access is not None else meta["access"]
             record = _report_record(
@@ -1475,8 +1452,6 @@ class DynamoDBReportStore(ReportStore):
             meta = resp.get("Item")
             if not meta or not _report_visible_to_user(meta, user_id):
                 return None
-            if meta.get("space_overview"):
-                raise ProtectedReportError(OVERVIEW_IMMOBILE)
 
             now = datetime.now(tz=UTC).isoformat()
             record = _report_record(
@@ -1501,11 +1476,6 @@ class DynamoDBReportStore(ReportStore):
             meta = resp.get("Item")
             if not meta or not _report_visible_to_user(meta, user_id):
                 return False
-            # Backstop for callers that skipped the pre-check; delete_space
-            # removes the overview report through its own cascade.
-            if meta.get("space_overview"):
-                raise ProtectedReportError(OVERVIEW_UNDELETABLE)
-
             items_resp = table.query(
                 KeyConditionExpression="PK = :pk",
                 ExpressionAttributeValues={":pk": _report_pk(report_id)},
@@ -2491,47 +2461,36 @@ class DynamoDBReportStore(ReportStore):
         created_by: str,
     ) -> SpaceListItem:
         space_id = generate_report_id()
-        overview_report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
 
+        # No overview report: the overview is a pointer the user sets later, so
+        # a new space is just the two space items.
         base = _strip_none(
             {
                 "space_id": space_id,
                 "name": name,
                 "description": description,
-                "overview_report_id": overview_report_id,
                 "created_at": now,
                 "updated_at": now,
                 "created_by": created_by,
                 "updated_by": created_by,
             }
         )
-        space_items = (
-            {"PK": _space_pk(space_id), "SK": _SK_METADATA, **base},
-            {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id), **base},
-        )
-        # Public: spaces are globally visible, so a private overview report
-        # would leave every non-owner looking at a broken space.
-        report_items = _new_report_items(
-            report_id=overview_report_id,
-            name=name,
-            created_by=created_by,
-            now=now,
-            access=ReportAccess(scope="public"),
-            space_id=space_id,
-            space_overview=True,
-        )
 
         def _op() -> None:
             table = _get_table()
-            _transact_put_sync(table, *space_items, *report_items)
+            _transact_put_sync(
+                table,
+                {"PK": _space_pk(space_id), "SK": _SK_METADATA, **base},
+                {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id), **base},
+            )
 
         await asyncio.to_thread(_op)
         return SpaceListItem(
             space_id=space_id,
             name=name,
             description=description,
-            overview_report_id=overview_report_id,
+            overview_report_id=None,
             created_at=now,
             updated_at=now,
             created_by=created_by,
@@ -2557,7 +2516,7 @@ class DynamoDBReportStore(ReportStore):
                     "space_id": space_id,
                     "name": name,
                     "description": description,
-                    "overview_report_id": existing["overview_report_id"],
+                    "overview_report_id": existing.get("overview_report_id"),
                     "created_at": existing["created_at"],
                     "updated_at": now,
                     "created_by": existing["created_by"],
@@ -2581,7 +2540,6 @@ class DynamoDBReportStore(ReportStore):
             if not space:
                 return SpaceDeleteResult.NOT_FOUND
 
-            overview_report_id = space["overview_report_id"]
             # Unfiltered on purpose: a member report the caller cannot see
             # still keeps the space non-empty, so deleting cannot orphan it.
             # Sub-spaces deliberately do not block — see delete_space in base.py.
@@ -2596,20 +2554,13 @@ class DynamoDBReportStore(ReportStore):
                     )
                     if item.get("space_id") == space_id
                 ]
-            if any(item["report_id"] != overview_report_id for item in members):
+            if members:
                 return SpaceDeleteResult.NOT_EMPTY
 
-            report_items = _query_all_sync(
-                table,
-                KeyConditionExpression="PK = :pk",
-                ExpressionAttributeValues={":pk": _report_pk(overview_report_id)},
-                ProjectionExpression="PK, SK",
-            )
-            keys_to_delete = [{"PK": item["PK"], "SK": item["SK"]} for item in report_items]
-            keys_to_delete.append({"PK": _PK_REPORT_LIST, "SK": _report_list_sk(overview_report_id)})
-            keys_to_delete.append({"PK": _space_pk(space_id), "SK": _SK_METADATA})
-            keys_to_delete.append({"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id)})
-
+            keys_to_delete = [
+                {"PK": _space_pk(space_id), "SK": _SK_METADATA},
+                {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id)},
+            ]
             # Sub-spaces go with the space. They are only grouping labels, and
             # with no member reports left there is nothing referencing them.
             for subspace in _query_all_sync(
@@ -2620,15 +2571,44 @@ class DynamoDBReportStore(ReportStore):
                 keys_to_delete.append({"PK": _subspace_pk(subspace["subspace_id"]), "SK": _SK_METADATA})
                 keys_to_delete.append({"PK": _subspace_list_pk(space_id), "SK": subspace["SK"]})
 
-            dashboard_resp = table.get_item(Key={"PK": _PK_DASHBOARD, "SK": _SK_DASHBOARD_POINTER})
-            dashboard_item = dashboard_resp.get("Item")
-            if dashboard_item and dashboard_item.get("report_id") == overview_report_id:
-                keys_to_delete.append({"PK": _PK_DASHBOARD, "SK": _SK_DASHBOARD_POINTER})
-
             with table.batch_writer() as batch:
                 for key in keys_to_delete:
                     batch.delete_item(Key=key)
             return SpaceDeleteResult.DELETED
+
+        return await asyncio.to_thread(_op)
+
+    async def set_space_overview(
+        self,
+        space_id: str,
+        report_id: str | None,
+        updated_by: str,
+    ) -> SpaceListItem | None:
+        def _op() -> SpaceListItem | None:
+            table = _get_table()
+            resp = table.get_item(Key={"PK": _space_pk(space_id), "SK": _SK_METADATA})
+            existing = resp.get("Item")
+            if not existing:
+                return None
+            now = datetime.now(tz=UTC).isoformat()
+            base = _strip_none(
+                {
+                    "space_id": space_id,
+                    "name": existing["name"],
+                    "description": existing.get("description", ""),
+                    "overview_report_id": report_id,
+                    "created_at": existing["created_at"],
+                    "updated_at": now,
+                    "created_by": existing["created_by"],
+                    "updated_by": updated_by,
+                }
+            )
+            _transact_put_sync(
+                table,
+                {"PK": _space_pk(space_id), "SK": _SK_METADATA, **base},
+                {"PK": _PK_SPACE_LIST, "SK": _space_list_sk(space_id), **base},
+            )
+            return _space_from_item(base)
 
         return await asyncio.to_thread(_op)
 

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
-from reporting.schema.report_config import ReportListItem, User
+from reporting.schema.report_config import User
 from reporting.services import chat_graph
 from reporting.services.chat_messages import MessageTag, has_tag
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
@@ -1793,21 +1793,6 @@ async def test_execute_confirmations_runs_approved_tool_through_real_runtime(moc
     mocker.patch(
         "reporting.services.chat_graph.report_store.claim_action_confirmation_for_execution",
         return_value=confirmation,
-    )
-    # reports__delete now loads metadata first, to refuse a space's overview
-    # report, so it has to be stubbed for the handler to reach the store.
-    mocker.patch(
-        "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-        return_value=ReportListItem(
-            report_id="r1",
-            name="Report",
-            current_version=1,
-            created_at=_NOW,
-            updated_at=_NOW,
-            created_by="user-1",
-            updated_by="user-1",
-            access={"scope": "public"},
-        ),
     )
     delete_report = mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True

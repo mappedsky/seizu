@@ -502,18 +502,10 @@ async def test_reports_update_visibility_rejects_unpublish_when_dashboard():
 
 
 async def test_reports_delete_success():
-    with (
-        # Delete now loads metadata first, to refuse space overview reports.
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-            new_callable=AsyncMock,
-            return_value=_report_list_item(),
-        ),
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.delete_report",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
+    with patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report",
+        new_callable=AsyncMock,
+        return_value=True,
     ):
         server = _build_mcp_server()
         result = await _call(server, "reports__delete", {"report_id": "r1"})
@@ -523,24 +515,16 @@ async def test_reports_delete_success():
 
 
 async def test_reports_delete_returns_error_when_missing():
-    with (
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-            new_callable=AsyncMock,
-            return_value=None,
-        ),
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.delete_report",
-            new_callable=AsyncMock,
-            return_value=False,
-        ) as mock_delete,
+    with patch(
+        "reporting.services.mcp_builtins.reports.report_store.delete_report",
+        new_callable=AsyncMock,
+        return_value=False,
     ):
         server = _build_mcp_server()
         result = await _call(server, "reports__delete", {"report_id": "nope"})
         data = json.loads(result[0].text)
 
     assert data == {"error": "Report not found"}
-    mock_delete.assert_not_awaited()
 
 
 async def test_reports_pin_returns_error_when_missing():
@@ -649,87 +633,8 @@ async def test_reports_get_version_returns_error_when_missing():
 
 
 # ---------------------------------------------------------------------------
-# Space overview report guards
-#
-# REST enforces these, and MCP mutates the store through its own handlers, so
-# a rule that lives in only one transport is one an authorized caller can walk
-# around.
+# Space membership
 # ---------------------------------------------------------------------------
-
-
-def _overview_item() -> ReportListItem:
-    return _report_list_item(report_id="ovr1", name="Cloud Security").model_copy(
-        update={"space_id": "sp1", "space_overview": True}
-    )
-
-
-async def test_reports_delete_rejects_a_space_overview_report():
-    approved = _approved_confirmation()
-    with (
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-            new_callable=AsyncMock,
-            return_value=_overview_item(),
-        ),
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.delete_report",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as mock_delete,
-        patch(
-            "reporting.services.action_confirmations.report_store.find_action_confirmation_grant",
-            new_callable=AsyncMock,
-            return_value=approved,
-        ),
-        patch(
-            "reporting.services.action_confirmations.report_store.claim_action_confirmation_for_execution",
-            new_callable=AsyncMock,
-            return_value=approved.model_copy(update={"status": "executed"}),
-        ),
-    ):
-        server = _build_mcp_server()
-        result = await _call(server, "reports__delete", {"report_id": "ovr1"}, bypass_confirmation=False)
-        data = json.loads(result[0].text)
-
-    assert "cannot be deleted" in data["error"]
-    mock_delete.assert_not_awaited()
-
-
-async def test_reports_update_visibility_rejects_privatizing_an_overview_report():
-    approved = _approved_confirmation()
-    with (
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-            new_callable=AsyncMock,
-            return_value=_overview_item(),
-        ),
-        patch(
-            "reporting.services.mcp_builtins.reports.report_store.update_report_visibility",
-            new_callable=AsyncMock,
-            return_value=None,
-        ) as mock_update,
-        patch(
-            "reporting.services.action_confirmations.report_store.find_action_confirmation_grant",
-            new_callable=AsyncMock,
-            return_value=approved,
-        ),
-        patch(
-            "reporting.services.action_confirmations.report_store.claim_action_confirmation_for_execution",
-            new_callable=AsyncMock,
-            return_value=approved.model_copy(update={"status": "executed"}),
-        ),
-    ):
-        server = _build_mcp_server()
-        result = await _call(
-            server,
-            "reports__update_visibility",
-            {"report_id": "ovr1", "access": {"scope": "private"}},
-            bypass_confirmation=False,
-        )
-        data = json.loads(result[0].text)
-
-    assert "cannot be made private" in data["error"]
-    mock_update.assert_not_awaited()
 
 
 async def test_reports_create_honours_the_space_fields():
@@ -796,7 +701,6 @@ async def test_reports_clone_inherits_the_source_space():
         server = _build_mcp_server()
         await _call(server, "reports__clone", {"report_id": "src1", "name": "Copy"})
 
-    # Matches REST: membership is inherited, the overview flag never is.
+    # Matches REST: membership is inherited.
     assert mock_create.await_args.kwargs["space_id"] == "sp1"
     assert mock_create.await_args.kwargs["subspace_id"] == "ss1"
-    assert "space_overview" not in mock_create.await_args.kwargs

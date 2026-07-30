@@ -40,7 +40,6 @@ import {
 import { Report } from 'src/config.context';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
-import { OVERVIEW_MUST_STAY_PUBLIC } from 'src/spaces';
 import { pageContentSx } from 'src/theme/layout';
 
 interface ReportPaneProps {
@@ -101,8 +100,7 @@ function ReportPane({
   const [displayedSpace, setDisplayedSpace] = useState<{
     spaceId: string | null;
     subspaceId: string | null;
-    isOverview: boolean;
-  }>({ spaceId: null, subspaceId: null, isOverview: false });
+  }>({ spaceId: null, subspaceId: null });
 
   const {
     report,
@@ -162,7 +160,6 @@ function ReportPane({
       setDisplayedSpace({
         spaceId: reportVersion.space_id,
         subspaceId: reportVersion.subspace_id,
-        isOverview: reportVersion.space_overview,
       });
     }
     setDisplayedQueryCapabilities(queryCapabilities);
@@ -259,11 +256,6 @@ function ReportPane({
   const isOwner = currentUser?.user_id === displayedOwnerId;
   const canUpdateAccess = hasPermission('reports:write') && isOwner;
   const canWriteReports = hasPermission('reports:write');
-  const isSpaceOverview = displayedSpace.isOverview;
-  // The API returns 409 when an overview report is made private: the space is
-  // globally visible, so its landing page has to be too.
-  const cannotUnpublishOverview =
-    isSpaceOverview && displayedAccessScope === 'public';
   const actionsMenuOpen = Boolean(actionsAnchor);
 
   const closeActionsMenu = () => {
@@ -320,13 +312,7 @@ function ReportPane({
                     ) : (
                       <PublicIcon fontSize="small" />
                     ),
-                    disabled:
-                      !canUpdateAccess ||
-                      updatingAccess ||
-                      cannotUnpublishOverview,
-                    tooltip: cannotUnpublishOverview
-                      ? OVERVIEW_MUST_STAY_PUBLIC
-                      : undefined,
+                    disabled: !canUpdateAccess || updatingAccess,
                     onClick: handleToggleAccess,
                   },
                   {
@@ -338,8 +324,7 @@ function ReportPane({
                   },
                 ]
               : []),
-            // The overview report is an artefact of its space and stays put.
-            ...(canWriteReports && !isSpaceOverview
+            ...(canWriteReports
               ? [
                   {
                     key: 'space',
@@ -460,7 +445,6 @@ function ReportPane({
             setDisplayedSpace({
               spaceId: updated.space_id,
               subspaceId: updated.subspace_id,
-              isOverview: updated.space_overview,
             });
           }}
         />

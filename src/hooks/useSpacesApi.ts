@@ -13,7 +13,7 @@ export interface SpaceListItem {
   space_id: string;
   name: string;
   description: string;
-  overview_report_id: string;
+  overview_report_id: string | null;
   created_at: string;
   updated_at: string;
   created_by: string;
@@ -34,10 +34,10 @@ export interface SpaceTree {
   space: SpaceListItem;
   subspaces: SubspaceItem[];
   /**
-   * Reports filed in the space, filtered to what the caller may see. Includes
-   * the overview report; the sidebar filters that one out. The API blanks out
-   * any `subspace_id` left dangling by a deleted sub-space, so an unknown
-   * grouping never reaches here.
+   * Reports filed in the space, filtered to what the caller may see. The API
+   * blanks out dangling references before responding — a `subspace_id` whose
+   * sub-space is gone, and an `overview_report_id` that is no longer a member —
+   * so neither reaches here.
    */
   reports: ReportListItem[];
 }
@@ -227,6 +227,10 @@ export function useSubspacesList(spaceId: string | null): {
 
 export function useSpaceMutations(): {
   createSpace: (name: string, description: string) => Promise<SpaceListItem>;
+  setSpaceOverview: (
+    spaceId: string,
+    reportId: string | null,
+  ) => Promise<SpaceListItem>;
   updateSpace: (
     spaceId: string,
     name: string,
@@ -300,7 +304,30 @@ export function useSpaceMutations(): {
     [accessToken],
   );
 
-  return { createSpace, updateSpace, deleteSpace };
+  const setSpaceOverview = useCallback(
+    async (
+      spaceId: string,
+      reportId: string | null,
+    ): Promise<SpaceListItem> => {
+      const res = await fetch(`/api/v1/spaces/${spaceId}/overview`, {
+        method: 'PUT',
+        headers: {
+          ...getApiHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ report_id: reportId }),
+      });
+      if (!res.ok)
+        throw new Error(
+          await errorMessage(res, `Failed to set the overview: ${res.status}`),
+        );
+      broadcastSpacesUpdated();
+      return res.json();
+    },
+    [accessToken],
+  );
+
+  return { createSpace, updateSpace, deleteSpace, setSpaceOverview };
 }
 
 /** Sub-space mutations. The parent space is baked in, mirroring useToolMutations. */

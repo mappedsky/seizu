@@ -47,7 +47,7 @@ const TREE = {
   reports: [
     {
       report_id: 'ovr1',
-      name: 'Cloud Security',
+      name: 'Pinned Overview',
       description: '',
       current_version: 1,
       created_at: '2026-01-01T00:00:00Z',
@@ -58,7 +58,6 @@ const TREE = {
       pinned: false,
       space_id: 'sp1',
       subspace_id: null,
-      space_overview: true,
     },
     {
       report_id: 'r1',
@@ -73,7 +72,6 @@ const TREE = {
       pinned: false,
       space_id: 'sp1',
       subspace_id: null,
-      space_overview: false,
     },
     {
       report_id: 'r2',
@@ -88,7 +86,6 @@ const TREE = {
       pinned: false,
       space_id: 'sp1',
       subspace_id: null,
-      space_overview: false,
     },
   ],
 };
@@ -140,13 +137,15 @@ describe('SpaceDetail tree fetching', () => {
     await waitFor(() => expect(treeCalls()).toBe(1));
     expect(screen.getByTestId('report-pane')).toHaveTextContent('ovr1');
 
-    await user.click(screen.getByRole('button', { name: 'Member One' }));
+    await user.click(screen.getByRole('button', { name: /Member One/ }));
     expect(screen.getByTestId('report-pane')).toHaveTextContent('r1');
 
-    await user.click(screen.getByRole('button', { name: 'Member Two' }));
+    await user.click(screen.getByRole('button', { name: /Member Two/ }));
     expect(screen.getByTestId('report-pane')).toHaveTextContent('r2');
 
-    await user.click(screen.getByRole('button', { name: 'Cloud Security' }));
+    // The pinned report's row carries an "overview" hint in its accessible
+    // name, so match on the report name rather than the whole string.
+    await user.click(screen.getByRole('button', { name: /Pinned Overview/ }));
     expect(screen.getByTestId('report-pane')).toHaveTextContent('ovr1');
 
     // Three navigations, still one tree fetch.

@@ -17,9 +17,8 @@ from sqlmodel import SQLModel
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
-from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
+from reporting.schema.space_config import SpaceDeleteResult, SubspaceItem
 from reporting.services.report_store import sql as sql_module
-from reporting.services.report_store.base import ProtectedReportError
 from reporting.services.report_store.sql import SQLModelReportStore
 
 # ---------------------------------------------------------------------------
@@ -2166,31 +2165,6 @@ async def test_list_spaces_empty(store):
     assert await store.list_spaces() == []
 
 
-async def test_create_space_creates_public_overview_report(store):
-    space = await store.create_space(name="Cloud Security", description="AWS", created_by="u1")
-    assert isinstance(space, SpaceListItem)
-    assert space.name == "Cloud Security"
-    assert space.description == "AWS"
-    assert space.overview_report_id
-
-    overview = await store.get_report_metadata(space.overview_report_id)
-    assert overview is not None
-    assert overview.name == "Cloud Security"
-    # Public, because spaces are globally visible: a private overview report
-    # would render the space broken for everyone but its creator.
-    assert overview.access.scope == "public"
-    assert overview.space_id == space.space_id
-    assert overview.subspace_id is None
-    assert overview.space_overview is True
-
-    # The overview report is renderable straight away.
-    latest = await store.get_report_latest(space.overview_report_id)
-    assert latest is not None
-    assert latest.version == 1
-    assert latest.space_id == space.space_id
-    assert latest.space_overview is True
-
-
 async def test_get_space_and_list_spaces(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     fetched = await store.get_space(space.space_id)
@@ -2228,14 +2202,6 @@ async def test_delete_space_not_found(store):
     assert await store.delete_space("missing") == SpaceDeleteResult.NOT_FOUND
 
 
-async def test_delete_empty_space_removes_overview_report(store):
-    space = await store.create_space(name="Cloud", description="", created_by="u1")
-    assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
-    assert await store.get_space(space.space_id) is None
-    assert await store.get_report_metadata(space.overview_report_id) is None
-    assert await store.list_report_versions(space.overview_report_id) == []
-
-
 async def test_delete_space_blocked_by_member_report(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     report = await store.create_report(name="Member", created_by="u1")
@@ -2247,7 +2213,6 @@ async def test_delete_space_blocked_by_member_report(store):
     )
     assert await store.delete_space(space.space_id) == SpaceDeleteResult.NOT_EMPTY
     assert await store.get_space(space.space_id) is not None
-    assert await store.get_report_metadata(space.overview_report_id) is not None
 
 
 async def test_delete_space_emptiness_ignores_report_visibility(store):
@@ -2282,13 +2247,6 @@ async def test_delete_space_removes_its_subspaces(store):
     assert await store.list_subspaces(space.space_id) == []
 
 
-async def test_delete_space_clears_dashboard_pointer(store):
-    space = await store.create_space(name="Cloud", description="", created_by="u1")
-    assert await store.set_dashboard_report(space.overview_report_id) is True
-    assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
-    assert await store.get_dashboard_report_id() is None
-
-
 async def test_list_space_reports_filters_by_space_and_visibility(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     other_space = await store.create_space(name="Other", description="", created_by="u1")
@@ -2304,10 +2262,9 @@ async def test_list_space_reports_filters_by_space_and_visibility(store):
 
     visible = await store.list_space_reports(space.space_id, user_id="u1")
     ids = {item.report_id for item in visible}
-    assert mine.report_id in ids
-    assert space.overview_report_id in ids
+    assert ids == {mine.report_id}
     assert theirs.report_id not in ids
-    assert other_space.overview_report_id not in ids
+    assert await store.list_space_reports(other_space.space_id, user_id="u1") == []
 
     unfiltered = await store.list_space_reports(space.space_id)
     assert theirs.report_id in {item.report_id for item in unfiltered}
@@ -2379,7 +2336,6 @@ async def test_create_report_defaults_to_no_space(store):
     report = await store.create_report(name="Loose", created_by="u1")
     assert report.space_id is None
     assert report.subspace_id is None
-    assert report.space_overview is False
 
 
 async def test_create_report_with_space_membership(store):
@@ -2488,61 +2444,76 @@ async def test_visibility_and_pin_changes_preserve_space_membership(store):
 # transports that remember to pre-check.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The overview pointer
+# ---------------------------------------------------------------------------
 
-async def test_store_refuses_to_delete_an_overview_report(store):
+
+async def test_create_space_starts_with_no_overview(store):
+    """A space no longer auto-creates a report; the overview is set later."""
+    space = await store.create_space(name="Cloud Security", description="AWS", created_by="u1")
+
+    assert space.overview_report_id is None
+    assert await store.list_space_reports(space.space_id) == []
+
+
+async def test_set_and_clear_the_overview_pointer(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
+    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
 
-    with pytest.raises(ProtectedReportError, match="delete the space instead"):
-        await store.delete_report(space.overview_report_id)
+    updated = await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u2")
+    assert updated.overview_report_id == report.report_id
+    assert updated.updated_by == "u2"
+    assert (await store.get_space(space.space_id)).overview_report_id == report.report_id
 
-    assert await store.get_report_metadata(space.overview_report_id) is not None
+    cleared = await store.set_space_overview(space_id=space.space_id, report_id=None, updated_by="u2")
+    assert cleared.overview_report_id is None
 
 
-async def test_store_refuses_to_privatize_an_overview_report(store):
+async def test_set_space_overview_not_found(store):
+    assert await store.set_space_overview(space_id="missing", report_id=None, updated_by="u1") is None
+
+
+async def test_renaming_a_space_keeps_its_overview_pointer(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
+    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
+    await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
 
-    with pytest.raises(ProtectedReportError, match="cannot be made private"):
-        await store.update_report_visibility(
-            report_id=space.overview_report_id,
-            updated_by="u1",
-            access=ReportAccess(scope="private"),
-        )
-
-    meta = await store.get_report_metadata(space.overview_report_id)
-    assert meta.access.scope == "public"
+    renamed = await store.update_space(space_id=space.space_id, name="Cloud Security", description="d", updated_by="u1")
+    assert renamed.overview_report_id == report.report_id
 
 
-async def test_store_refuses_to_move_an_overview_report(store):
+async def test_the_pinned_report_is_an_ordinary_report(store):
+    """No protections: it can be moved out, unpublished, and deleted."""
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     other = await store.create_space(name="Other", description="", created_by="u1")
+    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
+    await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
 
-    with pytest.raises(ProtectedReportError, match="cannot be moved"):
-        await store.update_report_space(
-            report_id=space.overview_report_id,
-            space_id=other.space_id,
-            subspace_id=None,
-            updated_by="u1",
-        )
-
-    meta = await store.get_report_metadata(space.overview_report_id)
-    assert meta.space_id == space.space_id
-
-
-async def test_delete_space_still_removes_its_overview_report(store):
-    """The cascade must not be blocked by the guard it bypasses."""
-    space = await store.create_space(name="Cloud", description="", created_by="u1")
-
-    assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
-    assert await store.get_report_metadata(space.overview_report_id) is None
-
-
-async def test_store_still_allows_publishing_an_overview_report(store):
-    """Only the private-ward direction is guarded."""
-    space = await store.create_space(name="Cloud", description="", created_by="u1")
-
-    updated = await store.update_report_visibility(
-        report_id=space.overview_report_id,
-        updated_by="u1",
-        access=ReportAccess(scope="public"),
+    moved = await store.update_report_space(
+        report_id=report.report_id, space_id=other.space_id, subspace_id=None, updated_by="u1"
     )
-    assert updated.access.scope == "public"
+    assert moved.space_id == other.space_id
+
+    privatized = await store.update_report_visibility(
+        report_id=report.report_id, updated_by="u1", access=ReportAccess(scope="private")
+    )
+    assert privatized.access.scope == "private"
+
+    assert await store.delete_report(report.report_id) is True
+    # The pointer is left dangling on purpose; the API resolves it lazily.
+    assert (await store.get_space(space.space_id)).overview_report_id == report.report_id
+
+
+async def test_delete_space_never_deletes_a_report(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    report = await store.create_report(name="Member", created_by="u1", space_id=space.space_id)
+    await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
+
+    # The pinned report still blocks the delete — it is a member report.
+    assert await store.delete_space(space.space_id) == SpaceDeleteResult.NOT_EMPTY
+
+    await store.update_report_space(report_id=report.report_id, space_id=None, subspace_id=None, updated_by="u1")
+    assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
+    # The report survives; only the space is gone.
+    assert await store.get_report_metadata(report.report_id) is not None

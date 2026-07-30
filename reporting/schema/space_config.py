@@ -24,17 +24,17 @@ def _strip_name(value: str) -> str:
 class SpaceListItem(BaseModel):
     """A space record.
 
-    ``overview_report_id`` points at the report auto-created with the space.
-    That pointer and the matching ``ReportListItem.space_overview`` flag are
-    written together when the space is created and are never mutated
-    afterwards -- the overview report cannot move space, be deleted directly,
-    or lose the flag.
+    ``overview_report_id`` optionally points at one of the space's member
+    reports, which the detail page renders as the space's landing page. It is
+    just a pointer: the report stays an ordinary report, and the pointer is
+    resolved lazily, so a target that has been deleted, moved out, or is
+    invisible to the caller simply reads as "no overview set".
     """
 
     space_id: str
     name: str
     description: str = ""
-    overview_report_id: str
+    overview_report_id: str | None = None
     created_at: str
     updated_at: str
     created_by: str
@@ -141,6 +141,15 @@ class SubspaceListResponse(BaseModel):
     subspaces: list[SubspaceItem]
 
 
+class SetSpaceOverviewRequest(BaseModel):
+    """Request body for PUT /api/v1/spaces/<id>/overview.
+
+    ``report_id`` must name a report filed in this space; null clears it.
+    """
+
+    report_id: str | None = None
+
+
 class SpaceIdResponse(BaseModel):
     space_id: str
 
@@ -152,10 +161,11 @@ class SubspaceIdResponse(BaseModel):
 class SpaceTreeResponse(BaseModel):
     """Everything the space detail page needs in one round trip.
 
-    ``reports`` is filtered by the caller's report visibility and includes the
-    overview report; the sidebar filters that one out. Any ``subspace_id`` that
-    does not resolve against ``subspaces`` is normalised to ``None`` before the
-    response is built, so clients never see a dangling reference.
+    ``reports`` is filtered by the caller's report visibility. Dangling
+    references are normalised away before the response is built, so clients
+    never see one: a ``subspace_id`` that does not resolve against
+    ``subspaces``, and a ``space.overview_report_id`` that is not among
+    ``reports``, both come back as ``None``.
     """
 
     space: SpaceListItem

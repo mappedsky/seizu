@@ -38,7 +38,7 @@ def _make_app(current_user: CurrentUser = _FAKE_CURRENT_USER):
     return app
 
 
-def _space(space_id="sp1", name="Cloud", overview_report_id="ovr1"):
+def _space(space_id="sp1", name="Cloud", overview_report_id=None):
     return SpaceListItem(
         space_id=space_id,
         name=name,
@@ -63,7 +63,7 @@ def _subspace(subspace_id="ss1", space_id="sp1", name="Network"):
     )
 
 
-def _report(report_id="r1", space_id="sp1", subspace_id=None, space_overview=False):
+def _report(report_id="r1", space_id="sp1", subspace_id=None):
     return ReportListItem(
         report_id=report_id,
         name=f"Report {report_id}",
@@ -75,7 +75,6 @@ def _report(report_id="r1", space_id="sp1", subspace_id=None, space_overview=Fal
         access={"scope": "public"},
         space_id=space_id,
         subspace_id=subspace_id,
-        space_overview=space_overview,
     )
 
 
@@ -121,7 +120,8 @@ async def test_create_space(mocker):
         ret = await client.post("/api/v1/spaces", json={"name": "Cloud", "description": "desc"})
     assert ret.status_code == 201
     assert ret.json()["space_id"] == "sp1"
-    assert ret.json()["overview_report_id"] == "ovr1"
+    # A new space has no overview until one is set.
+    assert ret.json()["overview_report_id"] is None
     mock_create.assert_called_once_with(name="Cloud", description="desc", created_by="test-user-id")
 
 
@@ -278,7 +278,7 @@ async def test_get_space_tree(mocker):
         "reporting.routes.spaces.report_store.list_space_reports",
         new=AsyncMock(
             return_value=[
-                _report("ovr1", space_overview=True),
+                _report("r1"),
                 _report("r2"),
                 _report("r3", subspace_id="ss1"),
             ]
@@ -291,7 +291,7 @@ async def test_get_space_tree(mocker):
     body = ret.json()
     assert body["space"]["space_id"] == "sp1"
     assert [s["subspace_id"] for s in body["subspaces"]] == ["ss1"]
-    assert [r["report_id"] for r in body["reports"]] == ["ovr1", "r2", "r3"]
+    assert [r["report_id"] for r in body["reports"]] == ["r1", "r2", "r3"]
     # Reports are scoped to the caller's visibility, not the whole space.
     mock_reports.assert_called_once_with("sp1", user_id="test-user-id")
 
@@ -493,3 +493,121 @@ async def test_every_space_endpoint_requires_a_permission():
             await client.delete("/api/v1/spaces/sp1/subspaces/ss1"),
         ]
     assert [r.status_code for r in responses] == [403] * len(responses)
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/v1/spaces/<space_id>/overview
+# ---------------------------------------------------------------------------
+
+
+async def test_set_space_overview(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mocker.patch(
+        "reporting.services.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report("r1", space_id="sp1")),
+    )
+    mock_set = mocker.patch(
+        "reporting.routes.spaces.report_store.set_space_overview",
+        new=AsyncMock(return_value=_space(overview_report_id="r1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": "r1"})
+    assert ret.status_code == 200
+    assert ret.json()["overview_report_id"] == "r1"
+    mock_set.assert_called_once_with(space_id="sp1", report_id="r1", updated_by="test-user-id")
+
+
+async def test_clear_space_overview(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mock_set = mocker.patch(
+        "reporting.routes.spaces.report_store.set_space_overview",
+        new=AsyncMock(return_value=_space()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": None})
+    assert ret.status_code == 200
+    assert mock_set.call_args.kwargs["report_id"] is None
+
+
+async def test_set_space_overview_rejects_a_report_from_another_space(mocker):
+    """The overview has to be a report filed in this space."""
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mocker.patch(
+        "reporting.services.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report("r9", space_id="other")),
+    )
+    mock_set = mocker.patch(
+        "reporting.routes.spaces.report_store.set_space_overview",
+        new=AsyncMock(return_value=_space()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": "r9"})
+    assert ret.status_code == 400
+    assert "filed in that space" in ret.json()["error"]
+    mock_set.assert_not_called()
+
+
+async def test_set_space_overview_rejects_an_unknown_report(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mocker.patch("reporting.services.report_store.get_report_metadata", new=AsyncMock(return_value=None))
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": "missing"})
+    assert ret.status_code == 400
+    assert "Report not found" in ret.json()["error"]
+
+
+async def test_set_space_overview_unknown_space(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=None))
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/missing/overview", json={"report_id": None})
+    assert ret.status_code == 404
+
+
+async def test_tree_blanks_an_overview_pointer_that_no_longer_resolves(mocker):
+    """The target may have been deleted, moved out, or be invisible here.
+
+    Resolving lazily is what lets the overview be an ordinary report with no
+    protections on it.
+    """
+    mocker.patch(
+        "reporting.routes.spaces.report_store.get_space",
+        new=AsyncMock(return_value=_space(overview_report_id="gone")),
+    )
+    mocker.patch("reporting.routes.spaces.report_store.list_subspaces", new=AsyncMock(return_value=[]))
+    mocker.patch(
+        "reporting.routes.spaces.report_store.list_space_reports",
+        new=AsyncMock(return_value=[_report("r1")]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/spaces/sp1/tree")
+    assert ret.status_code == 200
+    assert ret.json()["space"]["overview_report_id"] is None
+
+
+async def test_tree_keeps_an_overview_pointer_that_resolves(mocker):
+    mocker.patch(
+        "reporting.routes.spaces.report_store.get_space",
+        new=AsyncMock(return_value=_space(overview_report_id="r1")),
+    )
+    mocker.patch("reporting.routes.spaces.report_store.list_subspaces", new=AsyncMock(return_value=[]))
+    mocker.patch(
+        "reporting.routes.spaces.report_store.list_space_reports",
+        new=AsyncMock(return_value=[_report("r1")]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/spaces/sp1/tree")
+    assert ret.json()["space"]["overview_report_id"] == "r1"
+
+
+async def test_set_space_overview_requires_spaces_write():
+    app = _make_app(_UNPRIVILEGED_CURRENT_USER)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": None})
+    assert ret.status_code == 403

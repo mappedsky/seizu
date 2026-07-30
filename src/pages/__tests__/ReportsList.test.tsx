@@ -76,7 +76,6 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
     pinned: true,
     space_id: null,
     subspace_id: null,
-    space_overview: false,
   },
   {
     report_id: 'r2',
@@ -91,7 +90,6 @@ const REPORTS: reportsApiModule.ReportListItem[] = [
     pinned: false,
     space_id: null,
     subspace_id: null,
-    space_overview: false,
   },
 ];
 
@@ -384,26 +382,6 @@ describe('ReportsList', () => {
     });
   });
 
-  it('disables the move action on a space overview report', async () => {
-    mockUseReportsList.mockReturnValue({
-      reports: [{ ...REPORTS[0], space_id: 'sp1', space_overview: true }],
-      total: 1,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: refreshReports,
-    });
-    const user = userEvent.setup({ delay: null });
-    render(<ReportsList />, { wrapper: Wrapper });
-
-    await user.click(screen.getAllByLabelText('More actions')[0]);
-
-    expect(
-      screen.getByRole('menuitem', { name: /move to space/i }),
-    ).toHaveAttribute('aria-disabled', 'true');
-  });
-
   // -------------------------------------------------------------------------
   // Bulk actions
   // -------------------------------------------------------------------------
@@ -488,37 +466,6 @@ describe('ReportsList', () => {
     expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
   });
 
-  it('skips overview reports when bulk moving', async () => {
-    mockUseReportsList.mockReturnValue({
-      reports: [
-        { ...REPORTS[0], space_id: 'sp1', space_overview: true },
-        REPORTS[1],
-      ],
-      total: 2,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: refreshReports,
-    });
-    const user = userEvent.setup({ delay: null });
-    render(<ReportsList />, { wrapper: Wrapper });
-
-    await user.click(
-      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Move to space' }));
-    await user.click(screen.getByRole('combobox', { name: 'Space' }));
-    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
-    await user.click(screen.getByRole('button', { name: 'Move' }));
-
-    // The overview report is filtered out rather than 409-ing.
-    await waitFor(() => {
-      expect(setReportSpace).toHaveBeenCalledTimes(1);
-    });
-    expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
-  });
-
   it('reports per-report failures without aborting the rest of the batch', async () => {
     setReportSpace
       .mockRejectedValueOnce(new Error('nope'))
@@ -554,55 +501,10 @@ describe('ReportsList', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Overview-report guards (each of these 409s in the backend)
+  // Publish gating
   // -------------------------------------------------------------------------
 
-  function renderWithOverviewReport() {
-    mockUseReportsList.mockReturnValue({
-      reports: [
-        { ...REPORTS[0], space_id: 'sp1', space_overview: true, pinned: false },
-      ],
-      total: 1,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: refreshReports,
-    });
-    return userEvent.setup({ delay: null });
-  }
-
-  it('disables Unpublish on a space overview report', async () => {
-    const user = renderWithOverviewReport();
-    render(<ReportsList />, { wrapper: Wrapper });
-
-    await user.click(screen.getAllByLabelText('More actions')[0]);
-
-    // The overview report is created public and cannot go private. A disabled
-    // MUI MenuItem also carries pointer-events: none, so it is unclickable —
-    // asserting aria-disabled is the observable part.
-    expect(
-      screen.getByRole('menuitem', { name: /unpublish/i }),
-    ).toHaveAttribute('aria-disabled', 'true');
-    expect(updateReportVisibility).not.toHaveBeenCalled();
-  });
-
-  it('disables Delete on a space overview report', async () => {
-    const user = renderWithOverviewReport();
-    render(<ReportsList />, { wrapper: Wrapper });
-
-    await user.click(screen.getAllByLabelText('More actions')[0]);
-
-    // It goes away with its space, never on its own.
-    expect(screen.getByRole('menuitem', { name: /delete/i })).toHaveAttribute(
-      'aria-disabled',
-      'true',
-    );
-    expect(deleteReport).not.toHaveBeenCalled();
-  });
-
-  it('still allows Publish on a private report', async () => {
-    // Guard only the private-ward direction: Publish stays available.
+  it('offers Publish on a private report owned by the user', async () => {
     mockUseReportsList.mockReturnValue({
       reports: [{ ...REPORTS[1], created_by: 'alice' }],
       total: 1,
@@ -620,33 +522,5 @@ describe('ReportsList', () => {
     expect(
       screen.getByRole('menuitem', { name: /publish/i }),
     ).not.toHaveAttribute('aria-disabled', 'true');
-  });
-
-  it('skips overview reports when bulk deleting', async () => {
-    mockUseReportsList.mockReturnValue({
-      reports: [
-        { ...REPORTS[0], space_id: 'sp1', space_overview: true },
-        REPORTS[1],
-      ],
-      total: 2,
-      page: 1,
-      perPage: 500,
-      loading: false,
-      error: null,
-      refresh: refreshReports,
-    });
-    const user = userEvent.setup({ delay: null });
-    render(<ReportsList />, { wrapper: Wrapper });
-
-    await user.click(
-      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
-    );
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
-
-    await waitFor(() => {
-      expect(deleteReport).toHaveBeenCalledTimes(1);
-    });
-    expect(deleteReport).toHaveBeenCalledWith('r2');
   });
 });

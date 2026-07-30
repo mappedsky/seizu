@@ -695,7 +695,6 @@ const REPORT_VERSION = {
   query_capabilities: { 'tok-1': 'signed-abc' },
   space_id: null,
   subspace_id: null,
-  space_overview: false,
 };
 
 // ---------------------------------------------------------------------------

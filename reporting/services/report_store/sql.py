@@ -33,14 +33,7 @@ from reporting.schema.report_config import (
     User,
 )
 from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
-from reporting.services.report_store.base import (
-    OVERVIEW_IMMOBILE,
-    OVERVIEW_MUST_BE_PUBLIC,
-    OVERVIEW_UNDELETABLE,
-    ProtectedReportError,
-    ReportStore,
-    initial_report_config,
-)
+from reporting.services.report_store.base import ReportStore, initial_report_config
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
@@ -87,7 +80,6 @@ class ReportRecord(SQLModel, table=True):  # type: ignore
     pinned: bool = False
     space_id: str | None = Field(default=None, index=True)
     subspace_id: str | None = Field(default=None, index=True)
-    space_overview: bool = False
 
 
 class SpaceRecord(SQLModel, table=True):  # type: ignore
@@ -95,7 +87,7 @@ class SpaceRecord(SQLModel, table=True):  # type: ignore
     space_id: str = Field(primary_key=True)
     name: str
     description: str = ""
-    overview_report_id: str
+    overview_report_id: str | None = None
     created_at: str
     updated_at: str
     created_by: str
@@ -489,7 +481,6 @@ def _report_list_item_from_record(report: ReportRecord) -> ReportListItem:
         pinned=report.pinned,
         space_id=report.space_id,
         subspace_id=report.subspace_id,
-        space_overview=report.space_overview,
     )
 
 
@@ -509,7 +500,6 @@ def _report_version_from_records(report: ReportRecord, version: ReportVersionRec
         # unversioned, so restoring an old version cannot relocate a report.
         space_id=report.space_id,
         subspace_id=report.subspace_id,
-        space_overview=report.space_overview,
     )
 
 
@@ -522,13 +512,8 @@ def _new_report_records(
     access: ReportAccess,
     space_id: str | None = None,
     subspace_id: str | None = None,
-    space_overview: bool = False,
 ) -> tuple[ReportRecord, ReportVersionRecord]:
-    """Build the rows a brand-new report is made of.
-
-    Returned rather than committed so ``create_space`` can write a space and
-    its overview report in one session.
-    """
+    """Build the rows a brand-new report is made of."""
     return (
         ReportRecord(
             report_id=report_id,
@@ -541,7 +526,6 @@ def _new_report_records(
             access=access.model_dump(),
             space_id=space_id,
             subspace_id=subspace_id,
-            space_overview=space_overview,
         ),
         ReportVersionRecord(
             report_id=report_id,
@@ -754,7 +738,6 @@ class SQLModelReportStore(ReportStore):
         access: ReportAccess | None = None,
         space_id: str | None = None,
         subspace_id: str | None = None,
-        space_overview: bool = False,
     ) -> ReportListItem:
         """Create a report and its initial renderable version atomically."""
         report_id = generate_report_id()
@@ -770,7 +753,6 @@ class SQLModelReportStore(ReportStore):
                 access=report_access,
                 space_id=space_id,
                 subspace_id=subspace_id,
-                space_overview=space_overview,
             ):
                 session.add(record)
             await session.commit()
@@ -786,7 +768,6 @@ class SQLModelReportStore(ReportStore):
             access=report_access,
             space_id=space_id,
             subspace_id=subspace_id,
-            space_overview=space_overview,
         )
 
     async def save_report_version(
@@ -815,7 +796,6 @@ class SQLModelReportStore(ReportStore):
             # here only so it can be echoed back on the response.
             report_space_id = report.space_id
             report_subspace_id = report.subspace_id
-            report_space_overview = report.space_overview
             now = datetime.now(tz=UTC).isoformat()
 
             session.add(
@@ -849,7 +829,6 @@ class SQLModelReportStore(ReportStore):
             access=report_access,
             space_id=report_space_id,
             subspace_id=report_subspace_id,
-            space_overview=report_space_overview,
         )
 
     async def update_report_visibility(
@@ -862,8 +841,6 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report:
                 return None
-            if access is not None and access.scope == "private" and report.space_overview:
-                raise ProtectedReportError(OVERVIEW_MUST_BE_PUBLIC)
             report.updated_at = datetime.now(tz=UTC).isoformat()
             report.updated_by = updated_by
             if access is not None:
@@ -885,8 +862,6 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report or not _report_visible_to_user(report, user_id):
                 return None
-            if report.space_overview:
-                raise ProtectedReportError(OVERVIEW_IMMOBILE)
             report.space_id = space_id
             report.subspace_id = subspace_id
             report.updated_at = datetime.now(tz=UTC).isoformat()
@@ -902,10 +877,6 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report or not _report_visible_to_user(report, user_id):
                 return False
-            # Backstop for callers that skipped the pre-check; delete_space
-            # removes the overview report through its own cascade.
-            if report.space_overview:
-                raise ProtectedReportError(OVERVIEW_UNDELETABLE)
 
             pointer = await session.get(DashboardPointerRecord, 1)
             if pointer and pointer.report_id == report_id:
@@ -1716,41 +1687,29 @@ class SQLModelReportStore(ReportStore):
         created_by: str,
     ) -> SpaceListItem:
         space_id = generate_report_id()
-        overview_report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
 
+        # No overview report: the overview is a pointer the user sets later.
         async with AsyncSession(_get_engine()) as session:
             session.add(
                 SpaceRecord(
                     space_id=space_id,
                     name=name,
                     description=description,
-                    overview_report_id=overview_report_id,
+                    overview_report_id=None,
                     created_at=now,
                     updated_at=now,
                     created_by=created_by,
                     updated_by=created_by,
                 )
             )
-            # Public: spaces are globally visible, so a private overview report
-            # would leave every non-owner looking at a broken space.
-            for record in _new_report_records(
-                report_id=overview_report_id,
-                name=name,
-                created_by=created_by,
-                now=now,
-                access=ReportAccess(scope="public"),
-                space_id=space_id,
-                space_overview=True,
-            ):
-                session.add(record)
             await session.commit()
 
         return SpaceListItem(
             space_id=space_id,
             name=name,
             description=description,
-            overview_report_id=overview_report_id,
+            overview_report_id=None,
             created_at=now,
             updated_at=now,
             created_by=created_by,
@@ -1783,29 +1742,11 @@ class SQLModelReportStore(ReportStore):
             if not record:
                 return SpaceDeleteResult.NOT_FOUND
 
-            overview_report_id = record.overview_report_id
             # Unfiltered on purpose: a member report the caller cannot see
             # still keeps the space non-empty, so deleting cannot orphan it.
-            members = await session.execute(
-                select(ReportRecord).where(
-                    ReportRecord.space_id == space_id,
-                    ReportRecord.report_id != overview_report_id,
-                )
-            )
+            members = await session.execute(select(ReportRecord).where(ReportRecord.space_id == space_id))
             if members.scalars().first() is not None:
                 return SpaceDeleteResult.NOT_EMPTY
-
-            overview = await session.get(ReportRecord, overview_report_id)
-            if overview is not None:
-                versions = await session.execute(
-                    select(ReportVersionRecord).where(ReportVersionRecord.report_id == overview_report_id)
-                )
-                for version in versions.scalars().all():
-                    await session.delete(version)
-                pointer = await session.get(DashboardPointerRecord, 1)
-                if pointer and pointer.report_id == overview_report_id:
-                    await session.delete(pointer)
-                await session.delete(overview)
 
             # Sub-spaces go with the space. They are only grouping labels, and
             # with no member reports left there is nothing referencing them.
@@ -1816,6 +1757,24 @@ class SQLModelReportStore(ReportStore):
             await session.delete(record)
             await session.commit()
         return SpaceDeleteResult.DELETED
+
+    async def set_space_overview(
+        self,
+        space_id: str,
+        report_id: str | None,
+        updated_by: str,
+    ) -> SpaceListItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(SpaceRecord, space_id)
+            if not record:
+                return None
+            record.overview_report_id = report_id
+            record.updated_at = datetime.now(tz=UTC).isoformat()
+            record.updated_by = updated_by
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _space_from_record(record)
 
     async def list_space_reports(
         self,

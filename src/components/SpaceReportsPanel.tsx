@@ -19,6 +19,8 @@ import {
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import StarIcon from '@mui/icons-material/Star';
+import StarBorderIcon from '@mui/icons-material/StarBorder';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
 import ChevronRight from '@mui/icons-material/ChevronRight';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -57,6 +59,8 @@ interface SpaceReportsPanelProps {
     subspaceId: string | null,
   ) => Promise<void>;
   onRemoveReportFromSpace: (reportId: string) => Promise<void>;
+  onSetOverview: (reportId: string | null) => Promise<unknown>;
+  onCreateReport: () => void;
 }
 
 interface ReportGroup {
@@ -78,6 +82,8 @@ function SpaceReportsPanel({
   onDeleteSubspace,
   onSetReportSubspace,
   onRemoveReportFromSpace,
+  onSetOverview,
+  onCreateReport,
 }: SpaceReportsPanelProps) {
   const navigate = useNavigate();
   const [subspaceDialogOpen, setSubspaceDialogOpen] = useState(false);
@@ -92,10 +98,9 @@ function SpaceReportsPanel({
   const [moveTarget, setMoveTarget] = useState<ReportListItem | null>(null);
 
   const groups = useMemo<ReportGroup[]>(() => {
-    // The overview report is the main view, not a sidebar entry.
-    const members = tree.reports.filter(
-      (report) => report.report_id !== tree.space.overview_report_id,
-    );
+    // Every member report is listed, the pinned one included — it is an
+    // ordinary report that happens to be the space's landing page.
+    const members = tree.reports;
     // The API already blanks out any subspace_id left behind by a deleted
     // sub-space, so anything unmatched here is genuinely ungrouped.
     const ungrouped = members.filter((report) => !report.subspace_id);
@@ -111,8 +116,6 @@ function SpaceReportsPanel({
     ];
   }, [tree]);
 
-  // "Empty" means nothing beyond the overview report; sub-spaces alone don't
-  // count, since an empty sub-space still needs somewhere to file reports from.
   const hasMemberReports = groups.some((group) => group.reports.length > 0);
 
   const openCreateSubspace = () => {
@@ -189,28 +192,45 @@ function SpaceReportsPanel({
     },
   ];
 
-  const reportActions = (report: ReportListItem): RowMenuAction[] => [
-    {
-      key: 'move',
-      label: 'Move to sub-space…',
-      icon: <DriveFileMoveIcon fontSize="small" />,
-      onClick: () => setMoveTarget(report),
-      disabled: !canWriteReports || tree.subspaces.length === 0,
-      tooltip:
-        tree.subspaces.length === 0
-          ? 'This space has no sub-spaces'
-          : undefined,
-    },
-    {
-      key: 'remove',
-      label: 'Remove from space',
-      icon: <RemoveCircleOutlineIcon fontSize="small" />,
-      onClick: () => void onRemoveReportFromSpace(report.report_id),
-      disabled: !canWriteReports,
-      destructive: true,
-      dividerBefore: true,
-    },
-  ];
+  const reportActions = (report: ReportListItem): RowMenuAction[] => {
+    const isOverview = report.report_id === tree.space.overview_report_id;
+    return [
+      {
+        key: 'overview',
+        label: isOverview ? 'Clear space overview' : 'Set as space overview',
+        icon: isOverview ? (
+          <StarIcon fontSize="small" color="primary" />
+        ) : (
+          <StarBorderIcon fontSize="small" />
+        ),
+        onClick: () => void onSetOverview(isOverview ? null : report.report_id),
+        disabled: !canWriteSpaces,
+        tooltip: canWriteSpaces
+          ? undefined
+          : 'You do not have permission to change the space overview',
+      },
+      {
+        key: 'move',
+        label: 'Move to sub-space…',
+        icon: <DriveFileMoveIcon fontSize="small" />,
+        onClick: () => setMoveTarget(report),
+        disabled: !canWriteReports || tree.subspaces.length === 0,
+        tooltip:
+          tree.subspaces.length === 0
+            ? 'This space has no sub-spaces'
+            : undefined,
+      },
+      {
+        key: 'remove',
+        label: 'Remove from space',
+        icon: <RemoveCircleOutlineIcon fontSize="small" />,
+        onClick: () => void onRemoveReportFromSpace(report.report_id),
+        disabled: !canWriteReports,
+        destructive: true,
+        dividerBefore: true,
+      },
+    ];
+  };
 
   if (!open) {
     return (
@@ -407,6 +427,20 @@ function SpaceReportsPanel({
         </Box>
 
         <Box sx={{ borderTop: 1, borderColor: 'divider', flexShrink: 0, p: 1 }}>
+          {canWriteReports && (
+            <Button
+              size="small"
+              fullWidth
+              startIcon={<AddIcon fontSize="small" />}
+              onClick={onCreateReport}
+              sx={{
+                justifyContent: 'flex-start',
+                mb: hasMemberReports ? 0.5 : 1,
+              }}
+            >
+              New report here
+            </Button>
+          )}
           {hasMemberReports ? (
             <Button
               size="small"
@@ -427,7 +461,7 @@ function SpaceReportsPanel({
                 color="text.secondary"
                 sx={{ display: 'block', mb: 1 }}
               >
-                Add reports to this space with{' '}
+                Create one here, or add an existing report with{' '}
                 <Box component="span" sx={{ fontStyle: 'italic' }}>
                   Move to space
                 </Box>{' '}

@@ -153,6 +153,7 @@ def mock_store():
         "create_subspace": None,
         "update_subspace": None,
         "delete_subspace": True,
+        "set_space_overview": None,
     }
     for name, return_value in async_methods.items():
         setattr(store, name, AsyncMock(return_value=return_value))
@@ -198,7 +199,6 @@ async def test_create_report_delegates(mock_store):
         access=None,
         space_id=None,
         subspace_id=None,
-        space_overview=False,
     )
 
 
@@ -215,7 +215,6 @@ async def test_create_report_delegates_space_membership(mock_store):
         access=None,
         space_id="sp1",
         subspace_id="ss1",
-        space_overview=False,
     )
 
 
@@ -642,3 +641,8 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     mock_store.record_scheduled_chat_result.assert_awaited_once_with("sc1", "failure", error="boom")
     await report_store.request_scheduled_chat_run("sc1")
     mock_store.request_scheduled_chat_run.assert_awaited_once_with("sc1")
+
+
+async def test_set_space_overview_delegates(mock_store):
+    await report_store.set_space_overview(space_id="sp1", report_id="r1", updated_by="u@x.com")
+    mock_store.set_space_overview.assert_called_once_with(space_id="sp1", report_id="r1", updated_by="u@x.com")

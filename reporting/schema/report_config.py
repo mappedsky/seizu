@@ -47,7 +47,6 @@ class ReportListItem(BaseModel):
     pinned: bool = False
     space_id: str | None = None
     subspace_id: str | None = None
-    space_overview: bool = False
 
     @field_validator("current_version", mode="before")
     @classmethod
@@ -76,7 +75,6 @@ class ReportVersion(BaseModel):
     # or into `config`, so restoring an old version cannot relocate a report.
     space_id: str | None = None
     subspace_id: str | None = None
-    space_overview: bool = False
 
     @field_validator("version", mode="before")
     @classmethod

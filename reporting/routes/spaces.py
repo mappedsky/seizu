@@ -8,6 +8,7 @@ from reporting.schema.report_config import ReportListItem
 from reporting.schema.space_config import (
     CreateSpaceRequest,
     CreateSubspaceRequest,
+    SetSpaceOverviewRequest,
     SpaceDeleteResult,
     SpaceIdResponse,
     SpaceListItem,
@@ -20,6 +21,7 @@ from reporting.schema.space_config import (
     UpdateSubspaceRequest,
 )
 from reporting.services import report_store
+from reporting.services.spaces import SpaceValidationError, resolve_overview_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,6 +76,20 @@ async def _get_subspace_or_404(space_id: str, subspace_id: str) -> SubspaceItem:
     if not subspace or subspace.space_id != space_id:
         raise HTTPException(status_code=404, detail="Sub-space not found")
     return subspace
+
+
+def _with_resolved_overview(space: SpaceListItem, reports: list[ReportListItem]) -> SpaceListItem:
+    """Blank out an overview pointer that no longer resolves.
+
+    The target may have been deleted, moved out of the space, or be invisible to
+    this caller. Resolving lazily is what lets the overview be an ordinary
+    report with no protections on it.
+    """
+    if space.overview_report_id is None:
+        return space
+    if any(report.report_id == space.overview_report_id for report in reports):
+        return space
+    return space.model_copy(update={"overview_report_id": None})
 
 
 def _with_resolved_subspace(
@@ -152,7 +168,7 @@ async def delete_space(
     space_id: str,
     current: CurrentUser = Depends(require_permission(Permission.SPACES_DELETE)),
 ) -> SpaceIdResponse:
-    """Delete a space with no member reports, and its overview report and sub-spaces."""
+    """Delete a space that holds no reports, along with its sub-spaces."""
     result = await report_store.delete_space(space_id)
     if result is SpaceDeleteResult.NOT_FOUND:
         raise HTTPException(status_code=404, detail="Space not found")
@@ -178,10 +194,32 @@ async def get_space_tree(
     subspaces = await report_store.list_subspaces(space_id)
     reports = await report_store.list_space_reports(space_id, user_id=current.user.user_id)
     return SpaceTreeResponse(
-        space=space,
+        space=_with_resolved_overview(space, reports),
         subspaces=subspaces,
         reports=_with_resolved_subspace(reports, subspaces),
     )
+
+
+@router.put("/api/v1/spaces/{space_id}/overview", response_model=SpaceListItem)
+async def set_space_overview(
+    space_id: str,
+    body: SetSpaceOverviewRequest,
+    current: CurrentUser = Depends(require_permission(Permission.SPACES_WRITE)),
+) -> SpaceListItem:
+    """Point the space at one of its reports as the landing page, or clear it."""
+    await _get_space_or_404(space_id)
+    try:
+        report_id = await resolve_overview_report(space_id, body.report_id)
+    except SpaceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated = await report_store.set_space_overview(
+        space_id=space_id,
+        report_id=report_id,
+        updated_by=current.user.user_id,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Space not found")
+    return updated
 
 
 # ---------------------------------------------------------------------------

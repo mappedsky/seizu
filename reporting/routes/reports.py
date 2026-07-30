@@ -21,11 +21,7 @@ from reporting.schema.space_config import SetReportSpaceRequest
 from reporting.services import report_store
 from reporting.services.report_query_tokens import build_report_query_capabilities
 from reporting.services.spaces import (
-    ProtectedReportError,
     SpaceValidationError,
-    ensure_report_deletable,
-    ensure_report_movable,
-    ensure_visibility_change_allowed,
     resolve_clone_space,
     resolve_report_space,
 )
@@ -172,13 +168,6 @@ async def delete_report(
     current: CurrentUser = Depends(require_permission(Permission.REPORTS_DELETE)),
 ) -> ReportIdResponse:
     """Delete a report and all its versions."""
-    meta = await report_store.get_report_metadata(report_id, user_id=current.user.user_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Report not found")
-    try:
-        ensure_report_deletable(meta)
-    except ProtectedReportError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     ok = await report_store.delete_report(report_id, user_id=current.user.user_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -212,10 +201,6 @@ async def update_report_visibility(
         raise HTTPException(status_code=404, detail="Report not found")
     if body.access is not None and meta.created_by != current.user.user_id:
         raise HTTPException(status_code=403, detail="Only the report owner can update report access")
-    try:
-        ensure_visibility_change_allowed(meta, body.access)
-    except ProtectedReportError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:
@@ -245,13 +230,6 @@ async def update_report_space(
     spaces are globally visible so there is nothing to leak by letting any
     report author file into any space.
     """
-    meta = await report_store.get_report_metadata(report_id, user_id=current.user.user_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Report not found")
-    try:
-        ensure_report_movable(meta)
-    except ProtectedReportError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     space_id, subspace_id = await _resolve_space_or_400(body.space_id, body.subspace_id)
     updated = await report_store.update_report_space(
         report_id=report_id,

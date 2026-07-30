@@ -60,9 +60,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
   whose report-list partition exceeds the 1 MB query cap no longer get a
   silently truncated list.
-- `seizu export` skips space overview reports and warns when exported reports
-  belong to a space: YAML has no `spaces:` section, so space membership does not
-  round-trip through seed/export.
+- `seizu export` warns when exported reports belong to a space: YAML has no
+  `spaces:` section, so space membership does not round-trip through
+  seed/export.
 - Scheduled chats run as durable **Temporal Schedules** instead of a 20-second
   polling loop that executed every schedule serially. Disabling a schedule now
   pauses its Schedule; a run that overruns its next firing causes that firing to

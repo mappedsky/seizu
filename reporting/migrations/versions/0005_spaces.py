@@ -17,12 +17,6 @@ depends_on = None
 _REPORT_COLUMNS = {
     "space_id": sa.Column("space_id", sa.String(), nullable=True),
     "subspace_id": sa.Column("subspace_id", sa.String(), nullable=True),
-    "space_overview": sa.Column(
-        "space_overview",
-        sa.Boolean(),
-        nullable=False,
-        server_default=sa.false(),
-    ),
 }
 
 _REPORT_INDEXES = {
@@ -58,7 +52,7 @@ def upgrade() -> None:
             sa.Column("space_id", sa.String(), primary_key=True),
             sa.Column("name", sa.String(), nullable=False),
             sa.Column("description", sa.String(), nullable=False, server_default=""),
-            sa.Column("overview_report_id", sa.String(), nullable=False),
+            sa.Column("overview_report_id", sa.String(), nullable=True),
             sa.Column("created_at", sa.String(), nullable=False),
             sa.Column("updated_at", sa.String(), nullable=False),
             sa.Column("created_by", sa.String(), nullable=False),

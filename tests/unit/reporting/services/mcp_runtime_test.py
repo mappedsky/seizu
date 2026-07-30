@@ -79,19 +79,6 @@ def _report_list_item() -> ReportListItem:
     )
 
 
-def _patch_deletable_report(mocker):
-    """Let reports__delete reach the store.
-
-    The handler now loads report metadata first, to refuse a space's overview
-    report, so a test that only patches delete_report would otherwise fall
-    through to the real store.
-    """
-    mocker.patch(
-        "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
-        return_value=_report_list_item(),
-    )
-
-
 def _confirmation(status: str = "pending") -> ActionConfirmation:
     return ActionConfirmation.model_validate(
         {
@@ -415,7 +402,6 @@ async def test_pre_approved_confirmation_executes_without_gate(mocker):
     """The post-approval executor path: an already-approved, already-claimed
     confirmation runs the handler directly via confirmation_pre_approved, even with
     no confirmation_source. Without this, the fail-closed guard would block it."""
-    _patch_deletable_report(mocker)
     delete_report = mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.delete_report", return_value=True
     )
@@ -520,7 +506,6 @@ async def test_repeated_pending_mutating_builtin_reuses_confirmation_without_han
 
 
 async def test_approved_mutating_builtin_executes_handler(mocker):
-    _patch_deletable_report(mocker)
     delete_report = mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.delete_report",
         return_value=True,
@@ -852,7 +837,6 @@ async def test_render_prompt_for_chat_returns_none_blocked_on_success(mocker):
 
 async def test_bypass_confirmations_executes_with_permission(mocker):
     """With chat:bypass_permissions, bypass mode runs the handler directly and creates no confirmation."""
-    _patch_deletable_report(mocker)
     delete_report = mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.delete_report",
         mocker.AsyncMock(return_value=True),

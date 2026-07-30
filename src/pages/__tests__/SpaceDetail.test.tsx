@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import SpaceDetail from 'src/pages/SpaceDetail';
@@ -42,7 +49,6 @@ function report(
   reportId: string,
   name: string,
   subspaceId: string | null = null,
-  spaceOverview = false,
 ) {
   return {
     report_id: reportId,
@@ -57,7 +63,6 @@ function report(
     pinned: false,
     space_id: 'sp1',
     subspace_id: subspaceId,
-    space_overview: spaceOverview,
   };
 }
 
@@ -66,7 +71,7 @@ const TREE = {
     space_id: 'sp1',
     name: 'Cloud Security',
     description: '',
-    overview_report_id: 'ovr1',
+    overview_report_id: 'r1',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
     created_by: 'alice',
@@ -93,7 +98,6 @@ const TREE = {
     },
   ],
   reports: [
-    report('ovr1', 'Cloud Security', null, true),
     report('r1', 'Loose Report'),
     report('r2', 'Grouped Report', 'ss1'),
   ],
@@ -137,6 +141,8 @@ describe('SpaceDetail', () => {
   let mockUseReportsMutations: jest.Mock;
   let mockUseSpaceTree: jest.Mock;
   let mockUseSubspaceMutations: jest.Mock;
+  let mockUseSpaceMutations: jest.Mock;
+  let setSpaceOverview: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -155,6 +161,10 @@ describe('SpaceDetail', () => {
       spacesApiModule,
       'useSubspaceMutations',
     ) as unknown as jest.Mock;
+    mockUseSpaceMutations = jest.spyOn(
+      spacesApiModule,
+      'useSpaceMutations',
+    ) as unknown as jest.Mock;
     mockUsePermissions.mockReturnValue(() => true);
     mockUseSpaceTree.mockReturnValue({
       tree: TREE,
@@ -167,7 +177,15 @@ describe('SpaceDetail', () => {
       updateSubspace: jest.fn(),
       deleteSubspace: jest.fn(),
     });
+    setSpaceOverview = jest.fn().mockResolvedValue(undefined);
+    mockUseSpaceMutations.mockReturnValue({
+      createSpace: jest.fn(),
+      updateSpace: jest.fn(),
+      deleteSpace: jest.fn(),
+      setSpaceOverview,
+    });
     mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
       setReportSpace: jest.fn().mockResolvedValue(undefined),
     });
   });
@@ -177,12 +195,13 @@ describe('SpaceDetail', () => {
     mockUseReportsMutations.mockRestore?.();
     mockUseSpaceTree.mockRestore?.();
     mockUseSubspaceMutations.mockRestore?.();
+    mockUseSpaceMutations.mockRestore?.();
   });
 
-  it('renders the overview report by default', () => {
+  it('renders the pinned overview report by default', () => {
     renderAt('/app/spaces/sp1');
 
-    expect(screen.getByTestId('report-pane')).toHaveTextContent('ovr1');
+    expect(screen.getByTestId('report-pane')).toHaveTextContent('r1');
   });
 
   it('renders the selected member report', () => {
@@ -191,22 +210,18 @@ describe('SpaceDetail', () => {
     expect(screen.getByTestId('report-pane')).toHaveTextContent('r2');
   });
 
-  it('leads with the space entry, then ungrouped reports, then sub-space groups', () => {
+  it('lists ungrouped reports before sub-space groups', () => {
     renderAt('/app/spaces/sp1');
 
     const items = screen
       .getAllByRole('button')
       .map((node) => node.textContent ?? '')
-      .filter((text) =>
-        ['Cloud Security', 'Loose Report', 'Grouped Report'].includes(text),
-      );
-    // The space's own entry is named after the space, not labelled "Overview".
-    expect(items).toEqual(['Cloud Security', 'Loose Report', 'Grouped Report']);
-    // And the overview report is that entry only — never also a member row.
+      .filter((text) => ['Loose Report', 'Grouped Report'].includes(text));
+    expect(items).toEqual(['Loose Report', 'Grouped Report']);
+    // The pinned report is an ordinary member row, not a separate entry.
     expect(
-      screen.getAllByRole('button', { name: 'Cloud Security' }),
-    ).toHaveLength(1);
-    expect(screen.queryByRole('button', { name: 'Overview' })).toBeNull();
+      screen.getByRole('button', { name: /Loose Report/ }),
+    ).toBeInTheDocument();
   });
 
   it('renders a sub-space heading even when it has no reports', () => {
@@ -222,10 +237,7 @@ describe('SpaceDetail', () => {
         ...TREE,
         subspaces: [],
         // The API normalises dangling ids to null before they reach the client.
-        reports: [
-          report('ovr1', 'Cloud Security', null, true),
-          report('r3', 'Orphan'),
-        ],
+        reports: [report('r1', 'Loose Report'), report('r3', 'Orphan')],
       },
       loading: false,
       error: null,
@@ -284,10 +296,10 @@ describe('SpaceDetail', () => {
     mockUseSpaceTree.mockReturnValue({
       tree: {
         ...TREE,
+        // The API blanks a pointer that no longer resolves.
+        space: { ...TREE.space, overview_report_id: null },
         subspaces: [],
-        // Only the overview report — the space is empty as far as the user
-        // is concerned.
-        reports: [report('ovr1', 'Cloud Security', null, true)],
+        reports: [],
       },
       loading: false,
       error: null,
@@ -307,7 +319,8 @@ describe('SpaceDetail', () => {
     mockUseSpaceTree.mockReturnValue({
       tree: {
         ...TREE,
-        reports: [report('ovr1', 'Cloud Security', null, true)],
+        space: { ...TREE.space, overview_report_id: null },
+        reports: [],
       },
       loading: false,
       error: null,
@@ -327,7 +340,7 @@ describe('SpaceDetail', () => {
 
     const scroll = screen.getByTestId('space-reports-scroll');
     expect(scroll).toContainElement(
-      screen.getByRole('button', { name: 'Cloud Security' }),
+      screen.getByRole('button', { name: /Loose Report/ }),
     );
     expect(scroll).not.toContainElement(screen.getByText('Space'));
     expect(scroll).not.toContainElement(
@@ -349,16 +362,13 @@ describe('SpaceDetail', () => {
     (globalThis as { __paneMounts?: string[] }).__paneMounts = [];
 
     renderAt('/app/spaces/sp1');
-    expect(paneMounts()).toEqual(['ovr1']);
+    expect(paneMounts()).toEqual(['r1']);
 
     // Navigate within the same mounted tree — this is the case a shared
     // instance would silently survive.
-    fireEvent.click(screen.getByRole('button', { name: 'Loose Report' }));
-    expect(screen.getByTestId('report-pane')).toHaveTextContent('r1');
-    expect(paneMounts()).toEqual(['ovr1', 'r1']);
-
     fireEvent.click(screen.getByRole('button', { name: 'Grouped Report' }));
-    expect(paneMounts()).toEqual(['ovr1', 'r1', 'r2']);
+    expect(screen.getByTestId('report-pane')).toHaveTextContent('r2');
+    expect(paneMounts()).toEqual(['r1', 'r2']);
   });
 
   it('gates report actions on reports:write, not spaces:write', () => {
@@ -390,5 +400,90 @@ describe('SpaceDetail', () => {
     expect(screen.getAllByLabelText('Report actions').length).toBeGreaterThan(
       0,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Overview pointer
+  // -------------------------------------------------------------------------
+
+  it('marks the pinned report and offers to clear it', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    // r1 is pinned, so its row menu offers to clear rather than set.
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Clear space overview' }),
+    );
+
+    expect(setSpaceOverview).toHaveBeenCalledWith('sp1', null);
+  });
+
+  it('sets an unpinned report as the overview', async () => {
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    // r2 is not pinned.
+    await user.click(screen.getAllByLabelText('Report actions')[1]);
+    await user.click(
+      screen.getByRole('menuitem', { name: 'Set as space overview' }),
+    );
+
+    expect(setSpaceOverview).toHaveBeenCalledWith('sp1', 'r2');
+  });
+
+  it('gates the overview action on spaces:write', async () => {
+    mockUsePermissions.mockReturnValue(
+      (permission: string) => permission !== 'spaces:write',
+    );
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+
+    expect(
+      screen.getByRole('menuitem', { name: /space overview/ }),
+    ).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('prompts to pin a report when the space has some but none pinned', () => {
+    mockUseSpaceTree.mockReturnValue({
+      tree: { ...TREE, space: { ...TREE.space, overview_report_id: null } },
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+
+    renderAt('/app/spaces/sp1');
+
+    // No report is rendered; the page names the action instead of guessing.
+    expect(screen.queryByTestId('report-pane')).toBeNull();
+    expect(
+      screen.getByText(/Set a report as this space's overview/),
+    ).toBeInTheDocument();
+  });
+
+  it('creates a report filed in the space', async () => {
+    const createReport = jest
+      .fn()
+      .mockResolvedValue({ report_id: 'new1', name: 'Fresh' });
+    mockUseReportsMutations.mockReturnValue({
+      createReport,
+      setReportSpace: jest.fn().mockResolvedValue(undefined),
+    });
+    const user = userEvent.setup({ delay: null });
+    renderAt('/app/spaces/sp1');
+
+    await user.click(screen.getByRole('button', { name: 'New report here' }));
+    await user.type(
+      screen.getByRole('textbox', { name: /report name/i }),
+      'Fresh',
+    );
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    // Created and filed in one call — no leave-and-come-back.
+    await waitFor(() => {
+      expect(createReport).toHaveBeenCalledWith('Fresh', 'sp1');
+    });
   });
 });

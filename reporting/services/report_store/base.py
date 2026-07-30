@@ -36,24 +36,6 @@ def initial_report_config(name: str) -> dict[str, Any]:
     return {"name": name, "rows": [], "schema_version": 1}
 
 
-class ProtectedReportError(Exception):
-    """A mutation was rejected because the report is a space's overview report.
-
-    Raised by the store as a backstop, so the invariant holds for any caller
-    rather than only the transports that remember to pre-check. Callers map it
-    to HTTP 409. ``delete_space`` removes the overview report through its own
-    cascade and is deliberately not subject to this guard.
-    """
-
-
-# The overview report is an artefact of its space: created with it, deleted with
-# it, and the space detail page's main view. Letting it move, disappear, or go
-# private would leave the space pointing at something gone or invisible.
-OVERVIEW_IMMOBILE = "The space overview report cannot be moved to another space"
-OVERVIEW_UNDELETABLE = "The space overview report cannot be deleted; delete the space instead"
-OVERVIEW_MUST_BE_PUBLIC = "The space overview report cannot be made private"
-
-
 class ReportStore(ABC):
     """Abstract base class for report configuration storage backends."""
 
@@ -110,14 +92,11 @@ class ReportStore(ABC):
         access: ReportAccess | None = None,
         space_id: str | None = None,
         subspace_id: str | None = None,
-        space_overview: bool = False,
     ) -> ReportListItem:
         """Create a report with an initial version and return its metadata.
 
         The space arguments are not validated here — callers go through
-        ``reporting.services.spaces.resolve_report_space`` first. ``create_space``
-        is the only caller that passes ``space_overview=True``, and it does so
-        inside the same write that creates the space.
+        ``reporting.services.spaces.resolve_report_space`` first.
         """
 
     @abstractmethod
@@ -380,17 +359,10 @@ class ReportStore(ABC):
         description: str,
         created_by: str,
     ) -> SpaceListItem:
-        """Create a space and its overview report atomically.
+        """Create an empty space.
 
-        Generates both IDs; the returned item carries ``overview_report_id``.
-        The overview report is an ordinary report created **public** with
-        ``space_id`` set and ``space_overview=True``. Public because spaces are
-        globally visible, so a private overview would render the space broken
-        for everyone but its creator.
-
-        The two-way pointer (``space.overview_report_id`` and
-        ``report.space_overview``) is written here and never mutated
-        afterwards; only ``delete_space`` removes it.
+        No overview report is created: the overview is a pointer the user sets
+        at any of the space's member reports, so a new space starts with none.
         """
 
     @abstractmethod
@@ -405,16 +377,30 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def delete_space(self, space_id: str) -> SpaceDeleteResult:
-        """Delete an empty space, along with its overview report and sub-spaces.
+        """Delete a space that holds no reports, along with its sub-spaces.
 
-        A space is empty when it holds no member reports other than
-        ``overview_report_id``. Sub-spaces do not block the delete: they are
-        grouping labels, and with no member reports left nothing references
-        them, so they are removed with the space.
+        Sub-spaces do not block the delete: they are grouping labels, and with
+        no member reports left nothing references them, so they are removed
+        with the space. No report is ever deleted here — the overview is only a
+        pointer.
 
         Emptiness is evaluated **without** per-user visibility filtering —
         filtering it would let a space holding another user's private report
         read as empty and be deleted, orphaning that report.
+        """
+
+    @abstractmethod
+    async def set_space_overview(
+        self,
+        space_id: str,
+        report_id: str | None,
+        updated_by: str,
+    ) -> SpaceListItem | None:
+        """Point the space at one of its reports as the landing page.
+
+        ``report_id=None`` clears it. Membership is the caller's
+        responsibility — see ``reporting.services.spaces``. Returns None if the
+        space does not exist.
         """
 
     @abstractmethod

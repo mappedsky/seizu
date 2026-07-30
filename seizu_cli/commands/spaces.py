@@ -61,7 +61,7 @@ def list_spaces(
             space["space_id"],
             space["name"],
             space.get("description", ""),
-            space["overview_report_id"],
+            space.get("overview_report_id") or "—",
             space.get("updated_at", ""),
         )
 
@@ -88,7 +88,7 @@ def show_space(
     console.print(f"[bold]ID[/bold]: {space['space_id']}")
     console.print(f"[bold]Name[/bold]: {space['name']}")
     console.print(f"[bold]Description[/bold]: {space.get('description', '')}")
-    console.print(f"[bold]Overview Report[/bold]: {space['overview_report_id']}")
+    console.print(f"[bold]Overview Report[/bold]: {space.get('overview_report_id') or '(none set)'}")
 
     subspace_names = {s["subspace_id"]: s["name"] for s in data.get("subspaces", [])}
     reports = data.get("reports", [])
@@ -102,12 +102,13 @@ def show_space(
     table.add_column("Sub-space")
     table.add_column("Overview")
 
+    overview_id = space.get("overview_report_id")
     for report in reports:
         table.add_row(
             report["report_id"],
             report["name"],
             subspace_names.get(report.get("subspace_id") or "", "—"),
-            "yes" if report.get("space_overview") else "",
+            "yes" if report["report_id"] == overview_id else "",
         )
 
     console.print(table)

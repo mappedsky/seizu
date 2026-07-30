@@ -776,16 +776,11 @@ def export_cmd(config: str, dry_run: bool) -> None:
     new_reports: dict[str, Any] = {}
     dashboard_key: str | None = None
     exported = failed = 0
-    # Space overview reports are created by their space, not by seeding.
-    # Exporting them as ordinary top-level reports would make a re-seed create
-    # duplicate standalone copies. YAML has no `spaces:` section yet, so space
-    # membership is not exported at all — warn rather than let it be discovered.
-    skipped_overviews = sum(1 for item in report_list if item.get("space_overview"))
-    in_a_space = sum(1 for item in report_list if item.get("space_id") and not item.get("space_overview"))
+    # YAML has no `spaces:` section yet, so space membership is not exported —
+    # warn rather than let it be discovered on a re-seed.
+    in_a_space = sum(1 for item in report_list if item.get("space_id"))
 
     for item in sorted(report_list, key=lambda r: r["name"]):
-        if item.get("space_overview"):
-            continue
         latest = _get_report(item["report_id"])
         if not latest:
             err_console.print(f"[yellow][warn][/yellow] No version found for '{item['name']}', skipping.")
@@ -814,12 +809,6 @@ def export_cmd(config: str, dry_run: bool) -> None:
         console.print(f"[green][export][/green] report '{item['name']}' → key='{key}'")
         exported += 1
 
-    if skipped_overviews:
-        err_console.print(
-            f"[yellow][warn][/yellow] Skipped {skipped_overviews} space overview report(s): "
-            "they are created with their space, and exporting them would produce "
-            "duplicate standalone reports on the next seed."
-        )
     if in_a_space:
         err_console.print(
             f"[yellow][warn][/yellow] {in_a_space} exported report(s) belong to a space. "

@@ -26,7 +26,7 @@ async def test_migrations_run_on_a_fresh_database(tmp_path):
         assert {"spaces", "subspaces", "reports"} <= tables
 
         report_columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("reports")})
-        assert {"space_id", "subspace_id", "space_overview"} <= report_columns
+        assert {"space_id", "subspace_id"} <= report_columns
     finally:
         await engine.dispose()
 
@@ -71,13 +71,12 @@ async def test_spaces_migration_adds_columns_to_a_pre_existing_reports_table(tmp
         tables = await _inspect(engine, lambda i: set(i.get_table_names()))
         assert {"spaces", "subspaces"} <= tables
         report_columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("reports")})
-        assert {"space_id", "subspace_id", "space_overview"} <= report_columns
+        assert {"space_id", "subspace_id"} <= report_columns
 
         # The pre-existing row survives and defaults to "not in a space".
         async with engine.connect() as conn:
-            row = (await conn.execute(sa.text("SELECT space_id, subspace_id, space_overview FROM reports"))).one()
+            row = (await conn.execute(sa.text("SELECT space_id, subspace_id FROM reports"))).one()
         assert row.space_id is None
         assert row.subspace_id is None
-        assert not row.space_overview
     finally:
         await engine.dispose()

@@ -2462,14 +2462,14 @@ def _by_key(items: list[dict], pk: str, sk: str) -> dict:
     return matches[0]
 
 
-def _space_metadata_item(space_id: str = "sp1", overview_report_id: str = "r1") -> dict:
+def _space_metadata_item(space_id: str = "sp1", overview_report_id: str | None = None) -> dict:
     return {
         "PK": f"SPACE#{space_id}",
         "SK": "#METADATA",
         "space_id": space_id,
         "name": "Cloud",
         "description": "desc",
-        "overview_report_id": overview_report_id,
+        **({"overview_report_id": overview_report_id} if overview_report_id else {}),
         "created_at": "2024-01-01T00:00:00+00:00",
         "updated_at": "2024-01-01T00:00:00+00:00",
         "created_by": "user@example.com",
@@ -2521,7 +2521,7 @@ async def test_get_space_uses_metadata_key(patch_table, store):
     patch_table.get_item.return_value = {"Item": _space_metadata_item()}
     result = await store.get_space("sp1")
     assert result is not None
-    assert result.overview_report_id == "r1"
+    assert result.overview_report_id is None
     patch_table.get_item.assert_called_once_with(Key={"PK": "SPACE#sp1", "SK": "#METADATA"})
 
 
@@ -2530,32 +2530,25 @@ async def test_get_space_not_found(patch_table, store):
     assert await store.get_space("sp1") is None
 
 
-async def test_create_space_writes_six_items_in_one_transaction(patch_table, store, mocker):
+async def test_create_space_writes_only_the_space(patch_table, store, mocker):
+    """No overview report is created; the overview is a pointer set later."""
     mocker.patch(
         "reporting.services.report_store.dynamodb.generate_report_id",
-        side_effect=["sp1", "r1"],
+        return_value="sp1",
     )
     patch_table.meta.client.transact_write_items = MagicMock()
 
     result = await store.create_space(name="Cloud", description="desc", created_by="user@example.com")
 
     assert result.space_id == "sp1"
-    assert result.overview_report_id == "r1"
-    assert patch_table.meta.client.transact_write_items.call_count == 1
+    assert result.overview_report_id is None
 
     items = _put_items(patch_table.meta.client.transact_write_items)
-    assert len(items) == 6
+    assert len(items) == 2
     _by_key(items, "SPACE#sp1", "#METADATA")
     _by_key(items, "SPACE_LIST", "SPACE#sp1")
-    _by_key(items, "REPORT#r1", "VERSION#0000000001")
-    _by_key(items, "REPORT#r1", "#LATEST")
-
-    for item in (_by_key(items, "REPORT#r1", "#METADATA"), _by_key(items, "REPORT_LIST", "REPORT#r1")):
-        assert item["access"] == {"scope": "public"}
-        assert item["space_id"] == "sp1"
-        assert item["space_overview"] is True
-        # _strip_none drops the absent sub-space rather than writing NULL.
-        assert "subspace_id" not in item
+    # _strip_none drops the unset pointer rather than writing NULL.
+    assert "overview_report_id" not in items[0]
 
 
 async def test_update_space_rewrites_metadata_and_list_items(patch_table, store):
@@ -2568,7 +2561,6 @@ async def test_update_space_rewrites_metadata_and_list_items(patch_table, store)
 
     assert result is not None
     assert result.name == "Cloud Security"
-    assert result.overview_report_id == "r1"
     items = _put_items(patch_table.meta.client.transact_write_items)
     assert len(items) == 2
     assert _by_key(items, "SPACE#sp1", "#METADATA")["name"] == "Cloud Security"
@@ -2588,13 +2580,9 @@ async def test_delete_space_not_found(patch_table, store):
 async def test_delete_space_removes_its_subspaces(patch_table, store):
     """Sub-spaces go with the space rather than blocking the delete."""
     _force_index_fallback()  # exercise the no-GSI path
-    patch_table.get_item.side_effect = [
-        {"Item": _space_metadata_item()},
-        {},  # dashboard pointer
-    ]
+    patch_table.get_item.return_value = {"Item": _space_metadata_item()}
     patch_table.query.side_effect = [
-        {"Items": [_report_list_entry("r1", "sp1")]},  # only the overview report
-        {"Items": [{"PK": "REPORT#r1", "SK": "#METADATA"}]},  # overview partition
+        {"Items": []},  # no member reports
         {  # sub-spaces of the space
             "Items": [
                 {"PK": "SUBSPACE_LIST#sp1", "SK": "SUBSPACE#ss1", "subspace_id": "ss1"},
@@ -2613,6 +2601,8 @@ async def test_delete_space_removes_its_subspaces(patch_table, store):
     assert {"PK": "SUBSPACE#ss2", "SK": "#METADATA"} in deleted
     assert {"PK": "SUBSPACE_LIST#sp1", "SK": "SUBSPACE#ss2"} in deleted
     assert {"PK": "SPACE#sp1", "SK": "#METADATA"} in deleted
+    # No report is ever deleted with a space.
+    assert not any(str(key["PK"]).startswith("REPORT") for key in deleted)
 
 
 async def test_delete_space_blocked_by_member_report(patch_table, store):
@@ -2638,56 +2628,6 @@ async def test_delete_space_emptiness_ignores_report_visibility(patch_table, sto
         },
     ]
     assert await store.delete_space("sp1") == SpaceDeleteResult.NOT_EMPTY
-
-
-async def test_delete_empty_space_cascades_to_overview_report(patch_table, store):
-    _force_index_fallback()  # exercise the no-GSI path
-    patch_table.get_item.side_effect = [
-        {"Item": _space_metadata_item()},
-        {},  # dashboard pointer
-    ]
-    patch_table.query.side_effect = [
-        {"Items": [_report_list_entry("r1", "sp1")]},  # only the overview report
-        {  # overview report partition
-            "Items": [
-                {"PK": "REPORT#r1", "SK": "#METADATA"},
-                {"PK": "REPORT#r1", "SK": "#LATEST"},
-                {"PK": "REPORT#r1", "SK": "VERSION#0000000001"},
-            ]
-        },
-        {"Items": []},  # sub-spaces
-    ]
-    batch = MagicMock()
-    patch_table.batch_writer.return_value.__enter__.return_value = batch
-
-    assert await store.delete_space("sp1") == SpaceDeleteResult.DELETED
-
-    deleted = [call.kwargs["Key"] for call in batch.delete_item.call_args_list]
-    assert {"PK": "REPORT#r1", "SK": "#METADATA"} in deleted
-    assert {"PK": "REPORT#r1", "SK": "#LATEST"} in deleted
-    assert {"PK": "REPORT#r1", "SK": "VERSION#0000000001"} in deleted
-    assert {"PK": "REPORT_LIST", "SK": "REPORT#r1"} in deleted
-    assert {"PK": "SPACE#sp1", "SK": "#METADATA"} in deleted
-    assert {"PK": "SPACE_LIST", "SK": "SPACE#sp1"} in deleted
-
-
-async def test_delete_empty_space_clears_dashboard_pointer(patch_table, store):
-    _force_index_fallback()  # exercise the no-GSI path
-    patch_table.get_item.side_effect = [
-        {"Item": _space_metadata_item()},
-        {"Item": {"PK": "#DASHBOARD", "SK": "#POINTER", "report_id": "r1"}},
-    ]
-    patch_table.query.side_effect = [
-        {"Items": [_report_list_entry("r1", "sp1")]},
-        {"Items": [{"PK": "REPORT#r1", "SK": "#METADATA"}]},
-        {"Items": []},  # sub-spaces
-    ]
-    batch = MagicMock()
-    patch_table.batch_writer.return_value.__enter__.return_value = batch
-
-    assert await store.delete_space("sp1") == SpaceDeleteResult.DELETED
-    deleted = [call.kwargs["Key"] for call in batch.delete_item.call_args_list]
-    assert {"PK": "#DASHBOARD", "SK": "#POINTER"} in deleted
 
 
 async def test_list_space_reports_filters_by_space_and_visibility(patch_table, store):
@@ -2810,7 +2750,6 @@ async def test_create_report_writes_space_membership_to_both_copies(patch_table,
     for item in (_by_key(items, "REPORT#r1", "#METADATA"), _by_key(items, "REPORT_LIST", "REPORT#r1")):
         assert item["space_id"] == "sp1"
         assert item["subspace_id"] == "ss1"
-        assert item["space_overview"] is False
 
 
 async def test_create_report_without_space_omits_the_attributes(patch_table, store, mocker):
@@ -2824,7 +2763,6 @@ async def test_create_report_without_space_omits_the_attributes(patch_table, sto
     # _strip_none: absent, not NULL — DynamoDB Local rejects NULL in a transaction.
     assert "space_id" not in metadata
     assert "subspace_id" not in metadata
-    assert metadata["space_overview"] is False
 
 
 async def test_save_report_version_preserves_space_membership(patch_table, store):
@@ -2848,7 +2786,6 @@ async def test_save_report_version_preserves_space_membership(patch_table, store
             "pinned": True,
             "space_id": "sp1",
             "subspace_id": "ss1",
-            "space_overview": True,
         }
     }
     patch_table.meta.client.transact_write_items = MagicMock()
@@ -2862,13 +2799,11 @@ async def test_save_report_version_preserves_space_membership(patch_table, store
     assert result is not None
     assert result.space_id == "sp1"
     assert result.subspace_id == "ss1"
-    assert result.space_overview is True
 
     items = _put_items(patch_table.meta.client.transact_write_items)
     for item in (_by_key(items, "REPORT#r1", "#METADATA"), _by_key(items, "REPORT_LIST", "REPORT#r1")):
         assert item["space_id"] == "sp1"
         assert item["subspace_id"] == "ss1"
-        assert item["space_overview"] is True
         assert item["pinned"] is True
     # Membership is never written into the version items.
     version_item = _by_key(items, "REPORT#r1", "VERSION#0000000002")
@@ -2922,7 +2857,6 @@ async def test_pin_report_leaves_space_attributes_untouched(patch_table, store):
     assert await store.pin_report("r1", True, updated_by="user@example.com") is True
     for call in patch_table.update_item.call_args_list:
         assert "space_id" not in call.kwargs["UpdateExpression"]
-        assert "space_overview" not in call.kwargs["UpdateExpression"]
 
 
 async def test_update_report_space_writes_both_copies_without_a_version(patch_table, store):
@@ -3126,57 +3060,6 @@ async def test_delete_space_uses_the_index_for_the_emptiness_check(patch_table, 
 
     assert await store.delete_space("sp1") == SpaceDeleteResult.NOT_EMPTY
     assert patch_table.query.call_args_list[0].kwargs["IndexName"] == "space_reports_index"
-
-
-# ---------------------------------------------------------------------------
-# Store-level overview-report guards
-# ---------------------------------------------------------------------------
-
-
-def _overview_metadata_item():
-    return {
-        "PK": "REPORT#ovr1",
-        "SK": "#METADATA",
-        "report_id": "ovr1",
-        "name": "Cloud",
-        "current_version": 1,
-        "created_at": "2024-01-01T00:00:00+00:00",
-        "updated_at": "2024-01-01T00:00:00+00:00",
-        "created_by": "user@example.com",
-        "updated_by": "user@example.com",
-        "access": {"scope": "public"},
-        "space_id": "sp1",
-        "space_overview": True,
-    }
-
-
-async def test_store_refuses_to_delete_an_overview_report(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
-
-    with pytest.raises(dynamodb_module.ProtectedReportError, match="delete the space instead"):
-        await store.delete_report("ovr1")
-
-    patch_table.batch_writer.assert_not_called()
-
-
-async def test_store_refuses_to_privatize_an_overview_report(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
-    patch_table.meta.client.transact_write_items = MagicMock()
-
-    with pytest.raises(dynamodb_module.ProtectedReportError, match="cannot be made private"):
-        await store.update_report_visibility(report_id="ovr1", updated_by="u", access=ReportAccess(scope="private"))
-
-    patch_table.meta.client.transact_write_items.assert_not_called()
-
-
-async def test_store_refuses_to_move_an_overview_report(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
-    patch_table.meta.client.transact_write_items = MagicMock()
-
-    with pytest.raises(dynamodb_module.ProtectedReportError, match="cannot be moved"):
-        await store.update_report_space(report_id="ovr1", space_id="sp2", subspace_id=None, updated_by="u")
-
-    patch_table.meta.client.transact_write_items.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
