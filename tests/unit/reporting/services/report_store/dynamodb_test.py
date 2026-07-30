@@ -8,7 +8,7 @@ import pytest
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion
-from reporting.schema.space_config import SpaceDeleteResult
+from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult
 from reporting.services.report_store import dynamodb as dynamodb_module
 from reporting.services.report_store.dynamodb import DynamoDBReportStore, _action_confirmation_dedup_sk
 
@@ -2896,6 +2896,112 @@ async def test_update_report_space_writes_both_copies_without_a_version(patch_ta
         assert item["space_id"] == "spB"
         assert "subspace_id" not in item
         assert item["current_version"] == 3
+
+
+async def test_update_report_space_conditions_the_write_on_the_report_being_public(patch_table, store):
+    """The up-front check is not enough: a concurrent unpublish could win.
+
+    The metadata Put carries the condition, and a cancelled transaction covers
+    the REPORT_LIST copy with it.
+    """
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "REPORT#r1",
+            "SK": "#METADATA",
+            "report_id": "r1",
+            "name": "Member",
+            "current_version": 1,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "user@example.com",
+            "access": {"scope": "public"},
+        }
+    }
+    patch_table.meta.client.transact_write_items = MagicMock()
+
+    await store.update_report_space(
+        report_id="r1",
+        space_id="spB",
+        subspace_id=None,
+        updated_by="editor@example.com",
+    )
+
+    items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
+    put = items[0]["Put"]
+    assert put["ConditionExpression"] == "#access.#scope = :public"
+    assert put["ExpressionAttributeValues"] == {":public": "public"}
+    assert items[0]["Put"]["Item"]["SK"] == "#METADATA"
+    # Unfiling is unconditional.
+    patch_table.meta.client.transact_write_items = MagicMock()
+    await store.update_report_space(report_id="r1", space_id=None, subspace_id=None, updated_by="editor@example.com")
+    unfiled = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
+    assert "ConditionExpression" not in unfiled[0]["Put"]
+
+
+async def test_update_report_space_raises_when_the_condition_fails(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "REPORT#r1",
+            "SK": "#METADATA",
+            "report_id": "r1",
+            "name": "Member",
+            "current_version": 1,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "user@example.com",
+            "access": {"scope": "public"},
+        }
+    }
+    patch_table.meta.client.transact_write_items = MagicMock(
+        side_effect=botocore.exceptions.ClientError(
+            {"Error": {"Code": "TransactionCanceledException", "Message": "cancelled"}},
+            "TransactWriteItems",
+        )
+    )
+
+    with pytest.raises(SpaceConflictError):
+        await store.update_report_space(
+            report_id="r1",
+            space_id="spB",
+            subspace_id=None,
+            updated_by="editor@example.com",
+        )
+
+
+async def test_update_report_visibility_conditions_a_privatise_on_having_no_space(patch_table, store):
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "REPORT#r1",
+            "SK": "#METADATA",
+            "report_id": "r1",
+            "name": "Loose",
+            "current_version": 1,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "user@example.com",
+            "access": {"scope": "public"},
+        }
+    }
+    patch_table.meta.client.transact_write_items = MagicMock()
+
+    await store.update_report_visibility(
+        report_id="r1",
+        updated_by="user@example.com",
+        access=ReportAccess(scope="private"),
+    )
+
+    items = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
+    assert items[0]["Put"]["ConditionExpression"] == "attribute_not_exists(space_id)"
+
+    # Publishing needs no condition.
+    patch_table.meta.client.transact_write_items = MagicMock()
+    await store.update_report_visibility(
+        report_id="r1",
+        updated_by="user@example.com",
+        access=ReportAccess(scope="public"),
+    )
+    published = patch_table.meta.client.transact_write_items.call_args[1]["TransactItems"]
+    assert "ConditionExpression" not in published[0]["Put"]
 
 
 async def test_update_report_space_respects_visibility(patch_table, store):

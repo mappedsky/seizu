@@ -10,6 +10,11 @@ is what lets every report in a space stay an ordinary report.
 """
 
 from reporting.schema.report_config import ReportAccess
+from reporting.schema.space_config import (
+    FILING_PRIVATE_REPORT_DETAIL,
+    PRIVATISING_SPACE_MEMBER_DETAIL,
+    SpaceConflictError,
+)
 from reporting.services import report_store
 
 __all__ = [
@@ -39,25 +44,16 @@ class SpaceValidationError(Exception):
     """
 
 
-class SpaceConflictError(Exception):
-    """The request conflicts with the report's current state.
-
-    Callers map this to HTTP 409: the body is well formed and names real
-    records, but the report's visibility and its space membership cannot both
-    be what the request asks for.
-    """
-
-
 def reject_filing_private_report(space_id: str | None, access: ReportAccess) -> None:
     """Refuse to file a private report into a space.
 
-    This is the invariant behind ``SPACE_MEMBER_ACCESS``, checked on the way
-    in. Enforcing it here rather than blanking membership later is what lets
-    every space response expose its overview pointer without a per-caller
-    visibility resolution.
+    Checked on the way in, for an actionable error; the store backends enforce
+    the same rule atomically at the write, which is what makes it hold under
+    concurrent requests. Keeping a space free of private members is what lets
+    the space's overview pointer be resolved against member reports alone.
     """
     if space_id is not None and access.scope != "public":
-        raise SpaceConflictError("Publish the report before filing it into a space")
+        raise SpaceConflictError(FILING_PRIVATE_REPORT_DETAIL)
 
 
 def reject_privatising_space_member(space_id: str | None, access: ReportAccess | None) -> None:
@@ -67,7 +63,7 @@ def reject_privatising_space_member(space_id: str | None, access: ReportAccess |
     then unpublishing it would reintroduce a private space member.
     """
     if space_id is not None and access is not None and access.scope != "public":
-        raise SpaceConflictError("Remove the report from its space before making it private")
+        raise SpaceConflictError(PRIVATISING_SPACE_MEMBER_DETAIL)
 
 
 async def resolve_report_space(

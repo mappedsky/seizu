@@ -32,7 +32,14 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
+from reporting.schema.space_config import (
+    FILING_PRIVATE_REPORT_DETAIL,
+    PRIVATISING_SPACE_MEMBER_DETAIL,
+    SpaceConflictError,
+    SpaceDeleteResult,
+    SpaceListItem,
+    SubspaceItem,
+)
 from reporting.services.report_store.base import ReportStore, initial_report_config
 from reporting.utils.sql import build_database_url
 
@@ -462,6 +469,20 @@ def generate_report_id() -> str:
     return str(next(_get_snowflake_gen()))
 
 
+async def _locked_report(session: AsyncSession, report_id: str) -> ReportRecord | None:
+    """Fetch a report for update, holding its row until the session commits.
+
+    Used where a check on the row decides the write -- the public-space-member
+    rule reads ``access`` to allow a space move and ``space_id`` to allow an
+    unpublish, and without the lock two concurrent requests can both pass and
+    leave a private report inside a space. ``FOR UPDATE`` is a no-op on SQLite,
+    whose writes are serialised anyway.
+    """
+    stmt = select(ReportRecord).where(ReportRecord.report_id == report_id).with_for_update()
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
 def _report_visible_to_user(report: ReportRecord, user_id: str | None) -> bool:
     if user_id is None:
         return True
@@ -838,9 +859,13 @@ class SQLModelReportStore(ReportStore):
         access: ReportAccess | None = None,
     ) -> ReportListItem | None:
         async with AsyncSession(_get_engine()) as session:
-            report = await session.get(ReportRecord, report_id)
+            report = await _locked_report(session, report_id)
             if not report:
                 return None
+            # Held under the row lock: privatising must not race a concurrent
+            # filing into a space.
+            if access is not None and access.scope != "public" and report.space_id is not None:
+                raise SpaceConflictError(PRIVATISING_SPACE_MEMBER_DETAIL)
             report.updated_at = datetime.now(tz=UTC).isoformat()
             report.updated_by = updated_by
             if access is not None:
@@ -859,9 +884,13 @@ class SQLModelReportStore(ReportStore):
         user_id: str | None = None,
     ) -> ReportListItem | None:
         async with AsyncSession(_get_engine()) as session:
-            report = await session.get(ReportRecord, report_id)
+            report = await _locked_report(session, report_id)
             if not report or not _report_visible_to_user(report, user_id):
                 return None
+            # Held under the row lock: filing must not race a concurrent
+            # unpublish.
+            if space_id is not None and (report.access or {}).get("scope") != "public":
+                raise SpaceConflictError(FILING_PRIVATE_REPORT_DETAIL)
             report.space_id = space_id
             report.subspace_id = subspace_id
             report.updated_at = datetime.now(tz=UTC).isoformat()

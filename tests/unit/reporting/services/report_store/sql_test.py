@@ -17,13 +17,17 @@ from sqlmodel import SQLModel
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
-from reporting.schema.space_config import SpaceDeleteResult, SubspaceItem
+from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
 from reporting.services.report_store import sql as sql_module
 from reporting.services.report_store.sql import SQLModelReportStore
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+#: Space members must be public, so fixtures that file a report publish it.
+_PUBLIC = ReportAccess(scope="public")
 
 
 @pytest.fixture(autouse=True)
@@ -2204,7 +2208,7 @@ async def test_delete_space_not_found(store):
 
 async def test_delete_space_blocked_by_member_report(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    report = await store.create_report(name="Member", created_by="u1")
+    report = await store.create_report(name="Member", created_by="u1", access=_PUBLIC)
     await store.update_report_space(
         report_id=report.report_id,
         space_id=space.space_id,
@@ -2222,12 +2226,14 @@ async def test_delete_space_emptiness_ignores_report_visibility(store):
     space read as empty and be deleted, orphaning user B's report.
     """
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    other = await store.create_report(name="Private", created_by="u2", access=ReportAccess(scope="private"))
-    await store.update_report_space(
-        report_id=other.report_id,
+    # Filed at create time: update_report_space refuses a private report, so a
+    # private member can only be constructed this way. The point of the test is
+    # that emptiness does not depend on how it got there.
+    other = await store.create_report(
+        name="Private",
+        created_by="u2",
+        access=ReportAccess(scope="private"),
         space_id=space.space_id,
-        subspace_id=None,
-        updated_by="u2",
     )
     # u1 cannot see the report at all...
     visible_to_u1 = await store.list_space_reports(space.space_id, user_id="u1")
@@ -2251,13 +2257,18 @@ async def test_list_space_reports_filters_by_space_and_visibility(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     other_space = await store.create_space(name="Other", description="", created_by="u1")
 
-    mine = await store.create_report(name="Mine", created_by="u1")
+    mine = await store.create_report(name="Mine", created_by="u1", access=_PUBLIC)
     await store.update_report_space(
         report_id=mine.report_id, space_id=space.space_id, subspace_id=None, updated_by="u1"
     )
-    theirs = await store.create_report(name="Theirs", created_by="u2", access=ReportAccess(scope="private"))
-    await store.update_report_space(
-        report_id=theirs.report_id, space_id=space.space_id, subspace_id=None, updated_by="u2"
+    # Filed at create time: update_report_space refuses a private report, so
+    # this is the only way to construct a private member. The filter must not
+    # depend on how it got there.
+    theirs = await store.create_report(
+        name="Theirs",
+        created_by="u2",
+        access=ReportAccess(scope="private"),
+        space_id=space.space_id,
     )
 
     visible = await store.list_space_reports(space.space_id, user_id="u1")
@@ -2312,7 +2323,7 @@ async def test_delete_subspace_leaves_member_reports_in_place(store):
     """
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     sub = await store.create_subspace(space_id=space.space_id, name="Network", created_by="u1")
-    report = await store.create_report(name="Member", created_by="u1")
+    report = await store.create_report(name="Member", created_by="u1", access=_PUBLIC)
     await store.update_report_space(
         report_id=report.report_id,
         space_id=space.space_id,
@@ -2359,7 +2370,11 @@ async def test_update_report_space_replaces_membership(store):
     space_b = await store.create_space(name="B", description="", created_by="u1")
     sub_a = await store.create_subspace(space_id=space_a.space_id, name="Sub", created_by="u1")
     report = await store.create_report(
-        name="Member", created_by="u1", space_id=space_a.space_id, subspace_id=sub_a.subspace_id
+        name="Member",
+        created_by="u1",
+        access=_PUBLIC,
+        space_id=space_a.space_id,
+        subspace_id=sub_a.subspace_id,
     )
 
     # Replace semantics: moving to another space with no sub-space clears it.
@@ -2378,6 +2393,47 @@ async def test_update_report_space_replaces_membership(store):
         report_id=report.report_id, space_id=None, subspace_id=None, updated_by="u2"
     )
     assert cleared.space_id is None
+
+
+async def test_update_report_space_refuses_to_file_a_private_report(store):
+    """Enforced in the store, so a race cannot slip a draft into a space."""
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    draft = await store.create_report(name="Draft", created_by="u1")
+
+    with pytest.raises(SpaceConflictError):
+        await store.update_report_space(
+            report_id=draft.report_id,
+            space_id=space.space_id,
+            subspace_id=None,
+            updated_by="u1",
+        )
+
+    assert (await store.get_report_metadata(draft.report_id)).space_id is None
+
+
+async def test_update_report_visibility_refuses_to_privatise_a_member(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    member = await store.create_report(name="Member", created_by="u1", access=_PUBLIC, space_id=space.space_id)
+
+    with pytest.raises(SpaceConflictError):
+        await store.update_report_visibility(
+            report_id=member.report_id,
+            updated_by="u1",
+            access=ReportAccess(scope="private"),
+        )
+
+    assert (await store.get_report_metadata(member.report_id)).access.scope == "public"
+
+
+async def test_update_report_visibility_allows_privatising_a_loose_report(store):
+    report = await store.create_report(name="Loose", created_by="u1", access=_PUBLIC)
+
+    updated = await store.update_report_visibility(
+        report_id=report.report_id,
+        updated_by="u1",
+        access=ReportAccess(scope="private"),
+    )
+    assert updated.access.scope == "private"
 
 
 async def test_update_report_space_respects_visibility(store):
@@ -2484,10 +2540,14 @@ async def test_renaming_a_space_keeps_its_overview_pointer(store):
 
 
 async def test_the_pinned_report_is_an_ordinary_report(store):
-    """No protections: it can be moved out, unpublished, and deleted."""
+    """No protections from being pinned: it can be moved out and deleted.
+
+    Its visibility is governed by the public-space-member rule like any other
+    member's, so unpublishing goes through leaving the space first.
+    """
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     other = await store.create_space(name="Other", description="", created_by="u1")
-    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
+    report = await store.create_report(name="Landing", created_by="u1", access=_PUBLIC, space_id=space.space_id)
     await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
 
     moved = await store.update_report_space(
@@ -2495,6 +2555,10 @@ async def test_the_pinned_report_is_an_ordinary_report(store):
     )
     assert moved.space_id == other.space_id
 
+    unfiled = await store.update_report_space(
+        report_id=report.report_id, space_id=None, subspace_id=None, updated_by="u1"
+    )
+    assert unfiled.space_id is None
     privatized = await store.update_report_visibility(
         report_id=report.report_id, updated_by="u1", access=ReportAccess(scope="private")
     )

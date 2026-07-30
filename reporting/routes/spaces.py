@@ -229,7 +229,12 @@ async def set_space_overview(
     body: SetSpaceOverviewRequest,
     current: CurrentUser = Depends(require_permission(Permission.SPACES_WRITE)),
 ) -> SpaceListItem:
-    """Point the space at one of its reports as the landing page, or clear it."""
+    """Point the space at one of its reports as the landing page, or clear it.
+
+    Unlike the other non-tree space responses this one carries
+    ``overview_report_id``: it echoes what the caller just set, on a report they
+    supplied and were authorised to see.
+    """
     await _get_space_or_404(space_id)
     try:
         report_id = await resolve_overview_report(space_id, body.report_id, user_id=current.user.user_id)

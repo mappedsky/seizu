@@ -120,7 +120,12 @@ class ReportStore(ABC):
         updated_by: str,
         access: ReportAccess | None = None,
     ) -> ReportListItem | None:
-        """Update report visibility without creating a new report version."""
+        """Update report visibility without creating a new report version.
+
+        Implementations MUST refuse to make a report private while it is filed in
+        a space, raising ``SpaceConflictError`` — the other half of the rule in
+        ``update_report_space``, and atomic for the same reason.
+        """
 
     @abstractmethod
     async def update_report_space(
@@ -135,9 +140,13 @@ class ReportStore(ABC):
 
         Replace semantics: both arguments describe the desired final state, so
         moving a report to a different space without naming a sub-space clears
-        the sub-space. Cross-entity validity (the sub-space belongs to the
-        space, the report is not an overview report) is the caller's
-        responsibility — see ``reporting.services.spaces``.
+        the sub-space. Cross-entity validity (the sub-space exists and belongs
+        to the space) is the caller's responsibility — see
+        ``reporting.services.spaces``.
+
+        Implementations MUST refuse to file a non-public report, raising
+        ``SpaceConflictError``: the caller checks first for a better error
+        message, but only an atomic check here survives a concurrent unpublish.
 
         Returns None if the report does not exist or is not visible to the user.
         """

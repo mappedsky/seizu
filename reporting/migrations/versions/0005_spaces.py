@@ -2,8 +2,8 @@
 
 Every operation is guarded by an inspector check. That is load-bearing rather
 than defensive: on a fresh database the baseline revision calls
-``SQLModel.metadata.create_all``, which already creates both tables and all
-three ``reports`` columns before this revision runs.
+``SQLModel.metadata.create_all``, which already creates both tables and both
+``reports`` columns before this revision runs.
 """
 
 import sqlalchemy as sa

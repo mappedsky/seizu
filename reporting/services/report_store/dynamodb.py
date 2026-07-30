@@ -37,7 +37,14 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
+from reporting.schema.space_config import (
+    FILING_PRIVATE_REPORT_DETAIL,
+    PRIVATISING_SPACE_MEMBER_DETAIL,
+    SpaceConflictError,
+    SpaceDeleteResult,
+    SpaceListItem,
+    SubspaceItem,
+)
 from reporting.services.report_store.base import ReportStore, initial_report_config
 
 logger = logging.getLogger(__name__)
@@ -1088,19 +1095,52 @@ def _get_table() -> Any:
     return get_boto_resource().Table(settings.DYNAMODB_TABLE_NAME)
 
 
-def _transact_put_sync(table: Any, *items: dict[str, Any]) -> None:
-    """Write one or more items atomically via TransactWriteItems."""
+def _transact_put_sync(
+    table: Any,
+    *items: dict[str, Any],
+    condition: dict[str, Any] | None = None,
+) -> None:
+    """Write one or more items atomically via TransactWriteItems.
+
+    ``condition`` applies a ConditionExpression to the **first** item only --
+    by convention the ``#METADATA`` item, which is the authority for a report.
+    The whole transaction is cancelled if it fails, so a conditional first put
+    guards every item in the call.
+    """
+    if not items:
+        return
+    first: dict[str, Any] = {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Item": _strip_none(items[0]),
+    }
+    if condition:
+        first.update(condition)
     table.meta.client.transact_write_items(
-        TransactItems=[
+        TransactItems=[{"Put": first}]
+        + [
             {
                 "Put": {
                     "TableName": settings.DYNAMODB_TABLE_NAME,
                     "Item": _strip_none(item),
                 }
             }
-            for item in items
+            for item in items[1:]
         ]
     )
+
+
+#: Guards the two directions of the public-space-member rule at the write, so a
+#: concurrent visibility change and space move cannot both pass their up-front
+#: checks and leave a private report inside a space. ``access`` and ``scope`` are
+#: aliased because both are plausible future reserved words.
+_PUBLIC_ACCESS_CONDITION = {
+    "ConditionExpression": "#access.#scope = :public",
+    "ExpressionAttributeNames": {"#access": "access", "#scope": "scope"},
+    "ExpressionAttributeValues": {":public": "public"},
+}
+#: ``_strip_none`` omits a null ``space_id``, so "not in a space" is the
+#: attribute being absent.
+_NO_SPACE_CONDITION = {"ConditionExpression": "attribute_not_exists(space_id)"}
 
 
 def _update_user_profile_internal(
@@ -1433,7 +1473,19 @@ class DynamoDBReportStore(ReportStore):
                 access=new_access,
             )
             metadata_item, list_item = _report_record_items(record)
-            _transact_put_sync(table, metadata_item, list_item)
+            # Privatising must not race a concurrent filing into a space.
+            going_private = new_access.get("scope") != "public"
+            try:
+                _transact_put_sync(
+                    table,
+                    metadata_item,
+                    list_item,
+                    condition=_NO_SPACE_CONDITION if going_private else None,
+                )
+            except botocore.exceptions.ClientError as exc:
+                if _transaction_cancelled(exc):
+                    raise SpaceConflictError(PRIVATISING_SPACE_MEMBER_DETAIL) from exc
+                raise
             return _report_list_item_from_item(list_item)
 
         return await asyncio.to_thread(_op)
@@ -1462,7 +1514,18 @@ class DynamoDBReportStore(ReportStore):
                 subspace_id=subspace_id,
             )
             metadata_item, list_item = _report_record_items(record)
-            _transact_put_sync(table, metadata_item, list_item)
+            # Filing must not race a concurrent unpublish.
+            try:
+                _transact_put_sync(
+                    table,
+                    metadata_item,
+                    list_item,
+                    condition=_PUBLIC_ACCESS_CONDITION if space_id is not None else None,
+                )
+            except botocore.exceptions.ClientError as exc:
+                if _transaction_cancelled(exc):
+                    raise SpaceConflictError(FILING_PRIVATE_REPORT_DETAIL) from exc
+                raise
             return _report_list_item_from_item(list_item)
 
         return await asyncio.to_thread(_op)

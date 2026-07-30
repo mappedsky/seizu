@@ -259,10 +259,8 @@ export function useSpaceMutations(): {
         throw new Error(
           await errorMessage(res, `Failed to create space: ${res.status}`),
         );
+      // Spaces only: a new space is empty, so no report list changed.
       broadcastSpacesUpdated();
-      // Creating a space creates its overview report, so report lists (and the
-      // pinned-reports sidebar) are stale too.
-      notifyReportsUpdated();
       return res.json();
     },
     [accessToken],
@@ -302,9 +300,9 @@ export function useSpaceMutations(): {
         throw new Error(
           await errorMessage(res, `Failed to delete space: ${res.status}`),
         );
+      // Spaces only: a space can only be deleted once empty, and deleting one
+      // never deletes a report.
       broadcastSpacesUpdated();
-      // Deleting a space deletes its overview report.
-      notifyReportsUpdated();
     },
     [accessToken],
   );

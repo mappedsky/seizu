@@ -195,11 +195,16 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:
             return {"error": "Report must be unpinned and removed from the dashboard before it can be made private"}
-    updated = await report_store.update_report_visibility(
-        report_id=report_id,
-        updated_by=user.user.user_id,
-        access=body.access,
-    )
+    try:
+        updated = await report_store.update_report_visibility(
+            report_id=report_id,
+            updated_by=user.user.user_id,
+            access=body.access,
+        )
+    # The store re-checks the rule above atomically, so a report filed into a
+    # space concurrently lands here instead.
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     if not updated:
         return {"error": "Report not found"}
     return updated.model_dump()
@@ -210,6 +215,49 @@ async def _confirm_report_version(
 ) -> ActionConfirmationTarget | None:
     report_id = str(args["report_id"])
     return ActionConfirmationTarget(action="update", resource_type="report", resource_id=report_id)
+
+
+async def _confirm_report_create(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    """Gate a create only when the new report would be public.
+
+    Creating a report is normally exempt from confirmation because the result is
+    a private draft nobody else can see. Filing into a space publishes it
+    (``SPACE_MEMBER_ACCESS``), which is a visible change and needs approval.
+    """
+    if args.get("space_id") is None:
+        return None
+    return ActionConfirmationTarget(
+        action="create public",
+        resource_type="report",
+        resource_id=str(args.get("name", "")),
+    )
+
+
+async def _confirm_report_clone(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    """Gate a clone only when the copy would be public.
+
+    Worse than the create case: a clone of a *private* report that lands in a
+    space publishes that report's contents. The requested space is resolved the
+    same way the handler resolves it, so an inherited space counts too.
+    """
+    report_id = str(args["report_id"])
+    if args.get("space_id") is None:
+        user_id = current_user.user.user_id if current_user is not None else None
+        source = await report_store.get_report_latest(report_id, user_id=user_id)
+        # No source: the handler will 404. Nothing to publish, nothing to gate.
+        if source is None or source.space_id is None:
+            return None
+    return ActionConfirmationTarget(
+        action="clone public",
+        resource_type="report",
+        resource_id=report_id,
+    )
 
 
 async def _confirm_report_visibility(
@@ -288,8 +336,10 @@ GROUP_DEF = BuiltinGroup(
             handler=_create,
             requires_user=True,
             # Confirmation exception: creates a new private report and does not
-            # mutate existing resources.
+            # mutate existing resources. Conditional gate on top, because
+            # creating into a space publishes -- see _confirm_report_create.
             chat_safe_without_confirmation=True,
+            confirmation=_confirm_report_create,
         ),
         BuiltinTool(
             name="reports__create_version",
@@ -401,8 +451,11 @@ GROUP_DEF = BuiltinGroup(
             handler=_clone,
             requires_user=True,
             # Confirmation exception: clones into a new private report and does
-            # not mutate the source report.
+            # not mutate the source report. Conditional gate on top, because a
+            # clone landing in a space publishes the source's contents -- see
+            # _confirm_report_clone.
             chat_safe_without_confirmation=True,
+            confirmation=_confirm_report_clone,
         ),
     ],
 )

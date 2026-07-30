@@ -34,8 +34,8 @@ out of the space or deleted, the space simply reads as having no overview — no
 up, and nothing about the report is restricted to prevent it.
 
 Only `GET /api/v1/spaces/<id>/tree` reports the pointer, because only it has the caller's report list
-to resolve it against. `GET /api/v1/spaces` and `GET /api/v1/spaces/<id>` always return
-`overview_report_id: null`.
+to resolve it against — plus `PUT /api/v1/spaces/<id>/overview`, which echoes back what the caller just
+set. `GET /api/v1/spaces` and `GET /api/v1/spaces/<id>` always return `overview_report_id: null`.
 
 ## Managing spaces
 
@@ -153,7 +153,8 @@ get endpoints return `null` for it, since without a report list there is nothing
 against.
 
 `PUT .../overview` takes `{"report_id": ...}`; the target must be a report filed in that space, and
-`null` clears the pointer.
+`null` clears the pointer. Its response echoes `overview_report_id` — the value the caller just set —
+which is why it is the one non-tree endpoint that reports the pointer.
 
 Spaces are not versioned, so there are no `/versions` endpoints.
 

@@ -30,9 +30,12 @@ class SpaceListItem(BaseModel):
     resolved lazily, so a target that has been deleted, moved out, or is
     invisible to the caller simply reads as "no overview set".
 
-    Only the tree endpoint populates it. The list and get endpoints blank it,
-    because resolving the pointer needs the caller's visible report list and an
-    unresolved one would disclose a report ID they were never shown.
+    Two endpoints populate it: the tree, which can resolve it against the
+    caller's visible reports, and ``PUT /spaces/<id>/overview``, which echoes
+    back the pointer the caller just set (and was authorised to see). Every
+    other space response blanks it, because without a report list there is
+    nothing to resolve it against and an unresolved pointer would disclose a
+    report ID the caller was never shown.
     """
 
     space_id: str
@@ -60,6 +63,25 @@ class SubspaceItem(BaseModel):
     updated_at: str
     created_by: str
     updated_by: str | None = None
+
+
+class SpaceConflictError(Exception):
+    """A write would leave a private report inside a space.
+
+    Callers map this to HTTP 409 (or an ``error`` payload for MCP): the request
+    is well formed and names real records, but the report's visibility and its
+    space membership cannot both be what it asks for.
+
+    Defined here rather than in ``reporting.services.spaces`` because the store
+    backends raise it too -- they enforce the rule atomically, and importing the
+    service layer from a store would be a cycle.
+    """
+
+
+#: Messages for the two directions of the public-space-member rule. Shared so
+#: the up-front validation and the store's atomic enforcement cannot drift.
+FILING_PRIVATE_REPORT_DETAIL = "Publish the report before filing it into a space"
+PRIVATISING_SPACE_MEMBER_DETAIL = "Remove the report from its space before making it private"
 
 
 class SpaceDeleteResult(StrEnum):

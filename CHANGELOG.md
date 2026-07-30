@@ -29,6 +29,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   space's overview. Reports are filed via **Move to space…** on the Reports list
   or inside a report; a report filed in a space is public, so publish a draft
   before filing it and remove a report from its space before unpublishing it.
+  Both directions are enforced atomically by the store (conditional writes on
+  DynamoDB, a row lock on SQL), and the chat agent's `reports__create` /
+  `reports__clone` now require confirmation when the new report would land in a
+  space — publishing is a visible change, unlike the private draft those tools
+  normally produce.
   Spaces are unversioned and globally visible; report-level visibility still
   governs what appears inside one. Deleting a space is blocked while it holds
   reports; its sub-spaces are deleted with it and no report ever is.

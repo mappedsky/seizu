@@ -228,11 +228,16 @@ async def update_report_visibility(
                 status_code=400,
                 detail="Report must be unpinned and removed from the dashboard before it can be made private",
             )
-    updated = await report_store.update_report_visibility(
-        report_id=report_id,
-        updated_by=current.user.user_id,
-        access=body.access,
-    )
+    try:
+        updated = await report_store.update_report_visibility(
+            report_id=report_id,
+            updated_by=current.user.user_id,
+            access=body.access,
+        )
+    # The store re-checks the rule above under a lock/condition, so a report
+    # filed into a space concurrently lands here instead.
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Report not found")
     return updated
@@ -252,24 +257,26 @@ async def update_report_space(
     ``SPACE_MEMBER_ACCESS``.
     """
     space_id, subspace_id = await _resolve_space_or_400(body.space_id, body.subspace_id)
-    if space_id is not None:
-        # Only filing needs the report's access: removing one from its space is
-        # always allowed, whatever its visibility, and skipping the read keeps
-        # the unfile path a single write.
-        meta = await report_store.get_report_metadata(report_id, user_id=current.user.user_id)
-        if not meta:
-            raise HTTPException(status_code=404, detail="Report not found")
-        try:
+    try:
+        if space_id is not None:
+            # Only filing needs the report's access: removing one from its space
+            # is always allowed, whatever its visibility, and skipping the read
+            # keeps the unfile path a single write.
+            meta = await report_store.get_report_metadata(report_id, user_id=current.user.user_id)
+            if not meta:
+                raise HTTPException(status_code=404, detail="Report not found")
             reject_filing_private_report(space_id, meta.access)
-        except SpaceConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-    updated = await report_store.update_report_space(
-        report_id=report_id,
-        space_id=space_id,
-        subspace_id=subspace_id,
-        updated_by=current.user.user_id,
-        user_id=current.user.user_id,
-    )
+        # The store re-checks the same rule under a lock/condition, so the raise
+        # can come from either place; both mean the same 409.
+        updated = await report_store.update_report_space(
+            report_id=report_id,
+            space_id=space_id,
+            subspace_id=subspace_id,
+            updated_by=current.user.user_id,
+            user_id=current.user.user_id,
+        )
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Report not found")
     return updated
