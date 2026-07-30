@@ -110,8 +110,9 @@ function SpaceDialog({ open, onClose, onSave, initial }: SpaceDialogProps) {
         </Box>
         {!initial && (
           <Alert severity="info" sx={{ mt: 2 }}>
-            An overview report named after the space is created with it, and
-            becomes the space&apos;s landing page.
+            The space starts empty. File reports into it from the Reports list,
+            or create them from the space, then pin one as the space&apos;s
+            overview.
           </Alert>
         )}
       </DialogContent>
@@ -321,9 +322,9 @@ function Spaces() {
         onClose={() => setDeleteTarget(null)}
         onConfirm={handleDeleteConfirm}
       >
-        Permanently delete <strong>{deleteTarget?.name}</strong>, its overview
-        report, and its sub-spaces? Any other reports must be moved out first.
-        This cannot be undone.
+        Permanently delete <strong>{deleteTarget?.name}</strong> and its
+        sub-spaces? Every report must be moved out first; no report is ever
+        deleted with a space. This cannot be undone.
       </ConfirmDeleteDialog>
     </>
   );

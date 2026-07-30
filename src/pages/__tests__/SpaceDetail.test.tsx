@@ -324,12 +324,14 @@ describe('SpaceDetail', () => {
     expect(paneMounts()).toEqual(['r1', 'r2']);
   });
 
-  it('gates report actions on reports:write, not spaces:write', () => {
-    // A custom role with spaces:write but not reports:write must not be shown
-    // move/remove actions the API will refuse.
+  it('disables report actions without reports:write but keeps the menu', async () => {
+    // The menu mixes permissions: the overview pointer is spaces:write and
+    // membership is reports:write. A spaces:write-only role must still be able
+    // to pin an overview, so the menu opens and each action gates itself.
     mockUsePermissions.mockReturnValue(
       (permission: string) => permission !== 'reports:write',
     );
+    const user = userEvent.setup({ delay: null });
 
     renderAt('/app/spaces/sp1');
 
@@ -337,7 +339,26 @@ describe('SpaceDetail', () => {
     expect(
       screen.getByRole('button', { name: 'New sub-space' }),
     ).toBeInTheDocument();
-    // ...but no per-report menu.
+    // ...but no New report, which needs reports:write.
+    expect(screen.queryByRole('button', { name: 'New report' })).toBeNull();
+
+    await user.click(screen.getAllByLabelText('Report actions')[0]);
+    expect(
+      screen.getByRole('menuitem', { name: /space overview/ }),
+    ).not.toHaveAttribute('aria-disabled', 'true');
+    expect(
+      screen.getByRole('menuitem', { name: 'Remove from space' }),
+    ).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('hides the report menu when neither permission is held', () => {
+    mockUsePermissions.mockReturnValue(
+      (permission: string) =>
+        permission !== 'reports:write' && permission !== 'spaces:write',
+    );
+
+    renderAt('/app/spaces/sp1');
+
     expect(screen.queryByLabelText('Report actions')).toBeNull();
   });
 

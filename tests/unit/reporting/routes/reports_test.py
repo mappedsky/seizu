@@ -9,6 +9,7 @@ from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceListItem, SubspaceItem
+from reporting.services.spaces import SPACE_MEMBER_ACCESS
 
 settings.REPORT_QUERY_SIGNING_SECRET = "test-secret"
 
@@ -64,6 +65,7 @@ def _report_list_item(
     current_version=1,
     space_id=None,
     subspace_id=None,
+    access=None,
 ):
     return ReportListItem(
         report_id=report_id,
@@ -73,7 +75,7 @@ def _report_list_item(
         updated_at="2024-01-01T00:00:00+00:00",
         created_by="test-user-id",
         updated_by="test-user-id",
-        access={"scope": "public"},
+        access=access or {"scope": "public"},
         space_id=space_id,
         subspace_id=subspace_id,
     )
@@ -529,6 +531,8 @@ async def test_create_report_passes_fields_to_service(mocker):
     mock_create.assert_called_once_with(
         name="My Report",
         created_by="test-user-id",
+        # No space, so no forced visibility: the store's private default stands.
+        access=None,
         space_id=None,
         subspace_id=None,
     )
@@ -819,6 +823,7 @@ async def test_clone_report_success(mocker):
     mock_create.assert_called_once_with(
         name="Copy of My Report",
         created_by="test-user-id",
+        access=None,
         space_id=None,
         subspace_id=None,
     )
@@ -916,6 +921,10 @@ async def test_update_report_space_omitted_subspace_clears_it(mocker):
     work without special-casing, so it is asserted on the omitted-key form
     rather than an explicit null.
     """
+    mocker.patch(
+        "reporting.routes.reports.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report_list_item()),
+    )
     mocker.patch("reporting.services.report_store.get_space", new=AsyncMock(return_value=_space("spB")))
     mock_update = mocker.patch(
         "reporting.routes.reports.report_store.update_report_space",
@@ -929,6 +938,11 @@ async def test_update_report_space_omitted_subspace_clears_it(mocker):
 
 
 async def test_update_report_space_clears_membership(mocker):
+    """Unfiling needs no access check, so it must not read the report first."""
+    mock_meta = mocker.patch(
+        "reporting.routes.reports.report_store.get_report_metadata",
+        new=AsyncMock(return_value=None),
+    )
     mock_update = mocker.patch(
         "reporting.routes.reports.report_store.update_report_space",
         new=AsyncMock(return_value=_report_list_item()),
@@ -939,6 +953,7 @@ async def test_update_report_space_clears_membership(mocker):
     assert ret.status_code == 200
     assert mock_update.call_args.kwargs["space_id"] is None
     assert mock_update.call_args.kwargs["subspace_id"] is None
+    mock_meta.assert_not_called()
 
 
 async def test_update_report_space_rejects_subspace_without_space(mocker):
@@ -1029,6 +1044,8 @@ async def test_create_report_with_space_membership(mocker):
     mock_create.assert_called_once_with(
         name="My Report",
         created_by="test-user-id",
+        # Landing in a space publishes: space members are public.
+        access=SPACE_MEMBER_ACCESS,
         space_id="sp1",
         subspace_id="ss1",
     )
@@ -1069,6 +1086,7 @@ async def test_clone_report_inherits_source_space(mocker):
     mock_create.assert_called_once_with(
         name="Copy",
         created_by="test-user-id",
+        access=SPACE_MEMBER_ACCESS,
         space_id="sp1",
         subspace_id="ss1",
     )
@@ -1095,3 +1113,87 @@ async def test_clone_report_honours_explicit_space(mocker):
     assert ret.status_code == 201
     assert mock_create.call_args.kwargs["space_id"] == "spB"
     assert mock_create.call_args.kwargs["subspace_id"] is None
+
+
+async def test_update_report_space_rejects_filing_a_draft(mocker):
+    """A private report cannot be filed into a space (409, not 400).
+
+    The body is well formed and names a real space; it is the report's current
+    visibility that conflicts.
+    """
+    mocker.patch(
+        "reporting.routes.reports.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report_list_item(access={"scope": "private"})),
+    )
+    mocker.patch("reporting.services.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mock_update = mocker.patch(
+        "reporting.routes.reports.report_store.update_report_space",
+        new=AsyncMock(return_value=_report_list_item(space_id="sp1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/reports/rid1/space", json={"space_id": "sp1"})
+    assert ret.status_code == 409
+    assert "Publish the report" in ret.json()["error"]
+    mock_update.assert_not_called()
+
+
+async def test_update_report_space_unfiles_a_draft(mocker):
+    """Removing a report from a space is allowed whatever its visibility.
+
+    Only filing is gated, so a draft that predates the rule can still be moved
+    out rather than being stuck in a space nobody can empty.
+    """
+    mock_update = mocker.patch(
+        "reporting.routes.reports.report_store.update_report_space",
+        new=AsyncMock(return_value=_report_list_item(access={"scope": "private"})),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/reports/rid1/space", json={"space_id": None})
+    assert ret.status_code == 200
+    mock_update.assert_called_once()
+
+
+async def test_update_visibility_rejects_privatising_a_space_member(mocker):
+    mocker.patch(
+        "reporting.routes.reports.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report_list_item(space_id="sp1")),
+    )
+    mock_update = mocker.patch(
+        "reporting.routes.reports.report_store.update_report_visibility",
+        new=AsyncMock(return_value=_report_list_item()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put(
+            "/api/v1/reports/rid1/visibility",
+            json={"access": {"scope": "private"}},
+        )
+    assert ret.status_code == 409
+    assert "Remove the report from its space" in ret.json()["error"]
+    mock_update.assert_not_called()
+
+
+async def test_update_visibility_allows_publishing_a_space_member(mocker):
+    """The guard is about privatising, not about touching a member at all."""
+    mocker.patch(
+        "reporting.routes.reports.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report_list_item(space_id="sp1")),
+    )
+    mocker.patch(
+        "reporting.routes.reports.report_store.get_dashboard_report_id",
+        new=AsyncMock(return_value=None),
+    )
+    mock_update = mocker.patch(
+        "reporting.routes.reports.report_store.update_report_visibility",
+        new=AsyncMock(return_value=_report_list_item(space_id="sp1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put(
+            "/api/v1/reports/rid1/visibility",
+            json={"access": {"scope": "public"}},
+        )
+    assert ret.status_code == 200
+    mock_update.assert_called_once()

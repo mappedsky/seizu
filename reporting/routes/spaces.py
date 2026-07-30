@@ -66,6 +66,20 @@ async def _get_space_or_404(space_id: str) -> SpaceListItem:
     return space
 
 
+def _without_overview(space: SpaceListItem) -> SpaceListItem:
+    """Drop the overview pointer from a response that carries no report list.
+
+    Only the tree endpoint can say whether the pointer still resolves for this
+    caller, and a pointer at a report they cannot see would otherwise disclose
+    that report's ID and existence. Space members are public
+    (``SPACE_MEMBER_ACCESS``), so the pointer is normally harmless -- but it can
+    still go stale, and nothing outside the tree consumes it.
+    """
+    if space.overview_report_id is None:
+        return space
+    return space.model_copy(update={"overview_report_id": None})
+
+
 async def _get_subspace_or_404(space_id: str, subspace_id: str) -> SubspaceItem:
     """Fetch a sub-space, rejecting one that belongs to a different space.
 
@@ -118,7 +132,8 @@ async def list_spaces(
     current: CurrentUser = Depends(require_permission(Permission.SPACES_READ)),
 ) -> SpaceListResponse:
     """List all spaces."""
-    return SpaceListResponse(spaces=await report_store.list_spaces())
+    spaces = await report_store.list_spaces()
+    return SpaceListResponse(spaces=[_without_overview(space) for space in spaces])
 
 
 @router.post("/api/v1/spaces", response_model=SpaceListItem, status_code=201)
@@ -126,7 +141,11 @@ async def create_space(
     body: CreateSpaceRequest,
     current: CurrentUser = Depends(require_permission(Permission.SPACES_WRITE)),
 ) -> SpaceListItem:
-    """Create a space along with its overview report."""
+    """Create an empty space.
+
+    No report is created with it: the overview is a pointer the user sets later
+    at one of the space's own reports.
+    """
     await _reject_duplicate_space_name(body.name)
     return await report_store.create_space(
         name=body.name,
@@ -140,8 +159,12 @@ async def get_space(
     space_id: str,
     current: CurrentUser = Depends(require_permission(Permission.SPACES_READ)),
 ) -> SpaceListItem:
-    """Return a space by ID."""
-    return await _get_space_or_404(space_id)
+    """Return a space by ID, without its overview pointer.
+
+    The pointer needs the caller's visible report list to resolve, which only
+    the tree endpoint has.
+    """
+    return _without_overview(await _get_space_or_404(space_id))
 
 
 @router.put("/api/v1/spaces/{space_id}", response_model=SpaceListItem)
@@ -160,7 +183,7 @@ async def update_space(
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Space not found")
-    return updated
+    return _without_overview(updated)
 
 
 @router.delete("/api/v1/spaces/{space_id}", response_model=SpaceIdResponse)
@@ -209,7 +232,7 @@ async def set_space_overview(
     """Point the space at one of its reports as the landing page, or clear it."""
     await _get_space_or_404(space_id)
     try:
-        report_id = await resolve_overview_report(space_id, body.report_id)
+        report_id = await resolve_overview_report(space_id, body.report_id, user_id=current.user.user_id)
     except SpaceValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     updated = await report_store.set_space_overview(

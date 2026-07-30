@@ -382,6 +382,36 @@ describe('ReportsList', () => {
     });
   });
 
+  it('disables move on a draft and unpublish on a space member', async () => {
+    // The two halves of the public-space-member rule, each surfaced as a
+    // disabled action rather than a 409 the user has to read.
+    mockUseReportsList.mockReturnValue({
+      reports: [{ ...REPORTS[0], space_id: 'sp1' }, REPORTS[1]],
+      total: 2,
+      page: 1,
+      perPage: 500,
+      loading: false,
+      error: null,
+      refresh: refreshReports,
+    });
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    // r1 is public and in a space: it cannot be unpublished from here.
+    await user.click(screen.getAllByLabelText('More actions')[0]);
+    expect(screen.getByRole('menuitem', { name: 'Unpublish' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    await user.keyboard('{Escape}');
+
+    // r2 is a draft: it cannot be filed at all.
+    await user.click(screen.getAllByLabelText('More actions')[1]);
+    expect(
+      screen.getByRole('menuitem', { name: /move to space/i }),
+    ).toHaveAttribute('aria-disabled', 'true');
+  });
+
   // -------------------------------------------------------------------------
   // Bulk actions
   // -------------------------------------------------------------------------
@@ -447,12 +477,13 @@ describe('ReportsList', () => {
     expect(pinReport).toHaveBeenCalledWith('r2', true);
   });
 
-  it('bulk moves every selected report into the chosen space', async () => {
+  it('bulk moves the selected published reports into the chosen space', async () => {
     const user = userEvent.setup({ delay: null });
     render(<ReportsList />, { wrapper: Wrapper });
 
+    // r1 only: r2 is a draft, and space members must be public.
     await user.click(
-      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+      screen.getAllByRole('checkbox', { name: 'Select row' })[0],
     );
     await user.click(screen.getByRole('button', { name: 'Move to space' }));
     await user.click(screen.getByRole('combobox', { name: 'Space' }));
@@ -460,14 +491,27 @@ describe('ReportsList', () => {
     await user.click(screen.getByRole('button', { name: 'Move' }));
 
     await waitFor(() => {
-      expect(setReportSpace).toHaveBeenCalledTimes(2);
+      expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null);
     });
-    expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null);
-    expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
+  });
+
+  it('disables bulk move while the selection holds a draft', async () => {
+    // Filing a draft is a 409, so the whole batch is blocked rather than
+    // half-applied.
+    const user = userEvent.setup({ delay: null });
+    render(<ReportsList />, { wrapper: Wrapper });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
+    );
+
+    expect(
+      screen.getByRole('button', { name: 'Move to space' }),
+    ).toBeDisabled();
   });
 
   it('reports per-report failures without aborting the rest of the batch', async () => {
-    setReportSpace
+    updateReportVisibility
       .mockRejectedValueOnce(new Error('nope'))
       .mockResolvedValueOnce(REPORTS[1]);
     const user = userEvent.setup({ delay: null });
@@ -476,14 +520,11 @@ describe('ReportsList', () => {
     await user.click(
       screen.getByRole('checkbox', { name: 'Select all rows on this page' }),
     );
-    await user.click(screen.getByRole('button', { name: 'Move to space' }));
-    await user.click(screen.getByRole('combobox', { name: 'Space' }));
-    await user.click(screen.getByRole('option', { name: 'Cloud Security' }));
-    await user.click(screen.getByRole('button', { name: 'Move' }));
+    await user.click(screen.getByRole('button', { name: 'Publish' }));
 
     // Both were attempted, and the failure is surfaced by name.
     await waitFor(() => {
-      expect(setReportSpace).toHaveBeenCalledTimes(2);
+      expect(updateReportVisibility).toHaveBeenCalledTimes(2);
     });
     expect(await screen.findByText(/Executive Risk: nope/)).toBeInTheDocument();
   });

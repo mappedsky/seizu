@@ -29,6 +29,10 @@ class SpaceListItem(BaseModel):
     just a pointer: the report stays an ordinary report, and the pointer is
     resolved lazily, so a target that has been deleted, moved out, or is
     invisible to the caller simply reads as "no overview set".
+
+    Only the tree endpoint populates it. The list and get endpoints blank it,
+    because resolving the pointer needs the caller's visible report list and an
+    unresolved one would disclose a report ID they were never shown.
     """
 
     space_id: str

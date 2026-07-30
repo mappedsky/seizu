@@ -9,14 +9,25 @@ allowed to go stale, and are resolved lazily at the API boundary instead, which
 is what lets every report in a space stay an ordinary report.
 """
 
+from reporting.schema.report_config import ReportAccess
 from reporting.services import report_store
 
 __all__ = [
+    "SPACE_MEMBER_ACCESS",
+    "SpaceConflictError",
     "SpaceValidationError",
+    "reject_filing_private_report",
+    "reject_privatising_space_member",
     "resolve_clone_space",
     "resolve_overview_report",
     "resolve_report_space",
 ]
+
+#: Reports filed in a space are public. A space is a shared container, so a
+#: private member would be invisible to everyone but its owner while still
+#: blocking the space's deletion -- and its ID would leak through the space's
+#: overview pointer. Creating a report into a space therefore publishes it.
+SPACE_MEMBER_ACCESS = ReportAccess(scope="public")
 
 
 class SpaceValidationError(Exception):
@@ -26,6 +37,37 @@ class SpaceValidationError(Exception):
     pydantic failures surface as 422, and these are semantic rather than
     structural problems with the request.
     """
+
+
+class SpaceConflictError(Exception):
+    """The request conflicts with the report's current state.
+
+    Callers map this to HTTP 409: the body is well formed and names real
+    records, but the report's visibility and its space membership cannot both
+    be what the request asks for.
+    """
+
+
+def reject_filing_private_report(space_id: str | None, access: ReportAccess) -> None:
+    """Refuse to file a private report into a space.
+
+    This is the invariant behind ``SPACE_MEMBER_ACCESS``, checked on the way
+    in. Enforcing it here rather than blanking membership later is what lets
+    every space response expose its overview pointer without a per-caller
+    visibility resolution.
+    """
+    if space_id is not None and access.scope != "public":
+        raise SpaceConflictError("Publish the report before filing it into a space")
+
+
+def reject_privatising_space_member(space_id: str | None, access: ReportAccess | None) -> None:
+    """Refuse to make a report private while it is filed in a space.
+
+    The other half of the same invariant: without it, filing a public report and
+    then unpublishing it would reintroduce a private space member.
+    """
+    if space_id is not None and access is not None and access.scope != "public":
+        raise SpaceConflictError("Remove the report from its space before making it private")
 
 
 async def resolve_report_space(
@@ -58,17 +100,27 @@ async def resolve_report_space(
     return space_id, subspace_id
 
 
-async def resolve_overview_report(space_id: str, report_id: str | None) -> str | None:
+async def resolve_overview_report(
+    space_id: str,
+    report_id: str | None,
+    *,
+    user_id: str | None = None,
+) -> str | None:
     """Validate a report proposed as a space's overview, and return it.
 
     The target must be filed in this space; ``None`` clears the pointer. This is
     a validation rather than an invariant: nothing stops the report being moved
     out or deleted later, and the pointer is resolved lazily so it simply reads
     as "no overview" if that happens.
+
+    ``user_id`` scopes the lookup to reports the caller can see, so nominating a
+    report cannot confirm the existence of one they were never shown. Space
+    members are public by ``SPACE_MEMBER_ACCESS``, so this only ever rejects a
+    report the caller had no business naming.
     """
     if report_id is None:
         return None
-    report = await report_store.get_report_metadata(report_id)
+    report = await report_store.get_report_metadata(report_id, user_id=user_id)
     if report is None:
         raise SpaceValidationError("Report not found")
     if report.space_id != space_id:

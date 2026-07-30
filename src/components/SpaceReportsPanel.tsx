@@ -233,8 +233,9 @@ function SpaceReportsPanel({
         icon: <DriveFileMoveIcon fontSize="small" />,
         onClick: () => setMoveTarget(report),
         disabled: !canWriteReports || tree.subspaces.length === 0,
-        tooltip:
-          tree.subspaces.length === 0
+        tooltip: !canWriteReports
+          ? 'You do not have permission to move reports'
+          : tree.subspaces.length === 0
             ? 'This space has no sub-spaces'
             : undefined,
       },
@@ -244,6 +245,9 @@ function SpaceReportsPanel({
         icon: <RemoveCircleOutlineIcon fontSize="small" />,
         onClick: () => void onRemoveReportFromSpace(report.report_id),
         disabled: !canWriteReports,
+        tooltip: canWriteReports
+          ? undefined
+          : 'You do not have permission to move reports',
         destructive: true,
         dividerBefore: true,
       },
@@ -418,7 +422,10 @@ function SpaceReportsPanel({
                             />
                           )}
                         </Box>
-                        {canWriteReports && (
+                        {/* Either permission is enough to open the menu: the
+                            overview pointer is spaces:write and membership is
+                            reports:write, and each action disables itself. */}
+                        {(canWriteReports || canWriteSpaces) && (
                           <RowMenu
                             actions={reportActions(report)}
                             label="Report actions"

@@ -9,9 +9,13 @@ reports within a space.
 Both are optional. A report can sit in no space, in a space, or in a space and one of its sub-spaces;
 a sub-space can never be set without a space.
 
-Spaces are visible to everyone with `spaces:read`. They carry no access scope of their own, and the
-reports listed inside a space are still filtered by each report's own visibility, so a private report
-belonging to another user never appears.
+Spaces are visible to everyone with `spaces:read`. They carry no access scope of their own.
+
+**A report filed in a space is public.** A space is a shared container, so a draft cannot be filed into
+one: publish it first. In the other direction, a report has to be removed from its space before it can
+be unpublished. Creating a report from inside a space publishes it as part of the create. This is why a
+space never holds a report that some of its viewers cannot open — and why a space can always be emptied
+by whoever can see it.
 
 ## The space overview
 
@@ -26,9 +30,12 @@ Having no overview is a normal state, and it is what a new space starts in. The 
 the space name and prompts you to pick one.
 
 The pointer is resolved **lazily**, which is what keeps the nominated report ordinary. If it is moved
-out of the space, deleted, or is private and belongs to someone else, the space simply reads as having
-no overview for whoever is looking — nothing needs to be cleaned up, and nothing about the report is
-restricted to prevent it.
+out of the space or deleted, the space simply reads as having no overview — nothing needs to be cleaned
+up, and nothing about the report is restricted to prevent it.
+
+Only `GET /api/v1/spaces/<id>/tree` reports the pointer, because only it has the caller's report list
+to resolve it against. `GET /api/v1/spaces` and `GET /api/v1/spaces/<id>` always return
+`overview_report_id: null`.
 
 ## Managing spaces
 
@@ -55,9 +62,9 @@ dialog.
 **Deleting a space never deletes a report.** Sub-spaces do not block the delete either — they are only
 grouping labels, and once no reports remain nothing references them.
 
-Emptiness is evaluated across *all* reports in the space, including ones the deleting user cannot see.
-A space holding another user's private report cannot be deleted, which is what prevents that report
-from being orphaned.
+Emptiness is evaluated across *all* reports in the space, without the deleting user's visibility
+filter. Members are public, so this is belt and braces rather than load-bearing — but it means the
+check can never read a space as empty when it is not.
 
 ## Managing sub-spaces
 
@@ -75,7 +82,11 @@ An empty sub-space still shows its heading so it stays manageable.
 
 From the **Reports** list, use **Move to space…** on any report. From inside a report, the same action
 is in the overflow menu next to **Edit Report**. From inside a space, **New report** in the sidebar's
-footer creates a report already filed in that space.
+footer creates a report already filed in that space — published, since space members are public.
+
+**Move to space…** is disabled on a draft, with a tooltip saying to publish it first, and the Reports
+list's bulk **Move to space** is disabled while the selection contains any draft. **Unpublish** is
+disabled on a report that is in a space.
 
 The dialog has two selects. The sub-space select stays disabled until a space is chosen and resets
 whenever the space changes — matching the API rule that a sub-space must belong to the chosen space.
@@ -114,6 +125,9 @@ inside a toolset, a sub-space is a label with no independently callable surface.
 Filing a report into a space requires only `reports:write`. Filing is a report edit, and since spaces
 are globally visible there is nothing to leak by letting any report author choose a space.
 
+A `spaces:write` holder without `reports:write` can still pin and clear the overview: the sidebar's
+per-report menu opens for either permission and disables the actions the caller lacks.
+
 ## API
 
 ```
@@ -134,7 +148,9 @@ PUT    /api/v1/reports/<report_id>/space
 `GET .../tree` returns the space, its sub-spaces, and the reports visible to the caller in one
 response — the space detail page's single fetch. Dangling references are blanked to `null` in that
 response: a `subspace_id` whose sub-space is gone, and an `overview_report_id` that is not among the
-returned reports.
+returned reports. It is also the only endpoint that returns the overview pointer at all; the list and
+get endpoints return `null` for it, since without a report list there is nothing to resolve it
+against.
 
 `PUT .../overview` takes `{"report_id": ...}`; the target must be a report filed in that space, and
 `null` clears the pointer.
@@ -143,7 +159,14 @@ Spaces are not versioned, so there are no `/versions` endpoints.
 
 `PUT /api/v1/reports/<report_id>/space` takes `{"space_id": ..., "subspace_id": ...}`. Both fields
 describe the desired final state; omitting `subspace_id` clears it. An invalid pairing (a sub-space
-with no space, an unknown space, or a sub-space belonging to a different space) returns 400.
+with no space, an unknown space, or a sub-space belonging to a different space) returns 400. Filing a
+private report returns **409** — publish it first. Removing a report from a space (`space_id: null`) is
+always allowed, whatever its visibility.
+
+`PUT /api/v1/reports/<report_id>/visibility` returns **409** when it would make a report private while
+it is filed in a space. `POST /api/v1/reports` and `POST /api/v1/reports/<id>/clone` create a public
+report when the new report lands in a space, and a draft otherwise. The same rules apply to the
+`reports__create`, `reports__clone`, and `reports__update_visibility` MCP tools.
 
 ## CLI
 
@@ -152,8 +175,9 @@ seizu spaces list
 seizu spaces show <space_id>
 ```
 
-`show` prints the space along with its reports and their sub-space grouping. Both accept
-`--output json`.
+`show` prints the space along with its reports, their sub-space grouping, and which one is the
+overview. `list` does not show the overview, because the list endpoint does not return the pointer.
+Both accept `--output json`.
 
 Spaces are created and organised from the web UI; the CLI commands are read-only, intended for
 verifying a deployment's setup.

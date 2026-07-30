@@ -372,11 +372,11 @@ export default function ListTable<T>({
     return filteredRows.slice(start, start + rowsPerPage);
   }, [filteredRows, page, pagination, rowsPerPage]);
 
-  const selectedKeySet = useMemo(
-    () => new Set(selectedKeys),
-
-    [selectedKeys.join(' ')],
-  );
+  // Keyed on the array identity, not a joined string: a delimiter cannot be
+  // chosen that no key contains, and joining collides across types (numeric 1
+  // and string "1"), which would leave a stale Set. Callers hold selection in
+  // state and replace the array on change, so the identity is stable.
+  const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
 
   const selectedRows = useMemo(
     () =>

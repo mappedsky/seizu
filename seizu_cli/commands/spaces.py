@@ -53,15 +53,15 @@ def list_spaces(
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Description")
-    table.add_column("Overview Report")
     table.add_column("Updated At")
 
+    # No overview column: the list endpoint does not return the pointer, since
+    # resolving it needs the caller's report list. `spaces show` prints it.
     for space in items:
         table.add_row(
             space["space_id"],
             space["name"],
             space.get("description", ""),
-            space.get("overview_report_id") or "—",
             space.get("updated_at", ""),
         )
 

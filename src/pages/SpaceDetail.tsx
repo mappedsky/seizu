@@ -247,6 +247,13 @@ function SpaceDetail() {
             onKeyDown={(e) => e.key === 'Enter' && handleCreateReport()}
             sx={{ mt: 1 }}
           />
+          {/* Not a draft, unlike New report elsewhere: reports in a space are
+              public, so the create publishes. Say so rather than let the user
+              discover it from a disabled Unpublish action. */}
+          <Alert severity="info" sx={{ mt: 2 }}>
+            Reports in a space are visible to everyone, so this one is created
+            published.
+          </Alert>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCreateOpen(false)} disabled={creating}>

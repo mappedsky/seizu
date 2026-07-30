@@ -10,7 +10,7 @@ It is well suited for building reporting for tools like `cartography <https://gi
 Seizu includes:
 
 * A configuration-driven react/mui frontend, with support for a dashboard, arbitrary reports, using a row/panel based layout with various panel types for visualizing data
-* **Spaces** for grouping related reports, with optional sub-spaces for organizing within a space and an auto-created overview report as each space's landing page
+* **Spaces** for grouping related reports, with optional sub-spaces for organizing within a space and any one report pinned as the space's landing page
 * An interactive **Query Console** for running ad-hoc Cypher queries, with graph, table, and raw result views, and a collapsible database schema browser showing available node labels, relationship types, and property keys
 * Temporal-backed **Workflows** with sequential stages, parallel activities, named outputs, and time or graph-event schedules
 * An **MCP server** at ``/api/v1/mcp`` that exposes user-defined Cypher-backed tools to LLM agents such as Claude

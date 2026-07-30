@@ -24,12 +24,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Spaces** — group reports into named spaces, with optional sub-spaces for
   organizing within a space. A **Spaces** entry in the sidebar lists them; the
-  space detail page renders an auto-created overview report with a sidebar
-  listing the space's other reports, ungrouped first and then grouped by
-  sub-space. Reports are filed via **Move to space…** on the Reports list or
-  inside a report. Spaces are unversioned and globally visible; report-level
-  visibility still governs what appears inside one. Deleting a space is blocked
-  while it holds sub-spaces or reports other than its overview. Permissions:
+  space detail page has a sidebar listing the space's reports, ungrouped first
+  and then grouped by sub-space, and renders whichever report is pinned as the
+  space's overview. Reports are filed via **Move to space…** on the Reports list
+  or inside a report; a report filed in a space is public, so publish a draft
+  before filing it and remove a report from its space before unpublishing it.
+  Spaces are unversioned and globally visible; report-level visibility still
+  governs what appears inside one. Deleting a space is blocked while it holds
+  reports; its sub-spaces are deleted with it and no report ever is.
+  Permissions:
   `spaces:read` (Viewer), `spaces:write` / `spaces:delete` (Editor). New
   endpoints under `/api/v1/spaces`, plus
   `PUT /api/v1/reports/<id>/space`; new `seizu spaces list` / `seizu spaces show`
@@ -41,8 +44,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **operators managing the table with IaC should add it there**. Without it
   Seizu falls back to filtering the full report list — correct, but the old
   cost — and logs `Space reports GSI unavailable`. No backfill is required.
-- `ReportListItem` and `ReportVersion` now carry `space_id`, `subspace_id`, and
-  `space_overview`. MCP consumers of `reports__list` and `reports__get` see these
+- `ReportListItem` and `ReportVersion` now carry `space_id` and `subspace_id`.
+  MCP consumers of `reports__list` and `reports__get` see these
   fields automatically. There is no `spaces` MCP builtin group yet.
 - **`agent_chat` workflow activity** — the general-purpose AI activity. You
   supply the prompt; it runs a headless agent session as the workflow's creator

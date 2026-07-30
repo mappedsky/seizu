@@ -611,3 +611,86 @@ async def test_set_space_overview_requires_spaces_write():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": None})
     assert ret.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# The overview pointer is only exposed by the tree
+# ---------------------------------------------------------------------------
+
+
+async def test_list_spaces_omits_the_overview_pointer(mocker):
+    """Only the tree can resolve the pointer, so the list must not carry it.
+
+    An unresolved pointer would disclose the ID and existence of a report the
+    caller was never shown.
+    """
+    mocker.patch(
+        "reporting.routes.spaces.report_store.list_spaces",
+        new=AsyncMock(return_value=[_space(overview_report_id="r1")]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/spaces")
+    assert ret.status_code == 200
+    assert ret.json()["spaces"][0]["overview_report_id"] is None
+
+
+async def test_get_space_omits_the_overview_pointer(mocker):
+    mocker.patch(
+        "reporting.routes.spaces.report_store.get_space",
+        new=AsyncMock(return_value=_space(overview_report_id="r1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/spaces/sp1")
+    assert ret.status_code == 200
+    assert ret.json()["overview_report_id"] is None
+
+
+async def test_update_space_omits_the_overview_pointer(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.list_spaces", new=AsyncMock(return_value=[]))
+    mocker.patch(
+        "reporting.routes.spaces.report_store.update_space",
+        new=AsyncMock(return_value=_space(name="Renamed", overview_report_id="r1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1", json={"name": "Renamed"})
+    assert ret.status_code == 200
+    assert ret.json()["overview_report_id"] is None
+
+
+async def test_set_space_overview_looks_the_report_up_as_the_caller(mocker):
+    """Nominating a report must not confirm the existence of an unseen one."""
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mock_meta = mocker.patch(
+        "reporting.services.report_store.get_report_metadata",
+        new=AsyncMock(return_value=_report("r1", space_id="sp1")),
+    )
+    mocker.patch(
+        "reporting.routes.spaces.report_store.set_space_overview",
+        new=AsyncMock(return_value=_space(overview_report_id="r1")),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": "r1"})
+    assert ret.status_code == 200
+    assert mock_meta.call_args.kwargs["user_id"] == "test-user-id"
+
+
+async def test_set_space_overview_rejects_a_report_the_caller_cannot_see(mocker):
+    mocker.patch("reporting.routes.spaces.report_store.get_space", new=AsyncMock(return_value=_space()))
+    mocker.patch(
+        "reporting.services.report_store.get_report_metadata",
+        new=AsyncMock(return_value=None),
+    )
+    mock_set = mocker.patch(
+        "reporting.routes.spaces.report_store.set_space_overview",
+        new=AsyncMock(return_value=_space()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.put("/api/v1/spaces/sp1/overview", json={"report_id": "hidden"})
+    assert ret.status_code == 400
+    assert "Report not found" in ret.json()["error"]
+    mock_set.assert_not_called()

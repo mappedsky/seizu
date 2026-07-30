@@ -312,7 +312,18 @@ function ReportPane({
                     ) : (
                       <PublicIcon fontSize="small" />
                     ),
-                    disabled: !canUpdateAccess || updatingAccess,
+                    // Reports in a space are public, so unpublishing means
+                    // removing it from its space first.
+                    disabled:
+                      !canUpdateAccess ||
+                      updatingAccess ||
+                      (displayedAccessScope === 'public' &&
+                        !!displayedSpace.spaceId),
+                    tooltip:
+                      displayedAccessScope === 'public' &&
+                      displayedSpace.spaceId
+                        ? 'Remove the report from its space before unpublishing it'
+                        : undefined,
                     onClick: handleToggleAccess,
                   },
                   {
@@ -330,7 +341,12 @@ function ReportPane({
                     key: 'space',
                     label: 'Move to space…',
                     icon: <DriveFileMoveIcon fontSize="small" />,
-                    disabled: false,
+                    // A draft cannot be filed into a space at all.
+                    disabled: displayedAccessScope !== 'public',
+                    tooltip:
+                      displayedAccessScope === 'public'
+                        ? undefined
+                        : 'Publish the report before filing it into a space',
                     onClick: () => setMoveOpen(true),
                   },
                 ]

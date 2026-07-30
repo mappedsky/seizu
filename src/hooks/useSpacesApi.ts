@@ -13,6 +13,10 @@ export interface SpaceListItem {
   space_id: string;
   name: string;
   description: string;
+  /**
+   * Populated only by the tree endpoint, which has the caller's visible report
+   * list to resolve it against; the list and get endpoints always return null.
+   */
   overview_report_id: string | null;
   created_at: string;
   updated_at: string;
@@ -34,10 +38,11 @@ export interface SpaceTree {
   space: SpaceListItem;
   subspaces: SubspaceItem[];
   /**
-   * Reports filed in the space, filtered to what the caller may see. The API
-   * blanks out dangling references before responding — a `subspace_id` whose
-   * sub-space is gone, and an `overview_report_id` that is no longer a member —
-   * so neither reaches here.
+   * Reports filed in the space. Members are public (a draft cannot be filed),
+   * so this is not narrowed per caller in practice. The API blanks out dangling
+   * references before responding — a `subspace_id` whose sub-space is gone, and
+   * an `overview_report_id` that is no longer a member — so neither reaches
+   * here.
    */
   reports: ReportListItem[];
 }

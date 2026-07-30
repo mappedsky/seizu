@@ -326,20 +326,26 @@ function ReportsList() {
           <PublicIcon fontSize="small" />
         ),
         onClick: () => handleToggleAccess(report),
-        disabled: !canUpdateAccess,
-        tooltip: canUpdateAccess
-          ? undefined
-          : 'Only the report owner can publish or unpublish',
+        // Reports in a space are public, so unpublishing one has to go through
+        // removing it from its space first.
+        disabled: !canUpdateAccess || (isPublic && !!report.space_id),
+        tooltip: !canUpdateAccess
+          ? 'Only the report owner can publish or unpublish'
+          : isPublic && report.space_id
+            ? 'Remove the report from its space before unpublishing it'
+            : undefined,
       },
       {
         key: 'space',
         label: 'Move to space…',
         icon: <DriveFileMoveIcon fontSize="small" />,
         onClick: () => setMoveTarget(report),
-        disabled: !canWrite,
-        tooltip: canWrite
-          ? undefined
-          : 'You do not have permission to move reports',
+        disabled: !canWrite || !isPublic,
+        tooltip: !canWrite
+          ? 'You do not have permission to move reports'
+          : isPublic
+            ? undefined
+            : 'Publish the report before filing it into a space',
       },
       {
         key: 'pin',
@@ -630,14 +636,27 @@ function ReportsList() {
             onSelectionChange={setSelectedKeys}
             bulkActions={(rows) => (
               <>
-                <Button
-                  size="small"
-                  startIcon={<DriveFileMoveIcon fontSize="small" />}
-                  disabled={bulkBusy}
-                  onClick={() => setBulkMoveOpen(true)}
+                <Tooltip
+                  title={
+                    rows.some((report) => report.access.scope !== 'public')
+                      ? 'Publish the selected drafts before filing them into a space'
+                      : ''
+                  }
                 >
-                  Move to space
-                </Button>
+                  <span>
+                    <Button
+                      size="small"
+                      startIcon={<DriveFileMoveIcon fontSize="small" />}
+                      disabled={
+                        bulkBusy ||
+                        rows.some((report) => report.access.scope !== 'public')
+                      }
+                      onClick={() => setBulkMoveOpen(true)}
+                    >
+                      Move to space
+                    </Button>
+                  </span>
+                </Tooltip>
                 <Button
                   size="small"
                   startIcon={<PushPinIcon fontSize="small" />}

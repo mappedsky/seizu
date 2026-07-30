@@ -15,7 +15,10 @@ from reporting.schema.report_config import (
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
 from reporting.services.spaces import (
+    SPACE_MEMBER_ACCESS,
+    SpaceConflictError,
     SpaceValidationError,
+    reject_privatising_space_member,
     resolve_clone_space,
     resolve_report_space,
 )
@@ -64,6 +67,8 @@ async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dic
     item = await report_store.create_report(
         name=body.name,
         created_by=user.user.user_id,
+        # Space members are public; standalone reports stay drafts.
+        access=SPACE_MEMBER_ACCESS if space_id is not None else None,
         space_id=space_id,
         subspace_id=subspace_id,
     )
@@ -158,6 +163,7 @@ async def _clone(args: dict[str, Any], current_user: CurrentUser | None) -> dict
     new_item = await report_store.create_report(
         name=body.name,
         created_by=user.user.user_id,
+        access=SPACE_MEMBER_ACCESS if space_id is not None else None,
         space_id=space_id,
         subspace_id=subspace_id,
     )
@@ -181,6 +187,10 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
         return {"error": "Report not found"}
     if body.access is not None and meta.created_by != user.user.user_id:
         return {"error": "Only the report owner can update report access"}
+    try:
+        reject_privatising_space_member(meta.space_id, body.access)
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:
