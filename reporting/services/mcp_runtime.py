@@ -152,9 +152,9 @@ def _is_chat_safe_builtin(builtin: BuiltinTool) -> bool:
     if builtin.confirmation is not None:
         return True
     # Explicit exceptions are rare and must be documented on the tool
-    # registration. Today: the sandbox delegation tool, plus
-    # reports__create/reports__clone, which produce a private report except when
-    # they file into a space -- that case is caught by their resolver above.
+    # registration. Today: the sandbox delegation tool, plus reports__create,
+    # which produces a private report except when it files into a space -- that
+    # case is caught by its resolver above.
     if builtin.chat_safe_without_confirmation:
         return True
     return bool(builtin.required_permissions) and set(builtin.required_permissions) <= _CHAT_SAFE_PERMISSIONS
@@ -202,10 +202,11 @@ async def list_tools_for_user(
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
             continue
         # A tool carrying both a resolver and the no-confirmation exception is
-        # gated only for some argument shapes (reports__create/clone gate on
-        # filing into a space). It stays listed: the call-time gate below still
-        # refuses the gated shape, so excluding the tool entirely would cost the
-        # safe shape for nothing.
+        # gated only for some argument shapes (reports__create gates on filing
+        # into a space). It stays listed: the call-time gate below still refuses
+        # the gated shape, so excluding the tool entirely would cost the safe
+        # shape for nothing. A tool gated for every call (reports__clone) has no
+        # such flag and is dropped here, since none of its calls could proceed.
         if (
             exclude_confirmation_gated
             and builtin.confirmation is not None
@@ -410,7 +411,7 @@ async def _call_tool_core(
             # defense-in-depth backstop behind tool-list filtering at the call site.
             #
             # Ask the resolver first: several resolvers gate only some argument
-            # shapes (reports__create/clone gate on filing into a space,
+            # shapes (reports__create gates on filing into a space,
             # reports__update_visibility only when it carries an access change),
             # and refusing a call the resolver would have waved through would deny
             # the safe shape for no gain. A resolver that returns a target here

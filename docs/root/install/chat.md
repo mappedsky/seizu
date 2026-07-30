@@ -42,7 +42,7 @@ Chat exposes a deliberately narrower tool surface than the MCP server:
 
 - **Read and inspection tools** (schema, query, validate, listing reports/toolsets/skillsets/scheduled queries/users/roles) are available directly.
 - **Mutating tools** (creating or updating reports, scheduled queries, roles, and so on) pause the turn and render an in-chat **confirmation card**; the action runs only after you approve it. Approvals and denials expire after `ACTION_CONFIRMATION_TTL_SECONDS`.
-- New write/delete tools are **hidden from chat by default** (fail closed) until they are explicitly given a confirmation flow. The only no-confirmation mutating exceptions are `reports__create` and `reports__clone`, which create new private reports and cannot modify existing resources.
+- New write/delete tools are **hidden from chat by default** (fail closed) until they are explicitly given a confirmation flow. The only no-confirmation mutating exception is `reports__create`, which creates a new private report and cannot modify existing resources — and it still asks for confirmation in the one case where the new report is public (filing it into a space). `reports__clone` asks every time, since whether the copy is public depends on where the source is filed.
 
 Users holding `chat:bypass_permissions` see a **Bypass confirmations** toggle (off by default) that lets the agent execute confirmation-gated actions without pausing. Every bypassed execution is audit-logged, and the user's normal RBAC permissions still apply. The same permission controls whether headless runs (scheduled chats, Temporal workflows) may bypass confirmations — without it, mutating tools fail closed for the run.
 

@@ -457,10 +457,9 @@ GROUP_DEF = BuiltinGroup(
             requires_user=True,
             # Always confirmation-gated: a clone that lands in a space publishes
             # the source's contents, and the resolver cannot rule that out
-            # race-free -- see _confirm_report_clone. The flag stays so the tool
-            # is still listed for callers that exclude gated tools; the gate
-            # itself refuses when there is nobody to approve.
-            chat_safe_without_confirmation=True,
+            # race-free -- see _confirm_report_clone. No no-confirmation
+            # exception, so autonomous callers that cannot approve anything drop
+            # the tool instead of listing one whose every call would be refused.
             confirmation=_confirm_report_clone,
         ),
     ],

@@ -292,7 +292,8 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
 
 
 async def test_chat_safe_tool_listing_includes_create_write_builtins(mocker):
-    """reports__create/clone are always private so they are safe without confirmation."""
+    """Chat lists both: create is safe without confirmation for the private case,
+    and clone is listed because a confirmation resolver IS the safety gate."""
     mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools", return_value=[])
     current = _user(
         frozenset(
@@ -599,8 +600,12 @@ async def test_list_tools_exclude_confirmation_gated_keeps_readonly_and_user_too
 
     names = {tool.name for tool in tools}
     assert "reports__delete" not in names  # confirmation-gated → excluded
+    # Gated on every call, so listing it would only produce refusals.
+    assert "reports__clone" not in names
     assert "graph__query" in names  # read-only → kept
-    assert "reports__create" in names  # no-confirmation exception → kept
+    # Conditionally gated: the private-draft shape still runs, and the call-time
+    # gate refuses the publishing one.
+    assert "reports__create" in names
     assert "security__lookup" in names  # user-defined toolset tool → kept
 
 

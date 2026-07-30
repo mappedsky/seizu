@@ -167,7 +167,8 @@ always allowed, whatever its visibility.
 `PUT /api/v1/reports/<report_id>/visibility` returns **409** when it would make a report private while
 it is filed in a space. `POST /api/v1/reports` and `POST /api/v1/reports/<id>/clone` create a public
 report when the new report lands in a space, and a draft otherwise. The same rules apply to the
-`reports__create`, `reports__clone`, and `reports__update_visibility` MCP tools.
+`reports__create`, `reports__clone`, and `reports__update_visibility` MCP tools. In chat, creating into
+a space asks for confirmation first, and cloning always does.
 
 ## CLI
 
