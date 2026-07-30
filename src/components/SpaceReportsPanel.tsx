@@ -4,6 +4,7 @@ import {
   Alert,
   Box,
   Button,
+  ListItemIcon,
   Dialog,
   DialogActions,
   DialogContent,
@@ -18,7 +19,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import AddIcon from '@mui/icons-material/Add';
+import CreateNewFolderOutlinedIcon from '@mui/icons-material/CreateNewFolderOutlined';
+import PostAddOutlinedIcon from '@mui/icons-material/PostAddOutlined';
 import StarIcon from '@mui/icons-material/Star';
 import StarBorderIcon from '@mui/icons-material/StarBorder';
 import ChevronLeft from '@mui/icons-material/ChevronLeft';
@@ -36,6 +38,9 @@ import type { ReportListItem } from 'src/hooks/useReportsApi';
 import type { SpaceTree, SubspaceItem } from 'src/hooks/useSpacesApi';
 
 const PANEL_WIDTH = 260;
+// Tightened from the MUI default so the footer actions sit at the same rhythm
+// as the report rows above them.
+const footerActionIconSx = { minWidth: 32 } as const;
 
 interface SpaceReportsPanelProps {
   open: boolean;
@@ -115,8 +120,6 @@ function SpaceReportsPanel({
       })),
     ];
   }, [tree]);
-
-  const hasMemberReports = groups.some((group) => group.reports.length > 0);
 
   const openCreateSubspace = () => {
     setSubspaceEditTarget(null);
@@ -260,8 +263,8 @@ function SpaceReportsPanel({
           overflow: 'hidden',
         }}
       >
-        {/* Title row, following the chat sidebar: label, then the create
-            affordance as a tooltipped icon, then the collapse toggle. */}
+        {/* Title row: the space's own name, so the list below is only reports.
+            Creation lives in the footer action group. */}
         <Box
           sx={{
             alignItems: 'center',
@@ -274,20 +277,23 @@ function SpaceReportsPanel({
             pb: 1,
           }}
         >
-          <Typography variant="subtitle2" sx={{ flexGrow: 1, minWidth: 0 }}>
-            Space
-          </Typography>
-          {canWriteSpaces && (
-            <Tooltip title="New sub-space">
-              <IconButton
-                aria-label="New sub-space"
-                size="small"
-                onClick={openCreateSubspace}
-              >
-                <AddIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          )}
+          <Tooltip
+            title={tree.space.name}
+            placement="top"
+            arrow
+            disableInteractive
+          >
+            <Typography
+              variant="subtitle2"
+              sx={{
+                ...listTableTruncateSx,
+                flexGrow: 1,
+                fontWeight: 600,
+              }}
+            >
+              {tree.space.name}
+            </Typography>
+          </Tooltip>
           <Tooltip title="Hide reports">
             <IconButton
               aria-label="Hide reports"
@@ -306,37 +312,6 @@ function SpaceReportsPanel({
           data-testid="space-reports-scroll"
           sx={{ flex: 1, minHeight: 0, overflowY: 'auto', pt: 0.5 }}
         >
-          <List dense disablePadding>
-            <ListItem disablePadding>
-              {/* The space's own entry, named after the space rather than
-                  labelled "Overview" — it is the space's landing page, so the
-                  space name is what identifies it. */}
-              <ListItemButton
-                selected={activeReportId === tree.space.overview_report_id}
-                onClick={() => onSelectReport(tree.space.overview_report_id)}
-              >
-                <Tooltip
-                  title={tree.space.name}
-                  placement="top"
-                  arrow
-                  disableInteractive
-                >
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      ...listTableTruncateSx,
-                      fontWeight: 600,
-                      width: '100%',
-                    }}
-                  >
-                    {tree.space.name}
-                  </Typography>
-                </Tooltip>
-              </ListItemButton>
-            </ListItem>
-          </List>
-          <Divider />
-
           {groups.map((group) => {
             const key = group.subspace?.subspace_id ?? '__ungrouped__';
             if (!group.subspace && group.reports.length === 0) return null;
@@ -426,58 +401,40 @@ function SpaceReportsPanel({
           })}
         </Box>
 
-        <Box sx={{ borderTop: 1, borderColor: 'divider', flexShrink: 0, p: 1 }}>
-          {canWriteReports && (
-            <Button
-              size="small"
-              fullWidth
-              startIcon={<AddIcon fontSize="small" />}
-              onClick={onCreateReport}
-              sx={{
-                justifyContent: 'flex-start',
-                mb: hasMemberReports ? 0.5 : 1,
-              }}
-            >
-              New report here
-            </Button>
-          )}
-          {hasMemberReports ? (
-            <Button
-              size="small"
-              fullWidth
-              onClick={() => navigate('/app/reports')}
-            >
-              All reports
-            </Button>
-          ) : (
-            // Nothing filed here yet: point at where reports get filed rather
-            // than offering a bare navigation link.
-            <Box sx={{ px: 1, py: 0.5 }}>
-              <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
-                No reports yet
-              </Typography>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ display: 'block', mb: 1 }}
-              >
-                Create one here, or add an existing report with{' '}
-                <Box component="span" sx={{ fontStyle: 'italic' }}>
-                  Move to space
-                </Box>{' '}
-                from the reports list.
-              </Typography>
-              <Button
-                size="small"
-                variant="outlined"
-                fullWidth
-                startIcon={<Insights fontSize="small" />}
-                onClick={() => navigate('/app/reports')}
-              >
-                Go to reports
-              </Button>
-            </Box>
-          )}
+        {/* Footer actions: one styled group so creating and navigating away
+            read as the same kind of affordance. The empty-state guidance lives
+            in the main region, which has room for it. */}
+        <Box sx={{ borderTop: 1, borderColor: 'divider', flexShrink: 0 }}>
+          <List dense disablePadding>
+            {canWriteSpaces && (
+              <ListItem disablePadding>
+                <ListItemButton onClick={openCreateSubspace}>
+                  <ListItemIcon sx={footerActionIconSx}>
+                    <CreateNewFolderOutlinedIcon fontSize="small" />
+                  </ListItemIcon>
+                  <Typography variant="body2">New sub-space</Typography>
+                </ListItemButton>
+              </ListItem>
+            )}
+            {canWriteReports && (
+              <ListItem disablePadding>
+                <ListItemButton onClick={onCreateReport}>
+                  <ListItemIcon sx={footerActionIconSx}>
+                    <PostAddOutlinedIcon fontSize="small" />
+                  </ListItemIcon>
+                  <Typography variant="body2">New report</Typography>
+                </ListItemButton>
+              </ListItem>
+            )}
+            <ListItem disablePadding>
+              <ListItemButton onClick={() => navigate('/app/reports')}>
+                <ListItemIcon sx={footerActionIconSx}>
+                  <Insights fontSize="small" />
+                </ListItemIcon>
+                <Typography variant="body2">Go to all reports</Typography>
+              </ListItemButton>
+            </ListItem>
+          </List>
         </Box>
       </Box>
 

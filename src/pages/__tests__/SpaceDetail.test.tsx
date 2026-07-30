@@ -131,6 +131,7 @@ function renderAt(path: string) {
               </>
             }
           />
+          <Route path="/app/reports" element={<LocationTracker />} />
         </Routes>
       </ThemeProvider>
     </MemoryRouter>,
@@ -283,55 +284,6 @@ describe('SpaceDetail', () => {
     expect(screen.getByText('Failed to load space')).toBeInTheDocument();
   });
 
-  it('offers an All reports link when the space has member reports', () => {
-    renderAt('/app/spaces/sp1');
-
-    expect(
-      screen.getByRole('button', { name: 'All reports' }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText('No reports yet')).toBeNull();
-  });
-
-  it('calls out how to add reports when the space has none', () => {
-    mockUseSpaceTree.mockReturnValue({
-      tree: {
-        ...TREE,
-        // The API blanks a pointer that no longer resolves.
-        space: { ...TREE.space, overview_report_id: null },
-        subspaces: [],
-        reports: [],
-      },
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
-
-    renderAt('/app/spaces/sp1');
-
-    expect(screen.getByText('No reports yet')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /go to reports/i }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'All reports' })).toBeNull();
-  });
-
-  it('still calls out adding reports when only empty sub-spaces exist', () => {
-    mockUseSpaceTree.mockReturnValue({
-      tree: {
-        ...TREE,
-        space: { ...TREE.space, overview_report_id: null },
-        reports: [],
-      },
-      loading: false,
-      error: null,
-      refresh: jest.fn(),
-    });
-
-    renderAt('/app/spaces/sp1');
-
-    expect(screen.getByText('No reports yet')).toBeInTheDocument();
-  });
-
   it('keeps the panel header and footer outside the scroll region', () => {
     // The regression this guards: with the whole panel scrollable (and the page
     // unbounded in height), the "Reports" header scrolled up under the fixed
@@ -342,12 +294,13 @@ describe('SpaceDetail', () => {
     expect(scroll).toContainElement(
       screen.getByRole('button', { name: /Loose Report/ }),
     );
-    expect(scroll).not.toContainElement(screen.getByText('Space'));
+    // The space name is the header, and the actions are the footer.
+    expect(scroll).not.toContainElement(screen.getByText('Cloud Security'));
     expect(scroll).not.toContainElement(
       screen.getByRole('button', { name: 'New sub-space' }),
     );
     expect(scroll).not.toContainElement(
-      screen.getByRole('button', { name: 'All reports' }),
+      screen.getByRole('button', { name: 'Go to all reports' }),
     );
   });
 
@@ -474,7 +427,7 @@ describe('SpaceDetail', () => {
     const user = userEvent.setup({ delay: null });
     renderAt('/app/spaces/sp1');
 
-    await user.click(screen.getByRole('button', { name: 'New report here' }));
+    await user.click(screen.getByRole('button', { name: 'New report' }));
     await user.type(
       screen.getByRole('textbox', { name: /report name/i }),
       'Fresh',
@@ -485,5 +438,59 @@ describe('SpaceDetail', () => {
     await waitFor(() => {
       expect(createReport).toHaveBeenCalledWith('Fresh', 'sp1');
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Footer actions
+  // -------------------------------------------------------------------------
+
+  it('offers the footer actions as one group', () => {
+    renderAt('/app/spaces/sp1');
+
+    for (const label of ['New sub-space', 'New report', 'Go to all reports']) {
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it('keeps Go to all reports available without write permissions', () => {
+    mockUsePermissions.mockReturnValue(() => false);
+
+    renderAt('/app/spaces/sp1');
+
+    expect(
+      screen.getByRole('button', { name: 'Go to all reports' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New sub-space' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'New report' })).toBeNull();
+  });
+
+  it('navigates to the reports list from the footer', () => {
+    renderAt('/app/spaces/sp1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to all reports' }));
+
+    expect(screen.getByTestId('location')).toHaveTextContent('/app/reports');
+  });
+
+  it('does not duplicate the create action in the empty state', () => {
+    // The sidebar footer carries New report; the main region only explains.
+    mockUseSpaceTree.mockReturnValue({
+      tree: {
+        ...TREE,
+        space: { ...TREE.space, overview_report_id: null },
+        subspaces: [],
+        reports: [],
+      },
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+
+    renderAt('/app/spaces/sp1');
+
+    expect(screen.getByText(/Create one from the sidebar/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'New report' })).toHaveLength(
+      1,
+    );
   });
 });

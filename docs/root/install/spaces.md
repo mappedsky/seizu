@@ -64,7 +64,7 @@ from being orphaned.
 Sub-spaces exist only as grouping labels inside the space detail page's sidebar. They have no detail
 page, no description, and no content of their own.
 
-- **Create** one with the **+** button at the top of the space sidebar.
+- **Create** one with **New sub-space** in the space sidebar's footer.
 - **Rename** or **delete** one from the menu on its heading.
 - Deleting a sub-space keeps its reports in the space; they move to the ungrouped list at the top.
 - Deleting the space removes its sub-spaces along with it.
@@ -74,8 +74,8 @@ An empty sub-space still shows its heading so it stays manageable.
 ## Filing reports into a space
 
 From the **Reports** list, use **Move to space…** on any report. From inside a report, the same action
-is in the overflow menu next to **Edit Report**. From inside a space, **New report here** creates a
-report already filed in that space.
+is in the overflow menu next to **Edit Report**. From inside a space, **New report** in the sidebar's
+footer creates a report already filed in that space.
 
 The dialog has two selects. The sub-space select stays disabled until a space is chosen and resets
 whenever the space changes — matching the API rule that a sub-space must belong to the chosen space.
@@ -91,9 +91,10 @@ Cloning a report inside a space produces a clone in the same space and sub-space
 
 ## The space detail page
 
-`/app/spaces/<space_id>` renders the space's overview report, if one is set, with a sidebar listing
-every report in the space: ungrouped ones first, then one group per sub-space. The overview report is
-marked with a star.
+`/app/spaces/<space_id>` renders the space's overview report, if one is set. The sidebar is headed by
+the space name and lists every report in it — ungrouped first, then one group per sub-space — with the
+overview report marked by a star. Its footer holds **New sub-space**, **New report**, and **Go to all
+reports**.
 
 Selecting a report navigates to `/app/spaces/<space_id>/reports/<report_id>`, so in-space reports are
 deep-linkable and browser back works. Opening a report that is not in the space shows an explicit

@@ -143,16 +143,12 @@ function SpaceDetail() {
           <Typography variant="h1" sx={{ mb: 1 }}>
             {tree!.space.name}
           </Typography>
-          <Typography color="text.secondary" sx={{ mb: 2 }}>
+          {/* No button here: the sidebar footer already carries New report. */}
+          <Typography color="text.secondary">
             {tree!.reports.length > 0
               ? "Set a report as this space's overview to show it here. Use the star action next to any report in the sidebar."
-              : 'This space has no reports yet. Create one, or move an existing report in from the reports list.'}
+              : 'This space has no reports yet. Create one from the sidebar, or move an existing report in from the reports list.'}
           </Typography>
-          {canWriteReports && tree!.reports.length === 0 && (
-            <Button variant="contained" onClick={() => setCreateOpen(true)}>
-              New report here
-            </Button>
-          )}
         </Box>
       );
     }
