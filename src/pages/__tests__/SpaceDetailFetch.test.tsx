@@ -12,6 +12,8 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { AuthConfigContext } from 'src/authConfig.context';
 import SpaceDetail from 'src/pages/SpaceDetail';
 import * as permissionsModule from 'src/hooks/usePermissions';
+import * as reportsApiModule from 'src/hooks/useReportsApi';
+import * as spacesApiModule from 'src/hooks/useSpacesApi';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
@@ -92,10 +94,35 @@ const TREE = {
 
 describe('SpaceDetail tree fetching', () => {
   let mockFetch: jest.Mock;
+  let mockUseSpaceMutations: jest.Mock;
+  let mockUseReportsMutations: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
     mockUsePermissions.mockReturnValue(() => true);
+    // useSpaceTree stays real — it is what this file exercises — but the
+    // mutation hooks are stubbed explicitly. A sibling suite spies on them, and
+    // in Bun a spy persists across files: our clearAllMocks() above would then
+    // leave the spied hook returning undefined, which reads as a null
+    // destructure inside the component rather than as a mocking problem.
+    mockUseSpaceMutations = jest.spyOn(
+      spacesApiModule,
+      'useSpaceMutations',
+    ) as unknown as jest.Mock;
+    mockUseSpaceMutations.mockReturnValue({
+      createSpace: jest.fn(),
+      updateSpace: jest.fn(),
+      deleteSpace: jest.fn(),
+      setSpaceOverview: jest.fn().mockResolvedValue(undefined),
+    });
+    mockUseReportsMutations = jest.spyOn(
+      reportsApiModule,
+      'useReportsMutations',
+    ) as unknown as jest.Mock;
+    mockUseReportsMutations.mockReturnValue({
+      createReport: jest.fn(),
+      setReportSpace: jest.fn().mockResolvedValue(undefined),
+    });
     mockFetch = jest.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve(TREE),
@@ -103,7 +130,11 @@ describe('SpaceDetail tree fetching', () => {
     global.fetch = mockFetch as unknown as typeof fetch;
   });
 
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    mockUseSpaceMutations.mockRestore?.();
+    mockUseReportsMutations.mockRestore?.();
+  });
 
   const treeCalls = () =>
     mockFetch.mock.calls.filter((call) =>
