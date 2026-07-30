@@ -261,7 +261,7 @@ describe('ReportsList', () => {
         '/app/reports/clone1?edit=true',
       );
     });
-  }, 15_000);
+  });
 
   it('shows an error dialog when unpublishing is rejected', async () => {
     updateReportVisibility.mockRejectedValue(
@@ -284,7 +284,7 @@ describe('ReportsList', () => {
         'Report must be unpinned and removed from the dashboard before it can be made private',
       ),
     ).toBeInTheDocument();
-  }, 15_000);
+  });
 
   it('shows the delete failure in the confirmation dialog', async () => {
     deleteReport.mockRejectedValue(
@@ -304,7 +304,7 @@ describe('ReportsList', () => {
     expect(
       screen.getByText('Report must be unpinned before it can be deleted'),
     ).toBeInTheDocument();
-  }, 15_000);
+  });
 
   it('shows the space column and links to the space', () => {
     mockUseReportsList.mockReturnValue({
@@ -344,7 +344,7 @@ describe('ReportsList', () => {
     await waitFor(() => {
       expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', 'ss1');
     });
-  }, 15_000);
+  });
 
   it('disables the sub-space select until a space is chosen', async () => {
     const user = userEvent.setup({ delay: null });
@@ -358,7 +358,7 @@ describe('ReportsList', () => {
       'aria-disabled',
       'true',
     );
-  }, 15_000);
+  });
 
   it('resets the sub-space when the space changes', async () => {
     mockUseReportsList.mockReturnValue({
@@ -382,7 +382,7 @@ describe('ReportsList', () => {
     await waitFor(() => {
       expect(setReportSpace).toHaveBeenCalledWith('r1', null, null);
     });
-  }, 15_000);
+  });
 
   it('disables the move action on a space overview report', async () => {
     mockUseReportsList.mockReturnValue({
@@ -402,7 +402,7 @@ describe('ReportsList', () => {
     expect(
       screen.getByRole('menuitem', { name: /move to space/i }),
     ).toHaveAttribute('aria-disabled', 'true');
-  }, 15_000);
+  });
 
   // -------------------------------------------------------------------------
   // Bulk actions
@@ -429,7 +429,7 @@ describe('ReportsList', () => {
     expect(
       screen.getByRole('button', { name: 'Move to space' }),
     ).toBeInTheDocument();
-  }, 15_000);
+  });
 
   it('selects every row on the page from the header checkbox', async () => {
     const user = userEvent.setup({ delay: null });
@@ -440,7 +440,7 @@ describe('ReportsList', () => {
     );
 
     expect(screen.getByText('2 selected')).toBeInTheDocument();
-  }, 15_000);
+  });
 
   it('bulk pins every selected report', async () => {
     const pinReport = jest.fn().mockResolvedValue(undefined);
@@ -467,7 +467,7 @@ describe('ReportsList', () => {
     });
     expect(pinReport).toHaveBeenCalledWith('r1', true);
     expect(pinReport).toHaveBeenCalledWith('r2', true);
-  }, 15_000);
+  });
 
   it('bulk moves every selected report into the chosen space', async () => {
     const user = userEvent.setup({ delay: null });
@@ -486,7 +486,7 @@ describe('ReportsList', () => {
     });
     expect(setReportSpace).toHaveBeenCalledWith('r1', 'sp1', null);
     expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
-  }, 15_000);
+  });
 
   it('skips overview reports when bulk moving', async () => {
     mockUseReportsList.mockReturnValue({
@@ -517,7 +517,7 @@ describe('ReportsList', () => {
       expect(setReportSpace).toHaveBeenCalledTimes(1);
     });
     expect(setReportSpace).toHaveBeenCalledWith('r2', 'sp1', null);
-  }, 15_000);
+  });
 
   it('reports per-report failures without aborting the rest of the batch', async () => {
     setReportSpace
@@ -539,7 +539,7 @@ describe('ReportsList', () => {
       expect(setReportSpace).toHaveBeenCalledTimes(2);
     });
     expect(await screen.findByText(/Executive Risk: nope/)).toBeInTheDocument();
-  }, 15_000);
+  });
 
   it('hides the checkbox column without reports:write', () => {
     mockUsePermissionState.mockReturnValue({
@@ -585,7 +585,7 @@ describe('ReportsList', () => {
       screen.getByRole('menuitem', { name: /unpublish/i }),
     ).toHaveAttribute('aria-disabled', 'true');
     expect(updateReportVisibility).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('disables Delete on a space overview report', async () => {
     const user = renderWithOverviewReport();
@@ -599,7 +599,7 @@ describe('ReportsList', () => {
       'true',
     );
     expect(deleteReport).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('still allows Publish on a private report', async () => {
     // Guard only the private-ward direction: Publish stays available.
@@ -620,7 +620,7 @@ describe('ReportsList', () => {
     expect(
       screen.getByRole('menuitem', { name: /publish/i }),
     ).not.toHaveAttribute('aria-disabled', 'true');
-  }, 15_000);
+  });
 
   it('skips overview reports when bulk deleting', async () => {
     mockUseReportsList.mockReturnValue({
@@ -648,5 +648,5 @@ describe('ReportsList', () => {
       expect(deleteReport).toHaveBeenCalledTimes(1);
     });
     expect(deleteReport).toHaveBeenCalledWith('r2');
-  }, 15_000);
+  });
 });

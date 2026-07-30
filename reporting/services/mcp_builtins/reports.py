@@ -14,6 +14,14 @@ from reporting.schema.report_config import (
 )
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
+from reporting.services.spaces import (
+    ProtectedReportError,
+    SpaceValidationError,
+    ensure_report_deletable,
+    ensure_visibility_change_allowed,
+    resolve_clone_space,
+    resolve_report_space,
+)
 
 GROUP = "reports"
 
@@ -52,7 +60,16 @@ async def _get_dashboard(args: dict[str, Any], current_user: CurrentUser | None)
 async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
     body = CreateReportRequest.model_validate(args)
-    item = await report_store.create_report(name=body.name, created_by=user.user.user_id)
+    try:
+        space_id, subspace_id = await resolve_report_space(body.space_id, body.subspace_id)
+    except SpaceValidationError as exc:
+        return {"error": str(exc)}
+    item = await report_store.create_report(
+        name=body.name,
+        created_by=user.user.user_id,
+        space_id=space_id,
+        subspace_id=subspace_id,
+    )
     return item.model_dump()
 
 
@@ -74,10 +91,18 @@ async def _create_version(args: dict[str, Any], current_user: CurrentUser | None
 
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
-    ok = await report_store.delete_report(args["report_id"], user_id=user.user.user_id)
+    report_id = args["report_id"]
+    meta = await report_store.get_report_metadata(report_id, user_id=user.user.user_id)
+    if not meta:
+        return {"error": "Report not found"}
+    try:
+        ensure_report_deletable(meta)
+    except ProtectedReportError as exc:
+        return {"error": str(exc)}
+    ok = await report_store.delete_report(report_id, user_id=user.user.user_id)
     if not ok:
         return {"error": "Report not found"}
-    return {"report_id": args["report_id"]}
+    return {"report_id": report_id}
 
 
 async def _pin(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -134,7 +159,18 @@ async def _clone(args: dict[str, Any], current_user: CurrentUser | None) -> dict
     if not source:
         return {"error": "Report not found"}
     body = CloneReportRequest.model_validate({k: v for k, v in args.items() if k != "report_id"})
-    new_item = await report_store.create_report(name=body.name, created_by=user.user.user_id)
+    try:
+        space_id, subspace_id = await resolve_clone_space(
+            source.space_id, source.subspace_id, body.space_id, body.subspace_id
+        )
+    except SpaceValidationError as exc:
+        return {"error": str(exc)}
+    new_item = await report_store.create_report(
+        name=body.name,
+        created_by=user.user.user_id,
+        space_id=space_id,
+        subspace_id=subspace_id,
+    )
     cloned_config = {**source.config, "name": body.name}
     await report_store.save_report_version(
         report_id=new_item.report_id,
@@ -155,6 +191,10 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
         return {"error": "Report not found"}
     if body.access is not None and meta.created_by != user.user.user_id:
         return {"error": "Only the report owner can update report access"}
+    try:
+        ensure_visibility_change_allowed(meta, body.access)
+    except ProtectedReportError as exc:
+        return {"error": str(exc)}
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:

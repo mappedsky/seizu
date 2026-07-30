@@ -151,7 +151,7 @@ describe('SpaceDetail tree fetching', () => {
 
     // Three navigations, still one tree fetch.
     expect(treeCalls()).toBe(1);
-  }, 15_000);
+  });
 
   it('refetches the tree when a report changes', async () => {
     renderApp();
@@ -162,7 +162,7 @@ describe('SpaceDetail tree fetching', () => {
     window.dispatchEvent(new Event('seizu:reports-updated'));
 
     await waitFor(() => expect(treeCalls()).toBe(2));
-  }, 15_000);
+  });
 
   it('refetches the tree when a space or sub-space changes', async () => {
     renderApp();
@@ -171,7 +171,7 @@ describe('SpaceDetail tree fetching', () => {
     window.dispatchEvent(new Event('seizu:spaces-updated'));
 
     await waitFor(() => expect(treeCalls()).toBe(2));
-  }, 15_000);
+  });
 
   it('does not fetch the tree twice for a single change', async () => {
     // Mutations broadcast their own invalidation, so the page must not also
@@ -186,5 +186,5 @@ describe('SpaceDetail tree fetching', () => {
     // Give any stray second fetch a chance to land before asserting.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(treeCalls()).toBe(2);
-  }, 15_000);
+  });
 });

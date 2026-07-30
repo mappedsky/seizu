@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -25,13 +26,27 @@ def reset_snowflake_gen():
     dynamodb_module._snowflake_gen = original
 
 
+def _force_index_fallback():
+    """Pin the store to the no-GSI path.
+
+    Both fields are needed: a negative probe is only cached for
+    _SPACE_INDEX_RETRY_SECONDS, so without a fresh timestamp the store
+    immediately re-probes.
+    """
+    dynamodb_module._space_reports_index_available = False
+    dynamodb_module._space_reports_index_checked_at = time.monotonic()
+
+
 @pytest.fixture(autouse=True)
 def reset_space_index_probe():
     """Reset the cached "is the space GSI usable" flag between tests."""
     original = dynamodb_module._space_reports_index_available
+    original_at = dynamodb_module._space_reports_index_checked_at
     dynamodb_module._space_reports_index_available = None
+    dynamodb_module._space_reports_index_checked_at = 0.0
     yield
     dynamodb_module._space_reports_index_available = original
+    dynamodb_module._space_reports_index_checked_at = original_at
 
 
 @pytest.fixture()
@@ -2572,7 +2587,7 @@ async def test_delete_space_not_found(patch_table, store):
 
 async def test_delete_space_removes_its_subspaces(patch_table, store):
     """Sub-spaces go with the space rather than blocking the delete."""
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.get_item.side_effect = [
         {"Item": _space_metadata_item()},
         {},  # dashboard pointer
@@ -2601,7 +2616,7 @@ async def test_delete_space_removes_its_subspaces(patch_table, store):
 
 
 async def test_delete_space_blocked_by_member_report(patch_table, store):
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.get_item.return_value = {"Item": _space_metadata_item()}
     patch_table.query.side_effect = [
         {"Items": [_report_list_entry("r1", "sp1"), _report_list_entry("r2", "sp1")]},
@@ -2612,7 +2627,7 @@ async def test_delete_space_blocked_by_member_report(patch_table, store):
 
 async def test_delete_space_emptiness_ignores_report_visibility(patch_table, store):
     """A private report owned by someone else still blocks the delete."""
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.get_item.return_value = {"Item": _space_metadata_item()}
     patch_table.query.side_effect = [
         {
@@ -2626,7 +2641,7 @@ async def test_delete_space_emptiness_ignores_report_visibility(patch_table, sto
 
 
 async def test_delete_empty_space_cascades_to_overview_report(patch_table, store):
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.get_item.side_effect = [
         {"Item": _space_metadata_item()},
         {},  # dashboard pointer
@@ -2657,7 +2672,7 @@ async def test_delete_empty_space_cascades_to_overview_report(patch_table, store
 
 
 async def test_delete_empty_space_clears_dashboard_pointer(patch_table, store):
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.get_item.side_effect = [
         {"Item": _space_metadata_item()},
         {"Item": {"PK": "#DASHBOARD", "SK": "#POINTER", "report_id": "r1"}},
@@ -2676,7 +2691,7 @@ async def test_delete_empty_space_clears_dashboard_pointer(patch_table, store):
 
 
 async def test_list_space_reports_filters_by_space_and_visibility(patch_table, store):
-    dynamodb_module._space_reports_index_available = False  # exercise the fallback
+    _force_index_fallback()  # exercise the no-GSI path
     patch_table.query.return_value = {
         "Items": [
             _report_list_entry("r1", "sp1"),
@@ -3111,3 +3126,88 @@ async def test_delete_space_uses_the_index_for_the_emptiness_check(patch_table, 
 
     assert await store.delete_space("sp1") == SpaceDeleteResult.NOT_EMPTY
     assert patch_table.query.call_args_list[0].kwargs["IndexName"] == "space_reports_index"
+
+
+# ---------------------------------------------------------------------------
+# Store-level overview-report guards
+# ---------------------------------------------------------------------------
+
+
+def _overview_metadata_item():
+    return {
+        "PK": "REPORT#ovr1",
+        "SK": "#METADATA",
+        "report_id": "ovr1",
+        "name": "Cloud",
+        "current_version": 1,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "created_by": "user@example.com",
+        "updated_by": "user@example.com",
+        "access": {"scope": "public"},
+        "space_id": "sp1",
+        "space_overview": True,
+    }
+
+
+async def test_store_refuses_to_delete_an_overview_report(patch_table, store):
+    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
+
+    with pytest.raises(dynamodb_module.ProtectedReportError, match="delete the space instead"):
+        await store.delete_report("ovr1")
+
+    patch_table.batch_writer.assert_not_called()
+
+
+async def test_store_refuses_to_privatize_an_overview_report(patch_table, store):
+    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
+    patch_table.meta.client.transact_write_items = MagicMock()
+
+    with pytest.raises(dynamodb_module.ProtectedReportError, match="cannot be made private"):
+        await store.update_report_visibility(report_id="ovr1", updated_by="u", access=ReportAccess(scope="private"))
+
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_store_refuses_to_move_an_overview_report(patch_table, store):
+    patch_table.get_item.return_value = {"Item": _overview_metadata_item()}
+    patch_table.meta.client.transact_write_items = MagicMock()
+
+    with pytest.raises(dynamodb_module.ProtectedReportError, match="cannot be moved"):
+        await store.update_report_space(report_id="ovr1", space_id="sp2", subspace_id=None, updated_by="u")
+
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# GSI availability probe
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_index_is_retried_after_the_backoff(patch_table, store, mocker):
+    """An index created while the process runs has to be picked up eventually."""
+    missing = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "no such index"}}, "Query"
+    )
+    clock = mocker.patch("reporting.services.report_store.dynamodb.time.monotonic")
+
+    clock.return_value = 1000.0
+    patch_table.query.side_effect = [missing, {"Items": []}]
+    await store.list_space_reports("sp1")
+    assert dynamodb_module._space_reports_index_available is False
+
+    # Within the window: no probe, straight to the fallback.
+    clock.return_value = 1000.0 + dynamodb_module._SPACE_INDEX_RETRY_SECONDS - 1
+    patch_table.query.reset_mock()
+    patch_table.query.side_effect = None
+    patch_table.query.return_value = {"Items": [_report_list_entry("r1", "sp1")]}
+    await store.list_space_reports("sp1")
+    assert "IndexName" not in patch_table.query.call_args.kwargs
+
+    # Past the window: probe again, and adopt the index now that it exists.
+    clock.return_value = 1000.0 + dynamodb_module._SPACE_INDEX_RETRY_SECONDS + 1
+    patch_table.query.reset_mock()
+    result = await store.list_space_reports("sp1")
+    assert patch_table.query.call_args_list[0].kwargs["IndexName"] == "space_reports_index"
+    assert dynamodb_module._space_reports_index_available is True
+    assert [item.report_id for item in result] == ["r1"]

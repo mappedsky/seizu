@@ -36,6 +36,24 @@ def initial_report_config(name: str) -> dict[str, Any]:
     return {"name": name, "rows": [], "schema_version": 1}
 
 
+class ProtectedReportError(Exception):
+    """A mutation was rejected because the report is a space's overview report.
+
+    Raised by the store as a backstop, so the invariant holds for any caller
+    rather than only the transports that remember to pre-check. Callers map it
+    to HTTP 409. ``delete_space`` removes the overview report through its own
+    cascade and is deliberately not subject to this guard.
+    """
+
+
+# The overview report is an artefact of its space: created with it, deleted with
+# it, and the space detail page's main view. Letting it move, disappear, or go
+# private would leave the space pointing at something gone or invisible.
+OVERVIEW_IMMOBILE = "The space overview report cannot be moved to another space"
+OVERVIEW_UNDELETABLE = "The space overview report cannot be deleted; delete the space instead"
+OVERVIEW_MUST_BE_PUBLIC = "The space overview report cannot be made private"
+
+
 class ReportStore(ABC):
     """Abstract base class for report configuration storage backends."""
 

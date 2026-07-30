@@ -27,8 +27,11 @@ function SpaceDetail() {
   const { createSubspace, updateSubspace, deleteSubspace } =
     useSubspaceMutations(spaceId ?? '');
 
-  const canWrite = hasPermission('spaces:write');
-  const canDelete = hasPermission('spaces:delete');
+  // Sub-space mutations need spaces:write; filing a report needs reports:write.
+  // Gating both on one permission shows custom roles actions they cannot run,
+  // and hides actions they can.
+  const canWriteSpaces = hasPermission('spaces:write');
+  const canDeleteSpaces = hasPermission('spaces:delete');
   const canWriteReports = hasPermission('reports:write');
 
   const handleSetReportSubspace = useCallback(
@@ -103,8 +106,9 @@ function SpaceDetail() {
           onToggle={() => setPanelOpen((prev) => !prev)}
           tree={tree}
           activeReportId={activeReportId}
-          canWrite={canWrite}
-          canDelete={canDelete}
+          canWriteSpaces={canWriteSpaces}
+          canDeleteSpaces={canDeleteSpaces}
+          canWriteReports={canWriteReports}
           onSelectReport={(targetReportId) =>
             navigate(
               targetReportId === tree.space.overview_report_id
@@ -116,9 +120,7 @@ function SpaceDetail() {
           onRenameSubspace={updateSubspace}
           onDeleteSubspace={deleteSubspace}
           onSetReportSubspace={handleSetReportSubspace}
-          onRemoveReportFromSpace={
-            canWriteReports ? handleRemoveReportFromSpace : async () => {}
-          }
+          onRemoveReportFromSpace={handleRemoveReportFromSpace}
         />
 
         <Box sx={{ flexGrow: 1, minWidth: 0, overflow: 'auto' }}>
@@ -126,6 +128,9 @@ function SpaceDetail() {
             // Not silently redirected: a stale link should say so rather than
             // quietly showing a different report.
             <ReportPane
+              // Same reason as the standalone report route: never carry one
+              // report's editor state into another.
+              key={activeReportId}
               id={activeReportId}
               reportPath={reportPath}
               stickyToolbar={false}

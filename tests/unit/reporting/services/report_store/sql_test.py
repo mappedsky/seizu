@@ -19,6 +19,7 @@ from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVer
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
 from reporting.services.report_store import sql as sql_module
+from reporting.services.report_store.base import ProtectedReportError
 from reporting.services.report_store.sql import SQLModelReportStore
 
 # ---------------------------------------------------------------------------
@@ -2478,3 +2479,70 @@ async def test_visibility_and_pin_changes_preserve_space_membership(store):
 
     assert await store.pin_report(report.report_id, True, updated_by="u1") is True
     assert (await store.get_report_metadata(report.report_id)).space_id == space.space_id
+
+
+# ---------------------------------------------------------------------------
+# Store-level overview-report guards
+#
+# A backstop, so the invariant holds for any caller rather than only the
+# transports that remember to pre-check.
+# ---------------------------------------------------------------------------
+
+
+async def test_store_refuses_to_delete_an_overview_report(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    with pytest.raises(ProtectedReportError, match="delete the space instead"):
+        await store.delete_report(space.overview_report_id)
+
+    assert await store.get_report_metadata(space.overview_report_id) is not None
+
+
+async def test_store_refuses_to_privatize_an_overview_report(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    with pytest.raises(ProtectedReportError, match="cannot be made private"):
+        await store.update_report_visibility(
+            report_id=space.overview_report_id,
+            updated_by="u1",
+            access=ReportAccess(scope="private"),
+        )
+
+    meta = await store.get_report_metadata(space.overview_report_id)
+    assert meta.access.scope == "public"
+
+
+async def test_store_refuses_to_move_an_overview_report(store):
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+    other = await store.create_space(name="Other", description="", created_by="u1")
+
+    with pytest.raises(ProtectedReportError, match="cannot be moved"):
+        await store.update_report_space(
+            report_id=space.overview_report_id,
+            space_id=other.space_id,
+            subspace_id=None,
+            updated_by="u1",
+        )
+
+    meta = await store.get_report_metadata(space.overview_report_id)
+    assert meta.space_id == space.space_id
+
+
+async def test_delete_space_still_removes_its_overview_report(store):
+    """The cascade must not be blocked by the guard it bypasses."""
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
+    assert await store.get_report_metadata(space.overview_report_id) is None
+
+
+async def test_store_still_allows_publishing_an_overview_report(store):
+    """Only the private-ward direction is guarded."""
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    updated = await store.update_report_visibility(
+        report_id=space.overview_report_id,
+        updated_by="u1",
+        access=ReportAccess(scope="public"),
+    )
+    assert updated.access.scope == "public"

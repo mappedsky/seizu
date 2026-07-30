@@ -33,10 +33,18 @@ from reporting.schema.report_config import (
     User,
 )
 from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
-from reporting.services.report_store.base import ReportStore, initial_report_config
+from reporting.services.report_store.base import (
+    OVERVIEW_IMMOBILE,
+    OVERVIEW_MUST_BE_PUBLIC,
+    OVERVIEW_UNDELETABLE,
+    ProtectedReportError,
+    ReportStore,
+    initial_report_config,
+)
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
+
 
 _engine: AsyncEngine | None = None
 _snowflake_gen: SnowflakeGenerator | None = None
@@ -854,6 +862,8 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report:
                 return None
+            if access is not None and access.scope == "private" and report.space_overview:
+                raise ProtectedReportError(OVERVIEW_MUST_BE_PUBLIC)
             report.updated_at = datetime.now(tz=UTC).isoformat()
             report.updated_by = updated_by
             if access is not None:
@@ -875,6 +885,8 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report or not _report_visible_to_user(report, user_id):
                 return None
+            if report.space_overview:
+                raise ProtectedReportError(OVERVIEW_IMMOBILE)
             report.space_id = space_id
             report.subspace_id = subspace_id
             report.updated_at = datetime.now(tz=UTC).isoformat()
@@ -890,6 +902,10 @@ class SQLModelReportStore(ReportStore):
             report = await session.get(ReportRecord, report_id)
             if not report or not _report_visible_to_user(report, user_id):
                 return False
+            # Backstop for callers that skipped the pre-check; delete_space
+            # removes the overview report through its own cascade.
+            if report.space_overview:
+                raise ProtectedReportError(OVERVIEW_UNDELETABLE)
 
             pointer = await session.get(DashboardPointerRecord, 1)
             if pointer and pointer.report_id == report_id:

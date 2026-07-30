@@ -40,8 +40,12 @@ interface SpaceReportsPanelProps {
   onToggle: () => void;
   tree: SpaceTree;
   activeReportId: string | undefined;
-  canWrite: boolean;
-  canDelete: boolean;
+  /** spaces:write — creating and renaming sub-spaces. */
+  canWriteSpaces: boolean;
+  /** spaces:delete — deleting sub-spaces. */
+  canDeleteSpaces: boolean;
+  /** reports:write — filing reports into or out of the space. */
+  canWriteReports: boolean;
   onSelectReport: (reportId: string) => void;
   // Promise<unknown>: these can be wired straight to the mutation hooks, whose
   // return values the panel has no use for.
@@ -65,8 +69,9 @@ function SpaceReportsPanel({
   onToggle,
   tree,
   activeReportId,
-  canWrite,
-  canDelete,
+  canWriteSpaces,
+  canDeleteSpaces,
+  canWriteReports,
   onSelectReport,
   onCreateSubspace,
   onRenameSubspace,
@@ -168,7 +173,7 @@ function SpaceReportsPanel({
       label: 'Rename',
       icon: <EditIcon fontSize="small" />,
       onClick: () => openRenameSubspace(subspace),
-      disabled: !canWrite,
+      disabled: !canWriteSpaces,
     },
     {
       key: 'delete',
@@ -178,7 +183,7 @@ function SpaceReportsPanel({
         setDeleteError(null);
         setDeleteTarget(subspace);
       },
-      disabled: !canDelete,
+      disabled: !canDeleteSpaces,
       destructive: true,
       dividerBefore: true,
     },
@@ -190,7 +195,7 @@ function SpaceReportsPanel({
       label: 'Move to sub-space…',
       icon: <DriveFileMoveIcon fontSize="small" />,
       onClick: () => setMoveTarget(report),
-      disabled: !canWrite || tree.subspaces.length === 0,
+      disabled: !canWriteReports || tree.subspaces.length === 0,
       tooltip:
         tree.subspaces.length === 0
           ? 'This space has no sub-spaces'
@@ -201,7 +206,7 @@ function SpaceReportsPanel({
       label: 'Remove from space',
       icon: <RemoveCircleOutlineIcon fontSize="small" />,
       onClick: () => void onRemoveReportFromSpace(report.report_id),
-      disabled: !canWrite,
+      disabled: !canWriteReports,
       destructive: true,
       dividerBefore: true,
     },
@@ -252,7 +257,7 @@ function SpaceReportsPanel({
           <Typography variant="subtitle2" sx={{ flexGrow: 1, minWidth: 0 }}>
             Space
           </Typography>
-          {canWrite && (
+          {canWriteSpaces && (
             <Tooltip title="New sub-space">
               <IconButton
                 aria-label="New sub-space"
@@ -367,7 +372,7 @@ function SpaceReportsPanel({
                     key={report.report_id}
                     disablePadding
                     secondaryAction={
-                      canWrite ? (
+                      canWriteReports ? (
                         <RowMenu
                           actions={reportActions(report)}
                           label="Report actions"

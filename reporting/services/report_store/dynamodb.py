@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,7 +38,14 @@ from reporting.schema.report_config import (
     User,
 )
 from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
-from reporting.services.report_store.base import ReportStore, initial_report_config
+from reporting.services.report_store.base import (
+    OVERVIEW_IMMOBILE,
+    OVERVIEW_MUST_BE_PUBLIC,
+    OVERVIEW_UNDELETABLE,
+    ProtectedReportError,
+    ReportStore,
+    initial_report_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +89,15 @@ _GSI_SPACE_REPORTS_KEY_SCHEMA = [
 # Whether this process has found the GSI usable. None until first probed.
 # The index is optional: production tables are managed outside the app
 # (DYNAMODB_CREATE_TABLE defaults to false), so a deployment may not have it yet
-# and must keep working. Set once per process — adding the index to a live table
-# takes effect for new processes.
+# and must keep working.
+#
+# A negative result is cached only for _SPACE_INDEX_RETRY_SECONDS, then re-probed:
+# an index added while the process runs — or still backfilling at startup — has
+# to be picked up without a restart, or a long-lived worker stays on the
+# expensive fallback forever.
 _space_reports_index_available: bool | None = None
+_space_reports_index_checked_at: float = 0.0
+_SPACE_INDEX_RETRY_SECONDS = 300.0
 # Toolsets — list index PK for listing all toolsets.
 _PK_TOOLSET_LIST = "TOOLSET_LIST"
 # Skillsets — list index PK for listing all skillsets.
@@ -293,8 +307,11 @@ def _query_space_reports_via_index(table: Any, space_id: str) -> list[dict[str, 
     None means the index is missing or not yet queryable, and the caller should
     fall back to filtering the REPORT_LIST partition.
     """
-    global _space_reports_index_available
-    if _space_reports_index_available is False:
+    global _space_reports_index_available, _space_reports_index_checked_at
+    if (
+        _space_reports_index_available is False
+        and (time.monotonic() - _space_reports_index_checked_at) < _SPACE_INDEX_RETRY_SECONDS
+    ):
         return None
     try:
         items = _query_all_sync(
@@ -308,12 +325,20 @@ def _query_space_reports_via_index(table: Any, space_id: str) -> list[dict[str, 
         if code not in {"ValidationException", "ResourceNotFoundException", "IndexNotFoundException"}:
             raise
         _space_reports_index_available = False
+        _space_reports_index_checked_at = time.monotonic()
         logger.warning(
             "Space reports GSI unavailable; falling back to scanning the report list",
-            extra={"index": _GSI_SPACE_REPORTS, "code": code},
+            extra={
+                "index": _GSI_SPACE_REPORTS,
+                "code": code,
+                "retry_in_seconds": _SPACE_INDEX_RETRY_SECONDS,
+            },
         )
         return None
+    if _space_reports_index_available is not True:
+        logger.info("Space reports GSI is available", extra={"index": _GSI_SPACE_REPORTS})
     _space_reports_index_available = True
+    _space_reports_index_checked_at = time.monotonic()
     return items
 
 
@@ -1419,6 +1444,9 @@ class DynamoDBReportStore(ReportStore):
             if not meta:
                 return None
 
+            if access is not None and access.scope == "private" and meta.get("space_overview"):
+                raise ProtectedReportError(OVERVIEW_MUST_BE_PUBLIC)
+
             now = datetime.now(tz=UTC).isoformat()
             new_access = access.model_dump() if access is not None else meta["access"]
             record = _report_record(
@@ -1447,6 +1475,8 @@ class DynamoDBReportStore(ReportStore):
             meta = resp.get("Item")
             if not meta or not _report_visible_to_user(meta, user_id):
                 return None
+            if meta.get("space_overview"):
+                raise ProtectedReportError(OVERVIEW_IMMOBILE)
 
             now = datetime.now(tz=UTC).isoformat()
             record = _report_record(
@@ -1471,6 +1501,10 @@ class DynamoDBReportStore(ReportStore):
             meta = resp.get("Item")
             if not meta or not _report_visible_to_user(meta, user_id):
                 return False
+            # Backstop for callers that skipped the pre-check; delete_space
+            # removes the overview report through its own cascade.
+            if meta.get("space_overview"):
+                raise ProtectedReportError(OVERVIEW_UNDELETABLE)
 
             items_resp = table.query(
                 KeyConditionExpression="PK = :pk",

@@ -10,14 +10,27 @@ jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
 }));
 
-// The report body is exercised by Reports.test.tsx; here we only care that the
-// right report is handed to it.
-jest.mock('src/components/ReportPane', () => ({
-  __esModule: true,
-  default: ({ id }: { id: string | undefined }) => (
-    <div data-testid="report-pane">{id}</div>
-  ),
-}));
+// The report body is exercised by ReportPane.test.tsx; here we only care which
+// report is handed to it, and that each one gets a fresh instance. The mock
+// records every mount so a missing `key` (which would reuse the instance
+// across a report switch) is detectable.
+jest.mock('src/components/ReportPane', () => {
+  const react = require('react');
+  return {
+    __esModule: true,
+    default: ({ id }: { id: string | undefined }) => {
+      react.useEffect(() => {
+        const g = globalThis as { __paneMounts?: string[] };
+        g.__paneMounts = [...(g.__paneMounts ?? []), id ?? ''];
+      }, []);
+      return react.createElement('div', { 'data-testid': 'report-pane' }, id);
+    },
+  };
+});
+
+function paneMounts(): string[] {
+  return (globalThis as { __paneMounts?: string[] }).__paneMounts ?? [];
+}
 
 const mockUsePermissions =
   permissionsModule.usePermissions as jest.MockedFunction<
@@ -322,6 +335,60 @@ describe('SpaceDetail', () => {
     );
     expect(scroll).not.toContainElement(
       screen.getByRole('button', { name: 'All reports' }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Report-pane isolation and permission gating
+  // -------------------------------------------------------------------------
+
+  it('remounts the report pane when the selected report changes', () => {
+    // ReportPane holds displayed-report and edit state, and EditableReportView
+    // seeds its editor once on mount. Without a fresh instance per report,
+    // saving after A -> B could write A's editor contents against B's id.
+    (globalThis as { __paneMounts?: string[] }).__paneMounts = [];
+
+    renderAt('/app/spaces/sp1');
+    expect(paneMounts()).toEqual(['ovr1']);
+
+    // Navigate within the same mounted tree — this is the case a shared
+    // instance would silently survive.
+    fireEvent.click(screen.getByRole('button', { name: 'Loose Report' }));
+    expect(screen.getByTestId('report-pane')).toHaveTextContent('r1');
+    expect(paneMounts()).toEqual(['ovr1', 'r1']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grouped Report' }));
+    expect(paneMounts()).toEqual(['ovr1', 'r1', 'r2']);
+  });
+
+  it('gates report actions on reports:write, not spaces:write', () => {
+    // A custom role with spaces:write but not reports:write must not be shown
+    // move/remove actions the API will refuse.
+    mockUsePermissions.mockReturnValue(
+      (permission: string) => permission !== 'reports:write',
+    );
+
+    renderAt('/app/spaces/sp1');
+
+    // Sub-space creation still offered (spaces:write held)...
+    expect(
+      screen.getByRole('button', { name: 'New sub-space' }),
+    ).toBeInTheDocument();
+    // ...but no per-report menu.
+    expect(screen.queryByLabelText('Report actions')).toBeNull();
+  });
+
+  it('gates sub-space creation on spaces:write, not reports:write', () => {
+    mockUsePermissions.mockReturnValue(
+      (permission: string) => permission !== 'spaces:write',
+    );
+
+    renderAt('/app/spaces/sp1');
+
+    expect(screen.queryByRole('button', { name: 'New sub-space' })).toBeNull();
+    // Report actions remain, since reports:write is held.
+    expect(screen.getAllByLabelText('Report actions').length).toBeGreaterThan(
+      0,
     );
   });
 });
