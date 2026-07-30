@@ -484,11 +484,44 @@ async def test_creating_into_a_space_asks_for_confirmation(mocker):
     create_report.assert_not_called()
 
 
-async def test_cloning_into_the_sources_space_asks_for_confirmation(mocker):
-    """A clone inherits the source's space, which publishes the source's contents."""
+async def test_cloning_always_asks_for_confirmation(mocker):
+    """Clone is gated unconditionally, source placement notwithstanding.
+
+    A clone inherits the source's space, so whether it publishes depends on a
+    read the resolver cannot share with the handler.
+    """
     mocker.patch(
         "reporting.services.mcp_builtins.reports.report_store.get_report_latest",
         return_value=_report_version_in_space(),
+    )
+    create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__clone",
+        {"report_id": "r1", "name": "Copy"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="session-1",
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+    create_report.assert_not_called()
+
+
+async def test_cloning_a_standalone_report_also_asks_for_confirmation(mocker):
+    """No space anywhere in sight, and it is still gated -- that is the point."""
+    mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.get_report_latest",
+        return_value=_report_version_in_space().model_copy(update={"space_id": None}),
     )
     create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
     mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)

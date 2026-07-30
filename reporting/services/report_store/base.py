@@ -28,7 +28,29 @@ from reporting.schema.report_config import (
     ScheduledQueryVersion,
     User,
 )
-from reporting.schema.space_config import SpaceDeleteResult, SpaceListItem, SubspaceItem
+from reporting.schema.space_config import (
+    SPACE_MEMBER_MUST_BE_PUBLIC_DETAIL,
+    SpaceConflictError,
+    SpaceDeleteResult,
+    SpaceListItem,
+    SubspaceItem,
+)
+
+
+def require_public_space_member(access: ReportAccess, space_id: str | None) -> None:
+    """Refuse to create a private report inside a space.
+
+    The same invariant ``update_report_space`` enforces, applied to the one write
+    that can set membership and visibility together. There is no race here -- a
+    single caller supplies both -- but the store API is shared, and a caller that
+    forgets to publish should get an error rather than a member nobody else can
+    see and that quietly blocks the space's deletion.
+
+    Backends call this rather than normalising to public: silently widening a
+    caller's requested visibility is the wrong failure mode for a store.
+    """
+    if space_id is not None and access.scope != "public":
+        raise SpaceConflictError(SPACE_MEMBER_MUST_BE_PUBLIC_DETAIL)
 
 
 def initial_report_config(name: str) -> dict[str, Any]:

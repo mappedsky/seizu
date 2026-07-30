@@ -45,7 +45,7 @@ from reporting.schema.space_config import (
     SpaceListItem,
     SubspaceItem,
 )
-from reporting.services.report_store.base import ReportStore, initial_report_config
+from reporting.services.report_store.base import ReportStore, initial_report_config, require_public_space_member
 
 logger = logging.getLogger(__name__)
 
@@ -501,6 +501,21 @@ async def _hydrate_action_confirmations(
 
 def _transaction_cancelled(exc: botocore.exceptions.ClientError) -> bool:
     return exc.response["Error"]["Code"] == "TransactionCanceledException"
+
+
+def _first_item_condition_failed(exc: botocore.exceptions.ClientError) -> bool:
+    """True only when the first transact item's ConditionExpression rejected it.
+
+    DynamoDB reports throttling, capacity exhaustion, validation errors and
+    write-write contention through the same TransactionCanceledException, so the
+    exception type alone cannot distinguish "the report was not public" from "the
+    table is throttled". The per-item ``CancellationReasons`` list does; anything
+    else must propagate as the error it is rather than surface as a 409.
+    """
+    if not _transaction_cancelled(exc):
+        return False
+    reasons = exc.response.get("CancellationReasons") or []
+    return bool(reasons) and reasons[0].get("Code") == "ConditionalCheckFailed"
 
 
 def _chat_session_update_transactions(
@@ -1358,6 +1373,7 @@ class DynamoDBReportStore(ReportStore):
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
+        require_public_space_member(report_access, space_id)
 
         items = _new_report_items(
             report_id=report_id,
@@ -1483,7 +1499,7 @@ class DynamoDBReportStore(ReportStore):
                     condition=_NO_SPACE_CONDITION if going_private else None,
                 )
             except botocore.exceptions.ClientError as exc:
-                if _transaction_cancelled(exc):
+                if _first_item_condition_failed(exc):
                     raise SpaceConflictError(PRIVATISING_SPACE_MEMBER_DETAIL) from exc
                 raise
             return _report_list_item_from_item(list_item)
@@ -1523,7 +1539,7 @@ class DynamoDBReportStore(ReportStore):
                     condition=_PUBLIC_ACCESS_CONDITION if space_id is not None else None,
                 )
             except botocore.exceptions.ClientError as exc:
-                if _transaction_cancelled(exc):
+                if _first_item_condition_failed(exc):
                     raise SpaceConflictError(FILING_PRIVATE_REPORT_DETAIL) from exc
                 raise
             return _report_list_item_from_item(list_item)

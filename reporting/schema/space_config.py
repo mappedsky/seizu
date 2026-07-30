@@ -82,6 +82,8 @@ class SpaceConflictError(Exception):
 #: the up-front validation and the store's atomic enforcement cannot drift.
 FILING_PRIVATE_REPORT_DETAIL = "Publish the report before filing it into a space"
 PRIVATISING_SPACE_MEMBER_DETAIL = "Remove the report from its space before making it private"
+#: Creation has no "before" state to describe, so it gets its own wording.
+SPACE_MEMBER_MUST_BE_PUBLIC_DETAIL = "A report created in a space must be public"
 
 
 class SpaceDeleteResult(StrEnum):

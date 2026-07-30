@@ -2740,6 +2740,8 @@ async def test_create_report_writes_space_membership_to_both_copies(patch_table,
     result = await store.create_report(
         name="Member",
         created_by="user@example.com",
+        # Space members must be public; a bare create into a space is refused.
+        access=ReportAccess(scope="public"),
         space_id="sp1",
         subspace_id="ss1",
     )
@@ -2954,7 +2956,10 @@ async def test_update_report_space_raises_when_the_condition_fails(patch_table, 
     }
     patch_table.meta.client.transact_write_items = MagicMock(
         side_effect=botocore.exceptions.ClientError(
-            {"Error": {"Code": "TransactionCanceledException", "Message": "cancelled"}},
+            {
+                "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                "CancellationReasons": [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}],
+            },
             "TransactWriteItems",
         )
     )
@@ -2966,6 +2971,59 @@ async def test_update_report_space_raises_when_the_condition_fails(patch_table, 
             subspace_id=None,
             updated_by="editor@example.com",
         )
+
+
+async def test_update_report_space_propagates_other_cancellation_reasons(patch_table, store):
+    """Throttling and contention share the exception type but are not 409s.
+
+    Turning them into SpaceConflictError would tell the user to publish a report
+    that is already public, and hide a capacity problem.
+    """
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "REPORT#r1",
+            "SK": "#METADATA",
+            "report_id": "r1",
+            "name": "Member",
+            "current_version": 1,
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_by": "user@example.com",
+            "access": {"scope": "public"},
+        }
+    }
+    patch_table.meta.client.transact_write_items = MagicMock(
+        side_effect=botocore.exceptions.ClientError(
+            {
+                "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                "CancellationReasons": [{"Code": "ThrottlingError"}, {"Code": "None"}],
+            },
+            "TransactWriteItems",
+        )
+    )
+
+    with pytest.raises(botocore.exceptions.ClientError):
+        await store.update_report_space(
+            report_id="r1",
+            space_id="spB",
+            subspace_id=None,
+            updated_by="editor@example.com",
+        )
+
+
+async def test_create_report_refuses_a_private_report_in_a_space(patch_table, store, mocker):
+    mocker.patch("reporting.services.report_store.dynamodb.generate_report_id", return_value="r1")
+    patch_table.meta.client.transact_write_items = MagicMock()
+
+    with pytest.raises(SpaceConflictError):
+        await store.create_report(
+            name="Draft",
+            created_by="user@example.com",
+            access=ReportAccess(scope="private"),
+            space_id="sp1",
+        )
+
+    patch_table.meta.client.transact_write_items.assert_not_called()
 
 
 async def test_update_report_visibility_conditions_a_privatise_on_having_no_space(patch_table, store):

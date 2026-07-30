@@ -3,10 +3,16 @@
 Lives outside the route layer so REST and MCP share one implementation — both
 create and clone reports, and validation written twice drifts.
 
-These are validations, not invariants: they reject a bad request up front but
-nothing enforces them afterwards. Membership and the overview pointer are both
-allowed to go stale, and are resolved lazily at the API boundary instead, which
-is what lets every report in a space stay an ordinary report.
+Two kinds of check live here, and they are enforced differently:
+
+- The (space, sub-space) pairing and the overview target are *validations only*.
+  Nothing keeps them true afterwards: membership and the pointer are both allowed
+  to go stale and are resolved lazily at the API boundary, which is what lets
+  every report in a space stay an ordinary report.
+- The public-space-member rule (``SPACE_MEMBER_ACCESS`` and the two ``reject_``
+  helpers) *is* an invariant. The checks here exist for a clear error message;
+  the store backends re-check it atomically on every write that could break it,
+  because a check up here alone loses a concurrent unpublish/file race.
 """
 
 from reporting.schema.report_config import ReportAccess

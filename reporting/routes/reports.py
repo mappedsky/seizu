@@ -196,13 +196,18 @@ async def create_report(
 ) -> Any:
     """Create a new report."""
     space_id, subspace_id = await _resolve_space_or_400(body.space_id, body.subspace_id)
-    return await report_store.create_report(
-        name=body.name,
-        created_by=current.user.user_id,
-        access=_access_for_new_report(space_id),
-        space_id=space_id,
-        subspace_id=subspace_id,
-    )
+    try:
+        return await report_store.create_report(
+            name=body.name,
+            created_by=current.user.user_id,
+            access=_access_for_new_report(space_id),
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    # Unreachable while _access_for_new_report publishes in-space reports; kept so
+    # the store's invariant surfaces as its 409 rather than a 500 if that changes.
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.put("/api/v1/reports/{report_id}/visibility", response_model=ReportListItem)
@@ -323,13 +328,16 @@ async def clone_report(
         )
     except SpaceValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    new_item = await report_store.create_report(
-        name=body.name,
-        created_by=current.user.user_id,
-        access=_access_for_new_report(space_id),
-        space_id=space_id,
-        subspace_id=subspace_id,
-    )
+    try:
+        new_item = await report_store.create_report(
+            name=body.name,
+            created_by=current.user.user_id,
+            access=_access_for_new_report(space_id),
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     cloned_config = {**source.config, "name": body.name}
     await report_store.save_report_version(
         report_id=new_item.report_id,

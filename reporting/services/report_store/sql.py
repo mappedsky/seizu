@@ -40,7 +40,7 @@ from reporting.schema.space_config import (
     SpaceListItem,
     SubspaceItem,
 )
-from reporting.services.report_store.base import ReportStore, initial_report_config
+from reporting.services.report_store.base import ReportStore, initial_report_config, require_public_space_member
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
@@ -764,6 +764,7 @@ class SQLModelReportStore(ReportStore):
         report_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
         report_access = access or ReportAccess(scope="private")
+        require_public_space_member(report_access, space_id)
 
         async with AsyncSession(_get_engine()) as session:
             for record in _new_report_records(

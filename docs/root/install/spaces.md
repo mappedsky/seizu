@@ -148,9 +148,9 @@ PUT    /api/v1/reports/<report_id>/space
 `GET .../tree` returns the space, its sub-spaces, and the reports visible to the caller in one
 response — the space detail page's single fetch. Dangling references are blanked to `null` in that
 response: a `subspace_id` whose sub-space is gone, and an `overview_report_id` that is not among the
-returned reports. It is also the only endpoint that returns the overview pointer at all; the list and
-get endpoints return `null` for it, since without a report list there is nothing to resolve it
-against.
+returned reports. Along with `PUT .../overview` below, it is the only endpoint that reports the pointer:
+the list and get endpoints return `null` for it, since without a report list there is nothing to
+resolve it against.
 
 `PUT .../overview` takes `{"report_id": ...}`; the target must be a report filed in that space, and
 `null` clears the pointer. Its response echoes `overview_report_id` — the value the caller just set —

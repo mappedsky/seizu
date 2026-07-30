@@ -30,6 +30,23 @@ from reporting.services.report_store.sql import SQLModelReportStore
 _PUBLIC = ReportAccess(scope="public")
 
 
+async def _plant_private_member(store, space_id: str, created_by: str) -> str:
+    """Put a private report inside a space, behind the store's back.
+
+    Every store method now refuses this combination, so the only way to produce
+    one is to write the row directly -- which is exactly the state a database
+    predating the rule can be in. The checks that must not depend on the
+    invariant holding (emptiness, list filtering) are tested against it.
+    """
+    report = await store.create_report(name="Private", created_by=created_by, access=_PUBLIC, space_id=space_id)
+    async with sql_module.AsyncSession(sql_module._get_engine()) as session:
+        record = await session.get(sql_module.ReportRecord, report.report_id)
+        record.access = {"scope": "private"}
+        session.add(record)
+        await session.commit()
+    return report.report_id
+
+
 @pytest.fixture(autouse=True)
 def reset_snowflake_gen():
     """Reset the module-level snowflake generator between tests."""
@@ -2226,18 +2243,10 @@ async def test_delete_space_emptiness_ignores_report_visibility(store):
     space read as empty and be deleted, orphaning user B's report.
     """
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    # Filed at create time: update_report_space refuses a private report, so a
-    # private member can only be constructed this way. The point of the test is
-    # that emptiness does not depend on how it got there.
-    other = await store.create_report(
-        name="Private",
-        created_by="u2",
-        access=ReportAccess(scope="private"),
-        space_id=space.space_id,
-    )
+    other_id = await _plant_private_member(store, space.space_id, created_by="u2")
     # u1 cannot see the report at all...
     visible_to_u1 = await store.list_space_reports(space.space_id, user_id="u1")
-    assert all(item.report_id != other.report_id for item in visible_to_u1)
+    assert all(item.report_id != other_id for item in visible_to_u1)
     # ...but it still keeps the space non-empty.
     assert await store.delete_space(space.space_id) == SpaceDeleteResult.NOT_EMPTY
 
@@ -2261,24 +2270,16 @@ async def test_list_space_reports_filters_by_space_and_visibility(store):
     await store.update_report_space(
         report_id=mine.report_id, space_id=space.space_id, subspace_id=None, updated_by="u1"
     )
-    # Filed at create time: update_report_space refuses a private report, so
-    # this is the only way to construct a private member. The filter must not
-    # depend on how it got there.
-    theirs = await store.create_report(
-        name="Theirs",
-        created_by="u2",
-        access=ReportAccess(scope="private"),
-        space_id=space.space_id,
-    )
+    theirs_id = await _plant_private_member(store, space.space_id, created_by="u2")
 
     visible = await store.list_space_reports(space.space_id, user_id="u1")
     ids = {item.report_id for item in visible}
     assert ids == {mine.report_id}
-    assert theirs.report_id not in ids
+    assert theirs_id not in ids
     assert await store.list_space_reports(other_space.space_id, user_id="u1") == []
 
     unfiltered = await store.list_space_reports(space.space_id)
-    assert theirs.report_id in {item.report_id for item in unfiltered}
+    assert theirs_id in {item.report_id for item in unfiltered}
 
 
 # ---------------------------------------------------------------------------
@@ -2355,6 +2356,7 @@ async def test_create_report_with_space_membership(store):
     report = await store.create_report(
         name="Member",
         created_by="u1",
+        access=_PUBLIC,
         space_id=space.space_id,
         subspace_id=sub.subspace_id,
     )
@@ -2393,6 +2395,27 @@ async def test_update_report_space_replaces_membership(store):
         report_id=report.report_id, space_id=None, subspace_id=None, updated_by="u2"
     )
     assert cleared.space_id is None
+
+
+async def test_create_report_refuses_a_private_report_in_a_space(store):
+    """The store owns the invariant, not just its callers."""
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    with pytest.raises(SpaceConflictError):
+        await store.create_report(
+            name="Draft",
+            created_by="u1",
+            access=ReportAccess(scope="private"),
+            space_id=space.space_id,
+        )
+
+
+async def test_create_report_defaults_are_refused_in_a_space(store):
+    """New reports default to private, so a bare create into a space is refused."""
+    space = await store.create_space(name="Cloud", description="", created_by="u1")
+
+    with pytest.raises(SpaceConflictError):
+        await store.create_report(name="Draft", created_by="u1", space_id=space.space_id)
 
 
 async def test_update_report_space_refuses_to_file_a_private_report(store):
@@ -2462,7 +2485,7 @@ async def test_save_report_version_preserves_space_membership(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
     sub = await store.create_subspace(space_id=space.space_id, name="Network", created_by="u1")
     report = await store.create_report(
-        name="Member", created_by="u1", space_id=space.space_id, subspace_id=sub.subspace_id
+        name="Member", created_by="u1", access=_PUBLIC, space_id=space.space_id, subspace_id=sub.subspace_id
     )
 
     saved = await store.save_report_version(
@@ -2482,7 +2505,7 @@ async def test_save_report_version_preserves_space_membership(store):
 
 async def test_visibility_and_pin_changes_preserve_space_membership(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    report = await store.create_report(name="Member", created_by="u1", space_id=space.space_id)
+    report = await store.create_report(name="Member", created_by="u1", access=_PUBLIC, space_id=space.space_id)
 
     await store.update_report_visibility(
         report_id=report.report_id, updated_by="u1", access=ReportAccess(scope="public")
@@ -2515,7 +2538,7 @@ async def test_create_space_starts_with_no_overview(store):
 
 async def test_set_and_clear_the_overview_pointer(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
+    report = await store.create_report(name="Landing", created_by="u1", access=_PUBLIC, space_id=space.space_id)
 
     updated = await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u2")
     assert updated.overview_report_id == report.report_id
@@ -2532,7 +2555,7 @@ async def test_set_space_overview_not_found(store):
 
 async def test_renaming_a_space_keeps_its_overview_pointer(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    report = await store.create_report(name="Landing", created_by="u1", space_id=space.space_id)
+    report = await store.create_report(name="Landing", created_by="u1", access=_PUBLIC, space_id=space.space_id)
     await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
 
     renamed = await store.update_space(space_id=space.space_id, name="Cloud Security", description="d", updated_by="u1")
@@ -2571,7 +2594,7 @@ async def test_the_pinned_report_is_an_ordinary_report(store):
 
 async def test_delete_space_never_deletes_a_report(store):
     space = await store.create_space(name="Cloud", description="", created_by="u1")
-    report = await store.create_report(name="Member", created_by="u1", space_id=space.space_id)
+    report = await store.create_report(name="Member", created_by="u1", access=_PUBLIC, space_id=space.space_id)
     await store.set_space_overview(space_id=space.space_id, report_id=report.report_id, updated_by="u1")
 
     # The pinned report still blocks the delete — it is a member report.

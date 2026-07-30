@@ -64,14 +64,19 @@ async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dic
         space_id, subspace_id = await resolve_report_space(body.space_id, body.subspace_id)
     except SpaceValidationError as exc:
         return {"error": str(exc)}
-    item = await report_store.create_report(
-        name=body.name,
-        created_by=user.user.user_id,
-        # Space members are public; standalone reports stay drafts.
-        access=SPACE_MEMBER_ACCESS if space_id is not None else None,
-        space_id=space_id,
-        subspace_id=subspace_id,
-    )
+    try:
+        item = await report_store.create_report(
+            name=body.name,
+            created_by=user.user.user_id,
+            # Space members are public; standalone reports stay drafts.
+            access=SPACE_MEMBER_ACCESS if space_id is not None else None,
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    # Unreachable while the access above is chosen from space_id; kept so the
+    # store's invariant surfaces as an error rather than a traceback.
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     return item.model_dump()
 
 
@@ -160,13 +165,16 @@ async def _clone(args: dict[str, Any], current_user: CurrentUser | None) -> dict
         )
     except SpaceValidationError as exc:
         return {"error": str(exc)}
-    new_item = await report_store.create_report(
-        name=body.name,
-        created_by=user.user.user_id,
-        access=SPACE_MEMBER_ACCESS if space_id is not None else None,
-        space_id=space_id,
-        subspace_id=subspace_id,
-    )
+    try:
+        new_item = await report_store.create_report(
+            name=body.name,
+            created_by=user.user.user_id,
+            access=SPACE_MEMBER_ACCESS if space_id is not None else None,
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     cloned_config = {**source.config, "name": body.name}
     await report_store.save_report_version(
         report_id=new_item.report_id,
@@ -240,23 +248,20 @@ async def _confirm_report_clone(
     args: dict[str, Any],
     current_user: CurrentUser | None,
 ) -> ActionConfirmationTarget | None:
-    """Gate a clone only when the copy would be public.
+    """Gate every clone, unconditionally.
 
-    Worse than the create case: a clone of a *private* report that lands in a
-    space publishes that report's contents. The requested space is resolved the
-    same way the handler resolves it, so an inherited space counts too.
+    A clone with no requested space inherits the source's, so whether it
+    publishes depends on the source's placement — and the resolver's read of that
+    placement is not the handler's. If the source were filed into a space between
+    the two reads, a conditional gate would wave through a clone that publishes a
+    private report's contents. Confirming every clone closes that window; there
+    is no cheap way to make the two reads one, and clones are rare enough that
+    the extra approval costs little.
     """
-    report_id = str(args["report_id"])
-    if args.get("space_id") is None:
-        user_id = current_user.user.user_id if current_user is not None else None
-        source = await report_store.get_report_latest(report_id, user_id=user_id)
-        # No source: the handler will 404. Nothing to publish, nothing to gate.
-        if source is None or source.space_id is None:
-            return None
     return ActionConfirmationTarget(
-        action="clone public",
+        action="clone",
         resource_type="report",
-        resource_id=report_id,
+        resource_id=str(args["report_id"]),
     )
 
 
@@ -450,10 +455,11 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_clone,
             requires_user=True,
-            # Confirmation exception: clones into a new private report and does
-            # not mutate the source report. Conditional gate on top, because a
-            # clone landing in a space publishes the source's contents -- see
-            # _confirm_report_clone.
+            # Always confirmation-gated: a clone that lands in a space publishes
+            # the source's contents, and the resolver cannot rule that out
+            # race-free -- see _confirm_report_clone. The flag stays so the tool
+            # is still listed for callers that exclude gated tools; the gate
+            # itself refuses when there is nobody to approve.
             chat_safe_without_confirmation=True,
             confirmation=_confirm_report_clone,
         ),
