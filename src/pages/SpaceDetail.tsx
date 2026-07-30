@@ -198,7 +198,10 @@ function SpaceDetail() {
           open={panelOpen}
           onToggle={() => setPanelOpen((prev) => !prev)}
           tree={tree}
-          activeReportId={activeReportId}
+          // Not activeReportId: landing on the space root renders the
+          // overview, but highlighting its row would make the star redundant
+          // and imply the user had picked it.
+          selectedReportId={reportId}
           canWriteSpaces={canWriteSpaces}
           canDeleteSpaces={canDeleteSpaces}
           canWriteReports={canWriteReports}

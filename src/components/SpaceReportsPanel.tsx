@@ -41,12 +41,27 @@ const PANEL_WIDTH = 260;
 // Tightened from the MUI default so the footer actions sit at the same rhythm
 // as the report rows above them.
 const footerActionIconSx = { minWidth: 32 } as const;
+// Row actions sit in a fixed column at the panel's right edge: a slot reserved
+// on every row for the overview star, then the row menu. Reserving the slot
+// unconditionally is what keeps the menus in one line whether or not a row is
+// the overview. Names pad by the column plus a small gap, so the ellipsis lands
+// just left of the star rather than well short of it.
+// Sized to stay close to the chat sessions panel's 40px right reserve at the
+// same 260px width: the row menu's small icon button is 30px, and the star is
+// dropped to 16px so its always-reserved slot costs 18.
+const ACTION_INSET = 0;
+const ROW_MENU_WIDTH = 30;
+const OVERVIEW_STAR_SIZE = 16;
+const OVERVIEW_STAR_SLOT = OVERVIEW_STAR_SIZE + 2;
+const ACTION_COLUMN_WIDTH = ACTION_INSET + ROW_MENU_WIDTH + OVERVIEW_STAR_SLOT;
+const REPORT_NAME_GAP = 2;
 
 interface SpaceReportsPanelProps {
   open: boolean;
   onToggle: () => void;
   tree: SpaceTree;
-  activeReportId: string | undefined;
+  /** The report whose row is highlighted — the URL's report, if any. */
+  selectedReportId: string | undefined;
   /** spaces:write — creating and renaming sub-spaces. */
   canWriteSpaces: boolean;
   /** spaces:delete — deleting sub-spaces. */
@@ -77,7 +92,7 @@ function SpaceReportsPanel({
   open,
   onToggle,
   tree,
-  activeReportId,
+  selectedReportId,
   canWriteSpaces,
   canDeleteSpaces,
   canWriteReports,
@@ -328,6 +343,7 @@ function SpaceReportsPanel({
                         alignItems: 'center',
                         gap: 0.5,
                         lineHeight: '36px',
+                        pr: `${ACTION_INSET}px`,
                       }}
                     >
                       <Tooltip
@@ -366,18 +382,56 @@ function SpaceReportsPanel({
                   <ListItem
                     key={report.report_id}
                     disablePadding
+                    sx={{
+                      pr: `${ACTION_COLUMN_WIDTH + REPORT_NAME_GAP}px`,
+                      '& .MuiListItemSecondaryAction-root': {
+                        right: `${ACTION_INSET}px`,
+                      },
+                      // Whenever secondaryAction is set, ListItem pads its
+                      // button child by another 48px through a two-class
+                      // selector that outranks any sx on the button itself.
+                      // The row's own padding above already reserves the
+                      // action column, so that 48px is pure lost name width.
+                      '& > .MuiListItemButton-root': { pr: 0 },
+                    }}
                     secondaryAction={
-                      canWriteReports ? (
-                        <RowMenu
-                          actions={reportActions(report)}
-                          label="Report actions"
-                          menuMinWidth={200}
-                        />
-                      ) : undefined
+                      <Box sx={{ alignItems: 'center', display: 'flex' }}>
+                        {/* Always-reserved slot, right-aligned against the
+                            menu: the star marks the overview without shifting
+                            that row's menu out of line with every other
+                            row's. */}
+                        <Box
+                          sx={{
+                            alignItems: 'center',
+                            display: 'flex',
+                            flexShrink: 0,
+                            justifyContent: 'flex-end',
+                            width: `${OVERVIEW_STAR_SLOT}px`,
+                          }}
+                        >
+                          {report.report_id ===
+                            tree.space.overview_report_id && (
+                            <StarIcon
+                              color="primary"
+                              titleAccess="Space overview"
+                              sx={{ fontSize: OVERVIEW_STAR_SIZE }}
+                            />
+                          )}
+                        </Box>
+                        {canWriteReports && (
+                          <RowMenu
+                            actions={reportActions(report)}
+                            label="Report actions"
+                            menuMinWidth={200}
+                          />
+                        )}
+                      </Box>
                     }
                   >
                     <ListItemButton
-                      selected={activeReportId === report.report_id}
+                      // Highlight tracks the report the user picked, not the
+                      // overview fallback: the star is what marks the overview.
+                      selected={selectedReportId === report.report_id}
                       onClick={() => onSelectReport(report.report_id)}
                     >
                       <Tooltip

@@ -493,4 +493,15 @@ describe('SpaceDetail', () => {
       1,
     );
   });
+
+  it('marks the overview report with a star rather than a highlight', () => {
+    renderAt('/app/spaces/sp1');
+
+    // Exactly one star, on the pinned report's row and nowhere else. It sits
+    // outside the row button so the report names stay aligned.
+    const stars = screen.getAllByTitle('Space overview');
+    expect(stars).toHaveLength(1);
+    expect(stars[0].closest('li')).toHaveTextContent('Loose Report');
+    expect(stars[0].closest('[role="button"]')).toBeNull();
+  });
 });
