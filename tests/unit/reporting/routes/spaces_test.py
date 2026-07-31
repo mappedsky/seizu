@@ -136,10 +136,32 @@ async def test_create_space_rejects_duplicate_name(mocker):
     )
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Trimmed and case-insensitive.
-        ret = await client.post("/api/v1/spaces", json={"name": "  cloud  "})
+        # Trimmed before comparison, so the surrounding whitespace still collides.
+        ret = await client.post("/api/v1/spaces", json={"name": "  Cloud  "})
     assert ret.status_code == 409
     mock_create.assert_not_called()
+
+
+async def test_create_space_allows_a_name_differing_only_by_case(mocker):
+    """Names are matched exactly.
+
+    Case-folding would reject names an operator considers distinct, and it is a
+    rule the YAML seeder would have to reimplement to decide whether a space
+    already exists.
+    """
+    mocker.patch(
+        "reporting.routes.spaces.report_store.list_spaces",
+        new=AsyncMock(return_value=[_space(name="Cloud")]),
+    )
+    mock_create = mocker.patch(
+        "reporting.routes.spaces.report_store.create_space",
+        new=AsyncMock(return_value=_space()),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post("/api/v1/spaces", json={"name": "cloud"})
+    assert ret.status_code == 201
+    mock_create.assert_called_once()
 
 
 async def test_create_space_rejects_blank_name(mocker):
@@ -388,7 +410,7 @@ async def test_create_subspace_rejects_duplicate_name_within_the_space(mocker):
     )
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        ret = await client.post("/api/v1/spaces/sp1/subspaces", json={"name": "network"})
+        ret = await client.post("/api/v1/spaces/sp1/subspaces", json={"name": "  Network  "})
     assert ret.status_code == 409
     mock_create.assert_not_called()
 

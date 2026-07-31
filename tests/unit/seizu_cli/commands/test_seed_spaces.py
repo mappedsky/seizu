@@ -133,6 +133,9 @@ def test_seed_matches_an_existing_space_by_name(mock_client: MagicMock, tmp_path
         "/api/v1/spaces/s1/subspaces": {
             "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
         },
+        # The space already existed, so its overview pointer is read before
+        # being written.
+        "/api/v1/spaces/s1/tree": {"space": _space_row(), "subspaces": [], "reports": []},
         "/api/v1/reports": {"reports": []},
     }[path]
     mock_client.post.side_effect = [{"report_id": "r1"}, {}]
@@ -144,6 +147,118 @@ def test_seed_matches_an_existing_space_by_name(mock_client: MagicMock, tmp_path
     assert "/api/v1/spaces/s1/subspaces" not in posts
     puts = {call.args[0]: call.kwargs.get("json") for call in mock_client.put.call_args_list}
     assert puts["/api/v1/reports/r1/space"] == {"space_id": "s1", "subspace_id": "ss1"}
+
+
+def test_reseeding_an_unchanged_config_writes_nothing(mock_client: MagicMock, tmp_path: Path) -> None:
+    """Filing and the overview pointer are metadata writes that stamp updated_by.
+
+    Rewriting them on every seed would churn every filed report and every
+    configured space for no change.
+    """
+    config = tmp_path / "c.yaml"
+    config.write_text(_SPACE_CONFIG)
+    stored = _report_config("Sec Overview")
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": {
+            "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
+        },
+        "/api/v1/spaces/s1/tree": {
+            "space": {**_space_row(), "overview_report_id": "r1"},
+            "subspaces": [],
+            "reports": [],
+        },
+        "/api/v1/reports": {"reports": [_report_row("r1", "Sec Overview", space_id="s1", subspace_id="ss1")]},
+        "/api/v1/reports/r1": {"config": stored},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    mock_client.post.assert_not_called()
+    mock_client.put.assert_not_called()
+
+
+def test_reseed_refiles_a_report_that_moved(mock_client: MagicMock, tmp_path: Path) -> None:
+    """Only a membership that actually differs is rewritten."""
+    config = tmp_path / "c.yaml"
+    config.write_text(_SPACE_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": {
+            "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
+        },
+        "/api/v1/spaces/s1/tree": {
+            "space": {**_space_row(), "overview_report_id": "r1"},
+            "subspaces": [],
+            "reports": [],
+        },
+        # Same space, but the sub-space was cleared out of band.
+        "/api/v1/reports": {"reports": [_report_row("r1", "Sec Overview", space_id="s1", subspace_id=None)]},
+        "/api/v1/reports/r1": {"config": _report_config("Sec Overview")},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    mock_client.put.assert_called_once_with(
+        "/api/v1/reports/r1/space",
+        json={"space_id": "s1", "subspace_id": "ss1"},
+    )
+
+
+def test_reseed_resets_an_overview_pointing_elsewhere(mock_client: MagicMock, tmp_path: Path) -> None:
+    config = tmp_path / "c.yaml"
+    config.write_text(_SPACE_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": {
+            "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
+        },
+        "/api/v1/spaces/s1/tree": {"space": _space_row(), "subspaces": [], "reports": []},
+        "/api/v1/reports": {"reports": [_report_row("r1", "Sec Overview", space_id="s1", subspace_id="ss1")]},
+        "/api/v1/reports/r1": {"config": _report_config("Sec Overview")},
+    }[path]
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    mock_client.put.assert_called_once_with("/api/v1/spaces/s1/overview", json={"report_id": "r1"})
+
+
+def test_force_rewrites_membership_and_overview(mock_client: MagicMock, tmp_path: Path) -> None:
+    """--force means "write even if unchanged", consistently across the seeder."""
+    config = tmp_path / "c.yaml"
+    config.write_text(_SPACE_CONFIG)
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/spaces": {"spaces": [_space_row()]},
+        "/api/v1/spaces/s1/subspaces": {
+            "subspaces": [{"subspace_id": "ss1", "space_id": "s1", "name": "Vulnerabilities"}]
+        },
+        "/api/v1/reports": {"reports": [_report_row("r1", "Sec Overview", space_id="s1", subspace_id="ss1")]},
+        "/api/v1/reports/r1": {"config": _report_config("Sec Overview")},
+    }[path]
+
+    seed.seed_cmd(str(config), force=True, dry_run=False)
+
+    puts = {call.args[0] for call in mock_client.put.call_args_list}
+    assert "/api/v1/reports/r1/space" in puts
+    assert "/api/v1/spaces/s1/overview" in puts
+    # The tree read is skipped entirely: force writes without comparing.
+    assert "/api/v1/spaces/s1/tree" not in {call.args[0] for call in mock_client.get.call_args_list}
+
+
+def test_seed_matches_space_names_exactly(mock_client: MagicMock, tmp_path: Path) -> None:
+    """A case-only difference is a different space, as the API also treats it."""
+    config = tmp_path / "c.yaml"
+    config.write_text("spaces:\n  security:\n    name: Security\n    description: d\n")
+    mock_client.get.side_effect = lambda path: {
+        "/api/v1/spaces": {"spaces": [_space_row(name="security")]},
+        "/api/v1/reports": {"reports": []},
+    }[path]
+    mock_client.post.return_value = {"space_id": "s2"}
+
+    seed.seed_cmd(str(config), force=False, dry_run=False)
+
+    mock_client.post.assert_called_once_with("/api/v1/spaces", json={"name": "Security", "description": "d"})
+    mock_client.put.assert_not_called()
 
 
 def test_seed_updates_a_space_whose_description_changed(mock_client: MagicMock, tmp_path: Path) -> None:

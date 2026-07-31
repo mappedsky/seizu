@@ -44,9 +44,13 @@ set. `GET /api/v1/spaces` and `GET /api/v1/spaces/<id>` always return `overview_
 Open **Spaces** in the sidebar and choose **New space**. Supply a name and an optional description.
 The space starts empty, with no reports and no overview.
 
-Names are checked for duplicates case-insensitively at creation and rename time. The check is
-best-effort — it is not backed by a database constraint, so two simultaneous creates can still produce
-two spaces with the same name.
+Names are checked for duplicates at creation and rename time, matched **exactly** — surrounding
+whitespace is trimmed first, but case is significant, so `Security` and `security` can coexist. The
+check is best-effort: it is not backed by a database constraint, so two simultaneous creates can still
+produce two spaces with the same name.
+
+Exact matching is also what lets `seizu seed` decide whether a YAML space already exists without
+reimplementing the server's rule — see [Seeding](#seeding).
 
 ### Editing a space
 
@@ -239,7 +243,13 @@ reports:
 
 The YAML keys (`security`, `vulnerabilities`) are local handles used to wire the sections together.
 They never reach the API: space ids are server-generated, so the seeder matches spaces and sub-spaces
-**by name**, exactly as it matches reports.
+**by exact name**, exactly as it matches reports — and exactly how the API itself decides whether a
+name is taken, so the seeder never claims a record the server would have let it create.
+
+**Re-seeding an unchanged config writes nothing.** A report already filed where the YAML says, and an
+overview already pointing at the right report, are both left alone: those endpoints stamp
+`updated_at`/`updated_by`, so rewriting them every run would churn the audit trail for no change. Pass
+`--force` to write regardless.
 
 Three cross-references are validated when the file loads, before any writes happen — a typo fails the
 whole seed rather than half of it:

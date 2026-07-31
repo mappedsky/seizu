@@ -165,23 +165,23 @@ async def resolve_clone_space(
 # ---------------------------------------------------------------------------
 
 
-def _normalised_name(name: str) -> str:
-    return name.strip().casefold()
-
-
 async def find_duplicate_space_name(name: str, *, exclude_space_id: str | None = None) -> bool:
     """Report whether another space already carries *name*.
 
-    Best-effort, and deliberately not backed by a unique constraint: a
-    functional lower(name) index is awkward cross-dialect and DynamoDB cannot
-    enforce one at all, so adding it to only the SQL backend would make the two
-    behave differently under a race.
+    Matched **exactly**. Names reach here already stripped (``_strip_name`` on
+    the request models), so the only question this leaves open is case, and
+    case-folding it would be wrong twice over: it rejects names an operator
+    considers distinct, and it is a rule the seeder would have to reimplement to
+    decide whether a YAML space already exists. An exact match is the one
+    definition both sides can hold without sharing code -- see
+    ``_seed_spaces`` in ``seizu_cli/commands/seed.py``.
+
+    Best-effort, and deliberately not backed by a unique constraint: a unique
+    index on ``name`` is awkward cross-dialect and DynamoDB cannot enforce one
+    at all, so adding it to only the SQL backend would make the two behave
+    differently under a race.
     """
-    target = _normalised_name(name)
-    return any(
-        space.space_id != exclude_space_id and _normalised_name(space.name) == target
-        for space in await report_store.list_spaces()
-    )
+    return any(space.space_id != exclude_space_id and space.name == name for space in await report_store.list_spaces())
 
 
 async def find_duplicate_subspace_name(
@@ -190,10 +190,12 @@ async def find_duplicate_subspace_name(
     *,
     exclude_subspace_id: str | None = None,
 ) -> bool:
-    """Report whether another sub-space of *space_id* already carries *name*."""
-    target = _normalised_name(name)
+    """Report whether another sub-space of *space_id* already carries *name*.
+
+    Exact match, for the same reasons as :func:`find_duplicate_space_name`.
+    """
     return any(
-        subspace.subspace_id != exclude_subspace_id and _normalised_name(subspace.name) == target
+        subspace.subspace_id != exclude_subspace_id and subspace.name == name
         for subspace in await report_store.list_subspaces(space_id)
     )
 

@@ -172,14 +172,26 @@ async def test_create_space_records_the_current_user():
 
 async def test_create_space_rejects_a_duplicate_name():
     with (
-        _patch_service("list_spaces", return_value=[_space(name="  security  ")]),
+        _patch_service("list_spaces", return_value=[_space(name="Security")]),
         _patch("create_space") as mock_create,
     ):
-        data = await _call(_build_mcp_server(), "spaces__create", {"name": "Security"})
+        # Stripped by the request model, so the whitespace still collides.
+        data = await _call(_build_mcp_server(), "spaces__create", {"name": "  Security  "})
 
-    # Matched case- and whitespace-insensitively, like the REST route.
     assert "already exists" in data["error"]
     mock_create.assert_not_awaited()
+
+
+async def test_create_space_allows_a_name_differing_only_by_case():
+    """Exact matching, matching the REST route — see find_duplicate_space_name."""
+    with (
+        _patch_service("list_spaces", return_value=[_space(name="Security")]),
+        _patch("create_space", return_value=_space(space_id="s2")) as mock_create,
+    ):
+        data = await _call(_build_mcp_server(), "spaces__create", {"name": "security"})
+
+    assert data["space_id"] == "s2"
+    mock_create.assert_awaited_once()
 
 
 async def test_update_space_ignores_its_own_name():
@@ -272,7 +284,7 @@ async def test_create_subspace_rejects_a_duplicate_name_within_the_space():
         _patch_service("list_subspaces", return_value=[_subspace(name="Vulns")]),
         _patch("create_subspace") as mock_create,
     ):
-        data = await _call(_build_mcp_server(), "spaces__create_subspace", {"space_id": "s1", "name": "vulns"})
+        data = await _call(_build_mcp_server(), "spaces__create_subspace", {"space_id": "s1", "name": "  Vulns  "})
 
     assert "already exists" in data["error"]
     mock_create.assert_not_awaited()

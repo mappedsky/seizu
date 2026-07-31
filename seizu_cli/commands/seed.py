@@ -2,7 +2,7 @@
 
 import re
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 from rich.console import Console
 
@@ -216,7 +216,7 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
 
     # Spaces first: filing a report needs its space to already exist.
     console.print("Seeding spaces...")
-    space_ids, subspace_ids = _seed_spaces(loaded, force=force, dry_run=dry_run)
+    seeded_spaces = _seed_spaces(loaded, force=force, dry_run=dry_run)
     console.print("")
 
     try:
@@ -226,6 +226,9 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
         return
 
     existing_by_name: dict[str, dict[str, Any]] = {r["name"]: r for r in existing_list}
+    # Space membership is read from this snapshot rather than re-fetched: the
+    # report pass never changes it, so it is still current when filing runs.
+    existing_by_id: dict[str, dict[str, Any]] = {r["report_id"]: r for r in existing_list}
 
     created = updated = skipped = 0
     seeded_ids: dict[str, str] = {}
@@ -325,8 +328,8 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
     # the report to exist and be public, and an overview needs it filed.
     if loaded.spaces:
         console.print("\nFiling reports into spaces...")
-        _apply_report_spaces(loaded, seeded_ids, space_ids, subspace_ids, dry_run=dry_run)
-        _apply_space_overviews(loaded, seeded_ids, space_ids, dry_run=dry_run)
+        _apply_report_spaces(loaded, seeded_ids, seeded_spaces, existing_by_id, force=force, dry_run=dry_run)
+        _apply_space_overviews(loaded, seeded_ids, seeded_spaces, force=force, dry_run=dry_run)
 
     if loaded.workflows:
         console.print("\nSeeding workflows...")
@@ -345,35 +348,53 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
         console.print("\n(dry-run, no writes performed)")
 
 
+class SeededSpaces(NamedTuple):
+    """What the report pass needs to know after spaces have been seeded.
+
+    ``space_ids`` / ``subspace_ids`` map YAML keys to server ids. A value is
+    ``None`` when the id is not known, which happens only on a dry run for a
+    record that would have been created — callers print rather than write.
+
+    ``created_keys`` names the spaces this run created. They cannot already
+    carry an overview pointer, so the overview pass can skip reading one.
+    """
+
+    space_ids: dict[str, str | None]
+    subspace_ids: dict[tuple[str, str], str | None]
+    created_keys: set[str]
+
+
 def _seed_spaces(
     config: Any,
     force: bool,
     dry_run: bool,
-) -> tuple[dict[str, str | None], dict[tuple[str, str], str | None]]:
+) -> SeededSpaces:
     """Create or update the spaces and sub-spaces declared in *config*.
-
-    Returns the YAML key → server id maps the report pass needs. A value is
-    ``None`` when the id is not known, which happens only on a dry run for a
-    record that would have been created — callers print rather than write in
-    that case.
 
     Spaces are matched by name, like reports: their ids are server-generated
     snowflakes, so the YAML key is a local handle that never reaches the API.
+    The match is exact, which is also how the API decides whether a name is
+    taken — see ``find_duplicate_space_name``. Anything looser would have to be
+    kept in step with the server by hand, and would make the seeder claim an
+    existing record the API would have let it create.
+
     Nothing is ever deleted here; a space dropped from the YAML is left alone,
     matching how reports and toolsets are seeded.
     """
     space_ids: dict[str, str | None] = {}
     subspace_ids: dict[tuple[str, str], str | None] = {}
+    created_keys: set[str] = set()
+    seeded = SeededSpaces(space_ids, subspace_ids, created_keys)
 
     if not config.spaces:
         console.print("  No spaces in config, skipping.")
-        return space_ids, subspace_ids
+        return seeded
 
     try:
         existing_spaces = {item["name"]: item for item in _list_spaces()}
     except Exception as exc:
         _die(exc)
-        return space_ids, subspace_ids
+        return seeded
 
     created = updated = skipped = 0
 
@@ -398,7 +419,7 @@ def _seed_spaces(
                     )
                 except Exception as exc:
                     _die(exc)
-                    return space_ids, subspace_ids
+                    return seeded
                 console.print(f"  [blue][updated][/blue] '{space_id}'  name='{space_def.name}'  yaml_key='{space_key}'")
                 updated += 1
         elif dry_run:
@@ -413,8 +434,9 @@ def _seed_spaces(
                 )
             except Exception as exc:
                 _die(exc)
-                return space_ids, subspace_ids
+                return seeded
             space_ids[space_key] = result["space_id"]
+            created_keys.add(space_key)
             console.print(
                 f"  [green][created][/green] '{result['space_id']}'  name='{space_def.name}'  yaml_key='{space_key}'"
             )
@@ -439,7 +461,7 @@ def _seed_spaces(
                 existing_subspaces = {item["name"]: item for item in _list_subspaces(space_id)}
             except Exception as exc:
                 _die(exc)
-                return space_ids, subspace_ids
+                return seeded
 
         for sub_key, sub_def in space_def.subspaces.items():
             existing_sub = existing_subspaces.get(sub_def.name)
@@ -462,27 +484,34 @@ def _seed_spaces(
                 )
             except Exception as exc:
                 _die(exc)
-                return space_ids, subspace_ids
+                return seeded
             subspace_ids[(space_key, sub_key)] = result["subspace_id"]
             console.print(
                 f"    [green][created][/green] '{result['subspace_id']}'  name='{sub_def.name}'  yaml_key='{sub_key}'"
             )
 
     console.print(f"  Spaces: created={created} updated={updated} skipped={skipped}")
-    return space_ids, subspace_ids
+    return seeded
 
 
 def _apply_report_spaces(
     config: Any,
     seeded_ids: dict[str, str],
-    space_ids: dict[str, str | None],
-    subspace_ids: dict[tuple[str, str], str | None],
+    spaces: SeededSpaces,
+    existing_reports: dict[str, dict[str, Any]],
+    force: bool,
     dry_run: bool,
 ) -> None:
     """File the seeded reports into the spaces their YAML declares.
 
     Runs after the report pass because filing needs the report to exist and to
     be public — the report pass publishes everything it touches.
+
+    A report already filed where the YAML says is skipped: the filing endpoint
+    is a metadata write that stamps ``updated_at``/``updated_by``, so writing it
+    unconditionally would churn every filed report on every re-seed. The
+    membership comes from the report list fetched before the report pass, which
+    is why ``existing_reports`` is keyed by report id.
 
     A report whose YAML omits ``space`` is left where it is rather than being
     pulled out of a space, the same "only act when the key is present" rule
@@ -493,14 +522,14 @@ def _apply_report_spaces(
     if not targets:
         return
 
-    filed = 0
+    filed = unchanged = 0
     for report_key, report in targets:
-        space_id = space_ids.get(report.space)
-        subspace_id = subspace_ids.get((report.space, report.subspace)) if report.subspace else None
+        space_id = spaces.space_ids.get(report.space)
+        subspace_id = spaces.subspace_ids.get((report.space, report.subspace)) if report.subspace else None
         report_id = seeded_ids.get(report_key)
+        location = f"{report.space}/{report.subspace}" if report.subspace else report.space
 
         if dry_run:
-            location = f"{report.space}/{report.subspace}" if report.subspace else report.space
             console.print(f"  [yellow][dry-run][/yellow] would file report '{report.name}' into space '{location}'")
             filed += 1
             continue
@@ -509,32 +538,45 @@ def _apply_report_spaces(
             console.print(f"  [yellow][warn][/yellow] report '{report.name}' was not seeded, not filed into a space")
             continue
 
+        # A report this run created is not in the list, and has no membership.
+        current = existing_reports.get(report_id, {})
+        if not force and current.get("space_id") == space_id and current.get("subspace_id") == subspace_id:
+            console.print(f"  [dim][skip][/dim] report '{report.name}' (already in space '{location}')")
+            unchanged += 1
+            continue
+
         try:
             _set_report_space(report_id, space_id, subspace_id)
         except Exception as exc:
             _die(exc)
             return
-        location = f"{report.space}/{report.subspace}" if report.subspace else report.space
         console.print(f"  [green][filed][/green] report '{report.name}' → space '{location}'")
         filed += 1
 
-    console.print(f"  Report space membership: filed={filed}")
+    console.print(f"  Report space membership: filed={filed} unchanged={unchanged}")
 
 
 def _apply_space_overviews(
     config: Any,
     seeded_ids: dict[str, str],
-    space_ids: dict[str, str | None],
+    spaces: SeededSpaces,
+    force: bool,
     dry_run: bool,
 ) -> None:
     """Point each space at its overview report.
 
     Last, because the target has to exist and be filed in the space first.
+
+    A pointer that already resolves to the right report is left alone, so a
+    re-seed does not restamp every configured space. Reading it costs a tree
+    fetch, because the tree is the only endpoint that reports the pointer — a
+    read in place of a write, and only for a space that declares an overview and
+    was not created by this run.
     """
     for space_key, space_def in config.spaces.items():
         if space_def.overview is None:
             continue
-        space_id = space_ids.get(space_key)
+        space_id = spaces.space_ids.get(space_key)
         report_id = seeded_ids.get(space_def.overview)
 
         if dry_run:
@@ -548,6 +590,18 @@ def _apply_space_overviews(
                 f" '{space_key}' was not seeded, overview not set"
             )
             continue
+
+        # A space this run created cannot already have a pointer, so skip the read.
+        if not force and space_key not in spaces.created_keys:
+            try:
+                current = (_space_tree(space_id).get("space") or {}).get("overview_report_id")
+            except Exception as exc:
+                _die(exc)
+                return
+            if current == report_id:
+                console.print(f"  [dim][skip][/dim] space '{space_key}' overview (unchanged)")
+                continue
+
         try:
             _set_space_overview(space_id, report_id)
         except Exception as exc:
