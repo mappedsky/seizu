@@ -16,6 +16,7 @@ from reporting.services.mcp_builtins import roles as _roles
 from reporting.services.mcp_builtins import sandbox as _sandbox
 from reporting.services.mcp_builtins import scheduled_queries as _scheduled_queries
 from reporting.services.mcp_builtins import skillsets as _skillsets
+from reporting.services.mcp_builtins import spaces as _spaces
 from reporting.services.mcp_builtins import toolsets as _toolsets
 from reporting.services.mcp_builtins import workflows as _workflows
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
@@ -29,6 +30,7 @@ _GROUPS: list[BuiltinGroup] = [
     _roles.GROUP_DEF,
     _sandbox.GROUP_DEF,
     _scheduled_queries.GROUP_DEF,
+    _spaces.GROUP_DEF,
     _workflows.GROUP_DEF,
     _skillsets.GROUP_DEF,
     _toolsets.GROUP_DEF,

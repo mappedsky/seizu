@@ -137,7 +137,7 @@ Run `seizu --help` or `seizu <group> --help` for the full command list.
 
 ## Seed and Export
 
-The CLI can seed reports, scheduled queries, toolsets, and skillsets from the same YAML configuration format used by the quickstart:
+The CLI can seed spaces, reports, scheduled queries, toolsets, and skillsets from the same YAML configuration format used by the quickstart:
 
 ```bash
 seizu seed --config path/to/reporting-dashboard.yaml
@@ -145,12 +145,20 @@ seizu seed --dry-run
 seizu seed --force
 ```
 
+Spaces are seeded before reports, and report membership and space overviews are applied after — see
+[Spaces](spaces.html#seeding).
+
 Export writes the latest API state back into the YAML file:
 
 ```bash
 seizu export --config path/to/reporting-dashboard.yaml
 seizu export --dry-run
 ```
+
+**Built-in MCP toolsets are skipped on export.** They ship with the application, the write path rejects
+their ids, and those ids are not valid YAML keys — so they have no place in a config describing
+user-defined state. The run prints how many were skipped. A toolset or skillset that fails to export for
+any other reason is reported and skipped individually; it never aborts the run.
 
 When `--config` is omitted, the CLI uses `seed_file` from `~/.config/seizu/seizu.conf`, then falls back to `~/.config/seizu/reporting-dashboard.yaml`.
 

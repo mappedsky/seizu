@@ -22,6 +22,8 @@ from seizu_schema.reporting_config import (
     ScheduledQueryWatchScan,  # noqa: F401
     SkillDef,  # noqa: F401
     SkillsetDef,  # noqa: F401
+    SpaceDef,  # noqa: F401
+    SubspaceDef,  # noqa: F401
     ToolDef,  # noqa: F401
     ToolParamDef,  # noqa: F401
     ToolsetDef,  # noqa: F401

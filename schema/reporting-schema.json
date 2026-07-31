@@ -620,6 +620,38 @@
                     ],
                     "title": "Pinned"
                 },
+                "space": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Optional seed metadata: the key of a space in the top-level ``spaces`` section to file this report into. Like ``pinned`` this is parent metadata applied after the version is saved, and is never stored inside report version configs -- restoring an old version must not relocate a report. A report filed in a space is public.",
+                    "examples": [
+                        "security"
+                    ],
+                    "title": "Space"
+                },
+                "subspace": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Optional seed metadata: the key of a sub-space within ``space``. Requires ``space``. Not stored inside report version configs.",
+                    "examples": [
+                        "vulnerabilities"
+                    ],
+                    "title": "Subspace"
+                },
                 "name": {
                     "description": "The name of the report.",
                     "examples": [
@@ -1100,6 +1132,63 @@
             "title": "SkillsetDef",
             "type": "object"
         },
+        "SpaceDef": {
+            "description": "A space definition.\n\nSpaces carry no version history and no access scope, so unlike toolsets\nthere is no ``enabled`` flag and nothing to version. Membership is declared\non the report (``Report.space``), not listed here, so a report only ever\nnames its placement in one place.",
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                },
+                "description": {
+                    "default": "",
+                    "title": "Description",
+                    "type": "string"
+                },
+                "overview": {
+                    "anyOf": [
+                        {
+                            "type": "string"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ],
+                    "default": null,
+                    "description": "Optional key of a report in the ``reports`` section to use as this space's landing page. The report must declare this space in its ``space`` field.",
+                    "examples": [
+                        "security_overview"
+                    ],
+                    "title": "Overview"
+                },
+                "subspaces": {
+                    "additionalProperties": {
+                        "$ref": "#/$defs/SubspaceDef"
+                    },
+                    "description": "Sub-spaces within this space, keyed by a lower_snake_case id.",
+                    "title": "Subspaces",
+                    "type": "object"
+                }
+            },
+            "required": [
+                "name"
+            ],
+            "title": "SpaceDef",
+            "type": "object"
+        },
+        "SubspaceDef": {
+            "description": "A sub-space: a grouping label for reports within a single space.",
+            "properties": {
+                "name": {
+                    "title": "Name",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "name"
+            ],
+            "title": "SubspaceDef",
+            "type": "object"
+        },
         "ToolDef": {
             "description": "A tool definition within a toolset.",
             "properties": {
@@ -1405,6 +1494,17 @@
                 "\n            .. code-block:: yaml\n\n              skillsets:\n                investigations:\n                  name: Investigations\n                  description: Prompt templates for graph investigations\n                  enabled: true\n                  skills:\n                    summarize_node:\n                      name: Summarize node\n                      template: Summarize {{node_id}} for a security analyst.\n                      parameters:\n                        - name: node_id\n                          type: string\n            "
             ],
             "title": "Skillsets",
+            "type": "object"
+        },
+        "spaces": {
+            "additionalProperties": {
+                "$ref": "#/$defs/SpaceDef"
+            },
+            "description": "Spaces that group reports, keyed by a lower_snake_case id.",
+            "examples": [
+                "\n            .. code-block:: yaml\n\n              spaces:\n                security:\n                  name: Security\n                  description: Vulnerability and posture reporting\n                  overview: security_overview\n                  subspaces:\n                    vulnerabilities:\n                      name: Vulnerabilities\n            "
+            ],
+            "title": "Spaces",
             "type": "object"
         }
     },
