@@ -42,6 +42,19 @@ def test_viewer_cannot_write():
     assert Permission.REPORTS_WRITE not in VIEWER_PERMISSIONS
     assert Permission.TOOLSETS_WRITE not in VIEWER_PERMISSIONS
     assert Permission.SCHEDULED_QUERIES_WRITE not in VIEWER_PERMISSIONS
+    assert Permission.SPACES_WRITE not in VIEWER_PERMISSIONS
+    assert Permission.SPACES_DELETE not in VIEWER_PERMISSIONS
+
+
+def test_viewer_can_read_spaces():
+    assert Permission.SPACES_READ in VIEWER_PERMISSIONS
+
+
+def test_editor_can_manage_spaces():
+    # Spaces sit with reports (Editor), not with toolsets/skillsets (Admin):
+    # creating a space creates a report.
+    assert Permission.SPACES_WRITE in EDITOR_PERMISSIONS
+    assert Permission.SPACES_DELETE in EDITOR_PERMISSIONS
 
 
 def test_editor_can_write_reports():

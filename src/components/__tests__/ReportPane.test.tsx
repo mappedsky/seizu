@@ -7,7 +7,7 @@ import {
 } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import Reports from 'src/pages/Reports';
+import ReportPane from 'src/components/ReportPane';
 import * as reportsApiModule from 'src/hooks/useReportsApi';
 import * as permissionsModule from 'src/hooks/usePermissions';
 
@@ -33,7 +33,7 @@ function Wrapper({ children }: { children: React.ReactNode }) {
   );
 }
 
-describe('Reports', () => {
+describe('ReportPane', () => {
   let mockUseReport: jest.Mock;
   let mockUseReportsMutations: jest.Mock;
   let saveReportVersion: jest.Mock;
@@ -112,7 +112,7 @@ describe('Reports', () => {
   });
 
   it('populates edit-mode report name from report metadata when config name is absent', () => {
-    render(<Reports />, { wrapper: Wrapper });
+    render(<ReportPane id="r1" />, { wrapper: Wrapper });
 
     expect(screen.getByLabelText('Report name')).toHaveValue(
       'Metadata Report Name',
@@ -120,7 +120,7 @@ describe('Reports', () => {
   });
 
   it('saves the edited report name through the new report version', async () => {
-    render(<Reports />, { wrapper: Wrapper });
+    render(<ReportPane id="r1" />, { wrapper: Wrapper });
 
     fireEvent.change(screen.getByLabelText('Report name'), {
       target: { value: 'Renamed Report' },

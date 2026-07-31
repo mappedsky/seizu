@@ -225,13 +225,22 @@ function ChatSessionsPanel({
                       onClick={() => onSelectSession(session.thread_id)}
                       sx={{ pr: 5 }}
                     >
-                      <Typography
-                        variant="body2"
-                        noWrap
+                      {/* MUI tooltip rather than a native `title`: the browser
+                          waits a second or more before showing one. */}
+                      <Tooltip
                         title={session.title || 'New session'}
+                        placement="top"
+                        arrow
+                        disableInteractive
                       >
-                        {session.title || 'New session'}
-                      </Typography>
+                        <Typography
+                          variant="body2"
+                          noWrap
+                          sx={{ minWidth: 0, width: '100%' }}
+                        >
+                          {session.title || 'New session'}
+                        </Typography>
+                      </Tooltip>
                     </ListItemButton>
                   </ListItem>
                 ))}

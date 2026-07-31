@@ -10,6 +10,7 @@ from reporting.schema.report_config import (
     CreateReportRequest,
     CreateVersionRequest,
     PinReportRequest,
+    ReportAccess,
     ReportIdResponse,
     ReportListItem,
     ReportListResponse,
@@ -17,11 +18,41 @@ from reporting.schema.report_config import (
     ReportVersionListResponse,
     UpdateReportVisibilityRequest,
 )
+from reporting.schema.space_config import SetReportSpaceRequest
 from reporting.services import report_store
 from reporting.services.report_query_tokens import build_report_query_capabilities
+from reporting.services.spaces import (
+    SPACE_MEMBER_ACCESS,
+    SpaceConflictError,
+    SpaceValidationError,
+    reject_filing_private_report,
+    reject_privatising_space_member,
+    resolve_clone_space,
+    resolve_report_space,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _resolve_space_or_400(
+    space_id: str | None,
+    subspace_id: str | None,
+) -> tuple[str | None, str | None]:
+    try:
+        return await resolve_report_space(space_id, subspace_id)
+    except SpaceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _access_for_new_report(space_id: str | None) -> ReportAccess | None:
+    """Reports created into a space are public; standalone ones stay drafts.
+
+    Space members must be public (see ``SPACE_MEMBER_ACCESS``), and refusing the
+    create instead would leave the space page's New report action unable to file
+    what it creates.
+    """
+    return SPACE_MEMBER_ACCESS if space_id is not None else None
 
 
 def _with_query_capabilities(
@@ -164,10 +195,19 @@ async def create_report(
     current: CurrentUser = Depends(require_permission(Permission.REPORTS_WRITE)),
 ) -> Any:
     """Create a new report."""
-    return await report_store.create_report(
-        name=body.name,
-        created_by=current.user.user_id,
-    )
+    space_id, subspace_id = await _resolve_space_or_400(body.space_id, body.subspace_id)
+    try:
+        return await report_store.create_report(
+            name=body.name,
+            created_by=current.user.user_id,
+            access=_access_for_new_report(space_id),
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    # Unreachable while _access_for_new_report publishes in-space reports; kept so
+    # the store's invariant surfaces as its 409 rather than a 500 if that changes.
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.put("/api/v1/reports/{report_id}/visibility", response_model=ReportListItem)
@@ -182,6 +222,10 @@ async def update_report_visibility(
         raise HTTPException(status_code=404, detail="Report not found")
     if body.access is not None and meta.created_by != current.user.user_id:
         raise HTTPException(status_code=403, detail="Only the report owner can update report access")
+    try:
+        reject_privatising_space_member(meta.space_id, body.access)
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:
@@ -189,11 +233,55 @@ async def update_report_visibility(
                 status_code=400,
                 detail="Report must be unpinned and removed from the dashboard before it can be made private",
             )
-    updated = await report_store.update_report_visibility(
-        report_id=report_id,
-        updated_by=current.user.user_id,
-        access=body.access,
-    )
+    try:
+        updated = await report_store.update_report_visibility(
+            report_id=report_id,
+            updated_by=current.user.user_id,
+            access=body.access,
+        )
+    # The store re-checks the rule above under a lock/condition, so a report
+    # filed into a space concurrently lands here instead.
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return updated
+
+
+@router.put("/api/v1/reports/{report_id}/space", response_model=ReportListItem)
+async def update_report_space(
+    report_id: str,
+    body: SetReportSpaceRequest,
+    current: CurrentUser = Depends(require_permission(Permission.REPORTS_WRITE)),
+) -> ReportListItem:
+    """Set a report's space membership without creating a report version.
+
+    Requires only ``reports:write``: filing a report is a report edit, and
+    spaces are globally visible so there is nothing to leak by letting any
+    report author file into any space. A draft cannot be filed at all -- see
+    ``SPACE_MEMBER_ACCESS``.
+    """
+    space_id, subspace_id = await _resolve_space_or_400(body.space_id, body.subspace_id)
+    try:
+        if space_id is not None:
+            # Only filing needs the report's access: removing one from its space
+            # is always allowed, whatever its visibility, and skipping the read
+            # keeps the unfile path a single write.
+            meta = await report_store.get_report_metadata(report_id, user_id=current.user.user_id)
+            if not meta:
+                raise HTTPException(status_code=404, detail="Report not found")
+            reject_filing_private_report(space_id, meta.access)
+        # The store re-checks the same rule under a lock/condition, so the raise
+        # can come from either place; both mean the same 409.
+        updated = await report_store.update_report_space(
+            report_id=report_id,
+            space_id=space_id,
+            subspace_id=subspace_id,
+            updated_by=current.user.user_id,
+            user_id=current.user.user_id,
+        )
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Report not found")
     return updated
@@ -234,10 +322,22 @@ async def clone_report(
     source = await report_store.get_report_latest(report_id, user_id=current.user.user_id)
     if not source:
         raise HTTPException(status_code=404, detail="Report not found")
-    new_item = await report_store.create_report(
-        name=body.name,
-        created_by=current.user.user_id,
-    )
+    try:
+        space_id, subspace_id = await resolve_clone_space(
+            source.space_id, source.subspace_id, body.space_id, body.subspace_id
+        )
+    except SpaceValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        new_item = await report_store.create_report(
+            name=body.name,
+            created_by=current.user.user_id,
+            access=_access_for_new_report(space_id),
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    except SpaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     cloned_config = {**source.config, "name": body.name}
     await report_store.save_report_version(
         report_id=new_item.report_id,

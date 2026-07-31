@@ -6,6 +6,8 @@ import Reports from 'src/pages/Reports';
 import ReportHistory from 'src/pages/ReportHistory';
 import ReportVersionView from 'src/pages/ReportVersionView';
 import ReportsList from 'src/pages/ReportsList';
+import Spaces from 'src/pages/Spaces';
+import SpaceDetail from 'src/pages/SpaceDetail';
 import NotFound from 'src/pages/NotFound';
 import QueryConsole from 'src/pages/QueryConsole';
 import ChatInterface from 'src/pages/ChatInterface';
@@ -53,6 +55,9 @@ const routes = [
       { path: 'reports/:id', element: <Reports /> },
       { path: 'reports/:id/history', element: <ReportHistory /> },
       { path: 'reports/:id/versions/:version', element: <ReportVersionView /> },
+      { path: 'spaces', element: <Spaces /> },
+      { path: 'spaces/:spaceId', element: <SpaceDetail /> },
+      { path: 'spaces/:spaceId/reports/:reportId', element: <SpaceDetail /> },
       { path: 'query-console', element: <QueryConsole /> },
       { path: 'chat', element: <ChatInterface /> },
       { path: 'chat/:threadId', element: <ChatInterface /> },

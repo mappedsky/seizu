@@ -693,6 +693,8 @@ const REPORT_VERSION = {
   access: { scope: 'public' as const },
   comment: null,
   query_capabilities: { 'tok-1': 'signed-abc' },
+  space_id: null,
+  subspace_id: null,
 };
 
 // ---------------------------------------------------------------------------

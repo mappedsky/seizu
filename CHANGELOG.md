@@ -22,6 +22,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Spaces** — group reports into named spaces, with optional sub-spaces for
+  organizing within a space. A **Spaces** entry in the sidebar lists them; the
+  space detail page has a sidebar listing the space's reports, ungrouped first
+  and then grouped by sub-space, and renders whichever report is pinned as the
+  space's overview. Reports are filed via **Move to space…** on the Reports list
+  or inside a report; a report filed in a space is public, so publish a draft
+  before filing it and remove a report from its space before unpublishing it.
+  The rule is enforced by the store itself (a create-time check, conditional
+  writes on DynamoDB, a row lock on SQL), so it holds under concurrent requests.
+  In chat, `reports__create` now requires confirmation when the new report would
+  land in a space, and `reports__clone` always does — publishing is a visible
+  change, unlike the private draft those tools normally produce.
+  Spaces are unversioned and globally visible; report-level visibility still
+  governs what appears inside one. Deleting a space is blocked while it holds
+  reports; its sub-spaces are deleted with it and no report ever is.
+  Permissions:
+  `spaces:read` (Viewer), `spaces:write` / `spaces:delete` (Editor). New
+  endpoints under `/api/v1/spaces`, plus
+  `PUT /api/v1/reports/<id>/space`; new `seizu spaces list` / `seizu spaces show`
+  CLI commands; migration `0005_spaces`. Docs: `docs/root/install/spaces.md`.
+- **DynamoDB `space_reports_index` GSI** (`space_id` + `SK`, sparse, `ALL`
+  projection) backs the space report list, so it costs read capacity
+  proportional to the space rather than to the whole table. The app creates it
+  when `DYNAMODB_CREATE_TABLE` is enabled, including on an existing table;
+  **operators managing the table with IaC should add it there**. Without it
+  Seizu falls back to filtering the full report list — correct, but the old
+  cost — and logs `Space reports GSI unavailable`. No backfill is required.
+- `ReportListItem` and `ReportVersion` now carry `space_id` and `subspace_id`.
+  MCP consumers of `reports__list` and `reports__get` see these
+  fields automatically. There is no `spaces` MCP builtin group yet.
 - **`agent_chat` workflow activity** — the general-purpose AI activity. You
   supply the prompt; it runs a headless agent session as the workflow's creator
   and publishes the session summary as a named output later stages can consume.
@@ -35,6 +65,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
+  whose report-list partition exceeds the 1 MB query cap no longer get a
+  silently truncated list.
+- `seizu export` warns when exported reports belong to a space: YAML has no
+  `spaces:` section, so space membership does not round-trip through
+  seed/export.
 - Scheduled chats run as durable **Temporal Schedules** instead of a 20-second
   polling loop that executed every schedule serially. Disabling a schedule now
   pauses its Schedule; a run that overruns its next firing causes that firing to

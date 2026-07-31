@@ -776,6 +776,9 @@ def export_cmd(config: str, dry_run: bool) -> None:
     new_reports: dict[str, Any] = {}
     dashboard_key: str | None = None
     exported = failed = 0
+    # YAML has no `spaces:` section yet, so space membership is not exported —
+    # warn rather than let it be discovered on a re-seed.
+    in_a_space = sum(1 for item in report_list if item.get("space_id"))
 
     for item in sorted(report_list, key=lambda r: r["name"]):
         latest = _get_report(item["report_id"])
@@ -805,6 +808,12 @@ def export_cmd(config: str, dry_run: bool) -> None:
             dashboard_key = key
         console.print(f"[green][export][/green] report '{item['name']}' → key='{key}'")
         exported += 1
+
+    if in_a_space:
+        err_console.print(
+            f"[yellow][warn][/yellow] {in_a_space} exported report(s) belong to a space. "
+            "Space membership is not represented in YAML, so re-seeding will not restore it."
+        )
 
     # Export canonical workflows (legacy scheduled-query records are
     # normalized by the API before they reach the CLI).

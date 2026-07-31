@@ -33,6 +33,8 @@ import PushPinIcon from '@mui/icons-material/PushPin';
 import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import PublicIcon from '@mui/icons-material/Public';
 import DraftsIcon from '@mui/icons-material/Drafts';
+import DriveFileMoveIcon from '@mui/icons-material/DriveFileMove';
+import WorkspacesIcon from '@mui/icons-material/Workspaces';
 
 import {
   ReportListItem,
@@ -40,6 +42,8 @@ import {
   useReportsList,
   useReportsMutations,
 } from 'src/hooks/useReportsApi';
+import { useSpacesList } from 'src/hooks/useSpacesApi';
+import MoveToSpaceDialog from 'src/components/MoveToSpaceDialog';
 import { usePermissionState } from 'src/hooks/usePermissions';
 import ListTable, {
   ListTableColumn,
@@ -71,7 +75,9 @@ function ReportsList() {
     pinReport,
     updateReportVisibility,
     deleteReport,
+    setReportSpace,
   } = useReportsMutations();
+  const { spaces } = useSpacesList();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const {
@@ -99,6 +105,27 @@ function ReportsList() {
     title: string;
     message: string;
   } | null>(null);
+
+  const [moveTarget, setMoveTarget] = useState<ReportListItem | null>(null);
+
+  const [selectedKeys, setSelectedKeys] = useState<Array<string | number>>([]);
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkDeleteError, setBulkDeleteError] = useState<string | null>(null);
+
+  const spacesById = useMemo(
+    () => new Map(spaces.map((space) => [space.space_id, space])),
+    [spaces],
+  );
+
+  const selectedReports = useMemo(() => {
+    const keys = new Set(selectedKeys);
+    return reports.filter((report) => keys.has(report.report_id));
+  }, [reports, selectedKeys]);
+
+  const canWriteReports = hasPermission('reports:write');
+  const canDeleteReports = hasPermission('reports:delete');
 
   const messageFromError = (err: unknown, fallback: string): string => {
     return err instanceof globalThis.Error && err.message
@@ -183,6 +210,46 @@ function ReportsList() {
     }
   };
 
+  /**
+   * Apply a bulk action to each selected report, collecting failures instead of
+   * stopping at the first one.
+   *
+   * A partial failure is the normal case, not the exception: publishing is
+   * owner-only, and a report may be pinned or the dashboard. The backend
+   * enforces those per report, so the honest UI is to attempt each one and say
+   * which failed.
+   */
+  const runBulk = async (
+    label: string,
+    reports: ReportListItem[],
+    action: (report: ReportListItem) => Promise<unknown>,
+  ): Promise<boolean> => {
+    setBulkBusy(true);
+    const failures: string[] = [];
+    try {
+      for (const report of reports) {
+        try {
+          await action(report);
+        } catch (err) {
+          failures.push(`${report.name}: ${messageFromError(err, 'failed')}`);
+        }
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+    refresh();
+    refreshDashboard();
+    if (failures.length > 0) {
+      setActionError({
+        title: `${label}: ${failures.length} of ${reports.length} failed`,
+        message: failures.join('\n'),
+      });
+      return false;
+    }
+    setSelectedKeys([]);
+    return true;
+  };
+
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -259,10 +326,26 @@ function ReportsList() {
           <PublicIcon fontSize="small" />
         ),
         onClick: () => handleToggleAccess(report),
-        disabled: !canUpdateAccess,
-        tooltip: canUpdateAccess
-          ? undefined
-          : 'Only the report owner can publish or unpublish',
+        // Reports in a space are public, so unpublishing one has to go through
+        // removing it from its space first.
+        disabled: !canUpdateAccess || (isPublic && !!report.space_id),
+        tooltip: !canUpdateAccess
+          ? 'Only the report owner can publish or unpublish'
+          : isPublic && report.space_id
+            ? 'Remove the report from its space before unpublishing it'
+            : undefined,
+      },
+      {
+        key: 'space',
+        label: 'Move to space…',
+        icon: <DriveFileMoveIcon fontSize="small" />,
+        onClick: () => setMoveTarget(report),
+        disabled: !canWrite || !isPublic,
+        tooltip: !canWrite
+          ? 'You do not have permission to move reports'
+          : isPublic
+            ? undefined
+            : 'Publish the report before filing it into a space',
       },
       {
         key: 'pin',
@@ -391,6 +474,27 @@ function ReportsList() {
       ),
     },
     {
+      key: 'space',
+      label: 'Space',
+      hideBelow: 'md',
+      cellSx: { ...listTableSecondaryCellSx, width: 180 },
+      render: (report) => {
+        if (!report.space_id) return '—';
+        const space = spacesById.get(report.space_id);
+        if (!space) return '—';
+        return (
+          <Link
+            component={RouterLink}
+            to={`/app/spaces/${space.space_id}`}
+            underline="hover"
+            color="inherit"
+          >
+            {space.name}
+          </Link>
+        );
+      },
+    },
+    {
       key: 'version',
       label: 'Version',
       hideBelow: 'sm',
@@ -468,8 +572,30 @@ function ReportsList() {
           },
         ],
       },
+      ...(spaces.length > 0
+        ? [
+            {
+              key: 'space',
+              label: 'Space',
+              icon: <WorkspacesIcon fontSize="small" />,
+              options: [
+                {
+                  key: '__none__',
+                  label: 'No space',
+                  matches: (report: ReportListItem) => !report.space_id,
+                },
+                ...spaces.map((space) => ({
+                  key: space.space_id,
+                  label: space.name,
+                  matches: (report: ReportListItem) =>
+                    report.space_id === space.space_id,
+                })),
+              ],
+            },
+          ]
+        : []),
     ],
-    [dashboardReportId],
+    [dashboardReportId, spaces],
   );
 
   return (
@@ -505,6 +631,84 @@ function ReportsList() {
             getRowKey={(report) => report.report_id}
             emptyMessage="No reports yet. Create one above."
             filterGroups={filterGroups}
+            selectable={canWriteReports}
+            selectedKeys={selectedKeys}
+            onSelectionChange={setSelectedKeys}
+            bulkActions={(rows) => (
+              <>
+                <Tooltip
+                  title={
+                    rows.some((report) => report.access.scope !== 'public')
+                      ? 'Publish the selected drafts before filing them into a space'
+                      : ''
+                  }
+                >
+                  <span>
+                    <Button
+                      size="small"
+                      startIcon={<DriveFileMoveIcon fontSize="small" />}
+                      disabled={
+                        bulkBusy ||
+                        rows.some((report) => report.access.scope !== 'public')
+                      }
+                      onClick={() => setBulkMoveOpen(true)}
+                    >
+                      Move to space
+                    </Button>
+                  </span>
+                </Tooltip>
+                <Button
+                  size="small"
+                  startIcon={<PushPinIcon fontSize="small" />}
+                  disabled={bulkBusy}
+                  onClick={() =>
+                    void runBulk('Pin', rows, (report) =>
+                      pinReport(report.report_id, true),
+                    )
+                  }
+                >
+                  Pin
+                </Button>
+                <Button
+                  size="small"
+                  startIcon={<PushPinOutlinedIcon fontSize="small" />}
+                  disabled={bulkBusy}
+                  onClick={() =>
+                    void runBulk('Unpin', rows, (report) =>
+                      pinReport(report.report_id, false),
+                    )
+                  }
+                >
+                  Unpin
+                </Button>
+                <Button
+                  size="small"
+                  startIcon={<PublicIcon fontSize="small" />}
+                  disabled={bulkBusy}
+                  onClick={() =>
+                    void runBulk('Publish', rows, (report) =>
+                      updateReportVisibility(report.report_id, 'public'),
+                    )
+                  }
+                >
+                  Publish
+                </Button>
+                {canDeleteReports && (
+                  <Button
+                    size="small"
+                    color="error"
+                    startIcon={<DeleteIcon fontSize="small" />}
+                    disabled={bulkBusy}
+                    onClick={() => {
+                      setBulkDeleteError(null);
+                      setBulkDeleteOpen(true);
+                    }}
+                  >
+                    Delete
+                  </Button>
+                )}
+              </>
+            )}
           />
         </ListViewState>
       </Box>
@@ -591,6 +795,52 @@ function ReportsList() {
         </DialogActions>
       </Dialog>
 
+      {moveTarget && (
+        <MoveToSpaceDialog
+          open
+          reportName={moveTarget.name}
+          currentSpaceId={moveTarget.space_id}
+          currentSubspaceId={moveTarget.subspace_id}
+          onClose={() => setMoveTarget(null)}
+          onConfirm={async (spaceId, subspaceId) => {
+            await setReportSpace(moveTarget.report_id, spaceId, subspaceId);
+            refresh();
+          }}
+        />
+      )}
+
+      {bulkMoveOpen && (
+        <MoveToSpaceDialog
+          open
+          reportName={`${selectedReports.length} reports`}
+          currentSpaceId={null}
+          currentSubspaceId={null}
+          onClose={() => setBulkMoveOpen(false)}
+          onConfirm={async (spaceId, subspaceId) => {
+            await runBulk('Move to space', selectedReports, (report) =>
+              setReportSpace(report.report_id, spaceId, subspaceId),
+            );
+          }}
+        />
+      )}
+
+      <ConfirmDeleteDialog
+        open={bulkDeleteOpen}
+        title={`Delete ${selectedReports.length} report(s)?`}
+        deleting={bulkBusy}
+        error={bulkDeleteError}
+        onClose={() => setBulkDeleteOpen(false)}
+        onConfirm={async () => {
+          const ok = await runBulk('Delete', selectedReports, (report) =>
+            deleteReport(report.report_id),
+          );
+          if (ok) setBulkDeleteOpen(false);
+        }}
+      >
+        Permanently delete <strong>{selectedReports.length}</strong> report(s)
+        and all their versions? This cannot be undone.
+      </ConfirmDeleteDialog>
+
       {/* Delete confirmation dialog */}
       <ConfirmDeleteDialog
         open={!!deleteTarget}
@@ -612,7 +862,10 @@ function ReportsList() {
       >
         <DialogTitle>{actionError?.title}</DialogTitle>
         <DialogContent>
-          <DialogContentText>{actionError?.message}</DialogContentText>
+          {/* Bulk failures arrive as one newline-separated line per report. */}
+          <DialogContentText sx={{ whiteSpace: 'pre-line' }}>
+            {actionError?.message}
+          </DialogContentText>
         </DialogContent>
         <DialogActions>
           <Button variant="contained" onClick={() => setActionError(null)}>

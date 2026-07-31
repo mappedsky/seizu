@@ -14,6 +14,14 @@ from reporting.schema.report_config import (
 )
 from reporting.services import report_store
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool, model_input_schema
+from reporting.services.spaces import (
+    SPACE_MEMBER_ACCESS,
+    SpaceConflictError,
+    SpaceValidationError,
+    reject_privatising_space_member,
+    resolve_clone_space,
+    resolve_report_space,
+)
 
 GROUP = "reports"
 
@@ -52,7 +60,23 @@ async def _get_dashboard(args: dict[str, Any], current_user: CurrentUser | None)
 async def _create(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
     body = CreateReportRequest.model_validate(args)
-    item = await report_store.create_report(name=body.name, created_by=user.user.user_id)
+    try:
+        space_id, subspace_id = await resolve_report_space(body.space_id, body.subspace_id)
+    except SpaceValidationError as exc:
+        return {"error": str(exc)}
+    try:
+        item = await report_store.create_report(
+            name=body.name,
+            created_by=user.user.user_id,
+            # Space members are public; standalone reports stay drafts.
+            access=SPACE_MEMBER_ACCESS if space_id is not None else None,
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    # Unreachable while the access above is chosen from space_id; kept so the
+    # store's invariant surfaces as an error rather than a traceback.
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     return item.model_dump()
 
 
@@ -74,10 +98,11 @@ async def _create_version(args: dict[str, Any], current_user: CurrentUser | None
 
 async def _delete(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
     user = _require_user(current_user)
-    ok = await report_store.delete_report(args["report_id"], user_id=user.user.user_id)
+    report_id = args["report_id"]
+    ok = await report_store.delete_report(report_id, user_id=user.user.user_id)
     if not ok:
         return {"error": "Report not found"}
-    return {"report_id": args["report_id"]}
+    return {"report_id": report_id}
 
 
 async def _pin(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -134,7 +159,22 @@ async def _clone(args: dict[str, Any], current_user: CurrentUser | None) -> dict
     if not source:
         return {"error": "Report not found"}
     body = CloneReportRequest.model_validate({k: v for k, v in args.items() if k != "report_id"})
-    new_item = await report_store.create_report(name=body.name, created_by=user.user.user_id)
+    try:
+        space_id, subspace_id = await resolve_clone_space(
+            source.space_id, source.subspace_id, body.space_id, body.subspace_id
+        )
+    except SpaceValidationError as exc:
+        return {"error": str(exc)}
+    try:
+        new_item = await report_store.create_report(
+            name=body.name,
+            created_by=user.user.user_id,
+            access=SPACE_MEMBER_ACCESS if space_id is not None else None,
+            space_id=space_id,
+            subspace_id=subspace_id,
+        )
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     cloned_config = {**source.config, "name": body.name}
     await report_store.save_report_version(
         report_id=new_item.report_id,
@@ -155,15 +195,24 @@ async def _update_visibility(args: dict[str, Any], current_user: CurrentUser | N
         return {"error": "Report not found"}
     if body.access is not None and meta.created_by != user.user.user_id:
         return {"error": "Only the report owner can update report access"}
+    try:
+        reject_privatising_space_member(meta.space_id, body.access)
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     if body.access is not None and body.access.scope == "private":
         dashboard_report_id = await report_store.get_dashboard_report_id()
         if meta.pinned or dashboard_report_id == report_id:
             return {"error": "Report must be unpinned and removed from the dashboard before it can be made private"}
-    updated = await report_store.update_report_visibility(
-        report_id=report_id,
-        updated_by=user.user.user_id,
-        access=body.access,
-    )
+    try:
+        updated = await report_store.update_report_visibility(
+            report_id=report_id,
+            updated_by=user.user.user_id,
+            access=body.access,
+        )
+    # The store re-checks the rule above atomically, so a report filed into a
+    # space concurrently lands here instead.
+    except SpaceConflictError as exc:
+        return {"error": str(exc)}
     if not updated:
         return {"error": "Report not found"}
     return updated.model_dump()
@@ -174,6 +223,46 @@ async def _confirm_report_version(
 ) -> ActionConfirmationTarget | None:
     report_id = str(args["report_id"])
     return ActionConfirmationTarget(action="update", resource_type="report", resource_id=report_id)
+
+
+async def _confirm_report_create(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    """Gate a create only when the new report would be public.
+
+    Creating a report is normally exempt from confirmation because the result is
+    a private draft nobody else can see. Filing into a space publishes it
+    (``SPACE_MEMBER_ACCESS``), which is a visible change and needs approval.
+    """
+    if args.get("space_id") is None:
+        return None
+    return ActionConfirmationTarget(
+        action="create public",
+        resource_type="report",
+        resource_id=str(args.get("name", "")),
+    )
+
+
+async def _confirm_report_clone(
+    args: dict[str, Any],
+    current_user: CurrentUser | None,
+) -> ActionConfirmationTarget | None:
+    """Gate every clone, unconditionally.
+
+    A clone with no requested space inherits the source's, so whether it
+    publishes depends on the source's placement — and the resolver's read of that
+    placement is not the handler's. If the source were filed into a space between
+    the two reads, a conditional gate would wave through a clone that publishes a
+    private report's contents. Confirming every clone closes that window; there
+    is no cheap way to make the two reads one, and clones are rare enough that
+    the extra approval costs little.
+    """
+    return ActionConfirmationTarget(
+        action="clone",
+        resource_type="report",
+        resource_id=str(args["report_id"]),
+    )
 
 
 async def _confirm_report_visibility(
@@ -252,8 +341,10 @@ GROUP_DEF = BuiltinGroup(
             handler=_create,
             requires_user=True,
             # Confirmation exception: creates a new private report and does not
-            # mutate existing resources.
+            # mutate existing resources. Conditional gate on top, because
+            # creating into a space publishes -- see _confirm_report_create.
             chat_safe_without_confirmation=True,
+            confirmation=_confirm_report_create,
         ),
         BuiltinTool(
             name="reports__create_version",
@@ -364,9 +455,12 @@ GROUP_DEF = BuiltinGroup(
             required_permissions=[Permission.REPORTS_WRITE.value],
             handler=_clone,
             requires_user=True,
-            # Confirmation exception: clones into a new private report and does
-            # not mutate the source report.
-            chat_safe_without_confirmation=True,
+            # Always confirmation-gated: a clone that lands in a space publishes
+            # the source's contents, and the resolver cannot rule that out
+            # race-free -- see _confirm_report_clone. No no-confirmation
+            # exception, so autonomous callers that cannot approve anything drop
+            # the tool instead of listing one whose every call would be refused.
+            confirmation=_confirm_report_clone,
         ),
     ],
 )

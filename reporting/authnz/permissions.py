@@ -16,6 +16,13 @@ class Permission(StrEnum):
     REPORTS_DELETE = "reports:delete"
     REPORTS_SET_DASHBOARD = "reports:set_dashboard"
 
+    # Spaces. Sub-spaces deliberately reuse these rather than getting their own
+    # subspaces:* tier: unlike a tool inside a toolset, a sub-space is only a
+    # grouping label with no independent surface to gate.
+    SPACES_READ = "spaces:read"
+    SPACES_WRITE = "spaces:write"
+    SPACES_DELETE = "spaces:delete"
+
     # Queries
     QUERY_EXECUTE = "query:execute"
     QUERY_VALIDATE = "query:validate"
@@ -86,6 +93,7 @@ class Permission(StrEnum):
 VIEWER_PERMISSIONS: frozenset[Permission] = frozenset(
     {
         Permission.REPORTS_READ,
+        Permission.SPACES_READ,
         Permission.TOOLSETS_READ,
         Permission.TOOLS_READ,
         Permission.TOOLS_CALL,
@@ -106,6 +114,11 @@ EDITOR_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.REPORTS_WRITE,
         Permission.REPORTS_DELETE,
         Permission.REPORTS_SET_DASHBOARD,
+        # Editor, not Admin: creating a space creates a report, so gating
+        # spaces above reports:write would let editors create reports but not
+        # the containers to file them in.
+        Permission.SPACES_WRITE,
+        Permission.SPACES_DELETE,
         Permission.QUERY_EXECUTE,
         Permission.QUERY_VALIDATE,
         Permission.QUERY_HISTORY_READ,

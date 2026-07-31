@@ -10,6 +10,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import ReportListItem, ReportVersion, User
 from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
+from reporting.services.spaces import SPACE_MEMBER_ACCESS
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _EXPIRES = "2099-01-01T00:00:00+00:00"
@@ -111,7 +112,9 @@ async def test_reports_create_uses_current_user():
     assert data["report_id"] == "r1"
     # Verify the resolved CurrentUser was forwarded as created_by — this is
     # the whole reason we thread CurrentUser through the MCP context.
-    mock_create.assert_awaited_once_with(name="my report", created_by="u1")
+    mock_create.assert_awaited_once_with(
+        name="my report", created_by="u1", access=None, space_id=None, subspace_id=None
+    )
 
 
 async def test_reports_list_returns_reports():
@@ -630,3 +633,106 @@ async def test_reports_get_version_returns_error_when_missing():
         data = json.loads(result[0].text)
 
     assert data == {"error": "Version not found"}
+
+
+# ---------------------------------------------------------------------------
+# Space membership
+# ---------------------------------------------------------------------------
+
+
+async def test_reports_create_honours_the_space_fields():
+    """The schema advertises space_id/subspace_id, so they must not be dropped."""
+    with (
+        patch(
+            "reporting.services.report_store.get_space",
+            new_callable=AsyncMock,
+            return_value=object(),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.create_report",
+            new_callable=AsyncMock,
+            return_value=_report_list_item(),
+        ) as mock_create,
+    ):
+        server = _build_mcp_server()
+        await _call(server, "reports__create", {"name": "Filed", "space_id": "sp1"})
+
+    assert mock_create.await_args.kwargs["space_id"] == "sp1"
+    assert mock_create.await_args.kwargs["subspace_id"] is None
+    # Space members are public, matching REST.
+    assert mock_create.await_args.kwargs["access"] == SPACE_MEMBER_ACCESS
+
+
+async def test_reports_create_rejects_an_unknown_space():
+    with (
+        patch(
+            "reporting.services.report_store.get_space",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.create_report",
+            new_callable=AsyncMock,
+            return_value=_report_list_item(),
+        ) as mock_create,
+    ):
+        server = _build_mcp_server()
+        result = await _call(server, "reports__create", {"name": "Filed", "space_id": "missing"})
+        data = json.loads(result[0].text)
+
+    assert data["error"] == "Space not found"
+    mock_create.assert_not_awaited()
+
+
+async def test_reports_clone_inherits_the_source_space():
+    source = _report_version().model_copy(update={"space_id": "sp1", "subspace_id": "ss1"})
+    with (
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.get_report_latest",
+            new_callable=AsyncMock,
+            return_value=source,
+        ),
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.create_report",
+            new_callable=AsyncMock,
+            return_value=_report_list_item(),
+        ) as mock_create,
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.save_report_version",
+            new_callable=AsyncMock,
+            return_value=_report_version(),
+        ),
+    ):
+        server = _build_mcp_server()
+        await _call(server, "reports__clone", {"report_id": "src1", "name": "Copy"})
+
+    # Matches REST: membership is inherited, and landing in a space publishes.
+    assert mock_create.await_args.kwargs["space_id"] == "sp1"
+    assert mock_create.await_args.kwargs["subspace_id"] == "ss1"
+    assert mock_create.await_args.kwargs["access"] == SPACE_MEMBER_ACCESS
+
+
+async def test_reports_update_visibility_rejects_privatising_a_space_member():
+    """The public-member invariant is enforced for MCP callers too."""
+    with (
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.get_report_metadata",
+            new_callable=AsyncMock,
+            return_value=_report_list_item().model_copy(update={"space_id": "sp1", "created_by": "u1"}),
+        ),
+        patch(
+            "reporting.services.mcp_builtins.reports.report_store.update_report_visibility",
+            new_callable=AsyncMock,
+            return_value=_report_list_item(),
+        ) as mock_update,
+    ):
+        server = _build_mcp_server()
+        result = await _call(
+            server,
+            "reports__update_visibility",
+            {"report_id": "rid1", "access": {"scope": "private"}},
+        )
+        data = json.loads(result[0].text)
+
+    assert "Remove the report from its space" in data["error"]
+    mock_update.assert_not_awaited()

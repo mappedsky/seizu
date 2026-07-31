@@ -4,7 +4,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
-from reporting.schema.report_config import ReportAccess, ReportListItem, User
+from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.services import action_confirmations, mcp_runtime
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -76,6 +76,22 @@ def _report_list_item() -> ReportListItem:
         created_by="user-1",
         updated_by="user-1",
         access=ReportAccess(scope="private"),
+    )
+
+
+def _report_version_in_space() -> ReportVersion:
+    """A report filed in a space -- so a clone of it would be published."""
+    return ReportVersion(
+        report_id="r1",
+        name="Member",
+        version=1,
+        config={"name": "Member", "rows": []},
+        created_at=_NOW,
+        created_by="user-1",
+        report_created_by="user-1",
+        report_updated_by="user-1",
+        access=ReportAccess(scope="public"),
+        space_id="sp1",
     )
 
 
@@ -276,7 +292,8 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
 
 
 async def test_chat_safe_tool_listing_includes_create_write_builtins(mocker):
-    """reports__create/clone are always private so they are safe without confirmation."""
+    """Chat lists both: create is safe without confirmation for the private case,
+    and clone is listed because a confirmation resolver IS the safety gate."""
     mocker.patch("reporting.services.mcp_runtime.report_store.list_enabled_tools", return_value=[])
     current = _user(
         frozenset(
@@ -398,6 +415,138 @@ async def test_confirmation_gated_builtin_fails_closed_without_confirmation_sour
     delete_report.assert_not_called()
 
 
+async def test_conditionally_gated_tool_runs_when_its_resolver_declines(mocker):
+    """reports__create is gated only when it publishes.
+
+    Its resolver returns no target for a spaceless create, so the fail-closed
+    guard must not refuse it: refusing would deny the safe shape (a private
+    draft) that the no-confirmation exception exists for.
+    """
+    create_report = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.create_report",
+        return_value=_report_list_item(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__create",
+        {"name": "Draft"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+    )
+
+    assert outcome.blocked is None
+    create_report.assert_called_once()
+
+
+async def test_conditionally_gated_tool_is_refused_when_its_resolver_gates(mocker):
+    """Creating into a space publishes, so with no one to approve it, refuse."""
+    mocker.patch("reporting.services.report_store.get_space", return_value=object())
+    create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__create",
+        {"name": "Filed", "space_id": "sp1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.PERMISSION_DENIED
+    assert "requires action confirmation" in json.loads(outcome.text)["error"]
+    create_report.assert_not_called()
+
+
+async def test_creating_into_a_space_asks_for_confirmation(mocker):
+    """With a confirmation source, the publishing shape becomes a pending ask."""
+    mocker.patch("reporting.services.report_store.get_space", return_value=object())
+    create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__create",
+        {"name": "Filed", "space_id": "sp1"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="session-1",
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+    create_report.assert_not_called()
+
+
+async def test_cloning_always_asks_for_confirmation(mocker):
+    """Clone is gated unconditionally, source placement notwithstanding.
+
+    A clone inherits the source's space, so whether it publishes depends on a
+    read the resolver cannot share with the handler.
+    """
+    mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.get_report_latest",
+        return_value=_report_version_in_space(),
+    )
+    create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__clone",
+        {"report_id": "r1", "name": "Copy"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="session-1",
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+    create_report.assert_not_called()
+
+
+async def test_cloning_a_standalone_report_also_asks_for_confirmation(mocker):
+    """No space anywhere in sight, and it is still gated -- that is the point."""
+    mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.get_report_latest",
+        return_value=_report_version_in_space().model_copy(update={"space_id": None}),
+    )
+    create_report = mocker.patch("reporting.services.mcp_builtins.reports.report_store.create_report")
+    mocker.patch("reporting.services.mcp_runtime.report_store.find_action_confirmation_grant", return_value=None)
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_action_confirmations", return_value=[])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.create_action_confirmation",
+        return_value=_confirmation(),
+    )
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.REPORTS_WRITE.value}))
+
+    outcome = await mcp_runtime.call_tool_for_chat(
+        current,
+        "reports__clone",
+        {"report_id": "r1", "name": "Copy"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="session-1",
+    )
+
+    assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+    create_report.assert_not_called()
+
+
 async def test_pre_approved_confirmation_executes_without_gate(mocker):
     """The post-approval executor path: an already-approved, already-claimed
     confirmation runs the handler directly via confirmation_pre_approved, even with
@@ -451,8 +600,12 @@ async def test_list_tools_exclude_confirmation_gated_keeps_readonly_and_user_too
 
     names = {tool.name for tool in tools}
     assert "reports__delete" not in names  # confirmation-gated → excluded
+    # Gated on every call, so listing it would only produce refusals.
+    assert "reports__clone" not in names
     assert "graph__query" in names  # read-only → kept
-    assert "reports__create" in names  # no-confirmation exception → kept
+    # Conditionally gated: the private-draft shape still runs, and the call-time
+    # gate refuses the publishing one.
+    assert "reports__create" in names
     assert "security__lookup" in names  # user-defined toolset tool → kept
 
 

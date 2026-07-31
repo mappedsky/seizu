@@ -1,4 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from 'react';
 import { Helmet } from 'react-helmet';
 import {
   Box,
@@ -46,6 +53,16 @@ function inputWidth(size?: number) {
   if (size === undefined) return 220;
   return Math.min(Math.max(size * 70, 180), 420);
 }
+
+/**
+ * Clearance between a pinned toolbar and the first row of content, in px.
+ *
+ * The spacer that stands in for the fixed toolbar has to be taller than the
+ * toolbar itself: matching it exactly leaves the first row flush against the
+ * bar, under its box-shadow, so the row reads as clipped. The title band this
+ * component used to render supplied the same gap through its bottom margin.
+ */
+const STICKY_TOOLBAR_CONTENT_GAP = 16;
 
 function ReportView({
   report,
@@ -209,11 +226,19 @@ function ReportView({
     });
   }
 
-  const hasInputsOrActions =
-    inputControls.length > 0 || toolbarActions !== undefined;
-  const isSticky = stickyToolbar && hasInputsOrActions;
+  // The toolbar is up to two rows: title + actions, then inputs. Each is
+  // skipped when empty so a report never gets a blank bar, and the title counts
+  // as content so a title-only report still gets a proper header.
+  const hasHeaderRow =
+    Boolean(showTitle && displayTitle) || toolbarActions !== undefined;
+  const hasInputsRow = inputControls.length > 0;
+  const hasToolbarContent = hasHeaderRow || hasInputsRow;
+  const isSticky = stickyToolbar && hasToolbarContent;
 
-  useEffect(() => {
+  // Layout effect, not a plain effect: the spacer that reserves room for the
+  // fixed toolbar must be the right height on the first paint, or the first row
+  // of content renders clipped for a frame.
+  useLayoutEffect(() => {
     if (!isSticky || toolbarRef.current === null) return undefined;
 
     const updateToolbarHeight = () => {
@@ -263,52 +288,89 @@ function ReportView({
         borderColor: 'divider',
         boxShadow: isSticky ? 1 : 'none',
         ...contentContainerSx,
-        py: 2,
         mb: isSticky ? 0 : 2,
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 1.5,
-        flexWrap: 'wrap',
+        flexDirection: 'column',
       }}
     >
-      {inputControls.length > 0 && (
+      {/* Row 1: title and actions. The title lives here rather than in a band
+          of its own, so a report gets one header row instead of two, and it
+          truncates rather than wrapping so a long name cannot push the actions
+          off the row. */}
+      {hasHeaderRow && (
         <Box
           sx={{
             display: 'flex',
             alignItems: 'center',
-            gap: 1,
-            flex: '1 1 320px',
-            flexWrap: 'wrap',
+            justifyContent: 'space-between',
+            gap: 1.5,
+            py: 2,
             minWidth: 0,
           }}
         >
-          {inputControls}
+          {showTitle && displayTitle && (
+            <Typography
+              component="h1"
+              variant="h2"
+              title={displayTitle}
+              sx={{
+                lineHeight: 1.25,
+                flex: '1 1 auto',
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {displayTitle}
+            </Typography>
+          )}
+          {toolbarActions && (
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'flex-end',
+                gap: 1,
+                flex: showTitle && displayTitle ? '0 0 auto' : '1 1 auto',
+                flexWrap: 'wrap',
+                ml: showTitle && displayTitle ? 0 : 'auto',
+                '& .MuiButton-root': {
+                  minHeight: 40,
+                },
+                '& .MuiIconButton-root': {
+                  height: 40,
+                  width: 40,
+                },
+                '& .MuiChip-root': {
+                  height: 32,
+                },
+              }}
+            >
+              {toolbarActions({ onRefresh: handleRefresh, refreshedAtLabel })}
+            </Box>
+          )}
         </Box>
       )}
-      {toolbarActions && (
+      {/* Row 2: report inputs get their own bar. Sharing the row with the title
+          and actions left too little space once a report had more than one
+          input. */}
+      {hasInputsRow && (
         <Box
           sx={{
             display: 'flex',
             alignItems: 'center',
-            justifyContent: 'flex-end',
             gap: 1,
-            flex: inputControls.length > 0 ? '0 0 auto' : '1 1 auto',
             flexWrap: 'wrap',
-            ml: hasInputsOrActions ? 0 : 'auto',
-            '& .MuiButton-root': {
-              minHeight: 40,
-            },
-            '& .MuiIconButton-root': {
-              height: 40,
-              width: 40,
-            },
-            '& .MuiChip-root': {
-              height: 32,
-            },
+            minWidth: 0,
+            pt: hasHeaderRow ? 0 : 2,
+            pb: 2,
+            ...(hasHeaderRow
+              ? { borderTop: 1, borderColor: 'divider', mt: 0, pt: 1.5 }
+              : {}),
           }}
         >
-          {toolbarActions({ onRefresh: handleRefresh, refreshedAtLabel })}
+          {inputControls}
         </Box>
       )}
     </Box>
@@ -424,29 +486,9 @@ function ReportView({
         </Helmet>
       )}
       <Box sx={boxSx}>
-        {toolbar}
-        {isSticky && <Box sx={{ height: toolbarHeight }} />}
-        {showTitle && displayTitle && (
-          <Box
-            sx={{
-              bgcolor: 'background.paper',
-              borderBottom: 1,
-              borderColor: 'divider',
-              mb: 2,
-            }}
-          >
-            <Container
-              maxWidth={false}
-              sx={{
-                ...contentContainerSx,
-                py: 1.75,
-              }}
-            >
-              <Typography component="h1" variant="h2" sx={{ lineHeight: 1.25 }}>
-                {displayTitle}
-              </Typography>
-            </Container>
-          </Box>
+        {hasToolbarContent && toolbar}
+        {isSticky && (
+          <Box sx={{ height: toolbarHeight + STICKY_TOOLBAR_CONTENT_GAP }} />
         )}
         {hasInvalidRows && (
           <Container maxWidth={false} sx={{ ...contentContainerSx, pb: 1.5 }}>

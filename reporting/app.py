@@ -30,6 +30,7 @@ from reporting.routes import reports as reports_routes
 from reporting.routes import roles as roles_routes
 from reporting.routes import scheduled_queries as sq_routes
 from reporting.routes import skillsets as skillsets_routes
+from reporting.routes import spaces as spaces_routes
 from reporting.routes import static as static_routes
 from reporting.routes import sync_metadata as sync_metadata_routes
 from reporting.routes import toolsets as toolsets_routes
@@ -329,6 +330,7 @@ def create_app() -> FastAPI:
         roles_routes,
         sq_routes,
         skillsets_routes,
+        spaces_routes,
         sync_metadata_routes,
         toolsets_routes,
         users_routes,

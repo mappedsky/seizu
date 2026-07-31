@@ -52,6 +52,8 @@ export interface ReportListItem {
   updated_by: string;
   access: ReportAccess;
   pinned: boolean;
+  space_id: string | null;
+  subspace_id: string | null;
 }
 
 export interface ReportAccess {
@@ -70,6 +72,8 @@ export interface ReportVersion {
   access: ReportAccess;
   comment: string | null;
   query_capabilities?: Record<string, string>;
+  space_id: string | null;
+  subspace_id: string | null;
 }
 
 const REPORT_QUERY_CAPABILITIES_QUERY = '?include_query_capabilities=true';
@@ -83,7 +87,10 @@ function getApiHeaders(accessToken: string | null): Record<string, string> {
   return headers;
 }
 
-async function errorMessage(res: Response, fallback: string): Promise<string> {
+export async function errorMessage(
+  res: Response,
+  fallback: string,
+): Promise<string> {
   const data = await res.json().catch(() => ({}));
   const detail = (data as { detail?: unknown }).detail;
   if (typeof detail === 'string' && detail.trim()) return detail;
@@ -105,6 +112,36 @@ function broadcastReportsUpdated() {
   window.dispatchEvent(new Event(REPORTS_UPDATED));
 }
 
+/**
+ * Tell every mounted report list to reload.
+ *
+ * Exported so other modules (creating or deleting a space also creates or
+ * deletes a report) can invalidate without re-declaring the event name, which
+ * would silently drift the day it changes.
+ */
+export function notifyReportsUpdated() {
+  broadcastReportsUpdated();
+}
+
+/**
+ * Subscribe to report-list invalidations; the returned counter changes on each.
+ *
+ * Exported so other modules can react to report changes without re-declaring
+ * the event name, which would drift the day it changes.
+ */
+export function useReportsUpdatedSignal(): number {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const handler = () => setTick((t) => t + 1);
+    window.addEventListener(REPORTS_UPDATED, handler);
+    return () => window.removeEventListener(REPORTS_UPDATED, handler);
+  }, []);
+  return tick;
+}
+
+/** Also exported so callers can share the helper rather than re-implementing it. */
+export { getApiHeaders };
+
 export function useReportsList(): {
   reports: ReportListItem[];
   total: number;
@@ -122,13 +159,7 @@ export function useReportsList(): {
   const [perPage, setPerPage] = useState(REPORTS_LIST_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const handler = () => setTick((t) => t + 1);
-    window.addEventListener(REPORTS_UPDATED, handler);
-    return () => window.removeEventListener(REPORTS_UPDATED, handler);
-  }, []);
+  const tick = useReportsUpdatedSignal();
 
   const refresh = useCallback(() => broadcastReportsUpdated(), []);
 
@@ -377,7 +408,11 @@ export function useAllReports(): {
 }
 
 export function useReportsMutations(): {
-  createReport: (name: string) => Promise<ReportListItem>;
+  createReport: (
+    name: string,
+    spaceId?: string | null,
+    subspaceId?: string | null,
+  ) => Promise<ReportListItem>;
   cloneReport: (reportId: string, name: string) => Promise<ReportListItem>;
   updateReportVisibility: (
     reportId: string,
@@ -392,20 +427,37 @@ export function useReportsMutations(): {
   setDashboardReport: (reportId: string) => Promise<void>;
   pinReport: (reportId: string, pinned: boolean) => Promise<void>;
   deleteReport: (reportId: string) => Promise<void>;
+  setReportSpace: (
+    reportId: string,
+    spaceId: string | null,
+    subspaceId: string | null,
+  ) => Promise<ReportListItem>;
 } {
   const { accessToken } = useContext(AuthContext);
 
   const createReport = useCallback(
-    async (name: string): Promise<ReportListItem> => {
+    async (
+      name: string,
+      spaceId: string | null = null,
+      subspaceId: string | null = null,
+    ): Promise<ReportListItem> => {
       const res = await fetch('/api/v1/reports', {
         method: 'POST',
         headers: {
           ...getApiHeaders(accessToken),
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({
+          name,
+          space_id: spaceId,
+          subspace_id: subspaceId,
+        }),
       });
-      if (!res.ok) throw new Error(`Failed to create report: ${res.status}`);
+      if (!res.ok)
+        throw new Error(
+          await errorMessage(res, `Failed to create report: ${res.status}`),
+        );
+      broadcastReportsUpdated();
       return res.json();
     },
     [accessToken],
@@ -520,6 +572,32 @@ export function useReportsMutations(): {
     [accessToken],
   );
 
+  const setReportSpace = useCallback(
+    async (
+      reportId: string,
+      spaceId: string | null,
+      subspaceId: string | null,
+    ): Promise<ReportListItem> => {
+      // Replace semantics, matching the API: both fields describe the desired
+      // final state, so a move with no sub-space clears it.
+      const res = await fetch(`/api/v1/reports/${reportId}/space`, {
+        method: 'PUT',
+        headers: {
+          ...getApiHeaders(accessToken),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ space_id: spaceId, subspace_id: subspaceId }),
+      });
+      if (!res.ok)
+        throw new Error(
+          await errorMessage(res, `Failed to move report: ${res.status}`),
+        );
+      broadcastReportsUpdated();
+      return res.json();
+    },
+    [accessToken],
+  );
+
   return {
     createReport,
     cloneReport,
@@ -528,6 +606,7 @@ export function useReportsMutations(): {
     setDashboardReport,
     pinReport,
     deleteReport,
+    setReportSpace,
   };
 }
 

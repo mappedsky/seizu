@@ -10,6 +10,8 @@ import {
 import {
   Badge,
   Box,
+  Button,
+  Checkbox,
   Divider,
   IconButton,
   InputAdornment,
@@ -78,6 +80,20 @@ interface ListTableProps<T> {
   pagination?: boolean;
   initialRowsPerPage?: number;
   rowsPerPageOptions?: number[];
+  /**
+   * Opt in to row selection: adds a checkbox column and swaps the toolbar for a
+   * selection bar while anything is selected. Selection is controlled by the
+   * caller so bulk actions can read it directly.
+   */
+  selectable?: boolean;
+  selectedKeys?: ReadonlyArray<string | number>;
+  onSelectionChange?: (keys: Array<string | number>) => void;
+  /**
+   * Rendered in the selection bar. Rows a given action cannot apply to are the
+   * action's problem, not the table's — the backend enforces per-row rules
+   * anyway, so everything stays selectable.
+   */
+  bulkActions?: (selectedRows: T[]) => ReactNode;
 }
 
 const LIST_TABLE_ROWS_PER_PAGE_STORAGE_PREFIX =
@@ -171,6 +187,11 @@ function isResizingDisabled(column: ListTableColumn<unknown>): boolean {
   return column.key === 'actions' || column.key === 'row_actions';
 }
 
+const selectionColumnSx = {
+  width: 48,
+  minWidth: 48,
+} as const;
+
 export const listTableActionColumnSx = {
   width: 48,
   minWidth: 48,
@@ -240,6 +261,10 @@ export default function ListTable<T>({
   pagination = true,
   initialRowsPerPage = 10,
   rowsPerPageOptions = [10, 25, 50, 75, 100],
+  selectable = false,
+  selectedKeys = [],
+  onSelectionChange,
+  bulkActions,
 }: ListTableProps<T>) {
   const [page, setPage] = useState(0);
   const rowsPerPageStorageKey = useMemo(getRowsPerPageStorageKey, []);
@@ -346,6 +371,60 @@ export default function ListTable<T>({
     const start = page * rowsPerPage;
     return filteredRows.slice(start, start + rowsPerPage);
   }, [filteredRows, page, pagination, rowsPerPage]);
+
+  // Keyed on the array identity, not a joined string: a delimiter cannot be
+  // chosen that no key contains, and joining collides across types (numeric 1
+  // and string "1"), which would leave a stale Set. Callers hold selection in
+  // state and replace the array on change, so the identity is stable.
+  const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
+
+  const selectedRows = useMemo(
+    () =>
+      selectable
+        ? filteredRows.filter((row) => selectedKeySet.has(getRowKey(row)))
+        : [],
+    [selectable, filteredRows, selectedKeySet, getRowKey],
+  );
+
+  // Drop selections that are no longer reachable — a row that was deleted, or
+  // filtered out — so a bulk action can never act on something off screen.
+  useEffect(() => {
+    if (!selectable || !onSelectionChange || selectedKeySet.size === 0) return;
+    const reachable = new Set(filteredRows.map(getRowKey));
+    const pruned = [...selectedKeySet].filter((key) => reachable.has(key));
+    if (pruned.length !== selectedKeySet.size) {
+      onSelectionChange(pruned);
+    }
+  }, [selectable, onSelectionChange, selectedKeySet, filteredRows, getRowKey]);
+
+  const toggleRowSelection = (row: T) => {
+    if (!onSelectionChange) return;
+    const key = getRowKey(row);
+    const next = new Set(selectedKeySet);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    onSelectionChange([...next]);
+  };
+
+  // The header checkbox covers the current page only, matching MUI's own
+  // paginated-selection example: acting on rows you cannot see is worse than
+  // needing a second click.
+  const pageKeys = visibleRows.map(getRowKey);
+  const allPageSelected =
+    pageKeys.length > 0 && pageKeys.every((key) => selectedKeySet.has(key));
+  const somePageSelected =
+    !allPageSelected && pageKeys.some((key) => selectedKeySet.has(key));
+
+  const togglePageSelection = () => {
+    if (!onSelectionChange) return;
+    const next = new Set(selectedKeySet);
+    if (allPageSelected) pageKeys.forEach((key) => next.delete(key));
+    else pageKeys.forEach((key) => next.add(key));
+    onSelectionChange([...next]);
+  };
+
+  const clearSelection = () => onSelectionChange?.([]);
+  const selectionActive = selectable && selectedKeySet.size > 0;
 
   const getColumnMinWidth = (column: ListTableColumn<T>): number =>
     Math.max(48, column.minWidth ?? 48);
@@ -555,6 +634,31 @@ export default function ListTable<T>({
 
   return (
     <Paper variant="outlined">
+      {selectionActive && (
+        <Box
+          sx={{
+            alignItems: 'center',
+            bgcolor: 'action.selected',
+            borderBottom: 1,
+            borderColor: 'divider',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1,
+            px: 2,
+            py: 1,
+          }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {selectedKeySet.size} selected
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, ml: 1 }}>
+            {bulkActions?.(selectedRows)}
+          </Box>
+          <Button size="small" onClick={clearSelection} sx={{ ml: 'auto' }}>
+            Clear
+          </Button>
+        </Box>
+      )}
       <Box
         sx={{
           px: 2,
@@ -718,6 +822,22 @@ export default function ListTable<T>({
         <Table sx={{ tableLayout: 'fixed', width: '100%' }}>
           <TableHead>
             <TableRow>
+              {selectable && (
+                <TableCell padding="checkbox" sx={selectionColumnSx}>
+                  <Checkbox
+                    size="small"
+                    checked={allPageSelected}
+                    indeterminate={somePageSelected}
+                    onChange={togglePageSelection}
+                    disabled={pageKeys.length === 0}
+                    slotProps={{
+                      input: {
+                        'aria-label': 'Select all rows on this page',
+                      },
+                    }}
+                  />
+                </TableCell>
+              )}
               {columns.map((column) => (
                 <TableCell
                   key={column.key}
@@ -792,7 +912,7 @@ export default function ListTable<T>({
           <TableBody>
             {filteredRows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={columns.length}>
+                <TableCell colSpan={columns.length + (selectable ? 1 : 0)}>
                   <Box component="div" sx={listTableCellContentSx}>
                     <Typography color="text.secondary" sx={{ py: 1 }}>
                       {hasSearch || hasActiveFilters
@@ -804,7 +924,21 @@ export default function ListTable<T>({
               </TableRow>
             )}
             {visibleRows.map((row) => (
-              <TableRow key={getRowKey(row)} hover>
+              <TableRow
+                key={getRowKey(row)}
+                hover
+                selected={selectable && selectedKeySet.has(getRowKey(row))}
+              >
+                {selectable && (
+                  <TableCell padding="checkbox" sx={selectionColumnSx}>
+                    <Checkbox
+                      size="small"
+                      checked={selectedKeySet.has(getRowKey(row))}
+                      onChange={() => toggleRowSelection(row)}
+                      slotProps={{ input: { 'aria-label': 'Select row' } }}
+                    />
+                  </TableCell>
+                )}
                 {columns.map((column) => {
                   const cellContent = column.render(row);
                   return (

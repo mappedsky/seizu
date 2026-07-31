@@ -152,8 +152,9 @@ def _is_chat_safe_builtin(builtin: BuiltinTool) -> bool:
     if builtin.confirmation is not None:
         return True
     # Explicit exceptions are rare and must be documented on the tool
-    # registration. Today this is limited to reports__create/reports__clone:
-    # new reports are private by default and do not modify existing resources.
+    # registration. Today: the sandbox delegation tool, plus reports__create,
+    # which produces a private report except when it files into a space -- that
+    # case is caught by its resolver above.
     if builtin.chat_safe_without_confirmation:
         return True
     return bool(builtin.required_permissions) and set(builtin.required_permissions) <= _CHAT_SAFE_PERMISSIONS
@@ -200,7 +201,17 @@ async def list_tools_for_user(
     for builtin in list_builtin_tools(include_chat_only=include_chat_only):
         if chat_safe_only and not _is_chat_safe_builtin(builtin):
             continue
-        if exclude_confirmation_gated and builtin.confirmation is not None:
+        # A tool carrying both a resolver and the no-confirmation exception is
+        # gated only for some argument shapes (reports__create gates on filing
+        # into a space). It stays listed: the call-time gate below still refuses
+        # the gated shape, so excluding the tool entirely would cost the safe
+        # shape for nothing. A tool gated for every call (reports__clone) has no
+        # such flag and is dropped here, since none of its calls could proceed.
+        if (
+            exclude_confirmation_gated
+            and builtin.confirmation is not None
+            and not builtin.chat_safe_without_confirmation
+        ):
             continue
         if missing_permissions(builtin.required_permissions, perms):
             continue
@@ -398,13 +409,21 @@ async def _call_tool_core(
             # Both real entry points always pass a source (chat="chat", MCP="mcp"),
             # so this only fires on an internal caller that forgot to, and is a
             # defense-in-depth backstop behind tool-list filtering at the call site.
-            logger.warning(
-                "Refused confirmation-gated tool reached without a confirmation source",
-                extra={"type": "AUDIT", "tool": name},
-            )
-            return text_response(
-                {"error": f"Tool '{name}' requires action confirmation, which is unavailable in this context"}
-            ), ChatBlockReason.PERMISSION_DENIED
+            #
+            # Ask the resolver first: several resolvers gate only some argument
+            # shapes (reports__create gates on filing into a space,
+            # reports__update_visibility only when it carries an access change),
+            # and refusing a call the resolver would have waved through would deny
+            # the safe shape for no gain. A resolver that returns a target here
+            # still gets refused, because there is nobody to approve it.
+            if await builtin.confirmation(args, current_user) is not None:
+                logger.warning(
+                    "Refused confirmation-gated tool reached without a confirmation source",
+                    extra={"type": "AUDIT", "tool": name},
+                )
+                return text_response(
+                    {"error": f"Tool '{name}' requires action confirmation, which is unavailable in this context"}
+                ), ChatBlockReason.PERMISSION_DENIED
         elif builtin.confirmation is not None and confirmation_source is not None:
             # Fail-closed: a mutating tool was reached via a source that requires
             # confirmation but no session key is available to scope the record.
