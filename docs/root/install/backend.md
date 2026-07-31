@@ -210,7 +210,7 @@ Seizu exposes a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
   * ``none`` — all built-in groups are disabled; only user-defined toolsets are visible.
   * Comma-separated list (e.g. ``graph,reports``) — only the listed groups are enabled.
 
-  Known groups: ``graph``, ``reports``, ``scheduled_queries``, ``toolsets``, ``roles``.
+  Known groups: ``graph``, ``reports``, ``scheduled_queries``, ``spaces``, ``toolsets``, ``roles``.
 
 #### Connecting MCP clients
 

@@ -184,14 +184,85 @@ Both accept `--output json`.
 Spaces are created and organised from the web UI; the CLI commands are read-only, intended for
 verifying a deployment's setup.
 
+## MCP tools
+
+The `spaces` built-in group exposes the same surface to MCP clients and the chat agent:
+
+| Tool | Permission |
+|---|---|
+| `spaces__list`, `spaces__get`, `spaces__get_tree`, `spaces__list_subspaces` | `spaces:read` |
+| `spaces__create`, `spaces__update`, `spaces__set_overview` | `spaces:write` |
+| `spaces__create_subspace`, `spaces__update_subspace` | `spaces:write` |
+| `spaces__delete`, `spaces__delete_subspace` | `spaces:delete` |
+| `spaces__set_report_space` | `reports:write` |
+
+They behave exactly like the REST endpoints below — the same validation code runs for both — and return
+`{"error": ...}` where the route would return a 4xx. `spaces__get` and `spaces__list` blank the overview
+pointer for the same reason the routes do; only `spaces__get_tree` and `spaces__set_overview` report it.
+
+Filing a report keeps the route's permission (`reports:write` alone) but lives in the `spaces` group, so
+disabling the group through `MCP_ENABLED_BUILTINS` removes the whole feature.
+
+**Every mutating tool in the group is confirmation-gated in chat.** A space is a shared, globally visible
+container: creating, renaming or deleting one is visible to every user, and filing a report into one
+publishes it. None of them carry the "creates a private draft" exception `reports__create` relies on.
+
+Spaces are not versioned, so unlike toolsets or reports the group has no `*_versions` tools.
+
 ## Seeding
 
-Spaces are **not** represented in the YAML config, so `seizu seed` neither creates nor updates them.
+Spaces round-trip through the YAML config. The top-level `spaces:` section declares them, and each
+report names its placement:
 
-Space membership is not exported, so re-seeding an exported config will not restore which space a
-report was in. `export` prints a warning when any exported report belongs to a space. If you rely on
-YAML as the source of truth, treat space organisation as UI-managed state until a `spaces:` config
-section exists.
+```yaml
+spaces:
+  security:
+    name: Security
+    description: Vulnerability and posture reporting
+    overview: security_overview
+    subspaces:
+      vulnerabilities:
+        name: Vulnerabilities
+
+reports:
+  security_overview:
+    name: Security Overview
+    space: security
+    rows: []
+
+  open_cves:
+    name: Open CVEs
+    space: security
+    subspace: vulnerabilities
+    rows: []
+```
+
+The YAML keys (`security`, `vulnerabilities`) are local handles used to wire the sections together.
+They never reach the API: space ids are server-generated, so the seeder matches spaces and sub-spaces
+**by name**, exactly as it matches reports.
+
+Three cross-references are validated when the file loads, before any writes happen — a typo fails the
+whole seed rather than half of it:
+
+- a report's `space` must be a key in `spaces`;
+- a report's `subspace` must be defined in that space (and requires `space`);
+- a space's `overview` must be a report that declares that same space.
+
+`space` and `subspace` are seed metadata, like `pinned`. They are applied through
+`PUT /api/v1/reports/<id>/space` after the report version is saved, and are **never** written into the
+stored report config — otherwise restoring an old version would relocate the report.
+
+Ordering is handled for you: spaces and sub-spaces are created first (filing needs the space to exist),
+then reports, then membership, then the overview pointers (which need the report filed).
+
+A report whose YAML omits `space` is **left where it is** rather than pulled out of its space — the same
+"only act when the key is present" rule `pinned` follows. Removing a report from a space is a deliberate
+act, so use the UI, the API, or `spaces__set_report_space`. Nothing is ever deleted by seeding: a space
+dropped from the YAML is left alone.
+
+`seizu export` writes the `spaces:` section, each report's `space`/`subspace`, and each space's
+`overview`, so an exported config re-seeds to the same organisation. Existing keys in the file being
+overwritten are reused, so hand-chosen names survive an export.
 
 ## Storage
 

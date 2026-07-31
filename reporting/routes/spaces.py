@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
-from reporting.schema.report_config import ReportListItem
 from reporting.schema.space_config import (
     CreateSpaceRequest,
     CreateSubspaceRequest,
@@ -21,27 +20,25 @@ from reporting.schema.space_config import (
     UpdateSubspaceRequest,
 )
 from reporting.services import report_store
-from reporting.services.spaces import SpaceValidationError, resolve_overview_report
+from reporting.services.spaces import (
+    DUPLICATE_SPACE_NAME_DETAIL,
+    DUPLICATE_SUBSPACE_NAME_DETAIL,
+    SpaceValidationError,
+    find_duplicate_space_name,
+    find_duplicate_subspace_name,
+    resolve_overview_report,
+    with_resolved_overview,
+    with_resolved_subspace,
+    without_overview,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _normalised_name(name: str) -> str:
-    return name.strip().casefold()
-
-
 async def _reject_duplicate_space_name(name: str, *, exclude_space_id: str | None = None) -> None:
-    """Best-effort duplicate-name guard, matching the toolset create check.
-
-    Not backed by a unique constraint: a functional lower(name) index is
-    awkward cross-dialect and DynamoDB cannot enforce one at all, so adding it
-    to only the SQL backend would make the two behave differently under a race.
-    """
-    target = _normalised_name(name)
-    for space in await report_store.list_spaces():
-        if space.space_id != exclude_space_id and _normalised_name(space.name) == target:
-            raise HTTPException(status_code=409, detail="A space with that name already exists")
+    if await find_duplicate_space_name(name, exclude_space_id=exclude_space_id):
+        raise HTTPException(status_code=409, detail=DUPLICATE_SPACE_NAME_DETAIL)
 
 
 async def _reject_duplicate_subspace_name(
@@ -50,13 +47,8 @@ async def _reject_duplicate_subspace_name(
     *,
     exclude_subspace_id: str | None = None,
 ) -> None:
-    target = _normalised_name(name)
-    for subspace in await report_store.list_subspaces(space_id):
-        if subspace.subspace_id != exclude_subspace_id and _normalised_name(subspace.name) == target:
-            raise HTTPException(
-                status_code=409,
-                detail="A sub-space with that name already exists in this space",
-            )
+    if await find_duplicate_subspace_name(space_id, name, exclude_subspace_id=exclude_subspace_id):
+        raise HTTPException(status_code=409, detail=DUPLICATE_SUBSPACE_NAME_DETAIL)
 
 
 async def _get_space_or_404(space_id: str) -> SpaceListItem:
@@ -64,20 +56,6 @@ async def _get_space_or_404(space_id: str) -> SpaceListItem:
     if not space:
         raise HTTPException(status_code=404, detail="Space not found")
     return space
-
-
-def _without_overview(space: SpaceListItem) -> SpaceListItem:
-    """Drop the overview pointer from a response that carries no report list.
-
-    Only the tree endpoint can say whether the pointer still resolves for this
-    caller, and a pointer at a report they cannot see would otherwise disclose
-    that report's ID and existence. Space members are public
-    (``SPACE_MEMBER_ACCESS``), so the pointer is normally harmless -- but it can
-    still go stale, and nothing outside the tree consumes it.
-    """
-    if space.overview_report_id is None:
-        return space
-    return space.model_copy(update={"overview_report_id": None})
 
 
 async def _get_subspace_or_404(space_id: str, subspace_id: str) -> SubspaceItem:
@@ -92,36 +70,6 @@ async def _get_subspace_or_404(space_id: str, subspace_id: str) -> SubspaceItem:
     return subspace
 
 
-def _with_resolved_overview(space: SpaceListItem, reports: list[ReportListItem]) -> SpaceListItem:
-    """Blank out an overview pointer that no longer resolves.
-
-    The target may have been deleted, moved out of the space, or be invisible to
-    this caller. Resolving lazily is what lets the overview be an ordinary
-    report with no protections on it.
-    """
-    if space.overview_report_id is None:
-        return space
-    if any(report.report_id == space.overview_report_id for report in reports):
-        return space
-    return space.model_copy(update={"overview_report_id": None})
-
-
-def _with_resolved_subspace(
-    reports: list[ReportListItem],
-    subspaces: list[SubspaceItem],
-) -> list[ReportListItem]:
-    """Blank out any ``subspace_id`` that no longer resolves.
-
-    Deleting a sub-space leaves its member reports pointing at it; rather than
-    fanning out a write over every member, the reference is resolved lazily
-    here so clients only ever see "grouped" or "ungrouped".
-    """
-    known = {subspace.subspace_id for subspace in subspaces}
-    return [
-        report if report.subspace_id in known else report.model_copy(update={"subspace_id": None}) for report in reports
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Spaces
 # ---------------------------------------------------------------------------
@@ -133,7 +81,7 @@ async def list_spaces(
 ) -> SpaceListResponse:
     """List all spaces."""
     spaces = await report_store.list_spaces()
-    return SpaceListResponse(spaces=[_without_overview(space) for space in spaces])
+    return SpaceListResponse(spaces=[without_overview(space) for space in spaces])
 
 
 @router.post("/api/v1/spaces", response_model=SpaceListItem, status_code=201)
@@ -164,7 +112,7 @@ async def get_space(
     The pointer needs the caller's visible report list to resolve, which only
     the tree endpoint has.
     """
-    return _without_overview(await _get_space_or_404(space_id))
+    return without_overview(await _get_space_or_404(space_id))
 
 
 @router.put("/api/v1/spaces/{space_id}", response_model=SpaceListItem)
@@ -183,7 +131,7 @@ async def update_space(
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Space not found")
-    return _without_overview(updated)
+    return without_overview(updated)
 
 
 @router.delete("/api/v1/spaces/{space_id}", response_model=SpaceIdResponse)
@@ -217,9 +165,9 @@ async def get_space_tree(
     subspaces = await report_store.list_subspaces(space_id)
     reports = await report_store.list_space_reports(space_id, user_id=current.user.user_id)
     return SpaceTreeResponse(
-        space=_with_resolved_overview(space, reports),
+        space=with_resolved_overview(space, reports),
         subspaces=subspaces,
-        reports=_with_resolved_subspace(reports, subspaces),
+        reports=with_resolved_subspace(reports, subspaces),
     )
 
 

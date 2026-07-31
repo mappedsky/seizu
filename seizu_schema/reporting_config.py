@@ -475,6 +475,34 @@ class Report(BaseModel):
         examples=[True],
     )
 
+    space: str | None = Field(
+        default=None,
+        description=(
+            "Optional seed metadata: the key of a space in the top-level"
+            " ``spaces`` section to file this report into. Like ``pinned`` this"
+            " is parent metadata applied after the version is saved, and is"
+            " never stored inside report version configs -- restoring an old"
+            " version must not relocate a report. A report filed in a space is"
+            " public."
+        ),
+        examples=["security"],
+    )
+
+    subspace: str | None = Field(
+        default=None,
+        description=(
+            "Optional seed metadata: the key of a sub-space within ``space``."
+            " Requires ``space``. Not stored inside report version configs."
+        ),
+        examples=["vulnerabilities"],
+    )
+
+    @model_validator(mode="after")
+    def validate_space_membership(self) -> "Report":
+        if self.subspace is not None and self.space is None:
+            raise ValueError("subspace requires space")
+        return self
+
     name: str = Field(
         description="The name of the report.",
         examples=["CVEs"],
@@ -964,6 +992,47 @@ class SkillsetDef(BaseModel):
         return v
 
 
+class SubspaceDef(BaseModel):
+    """A sub-space: a grouping label for reports within a single space."""
+
+    name: str
+
+
+class SpaceDef(BaseModel):
+    """A space definition.
+
+    Spaces carry no version history and no access scope, so unlike toolsets
+    there is no ``enabled`` flag and nothing to version. Membership is declared
+    on the report (``Report.space``), not listed here, so a report only ever
+    names its placement in one place.
+    """
+
+    name: str
+    description: str = ""
+
+    overview: str | None = Field(
+        default=None,
+        description=(
+            "Optional key of a report in the ``reports`` section to use as this"
+            " space's landing page. The report must declare this space in its"
+            " ``space`` field."
+        ),
+        examples=["security_overview"],
+    )
+
+    subspaces: dict[str, SubspaceDef] = Field(
+        default_factory=dict,
+        description="Sub-spaces within this space, keyed by a lower_snake_case id.",
+    )
+
+    @field_validator("subspaces")
+    @classmethod
+    def validate_subspace_ids(cls, v: dict[str, SubspaceDef]) -> dict[str, SubspaceDef]:
+        for key in v:
+            validate_lower_snake_id(key)
+        return v
+
+
 class ReportingConfig(BaseModel):
     queries: dict[str, str] = Field(
         default_factory=dict,
@@ -1088,6 +1157,65 @@ class ReportingConfig(BaseModel):
             """
         ],
     )
+
+    spaces: dict[str, SpaceDef] = Field(
+        default_factory=dict,
+        description="Spaces that group reports, keyed by a lower_snake_case id.",
+        examples=[
+            """
+            .. code-block:: yaml
+
+              spaces:
+                security:
+                  name: Security
+                  description: Vulnerability and posture reporting
+                  overview: security_overview
+                  subspaces:
+                    vulnerabilities:
+                      name: Vulnerabilities
+            """
+        ],
+    )
+
+    @field_validator("spaces")
+    @classmethod
+    def validate_space_ids(cls, v: dict[str, SpaceDef]) -> dict[str, SpaceDef]:
+        for key in v:
+            validate_lower_snake_id(key)
+        return v
+
+    @model_validator(mode="after")
+    def validate_space_references(self) -> "ReportingConfig":
+        """Resolve the three cross-references between reports and spaces.
+
+        Checked here rather than left to the seeder so a typo fails on load,
+        before any writes have happened, instead of half way through a seed.
+        """
+        for report_key, report in self.reports.items():
+            if report.space is None:
+                continue
+            space = self.spaces.get(report.space)
+            if space is None:
+                raise ValueError(f"report '{report_key}' names unknown space '{report.space}'")
+            if report.subspace is not None and report.subspace not in space.subspaces:
+                raise ValueError(
+                    f"report '{report_key}' names sub-space '{report.subspace}',"
+                    f" which is not defined in space '{report.space}'"
+                )
+
+        for space_key, space in self.spaces.items():
+            if space.overview is None:
+                continue
+            overview_report = self.reports.get(space.overview)
+            if overview_report is None:
+                raise ValueError(f"space '{space_key}' names unknown overview report '{space.overview}'")
+            # The API enforces the same rule: an overview must be a report filed
+            # in that space.
+            if overview_report.space != space_key:
+                raise ValueError(
+                    f"space '{space_key}' names overview report '{space.overview}', which is not filed in that space"
+                )
+        return self
 
     @field_validator("toolsets")
     @classmethod

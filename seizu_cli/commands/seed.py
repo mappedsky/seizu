@@ -15,6 +15,14 @@ err_console = Console(stderr=True)
 SEED_COMMENT = "Imported from YAML dashboard config"
 SEED_UPDATE_COMMENT = "Updated from YAML dashboard config"
 
+#: Built-in MCP toolsets surface through ``/api/v1/toolsets`` as synthetic rows
+#: with ids like ``__builtin_graph__``. They ship with the application and the
+#: write path rejects the prefix outright, so they must not reach the YAML —
+#: their ids do not even satisfy the lower_snake_case key validators. Matched by
+#: prefix here rather than importing ``mcp_builtins.synthetic``: the CLI is
+#: published as its own package and must not depend on backend code.
+BUILTIN_ID_PREFIX = "__builtin_"
+
 
 def _slugify(name: str) -> str:
     slug = name.lower()
@@ -49,6 +57,37 @@ def _get_report(report_id: str) -> dict[str, Any] | None:
         if exc.status_code == 404:
             return None
         raise
+
+
+def _is_builtin_id(value: str) -> bool:
+    return value.startswith(BUILTIN_ID_PREFIX)
+
+
+def _list_spaces() -> list[dict[str, Any]]:
+    return state.get_client().get("/api/v1/spaces").get("spaces", [])
+
+
+def _list_subspaces(space_id: str) -> list[dict[str, Any]]:
+    return state.get_client().get(f"/api/v1/spaces/{space_id}/subspaces").get("subspaces", [])
+
+
+def _space_tree(space_id: str) -> dict[str, Any]:
+    return state.get_client().get(f"/api/v1/spaces/{space_id}/tree")
+
+
+def _set_report_space(report_id: str, space_id: str, subspace_id: str | None) -> None:
+    state.get_client().put(
+        f"/api/v1/reports/{report_id}/space",
+        json={"space_id": space_id, "subspace_id": subspace_id},
+    )
+
+
+def _set_space_overview(space_id: str, report_id: str) -> None:
+    state.get_client().put(f"/api/v1/spaces/{space_id}/overview", json={"report_id": report_id})
+
+
+def _space_content_changed(existing: dict[str, Any], name: str, description: str) -> bool:
+    return existing.get("name") != name or existing.get("description", "") != description
 
 
 def _list_scheduled_queries() -> list[dict[str, Any]]:
@@ -161,7 +200,7 @@ def _skill_content_changed(
 
 
 def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
-    """Seed reports, workflows, toolsets, and skillsets from YAML."""
+    """Seed spaces, reports, workflows, toolsets, and skillsets from YAML."""
     loaded = schema.load_file(config)
 
     if (
@@ -170,9 +209,15 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
         and not loaded.scheduled_queries
         and not loaded.toolsets
         and not loaded.skillsets
+        and not loaded.spaces
     ):
-        console.print("No reports, workflows, toolsets, or skillsets found in config file. Nothing to do.")
+        console.print("No spaces, reports, workflows, toolsets, or skillsets found in config file. Nothing to do.")
         return
+
+    # Spaces first: filing a report needs its space to already exist.
+    console.print("Seeding spaces...")
+    space_ids, subspace_ids = _seed_spaces(loaded, force=force, dry_run=dry_run)
+    console.print("")
 
     try:
         existing_list = _list_reports()
@@ -186,7 +231,9 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
     seeded_ids: dict[str, str] = {}
 
     for report_key, report in loaded.reports.items():
-        report_config_dict = report.model_dump(exclude_none=True, exclude={"pinned"})
+        # pinned/space/subspace are parent metadata the seeder applies through
+        # their own endpoints; none of them belong inside a stored version.
+        report_config_dict = report.model_dump(exclude_none=True, exclude={"pinned", "space", "subspace"})
         existing = existing_by_name.get(report.name)
 
         if existing:
@@ -271,6 +318,16 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
             console.print(msg)
 
     console.print(f"\nReports: created={created} updated={updated} skipped={skipped}")
+
+    # Membership and the overview pointer are parent metadata applied after the
+    # version save, never part of a report's config — restoring an old version
+    # must not relocate a report. Both run last of the report pass: filing needs
+    # the report to exist and be public, and an overview needs it filed.
+    if loaded.spaces:
+        console.print("\nFiling reports into spaces...")
+        _apply_report_spaces(loaded, seeded_ids, space_ids, subspace_ids, dry_run=dry_run)
+        _apply_space_overviews(loaded, seeded_ids, space_ids, dry_run=dry_run)
+
     if loaded.workflows:
         console.print("\nSeeding workflows...")
         _seed_workflows(loaded, force=force, dry_run=dry_run)
@@ -286,6 +343,217 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
 
     if dry_run:
         console.print("\n(dry-run, no writes performed)")
+
+
+def _seed_spaces(
+    config: Any,
+    force: bool,
+    dry_run: bool,
+) -> tuple[dict[str, str | None], dict[tuple[str, str], str | None]]:
+    """Create or update the spaces and sub-spaces declared in *config*.
+
+    Returns the YAML key → server id maps the report pass needs. A value is
+    ``None`` when the id is not known, which happens only on a dry run for a
+    record that would have been created — callers print rather than write in
+    that case.
+
+    Spaces are matched by name, like reports: their ids are server-generated
+    snowflakes, so the YAML key is a local handle that never reaches the API.
+    Nothing is ever deleted here; a space dropped from the YAML is left alone,
+    matching how reports and toolsets are seeded.
+    """
+    space_ids: dict[str, str | None] = {}
+    subspace_ids: dict[tuple[str, str], str | None] = {}
+
+    if not config.spaces:
+        console.print("  No spaces in config, skipping.")
+        return space_ids, subspace_ids
+
+    try:
+        existing_spaces = {item["name"]: item for item in _list_spaces()}
+    except Exception as exc:
+        _die(exc)
+        return space_ids, subspace_ids
+
+    created = updated = skipped = 0
+
+    for space_key, space_def in config.spaces.items():
+        description = space_def.description or ""
+        existing = existing_spaces.get(space_def.name)
+
+        if existing:
+            space_id = existing["space_id"]
+            space_ids[space_key] = space_id
+            if not force and not _space_content_changed(existing, space_def.name, description):
+                console.print(f"  [dim][skip][/dim] space '{space_def.name}' (unchanged)")
+                skipped += 1
+            elif dry_run:
+                console.print(f"  [yellow][dry-run][/yellow] would update space '{space_def.name}' (key: {space_key})")
+                updated += 1
+            else:
+                try:
+                    state.get_client().put(
+                        f"/api/v1/spaces/{space_id}",
+                        json={"name": space_def.name, "description": description},
+                    )
+                except Exception as exc:
+                    _die(exc)
+                    return space_ids, subspace_ids
+                console.print(f"  [blue][updated][/blue] '{space_id}'  name='{space_def.name}'  yaml_key='{space_key}'")
+                updated += 1
+        elif dry_run:
+            console.print(f"  [yellow][dry-run][/yellow] would create space '{space_def.name}' (key: {space_key})")
+            space_ids[space_key] = None
+            created += 1
+        else:
+            try:
+                result = state.get_client().post(
+                    "/api/v1/spaces",
+                    json={"name": space_def.name, "description": description},
+                )
+            except Exception as exc:
+                _die(exc)
+                return space_ids, subspace_ids
+            space_ids[space_key] = result["space_id"]
+            console.print(
+                f"  [green][created][/green] '{result['space_id']}'  name='{space_def.name}'  yaml_key='{space_key}'"
+            )
+            created += 1
+
+        space_id = space_ids.get(space_key)
+        if not space_def.subspaces:
+            continue
+        if space_id is None:
+            for sub_key, sub_def in space_def.subspaces.items():
+                console.print(
+                    f"    [yellow][dry-run][/yellow] would create sub-space '{sub_def.name}' (key: {sub_key})"
+                )
+                subspace_ids[(space_key, sub_key)] = None
+            continue
+
+        existing_subspaces: dict[str, dict[str, Any]] = {}
+        if existing:
+            # A space this run just created has none, so only an existing space
+            # is worth a round trip.
+            try:
+                existing_subspaces = {item["name"]: item for item in _list_subspaces(space_id)}
+            except Exception as exc:
+                _die(exc)
+                return space_ids, subspace_ids
+
+        for sub_key, sub_def in space_def.subspaces.items():
+            existing_sub = existing_subspaces.get(sub_def.name)
+            if existing_sub:
+                # Sub-spaces hold nothing but a name, so a match by name is
+                # always already up to date.
+                subspace_ids[(space_key, sub_key)] = existing_sub["subspace_id"]
+                console.print(f"    [dim][skip][/dim] sub-space '{sub_def.name}' (unchanged)")
+                continue
+            if dry_run:
+                console.print(
+                    f"    [yellow][dry-run][/yellow] would create sub-space '{sub_def.name}' (key: {sub_key})"
+                )
+                subspace_ids[(space_key, sub_key)] = None
+                continue
+            try:
+                result = state.get_client().post(
+                    f"/api/v1/spaces/{space_id}/subspaces",
+                    json={"name": sub_def.name},
+                )
+            except Exception as exc:
+                _die(exc)
+                return space_ids, subspace_ids
+            subspace_ids[(space_key, sub_key)] = result["subspace_id"]
+            console.print(
+                f"    [green][created][/green] '{result['subspace_id']}'  name='{sub_def.name}'  yaml_key='{sub_key}'"
+            )
+
+    console.print(f"  Spaces: created={created} updated={updated} skipped={skipped}")
+    return space_ids, subspace_ids
+
+
+def _apply_report_spaces(
+    config: Any,
+    seeded_ids: dict[str, str],
+    space_ids: dict[str, str | None],
+    subspace_ids: dict[tuple[str, str], str | None],
+    dry_run: bool,
+) -> None:
+    """File the seeded reports into the spaces their YAML declares.
+
+    Runs after the report pass because filing needs the report to exist and to
+    be public — the report pass publishes everything it touches.
+
+    A report whose YAML omits ``space`` is left where it is rather than being
+    pulled out of a space, the same "only act when the key is present" rule
+    ``pinned`` follows. Removing a report from a space is a deliberate act, and
+    a config written before spaces existed should not perform one.
+    """
+    targets = [(key, report) for key, report in config.reports.items() if report.space is not None]
+    if not targets:
+        return
+
+    filed = 0
+    for report_key, report in targets:
+        space_id = space_ids.get(report.space)
+        subspace_id = subspace_ids.get((report.space, report.subspace)) if report.subspace else None
+        report_id = seeded_ids.get(report_key)
+
+        if dry_run:
+            location = f"{report.space}/{report.subspace}" if report.subspace else report.space
+            console.print(f"  [yellow][dry-run][/yellow] would file report '{report.name}' into space '{location}'")
+            filed += 1
+            continue
+
+        if report_id is None or space_id is None:
+            console.print(f"  [yellow][warn][/yellow] report '{report.name}' was not seeded, not filed into a space")
+            continue
+
+        try:
+            _set_report_space(report_id, space_id, subspace_id)
+        except Exception as exc:
+            _die(exc)
+            return
+        location = f"{report.space}/{report.subspace}" if report.subspace else report.space
+        console.print(f"  [green][filed][/green] report '{report.name}' → space '{location}'")
+        filed += 1
+
+    console.print(f"  Report space membership: filed={filed}")
+
+
+def _apply_space_overviews(
+    config: Any,
+    seeded_ids: dict[str, str],
+    space_ids: dict[str, str | None],
+    dry_run: bool,
+) -> None:
+    """Point each space at its overview report.
+
+    Last, because the target has to exist and be filed in the space first.
+    """
+    for space_key, space_def in config.spaces.items():
+        if space_def.overview is None:
+            continue
+        space_id = space_ids.get(space_key)
+        report_id = seeded_ids.get(space_def.overview)
+
+        if dry_run:
+            console.print(
+                f"  [yellow][dry-run][/yellow] would set overview of space '{space_key}' to '{space_def.overview}'"
+            )
+            continue
+        if space_id is None or report_id is None:
+            console.print(
+                f"  [yellow][warn][/yellow] overview report '{space_def.overview}' for space"
+                f" '{space_key}' was not seeded, overview not set"
+            )
+            continue
+        try:
+            _set_space_overview(space_id, report_id)
+        except Exception as exc:
+            _die(exc)
+            return
+        console.print(f"  [green][overview][/green] space '{space_key}' → report '{space_def.overview}'")
 
 
 def _seed_scheduled_queries(
@@ -749,8 +1017,81 @@ def _seed_skillsets(
     console.print(f"  Skillsets: created={ss_created} updated={ss_updated} skipped={ss_skipped}")
 
 
+def _export_spaces(existing_cfg: Any) -> tuple[dict[str, Any], dict[str, str], dict[str, str], dict[str, str], int]:
+    """Fetch every space and return the pieces the report pass needs.
+
+    Returns ``(spaces, space_id_to_key, subspace_id_to_key, overview_report_id_to_space_key, failed)``.
+    The overview map is keyed by report id and resolved to a report *key* only
+    after the report pass has assigned keys.
+
+    Sub-space ids are globally unique, so one flat map covers every space.
+    """
+    space_name_to_key = {s.name: k for k, s in existing_cfg.spaces.items()}
+
+    try:
+        space_list = _list_spaces()
+    except Exception as exc:
+        _die(exc)
+        return {}, {}, {}, {}, 1
+
+    spaces: dict[str, Any] = {}
+    space_id_to_key: dict[str, str] = {}
+    subspace_id_to_key: dict[str, str] = {}
+    overview_by_report_id: dict[str, str] = {}
+    failed = 0
+
+    for item in sorted(space_list, key=lambda s: s["name"]):
+        space_id = item["space_id"]
+        try:
+            # The tree, not GET /spaces/<id>: every other space response blanks
+            # the overview pointer, because only the tree can resolve it.
+            tree = _space_tree(space_id)
+        except Exception as exc:
+            err_console.print(
+                f"[yellow][warn][/yellow] Could not fetch tree for space '{item['name']}': {exc} — skipping space."
+            )
+            failed += 1
+            continue
+
+        key = space_name_to_key.get(item["name"]) or _slugify(item["name"])
+        base_key = key
+        suffix = 2
+        while key in spaces:
+            key = f"{base_key}_{suffix}"
+            suffix += 1
+
+        existing_def = existing_cfg.spaces.get(key)
+        sub_name_to_key = {s.name: k for k, s in existing_def.subspaces.items()} if existing_def else {}
+
+        subspaces: dict[str, Any] = {}
+        for sub in sorted(tree.get("subspaces", []), key=lambda s: s["name"]):
+            sub_key = sub_name_to_key.get(sub["name"]) or _slugify(sub["name"])
+            base_sub_key = sub_key
+            sub_suffix = 2
+            while sub_key in subspaces:
+                sub_key = f"{base_sub_key}_{sub_suffix}"
+                sub_suffix += 1
+            subspaces[sub_key] = schema.SubspaceDef(name=sub["name"])
+            subspace_id_to_key[sub["subspace_id"]] = sub_key
+
+        spaces[key] = schema.SpaceDef(
+            name=item["name"],
+            description=item.get("description", ""),
+            subspaces=subspaces,
+        )
+        space_id_to_key[space_id] = key
+
+        overview_report_id = (tree.get("space") or {}).get("overview_report_id")
+        if overview_report_id:
+            overview_by_report_id[overview_report_id] = key
+
+        console.print(f"[green][export][/green] space '{item['name']}' ({len(subspaces)} sub-spaces) → key='{key}'")
+
+    return spaces, space_id_to_key, subspace_id_to_key, overview_by_report_id, failed
+
+
 def export_cmd(config: str, dry_run: bool) -> None:
-    """Export latest report versions and toolsets from the API back into *config* YAML."""
+    """Export latest report versions, spaces, and toolsets from the API back into *config* YAML."""
     try:
         existing_cfg = schema.load_file(config)
     except FileNotFoundError:
@@ -773,12 +1114,13 @@ def export_cmd(config: str, dry_run: bool) -> None:
         if exc.status_code != 404:
             err_console.print(f"[yellow][warn][/yellow] Could not fetch dashboard pointer: {exc}")
 
+    # Spaces first: their keys have to exist before a report can name one.
+    new_spaces, space_id_to_key, subspace_id_to_key, overview_by_report_id, space_failed = _export_spaces(existing_cfg)
+
     new_reports: dict[str, Any] = {}
     dashboard_key: str | None = None
+    overview_keys: dict[str, str] = {}
     exported = failed = 0
-    # YAML has no `spaces:` section yet, so space membership is not exported —
-    # warn rather than let it be discovered on a re-seed.
-    in_a_space = sum(1 for item in report_list if item.get("space_id"))
 
     for item in sorted(report_list, key=lambda r: r["name"]):
         latest = _get_report(item["report_id"])
@@ -804,16 +1146,35 @@ def export_cmd(config: str, dry_run: bool) -> None:
         new_reports[key] = report_obj
         if item.get("pinned"):
             report_obj.pinned = True
+        # Membership rides on the report list item, not the version config: it is
+        # parent metadata, and a version never carries it.
+        space_key = space_id_to_key.get(item.get("space_id") or "")
+        if space_key:
+            report_obj.space = space_key
+            subspace_key = subspace_id_to_key.get(item.get("subspace_id") or "")
+            # A sub-space deleted out from under its members leaves a dangling
+            # id; the tree normalises that to "ungrouped", so drop it here too.
+            if subspace_key and subspace_key in new_spaces[space_key].subspaces:
+                report_obj.subspace = subspace_key
+        elif item.get("space_id"):
+            err_console.print(
+                f"[yellow][warn][/yellow] Report '{item['name']}' is in a space that was not exported;"
+                " its membership is not represented in the YAML."
+            )
+        if item["report_id"] in overview_by_report_id:
+            overview_keys[overview_by_report_id[item["report_id"]]] = key
         if dashboard_id and item["report_id"] == dashboard_id:
             dashboard_key = key
         console.print(f"[green][export][/green] report '{item['name']}' → key='{key}'")
         exported += 1
 
-    if in_a_space:
-        err_console.print(
-            f"[yellow][warn][/yellow] {in_a_space} exported report(s) belong to a space. "
-            "Space membership is not represented in YAML, so re-seeding will not restore it."
-        )
+    # Resolved last: an overview names a report key, which only exists once the
+    # report pass has run. A pointer at a report that failed to export is left
+    # unset rather than emitted dangling — the config validator rejects those.
+    for space_key, space_def in new_spaces.items():
+        overview_key = overview_keys.get(space_key)
+        if overview_key is not None and new_reports[overview_key].space == space_key:
+            space_def.overview = overview_key
 
     # Export canonical workflows (legacy scheduled-query records are
     # normalized by the API before they reach the CLI).
@@ -849,7 +1210,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
 
     # Export toolsets
     new_toolsets: dict[str, Any] = {}
-    ts_exported = ts_failed = 0
+    ts_exported = ts_failed = ts_builtin = 0
 
     try:
         toolset_list = _list_toolsets()
@@ -860,35 +1221,49 @@ def export_cmd(config: str, dry_run: bool) -> None:
     for ts_item in sorted(toolset_list, key=lambda t: t["name"]):
         ts_key = ts_item["toolset_id"]
 
-        try:
-            tools_data = _list_tools(ts_item["toolset_id"])
-        except Exception as exc:
-            err_console.print(
-                f"[yellow][warn][/yellow] Could not fetch tools for '{ts_item['name']}': {exc} — skipping toolset."
-            )
-            ts_failed += 1
+        # Built-ins ship with the application: their ids fail the YAML key
+        # validators, and seeding one back would be rejected by the write path
+        # anyway. Nothing about them belongs in a config of user-defined state.
+        if _is_builtin_id(ts_key):
+            ts_builtin += 1
             continue
 
-        new_tools: dict[str, Any] = {}
-        for tool in sorted(tools_data, key=lambda t: t["name"]):
-            tool_key = tool["tool_id"]
-            params = [schema.ToolParamDef.model_validate(p) for p in tool.get("parameters", [])]
-            new_tools[tool_key] = schema.ToolDef(
-                name=tool["name"],
-                description=tool.get("description", ""),
-                cypher=tool["cypher"],
-                parameters=params,
-                enabled=tool.get("enabled", True),
-            )
+        try:
+            tools_data = _list_tools(ts_item["toolset_id"])
 
-        new_toolsets[ts_key] = schema.ToolsetDef(
-            name=ts_item["name"],
-            description=ts_item.get("description", ""),
-            enabled=ts_item.get("enabled", True),
-            tools=new_tools,
-        )
+            new_tools: dict[str, Any] = {}
+            for tool in sorted(tools_data, key=lambda t: t["name"]):
+                tool_key = tool["tool_id"]
+                params = [schema.ToolParamDef.model_validate(p) for p in tool.get("parameters", [])]
+                new_tools[tool_key] = schema.ToolDef(
+                    name=tool["name"],
+                    description=tool.get("description", ""),
+                    cypher=tool["cypher"],
+                    parameters=params,
+                    enabled=tool.get("enabled", True),
+                )
+
+            # Inside the try with the fetch: a toolset whose ids or tools fail
+            # validation must cost one toolset, not the whole export.
+            new_toolsets[ts_key] = schema.ToolsetDef(
+                name=ts_item["name"],
+                description=ts_item.get("description", ""),
+                enabled=ts_item.get("enabled", True),
+                tools=new_tools,
+            )
+        except Exception as exc:
+            err_console.print(
+                f"[yellow][warn][/yellow] Could not export toolset '{ts_item['name']}': {exc} — skipping toolset."
+            )
+            ts_failed += 1
+            new_toolsets.pop(ts_key, None)
+            continue
+
         console.print(f"[green][export][/green] toolset '{ts_item['name']}' ({len(new_tools)} tools) → key='{ts_key}'")
         ts_exported += 1
+
+    if ts_builtin:
+        console.print(f"[dim][skip][/dim] {ts_builtin} built-in toolset(s) (shipped with Seizu, not seedable)")
 
     # Export skillsets
     new_skillsets: dict[str, Any] = {}
@@ -904,33 +1279,37 @@ def export_cmd(config: str, dry_run: bool) -> None:
         ss_key = ss_item["skillset_id"]
         try:
             skills_data = _list_skills(ss_item["skillset_id"])
+
+            new_skills: dict[str, Any] = {}
+            for skill in sorted(skills_data, key=lambda s: s["name"]):
+                skill_key = skill["skill_id"]
+                params = [schema.ToolParamDef.model_validate(p) for p in skill.get("parameters", [])]
+                new_skills[skill_key] = schema.SkillDef(
+                    name=skill["name"],
+                    description=skill.get("description", ""),
+                    template=skill["template"],
+                    parameters=params,
+                    triggers=skill.get("triggers", []),
+                    tools_required=skill.get("tools_required", []),
+                    enabled=skill.get("enabled", True),
+                )
+
+            # Constructed inside the try for the same reason as toolsets: a
+            # skillset that fails validation must cost one skillset, not the run.
+            new_skillsets[ss_key] = schema.SkillsetDef(
+                name=ss_item["name"],
+                description=ss_item.get("description", ""),
+                enabled=ss_item.get("enabled", True),
+                skills=new_skills,
+            )
         except Exception as exc:
             err_console.print(
-                f"[yellow][warn][/yellow] Could not fetch skills for '{ss_item['name']}': {exc} — skipping skillset."
+                f"[yellow][warn][/yellow] Could not export skillset '{ss_item['name']}': {exc} — skipping skillset."
             )
             ss_failed += 1
+            new_skillsets.pop(ss_key, None)
             continue
 
-        new_skills: dict[str, Any] = {}
-        for skill in sorted(skills_data, key=lambda s: s["name"]):
-            skill_key = skill["skill_id"]
-            params = [schema.ToolParamDef.model_validate(p) for p in skill.get("parameters", [])]
-            new_skills[skill_key] = schema.SkillDef(
-                name=skill["name"],
-                description=skill.get("description", ""),
-                template=skill["template"],
-                parameters=params,
-                triggers=skill.get("triggers", []),
-                tools_required=skill.get("tools_required", []),
-                enabled=skill.get("enabled", True),
-            )
-
-        new_skillsets[ss_key] = schema.SkillsetDef(
-            name=ss_item["name"],
-            description=ss_item.get("description", ""),
-            enabled=ss_item.get("enabled", True),
-            skills=new_skills,
-        )
         console.print(
             f"[green][export][/green] skillset '{ss_item['name']}' ({len(new_skills)} skills) → key='{ss_key}'"
         )
@@ -939,6 +1318,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
     updated_cfg = schema.ReportingConfig(
         queries=existing_cfg.queries,
         dashboard=dashboard_key if dashboard_key is not None else existing_cfg.dashboard,
+        spaces=new_spaces,
         reports=new_reports,
         scheduled_queries=[],
         workflows=new_workflows,
@@ -947,24 +1327,20 @@ def export_cmd(config: str, dry_run: bool) -> None:
     )
     yaml_content = schema.dump_yaml(updated_cfg)
 
+    summary = (
+        f"\nDone. spaces: exported={len(new_spaces)} failed={space_failed}  "
+        f"reports: exported={exported} failed={failed}  "
+        f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
+        f"toolsets: exported={ts_exported} failed={ts_failed} builtin_skipped={ts_builtin}  "
+        f"skillsets: exported={ss_exported} failed={ss_failed}  "
+    )
+
     if dry_run:
         console.print("\n--- YAML output (dry-run, not written) ---\n")
         console.print(yaml_content)
-        console.print(
-            f"\nDone. reports: exported={exported} failed={failed}  "
-            f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
-            f"toolsets: exported={ts_exported} failed={ts_failed}  "
-            f"skillsets: exported={ss_exported} failed={ss_failed}  "
-            "(dry-run, file not written)"
-        )
+        console.print(summary + "(dry-run, file not written)")
         return
 
     with open(config, "w") as f:
         f.write(yaml_content)
-    console.print(
-        f"\nDone. reports: exported={exported} failed={failed}  "
-        f"workflows: exported={len(new_workflows)} failed={workflow_failed}  "
-        f"toolsets: exported={ts_exported} failed={ts_failed}  "
-        f"skillsets: exported={ss_exported} failed={ss_failed}  "
-        f"→ wrote '{config}'"
-    )
+    console.print(summary + f"→ wrote '{config}'")

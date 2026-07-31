@@ -15,24 +15,38 @@ Two kinds of check live here, and they are enforced differently:
   because a check up here alone loses a concurrent unpublish/file race.
 """
 
-from reporting.schema.report_config import ReportAccess
+from reporting.schema.report_config import ReportAccess, ReportListItem
 from reporting.schema.space_config import (
     FILING_PRIVATE_REPORT_DETAIL,
     PRIVATISING_SPACE_MEMBER_DETAIL,
     SpaceConflictError,
+    SpaceListItem,
+    SubspaceItem,
 )
 from reporting.services import report_store
 
 __all__ = [
+    "DUPLICATE_SPACE_NAME_DETAIL",
+    "DUPLICATE_SUBSPACE_NAME_DETAIL",
     "SPACE_MEMBER_ACCESS",
     "SpaceConflictError",
     "SpaceValidationError",
+    "find_duplicate_space_name",
+    "find_duplicate_subspace_name",
     "reject_filing_private_report",
     "reject_privatising_space_member",
     "resolve_clone_space",
     "resolve_overview_report",
     "resolve_report_space",
+    "with_resolved_overview",
+    "with_resolved_subspace",
+    "without_overview",
 ]
+
+#: Messages for the best-effort duplicate-name guards, shared so REST and MCP
+#: report the same thing.
+DUPLICATE_SPACE_NAME_DETAIL = "A space with that name already exists"
+DUPLICATE_SUBSPACE_NAME_DETAIL = "A sub-space with that name already exists in this space"
 
 #: Reports filed in a space are public. A space is a shared container, so a
 #: private member would be invisible to everyone but its owner while still
@@ -144,3 +158,90 @@ async def resolve_clone_space(
     if requested_space_id is None:
         return source_space_id, source_subspace_id
     return await resolve_report_space(requested_space_id, requested_subspace_id)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-name guards
+# ---------------------------------------------------------------------------
+
+
+def _normalised_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+async def find_duplicate_space_name(name: str, *, exclude_space_id: str | None = None) -> bool:
+    """Report whether another space already carries *name*.
+
+    Best-effort, and deliberately not backed by a unique constraint: a
+    functional lower(name) index is awkward cross-dialect and DynamoDB cannot
+    enforce one at all, so adding it to only the SQL backend would make the two
+    behave differently under a race.
+    """
+    target = _normalised_name(name)
+    return any(
+        space.space_id != exclude_space_id and _normalised_name(space.name) == target
+        for space in await report_store.list_spaces()
+    )
+
+
+async def find_duplicate_subspace_name(
+    space_id: str,
+    name: str,
+    *,
+    exclude_subspace_id: str | None = None,
+) -> bool:
+    """Report whether another sub-space of *space_id* already carries *name*."""
+    target = _normalised_name(name)
+    return any(
+        subspace.subspace_id != exclude_subspace_id and _normalised_name(subspace.name) == target
+        for subspace in await report_store.list_subspaces(space_id)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Lazy reference resolution
+# ---------------------------------------------------------------------------
+
+
+def without_overview(space: SpaceListItem) -> SpaceListItem:
+    """Drop the overview pointer from a response that carries no report list.
+
+    Only a response holding the caller's visible reports can say whether the
+    pointer still resolves, and a pointer at a report they cannot see would
+    otherwise disclose that report's ID and existence. Space members are public
+    (``SPACE_MEMBER_ACCESS``), so the pointer is normally harmless -- but it can
+    still go stale, and nothing outside the tree consumes it.
+    """
+    if space.overview_report_id is None:
+        return space
+    return space.model_copy(update={"overview_report_id": None})
+
+
+def with_resolved_overview(space: SpaceListItem, reports: list[ReportListItem]) -> SpaceListItem:
+    """Blank out an overview pointer that no longer resolves.
+
+    The target may have been deleted, moved out of the space, or be invisible to
+    this caller. Resolving lazily is what lets the overview be an ordinary
+    report with no protections on it.
+    """
+    if space.overview_report_id is None:
+        return space
+    if any(report.report_id == space.overview_report_id for report in reports):
+        return space
+    return space.model_copy(update={"overview_report_id": None})
+
+
+def with_resolved_subspace(
+    reports: list[ReportListItem],
+    subspaces: list[SubspaceItem],
+) -> list[ReportListItem]:
+    """Blank out any ``subspace_id`` that no longer resolves.
+
+    Deleting a sub-space leaves its member reports pointing at it; rather than
+    fanning out a write over every member, the reference is resolved lazily
+    here so clients only ever see "grouped" or "ungrouped".
+    """
+    known = {subspace.subspace_id for subspace in subspaces}
+    return [
+        report if report.subspace_id in known else report.model_copy(update={"subspace_id": None}) for report in reports
+    ]

@@ -27,6 +27,11 @@ _GROUP_DESCRIPTIONS: dict[str, str] = {
         "the default dashboard; version history operations included."
     ),
     "scheduled_queries": ("Built-in scheduled query management: full CRUD plus version history."),
+    "spaces": (
+        "Built-in space management: CRUD for spaces and their sub-spaces, the "
+        "space overview pointer, and filing reports into a space. Spaces carry "
+        "no version history."
+    ),
     "toolsets": (
         "Built-in toolset and tool management: full CRUD for toolsets and their nested tools, with version history."
     ),
