@@ -13,7 +13,7 @@ Seizu chat agent
   → sandbox__delegate(task="...", context="...")
     → _open_backend()        # provider-specific lifecycle (create + destroy)
       → SandboxBackend       # stable five-operation interface
-        → create_react_agent with run_python / run_bash / read_file / write_file / list_files
+        → create_react_agent with run_python / run_bash / preview_file / write_file / list_files
     → result string
 ```
 
@@ -23,7 +23,7 @@ The `SandboxBackend` protocol (`reporting/services/mcp_builtins/sandbox.py`) def
 |--------|-------------|
 | `run_python(code)` | Run Python code; returns stdout/stderr/result as text |
 | `run_bash(cmd)` | Run a shell command; returns stdout/stderr as text |
-| `read_file(path)` | Return file contents as text |
+| `read_file(path)` | Return file contents as text (backend protocol; exposed to the agent as `preview_file`) |
 | `write_file(path, content)` | Write content to a file; return confirmation |
 | `list_files(path)` | List files/directories; return human-readable text |
 
@@ -66,11 +66,18 @@ would otherwise have received, and where a result fits nothing changes at all.
 If the write fails, the truncated result is returned instead — exactly what
 would have happened without this path.
 
-`read_file` is deliberately not a way around this. Asked for a file larger than
-`SANDBOX_MAX_OUTPUT_BYTES` it returns the beginning together with the file's real
-size and an explicit statement that this is not the whole file, rather than a
-bare `[truncated]` marker that an agent can read past — reading a 500KB result
-file should not quietly yield a tenth of it.
+The agent has no way to read a result file back into context. What it gets is
+**`preview_file`**, which returns files at or under `SANDBOX_PREVIEW_MAX_BYTES`
+(2KB) whole, and for anything larger returns only shape — byte size, line count,
+JSON structure, columns — plus the first 2KB. That is enough to write code
+against a file and not enough to load one.
+
+It replaced a `read_file` that returned up to `SANDBOX_MAX_OUTPUT_BYTES`, which
+made it a route around the whole mechanism: an oversized result is written to a
+file precisely to keep it out of context, and the agent could pull it straight
+back in. A measured run did exactly that — 17 `read_file` calls against 3
+`run_python`. No capability is lost, since `run_python` can read anything in the
+sandbox; it just has to go through code, which is the point.
 
 ### Adding a new backend
 
@@ -114,6 +121,7 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_ALLOW_INTERNET` | `false` | Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access. |
 | `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
+| `SANDBOX_PREVIEW_MAX_BYTES` | `2000` | Bytes of a file `preview_file` may return. Files at or under this size come back whole; larger ones return shape plus the first part, so a result file cannot be read back into context. |
 | `SANDBOX_FILE_RESULT_MAX_ROWS` | `50000` | Row cap for a Seizu tool result written to a sandbox file via `save_to_path` rather than returned. Much higher than `CHAT_TOOL_RESULT_MAX_ROWS`, which protects a context window a file never enters. |
 | `SANDBOX_FILE_RESULT_MAX_BYTES` | `10000000` | Byte cap for the same. Finite because the result materializes in the Seizu process before reaching the sandbox. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |

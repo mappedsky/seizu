@@ -95,23 +95,14 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
         """Run a shell command in the sandbox and return stdout and stderr."""
         return _cap(await backend.run_bash(cmd))
 
-    async def read_file(path: str) -> str:
-        """Read the contents of a file in the sandbox filesystem."""
-        content = await backend.read_file(path)
-        size = len(content.encode())
-        if size <= settings.SANDBOX_MAX_OUTPUT_BYTES:
-            return content
-        # Say what was lost and what to do instead. The bare `[truncated]`
-        # marker this used to return is easy to read past: an agent that asked
-        # for a 500KB result file got a tenth of it and no reason to think it
-        # had anything less than the whole thing -- the same silent-truncation
-        # failure that made a cut-off model answer look complete.
-        head = _truncate_bytes(content, settings.SANDBOX_MAX_OUTPUT_BYTES)
-        return (
-            f"[{path} is {size} bytes, larger than the {settings.SANDBOX_MAX_OUTPUT_BYTES} that can be read into "
-            "context. The first part follows, but it is NOT the whole file. To use all of it, process the file in "
-            "code with run_python instead of reading it.]\n" + head
-        )
+    async def preview_file(path: str) -> str:
+        """Inspect a file: its size, shape, and beginning.
+
+        Returns small files whole. For anything larger this returns a summary
+        and the first part only — it is for working out how to process a file,
+        not for loading one. Use run_python to work with the full contents.
+        """
+        return _file_preview(path, await backend.read_file(path))
 
     async def write_file(path: str, content: str) -> str:
         """Write content to a file in the sandbox filesystem."""
@@ -124,7 +115,9 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     return [
         StructuredTool.from_function(coroutine=run_python, name="run_python", description=run_python.__doc__ or ""),
         StructuredTool.from_function(coroutine=run_bash, name="run_bash", description=run_bash.__doc__ or ""),
-        StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__ or ""),
+        StructuredTool.from_function(
+            coroutine=preview_file, name="preview_file", description=preview_file.__doc__ or ""
+        ),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__ or ""),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__ or ""),
     ]
@@ -157,6 +150,50 @@ def _result_rows(text: str) -> list[Any] | None:
     return None
 
 
+def _file_preview(path: str, content: str) -> str:
+    """Describe a file compactly enough that code can be written against it.
+
+    A file that fits the preview budget is returned whole, so nothing changes for
+    the small files an agent writes itself. Beyond that the agent gets shape --
+    size, line count, JSON structure, columns -- and only the beginning.
+
+    This replaced a ``read_file`` that returned up to ``SANDBOX_MAX_OUTPUT_BYTES``,
+    which made it a way around the result-file mechanism: an oversized result was
+    written out precisely to keep it out of context, and the agent could pull it
+    straight back in. A measured run did exactly that, 17 reads against 3
+    ``run_python`` calls. Shape is what is needed to write the code; the contents
+    are what ``run_python`` is for.
+    """
+    size = len(content.encode())
+    budget = max(0, settings.SANDBOX_PREVIEW_MAX_BYTES)
+    if size <= budget:
+        return content
+
+    summary: dict[str, Any] = {"path": path, "bytes": size, "lines": content.count("\n") + 1}
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        parsed = None
+    if parsed is not None:
+        summary["json"] = type(parsed).__name__
+        rows = _result_rows(content)
+        if rows is not None:
+            summary["rows"] = len(rows)
+            columns: list[str] = []
+            for row in rows:
+                if isinstance(row, dict):
+                    for key in row:
+                        if key not in columns:
+                            columns.append(key)
+            if columns:
+                summary["columns"] = columns
+    summary["preview_only"] = (
+        f"This is a {size}-byte file and only its first {budget} bytes follow. To use the whole file, process it "
+        "in code with run_python (e.g. json.load(open(path))) rather than previewing it again."
+    )
+    return json.dumps(summary, default=str) + "\n\n" + _truncate_bytes(content, budget)
+
+
 def _file_result_receipt(path: str, text: str) -> str:
     """Describe a result too large to return, which was written to the sandbox.
 
@@ -184,8 +221,9 @@ def _file_result_receipt(path: str, text: str) -> str:
             receipt["columns"] = columns
         receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
     receipt["next_step"] = (
-        f"The full result is in {path}; only the sample above was returned. Read or process the file with "
-        "run_python (e.g. json.load(open(path))). Re-running this call will return this same receipt."
+        f"The full result is in {path}; only the sample above was returned. Process the file in code with "
+        "run_python (e.g. json.load(open(path))) — preview_file will only show you its shape again, and "
+        "re-running this call will return this same receipt."
     )
     return json.dumps(receipt, default=str)
 

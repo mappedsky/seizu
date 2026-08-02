@@ -786,6 +786,12 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # never reads the rows itself. Still finite -- write_file takes a string, so the
 # whole result materializes in the Seizu process before reaching the sandbox,
 # and an unbounded query would be a memory event here rather than there.
+# Bytes of a file the sub-agent may pull into context with preview_file. Small
+# by design: previewing is for working out how to process a file, and the tool
+# that preceded it returned up to SANDBOX_MAX_OUTPUT_BYTES, which let the agent
+# read an oversized result straight back into the context it had been written
+# out to avoid. Files at or under this size are returned whole.
+SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
