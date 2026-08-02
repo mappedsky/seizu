@@ -36,8 +36,8 @@ entitled to (`graph__query`, user-defined toolset tools, and so on), so it can
 fetch data itself rather than having it relayed through `context`.
 
 A result that fits is returned to the agent as it always was. A result **too
-large to return** — more rows than `CHAT_TOOL_RESULT_MAX_ROWS`, or more bytes
-than `SANDBOX_MAX_OUTPUT_BYTES` — is instead written to a file under
+large to return** — more bytes than `SANDBOX_MAX_OUTPUT_BYTES` — is instead
+written to a file under
 `/tmp/seizu_results/` and replaced by a receipt: the path, byte size, row count,
 column names, and two sample rows, plus a note that the full data is in the
 file. The agent then processes it with `run_python`.
@@ -46,10 +46,13 @@ This matters because the sandbox exists to handle data *as data*. Without the
 file path, the only route from a query to `run_python` runs through the model:
 it has to read every row out of its own context and re-emit them as a Python
 literal, so the data crosses the model twice and it hand-serializes in between.
-Oversized results also stop being silently capped at
-`CHAT_TOOL_RESULT_MAX_ROWS`, since the row cap protects a context window a file
-never enters; they are bounded instead by `SANDBOX_FILE_RESULT_MAX_ROWS` and
-`SANDBOX_FILE_RESULT_MAX_BYTES`.
+Results also stop being silently capped at `CHAT_TOOL_RESULT_MAX_ROWS`, which
+protects a context window; the sub-agent fetches to `SANDBOX_FILE_RESULT_MAX_ROWS`
+and `SANDBOX_FILE_RESULT_MAX_BYTES` instead, and the byte size of what comes back
+decides whether it is returned or filed. The threshold is bytes alone: a row
+count says nothing about context cost, and triggering on rows filed results that
+would have fitted, which the agent then read straight back in — the data
+travelling twice and costing more than returning it would have.
 
 **Routing is decided by size, never by the agent.** An earlier version exposed a
 `save_to_path` argument and let the agent choose. Given the choice it wrote
@@ -61,6 +64,12 @@ would otherwise have received, and where a result fits nothing changes at all.
 
 If the write fails, the truncated result is returned instead — exactly what
 would have happened without this path.
+
+`read_file` is deliberately not a way around this. Asked for a file larger than
+`SANDBOX_MAX_OUTPUT_BYTES` it returns the beginning together with the file's real
+size and an explicit statement that this is not the whole file, rather than a
+bare `[truncated]` marker that an agent can read past — reading a 500KB result
+file should not quietly yield a tenth of it.
 
 ### Adding a new backend
 

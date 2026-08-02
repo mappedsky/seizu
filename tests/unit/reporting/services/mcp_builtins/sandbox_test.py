@@ -1092,25 +1092,22 @@ async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "gr
     return tools[0]
 
 
-async def test_a_result_over_the_row_cap_goes_to_a_file(mocker) -> None:
+async def test_a_result_that_fits_is_not_filed_however_many_rows(mocker) -> None:
+    """Rows do not decide it: a row count says nothing about context cost.
+
+    Triggering on rows filed results that would have fitted, and the agent
+    pulled them straight back with read_file -- the data travelled twice.
+    """
     backend = _make_fake_backend()
     backend.write_file = AsyncMock(return_value="ok")
     mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
-    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 5_000_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(5_000))
 
-    returned = await tool.coroutine(query="MATCH (c:CVE) RETURN c")
+    returned = await tool.coroutine(query="q")
 
-    written_path, written_body = backend.write_file.await_args.args
-    assert written_path.startswith("/tmp/seizu_results/graph__query_")
-    assert len(json.loads(written_body)["results"]) == 500  # all of it reached the sandbox
-
-    receipt = json.loads(returned)
-    assert receipt["status"] == "too_large_to_return"
-    assert receipt["rows"] == 500
-    assert receipt["columns"] == ["cve", "score"]
-    assert len(receipt["sample"]) == 2
-    assert "run_python" in receipt["next_step"]
-    assert len(returned) < 600  # the rows never entered the model's context
+    backend.write_file.assert_not_awaited()
+    assert len(json.loads(returned)["results"]) == 5_000
 
 
 async def test_a_result_over_the_byte_cap_goes_to_a_file(mocker) -> None:
@@ -1195,3 +1192,31 @@ async def test_with_a_backend_the_fetch_is_raised_to_the_file_bounds(mocker) -> 
 
     # Whether a result is oversized cannot be known before fetching it.
     assert call.await_args.kwargs["result_max_rows"] == 50_000
+
+
+# --- read_file honesty ---------------------------------------------------------
+
+
+async def test_read_file_returns_a_file_that_fits_verbatim() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="small contents")
+    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        assert await tools["read_file"].coroutine(path="/tmp/x") == "small contents"
+
+
+async def test_read_file_says_so_when_it_cannot_return_the_whole_file() -> None:
+    """Regression: a bare [truncated] marker let an agent believe it had the lot.
+
+    The same silent-truncation shape that made a cut-off model answer look
+    complete -- here it would have been a tenth of a result file.
+    """
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="x" * 500_000)
+    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        returned = await tools["read_file"].coroutine(path="/tmp/big.json")
+
+    assert "500000 bytes" in returned
+    assert "NOT the whole file" in returned
+    assert "run_python" in returned

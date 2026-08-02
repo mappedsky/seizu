@@ -97,7 +97,21 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
 
     async def read_file(path: str) -> str:
         """Read the contents of a file in the sandbox filesystem."""
-        return _cap(await backend.read_file(path))
+        content = await backend.read_file(path)
+        size = len(content.encode())
+        if size <= settings.SANDBOX_MAX_OUTPUT_BYTES:
+            return content
+        # Say what was lost and what to do instead. The bare `[truncated]`
+        # marker this used to return is easy to read past: an agent that asked
+        # for a 500KB result file got a tenth of it and no reason to think it
+        # had anything less than the whole thing -- the same silent-truncation
+        # failure that made a cut-off model answer look complete.
+        head = _truncate_bytes(content, settings.SANDBOX_MAX_OUTPUT_BYTES)
+        return (
+            f"[{path} is {size} bytes, larger than the {settings.SANDBOX_MAX_OUTPUT_BYTES} that can be read into "
+            "context. The first part follows, but it is NOT the whole file. To use all of it, process the file in "
+            "code with run_python instead of reading it.]\n" + head
+        )
 
     async def write_file(path: str, content: str) -> str:
         """Write content to a file in the sandbox filesystem."""
@@ -278,10 +292,12 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
             # removes the decision: a file appears only where the alternative
             # was a truncated result, so reading it is strictly better than what
             # the agent would otherwise have had.
-            rows = _result_rows(text)
-            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
-                rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
-            )
+            # Bytes only, deliberately. A row count says nothing about context
+            # cost, and triggering on it sent results that would have fitted to a
+            # file the agent then pulled straight back in with read_file -- the
+            # data travelled twice and cost more than returning it would have.
+            # Bytes are what the context actually pays for.
+            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES
             if backend is None or not oversized:
                 return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
 
