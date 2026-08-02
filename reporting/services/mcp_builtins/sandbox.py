@@ -292,12 +292,17 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
             # removes the decision: a file appears only where the alternative
             # was a truncated result, so reading it is strictly better than what
             # the agent would otherwise have had.
-            # Bytes only, deliberately. A row count says nothing about context
-            # cost, and triggering on it sent results that would have fitted to a
-            # file the agent then pulled straight back in with read_file -- the
-            # data travelled twice and cost more than returning it would have.
-            # Bytes are what the context actually pays for.
-            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES
+            # Either bound, because the fetch above deliberately exceeds both.
+            # Triggering on bytes alone was tried and was much worse: with the
+            # fetch raised to the file bounds, the row cap is the only thing
+            # keeping an inline result small in row terms, so dropping it let
+            # multi-thousand-row results return in full. A measured turn went
+            # from 124 inner calls and a complete answer to 880 calls, 791 of
+            # them queries, and a 581-character answer with both steps failing.
+            rows = _result_rows(text)
+            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
+                rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
+            )
             if backend is None or not oversized:
                 return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
 

@@ -1092,11 +1092,13 @@ async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "gr
     return tools[0]
 
 
-async def test_a_result_that_fits_is_not_filed_however_many_rows(mocker) -> None:
-    """Rows do not decide it: a row count says nothing about context cost.
+async def test_a_result_over_the_row_cap_goes_to_a_file(mocker) -> None:
+    """Rows must trigger it as well as bytes.
 
-    Triggering on rows filed results that would have fitted, and the agent
-    pulled them straight back with read_file -- the data travelled twice.
+    The fetch deliberately exceeds both bounds so oversize can be detected, which
+    leaves the row cap as the only thing keeping an inline result small in row
+    terms. Triggering on bytes alone was measured at 880 inner calls and a
+    581-character answer, against 124 and a complete one.
     """
     backend = _make_fake_backend()
     backend.write_file = AsyncMock(return_value="ok")
@@ -1106,8 +1108,10 @@ async def test_a_result_that_fits_is_not_filed_however_many_rows(mocker) -> None
 
     returned = await tool.coroutine(query="q")
 
-    backend.write_file.assert_not_awaited()
-    assert len(json.loads(returned)["results"]) == 5_000
+    backend.write_file.assert_awaited_once()
+    receipt = json.loads(returned)
+    assert receipt["status"] == "too_large_to_return"
+    assert receipt["rows"] == 5_000
 
 
 async def test_a_result_over_the_byte_cap_goes_to_a_file(mocker) -> None:

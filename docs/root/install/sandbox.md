@@ -36,8 +36,8 @@ entitled to (`graph__query`, user-defined toolset tools, and so on), so it can
 fetch data itself rather than having it relayed through `context`.
 
 A result that fits is returned to the agent as it always was. A result **too
-large to return** — more bytes than `SANDBOX_MAX_OUTPUT_BYTES` — is instead
-written to a file under
+large to return** — more rows than `CHAT_TOOL_RESULT_MAX_ROWS`, or more bytes
+than `SANDBOX_MAX_OUTPUT_BYTES` — is instead written to a file under
 `/tmp/seizu_results/` and replaced by a receipt: the path, byte size, row count,
 column names, and two sample rows, plus a note that the full data is in the
 file. The agent then processes it with `run_python`.
@@ -48,11 +48,12 @@ it has to read every row out of its own context and re-emit them as a Python
 literal, so the data crosses the model twice and it hand-serializes in between.
 Results also stop being silently capped at `CHAT_TOOL_RESULT_MAX_ROWS`, which
 protects a context window; the sub-agent fetches to `SANDBOX_FILE_RESULT_MAX_ROWS`
-and `SANDBOX_FILE_RESULT_MAX_BYTES` instead, and the byte size of what comes back
-decides whether it is returned or filed. The threshold is bytes alone: a row
-count says nothing about context cost, and triggering on rows filed results that
-would have fitted, which the agent then read straight back in — the data
-travelling twice and costing more than returning it would have.
+and `SANDBOX_FILE_RESULT_MAX_BYTES` instead, and either bound decides whether what
+comes back is returned or filed. Both are needed: because the fetch deliberately
+exceeds both, the row cap is the only thing keeping an inline result small in row
+terms, and triggering on bytes alone let multi-thousand-row results return in
+full — measured at 880 inner calls and a 581-character answer, against 124 and a
+complete one.
 
 **Routing is decided by size, never by the agent.** An earlier version exposed a
 `save_to_path` argument and let the agent choose. Given the choice it wrote
