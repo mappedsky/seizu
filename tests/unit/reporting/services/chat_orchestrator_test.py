@@ -609,6 +609,371 @@ async def test_worker_step_synthesizes_when_action_budget_exhausted(mocker):
     assert "ran out of budget" in result["output"]  # forced synthesis, not empty
 
 
+class _ProtocolModel:
+    """Scripted worker model that records the tools it was offered each turn."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        self.responses = responses
+        self.calls = 0
+        self.bound_tool_names: list[list[str]] = []
+
+    def bind_tools(self, tools: Any) -> "_ProtocolModel":
+        self.bound_tool_names.append([t["function"]["name"] for t in tools])
+        return self
+
+    async def astream(self, _messages: Any, config: Any = None, **_kwargs: Any):
+        index = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        yield self.responses[index]
+
+
+def _submit(result: str, call_id: str = "sub1") -> Any:
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": chat_orchestrator._STEP_RESULT_TOOL_NAME, "args": {"result": result}, "id": call_id}],
+    )
+
+
+async def _run_protocol_step(mocker: Any, model: Any, step: dict[str, Any] | None = None, **kwargs: Any):
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    calls: list[str] = []
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        calls.extend(req.name for req in batch)
+        return [chat_graph.ToolCallResult(request=req, content='{"rows": 1}') for req in batch]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+    resolved = step if step is not None else _step("s1")
+    result = await chat_orchestrator._run_worker_step(
+        resolved,
+        plan=[resolved],
+        results=[],
+        model=model,
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[spec],
+        disclosed_names={"t__one"},
+        writer=lambda event: None,
+        **kwargs,
+    )
+    return result, calls
+
+
+async def test_worker_step_ends_on_the_submit_sentinel(mocker):
+    # Completion is an explicit call, and its argument is the step result.
+    result, dispatched = await _run_protocol_step(mocker, _ProtocolModel([_submit("8 repos, 22 open alerts.")]))
+
+    assert result["output"] == "8 repos, 22 open alerts."
+    # The sentinel is a protocol marker, never dispatched as a real tool and
+    # never counted as work the step performed.
+    assert dispatched == []
+    assert chat_orchestrator._STEP_RESULT_TOOL_NAME not in result["tools_used"]
+    assert "finalize_violations" not in result
+
+
+async def test_worker_step_retries_a_plain_text_turn_instead_of_ending(mocker):
+    # Regression (chat 7488500832439111681): "All data collected. Now delivering
+    # the final executive summary." used to END the step and become its result.
+    # It is now a protocol violation, so the worker is told and asked again.
+    from langchain_core.messages import AIMessage
+
+    model = _ProtocolModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": "c1"}]),
+            AIMessage(content="All data collected. Now delivering the final executive summary."),
+            _submit("8 repos, 22 open alerts (9 high). Highest risk: mappedsky/confidant."),
+        ]
+    )
+
+    result, dispatched = await _run_protocol_step(mocker, model)
+
+    assert "22 open alerts" in result["output"]
+    assert "Now delivering" not in result["output"]
+    assert result["finalize_violations"] == 1
+    assert dispatched == ["t__one"]
+
+
+async def test_worker_step_retries_an_unrecognized_tool_name(mocker):
+    # A hallucinated tool name is dropped by _tool_call_requests, leaving zero
+    # requests. That used to be indistinguishable from "the model is done" and
+    # ended the step; it is now a violation like any other.
+    from langchain_core.messages import AIMessage
+
+    model = _ProtocolModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "no__such_tool", "args": {}, "id": "c1"}]),
+            _submit("Recovered and produced the findings."),
+        ]
+    )
+
+    result, _dispatched = await _run_protocol_step(mocker, model)
+
+    assert result["output"] == "Recovered and produced the findings."
+    assert result["finalize_violations"] == 1
+
+
+async def test_worker_step_falls_back_when_the_protocol_retries_are_spent(mocker):
+    # A model that will not use the protocol must still finish the step, so the
+    # loop degrades to the historical "read the text" behavior rather than hang.
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES", 2)
+    model = _ProtocolModel([AIMessage(content="I refuse to call tools. Here are the findings: 3 repos.")])
+
+    result, _dispatched = await _run_protocol_step(mocker, model)
+
+    assert result["output"] == "I refuse to call tools. Here are the findings: 3 repos."
+    assert result["finalize_violations"] == 2
+    assert model.calls == 3  # first turn + 2 corrective retries
+
+
+async def test_worker_step_reasks_when_the_submitted_result_was_cut_off(mocker):
+    # The result rides in a tool-call argument, so the output cap can cut it
+    # mid-sentence and there is no continuation path for a tool argument. A live
+    # run hit exactly this: the step "completed" with a report that stopped
+    # mid-section, and the verifier had to block it.
+
+    class _TruncatingModel(_ProtocolModel):
+        async def astream(self, _messages: Any, config: Any = None, **_kwargs: Any):
+            index = min(self.calls, len(self.responses) - 1)
+            self.calls += 1
+            message, cut = self.responses[index]
+            chunk = message
+            chunk.response_metadata = {"finish_reason": "length" if cut else "stop"}
+            yield chunk
+
+    model = _TruncatingModel(
+        [
+            (_submit("## Overview\n| repo | alerts |\n| confidant | 19 | ... cut off mid-sent"), True),
+            (_submit("confidant: 19 open alerts, 8 high. urllib3 CVE-2026-44432."), False),
+        ]
+    )
+
+    result, _dispatched = await _run_protocol_step(mocker, model)
+
+    assert result["output"] == "confidant: 19 open alerts, 8 high. urllib3 CVE-2026-44432."
+    assert result["finalize_violations"] == 1
+
+
+async def test_worker_step_keeps_a_truncated_result_once_retries_are_spent(mocker):
+    # Degrading to the cut-off result beats losing the step: the synthesizer
+    # still has the step's evidence to answer from.
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES", 1)
+
+    class _AlwaysTruncatingModel(_ProtocolModel):
+        async def astream(self, _messages: Any, config: Any = None, **_kwargs: Any):
+            self.calls += 1
+            chunk = _submit("findings that get cut off mid-sent")
+            chunk.response_metadata = {"finish_reason": "length"}
+            yield chunk
+
+    result, _dispatched = await _run_protocol_step(mocker, _AlwaysTruncatingModel([]))
+
+    assert result["output"] == "findings that get cut off mid-sent"
+    assert result["finalize_violations"] == 1
+
+
+async def test_submit_sentinel_is_offered_even_on_an_answer_only_step(mocker):
+    # An answer-only step binds no tools at all, so without an explicit carve-out
+    # the model would have no way to end the step.
+    step = _step("s1", action_kind="answer")
+
+    result, _dispatched = await _run_protocol_step(mocker, _ProtocolModel([_submit("Chose CVE-1.")]), step=step)
+
+    assert result["output"] == "Chose CVE-1."
+
+
+async def test_submit_sentinel_survives_a_single_action_contract(mocker):
+    # A skill/tool step is scoped to exactly its required action; the sentinel
+    # must be added on top or the step could never be submitted.
+    step = _step("s1", action_kind="tool", required_action="t__one", success_criteria="rows fetched")
+    from langchain_core.messages import AIMessage
+
+    model = _ProtocolModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": "c1"}]),
+            _submit("Fetched 1 row."),
+        ]
+    )
+
+    result, _dispatched = await _run_protocol_step(mocker, model, step=step)
+
+    assert result.get("execution_error") in (None, "")
+    assert result["output"] == "Fetched 1 row."
+    assert chat_orchestrator._STEP_RESULT_TOOL_NAME in model.bound_tool_names[0]
+    assert "t__one" in model.bound_tool_names[0]
+
+
+async def test_submit_sentinel_wins_when_co_called_with_other_tools(mocker):
+    # The model has committed to a result, so co-called tools are not run: their
+    # output could not be reflected in the result it already wrote.
+    from langchain_core.messages import AIMessage
+
+    model = _ProtocolModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "t__one", "args": {}, "id": "c1"},
+                    {"name": chat_orchestrator._STEP_RESULT_TOOL_NAME, "args": {"result": "done"}, "id": "c2"},
+                ],
+            )
+        ]
+    )
+
+    result, dispatched = await _run_protocol_step(mocker, model)
+
+    assert result["output"] == "done"
+    assert dispatched == []
+
+
+def test_synthesis_context_carries_step_evidence_not_just_the_summary():
+    # Regression (chat 7488500832439111681): the worker called every tool the
+    # skill declared, then ended the step with "All data collected. Now
+    # delivering the final executive summary." Because only ``output`` crossed
+    # the step boundary, every finding was dropped and the synthesizer had
+    # nothing to write from. The evidence the step recorded must reach it too.
+    plan = [_step("s1", status="passed")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "All data collected. Now delivering the final executive summary.",
+            "tools_used": ["github_security__org_overview"],
+            "tool_details": [
+                {
+                    "kind": "tool",
+                    "title": "Tool: github_security__org_overview",
+                    "body": '{"repositories": 8, "open_alerts": 22, "open_high": 9}',
+                }
+            ],
+        }
+    ]
+
+    context = chat_orchestrator._synthesis_context(plan, results)
+
+    assert "open_alerts" in context
+    assert "22" in context
+    assert "Supporting evidence" in context
+    # The summary is still there; evidence supplements it rather than replacing it.
+    assert "All data collected" in context
+
+
+def test_synthesis_context_shares_the_evidence_budget_across_steps(mocker):
+    # One chatty step must not crowd the others out of the synthesizer's context.
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 2000)
+    plan = [_step("s1", status="passed"), _step("s2", status="passed")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "summary one",
+            "tool_details": [{"title": "Tool: noisy", "body": "A" * 50_000}],
+        },
+        {
+            "step_id": "s2",
+            "output": "summary two",
+            "tool_details": [{"title": "Tool: quiet", "body": "UNIQUE_S2_FINDING"}],
+        },
+    ]
+
+    context = chat_orchestrator._synthesis_context(plan, results)
+
+    assert "UNIQUE_S2_FINDING" in context  # the quiet step survived
+    assert len(context) < 6000  # and the noisy one was bounded
+
+
+def test_synthesis_context_omits_evidence_when_disabled_or_absent(mocker):
+    plan = [_step("s1", status="passed")]
+    results = [{"step_id": "s1", "output": "a real summary", "tool_details": [{"title": "T", "body": "data"}]}]
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 0)
+    assert "Supporting evidence" not in chat_orchestrator._synthesis_context(plan, results)
+
+    # An answer-only step records no tool details and gets no empty section.
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
+    assert "Supporting evidence" not in chat_orchestrator._synthesis_context(plan, [{"step_id": "s1", "output": "x"}])
+
+
+def test_synthesis_fallback_shown_to_the_user_carries_no_raw_evidence():
+    # The fallback is rendered straight into the assistant bubble, so it must
+    # stay summaries-only: evidence blocks are raw tool JSON, model context only.
+    plan = [_step("s1", status="passed")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "8 repos, 22 open alerts.",
+            "tool_details": [{"title": "Tool: org_overview", "body": '{"raw_json_leak": true}'}],
+        }
+    ]
+
+    fallback = chat_orchestrator._synthesis_fallback(plan, results)
+
+    assert "8 repos, 22 open alerts." in fallback
+    assert "raw_json_leak" not in fallback
+    assert "Supporting evidence" not in fallback
+
+
+def test_step_evidence_gives_every_call_a_share():
+    # Budgeting per call rather than first-come means the last tool a step ran
+    # is represented too — it is as likely to matter as the first.
+    result = {
+        "tool_details": [
+            {"title": "Tool: a", "body": "A" * 5000},
+            {"title": "Tool: b", "body": "B" * 5000},
+            {"title": "Tool: c", "body": "LAST_CALL_FINDING"},
+        ]
+    }
+
+    evidence = chat_orchestrator._step_evidence(result, max_chars=3000)
+
+    assert "LAST_CALL_FINDING" in evidence
+    assert "Tool: a" in evidence
+
+
+def test_step_evidence_keeps_the_cut_short_marker_out_of_the_body():
+    # A marker inline in the body sits inside prose the model reads as content,
+    # and it copies it: a live run ended a user-facing answer with a stray
+    # "... [truncated]" lifted straight out of an evidence block.
+    result = {"tool_details": [{"title": "Tool: a", "body": "X" * 5000}]}
+
+    evidence = chat_orchestrator._step_evidence(result, max_chars=1000)
+
+    assert "[truncated]" not in evidence
+    assert "characters)" in evidence  # the signal survives, in the label
+    assert evidence.rstrip().endswith("X")
+
+
+async def test_verify_step_is_told_the_execution_footprint(mocker):
+    # Without the footprint the judge reads "now delivering the summary" as a
+    # step that succeeded and is about to report, and passes it (it did, in
+    # chat 7488500832439111681).
+    captured: list[str] = []
+
+    async def _fake_structured(schema, messages, config, *, role, **_kw):
+        captured.append(str(messages[0].content))
+        return _Verdict(passed=False, reason="only announces the summary")
+
+    mocker.patch("reporting.services.chat_orchestrator._structured_invoke", _fake_structured)
+
+    step = _step("s1", success_criteria="A prioritized executive summary.")
+    result = {
+        "step_id": "s1",
+        "output": "All data collected. Now delivering the final executive summary.",
+        "tools_used": ["skill__overview", "t__a", "t__b"],
+    }
+
+    passed, reason = await chat_orchestrator._verify_step(step, result, {"configurable": {}})
+
+    assert passed is False
+    prompt = captured[0]
+    assert "3 tool/skill call(s)" in prompt
+    assert "no tool output is carried forward" in prompt
+    assert "only announces, promises, or describes findings" in prompt
+    assert reason == "only announces the summary"
+
+
 async def test_budgeted_headless_worker_is_not_stopped_by_per_step_action_guard(mocker):
     from langchain_core.messages import AIMessage
 

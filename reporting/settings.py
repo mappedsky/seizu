@@ -590,6 +590,19 @@ CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
 # Normal interactive and headless plans use the shared run-level
 # token/cost/call ledger instead of stopping at a per-step action count.
 CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
+# Corrective retries when a worker ends a turn without calling the sentinel that
+# submits its step result. A step ends on that explicit call, never on the model
+# simply going quiet, so a plain-text turn is a protocol violation the worker
+# points out and re-asks. After this many retries it falls back to reading the
+# text as the result, so a model that will not use the protocol still finishes.
+CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES = int_env("CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES", 2)
+# Characters of raw step evidence (the tool/skill output each worker gathered)
+# carried into the synthesizer's context, shared across all steps of a plan.
+# A worker's prose summary is a lossy channel: whatever it omits is gone, since
+# nothing else crosses the step boundary. Passing the underlying evidence too
+# means the synthesizer can still answer when a summary comes back thin. Set 0
+# to send summaries only (the pre-existing behavior).
+CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
 # Per-turn chat orchestrator budget shared by interactive and automated runs.
 # The reserve is unavailable to normal planning/worker calls and is released
 # only for final summaries/synthesis.

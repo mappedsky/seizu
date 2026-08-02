@@ -45,6 +45,7 @@ from reporting.authnz import CurrentUser
 from reporting.services import chat_graph, mcp_builtins
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
+    STEP_RESULT_TOOL,
     ChatState,
     ChatToolSpec,
     ToolCallResult,
@@ -53,6 +54,7 @@ from reporting.services.chat_graph import (
     _append_output_limit_notice,
     _auto_continue_answer,
     _blocked_tool_call_response,
+    _budgeted_context_max_chars,
     _chat_provider,
     _child_detail_event_accumulator,
     _client_thread_id_from_config,
@@ -92,6 +94,12 @@ logger = logging.getLogger(__name__)
 # (verifier). Failed steps may be reset to pending for a bounded retry.
 
 _STEP_TOKEN_ESTIMATES = {"small": 4_000, "medium": 8_000, "large": 16_000}
+
+# The worker's terminal sentinel. Shared machinery with the single-agent loop's
+# respond_to_user (see chat_graph.TerminalTool); named for the step rather than
+# the user's answer, because a worker produces one step's result and calling it a
+# "final answer" invites a user-facing essay instead.
+_STEP_RESULT_TOOL_NAME = STEP_RESULT_TOOL.name
 
 
 def _safe_exception_text(exc: Exception) -> str:
@@ -194,7 +202,13 @@ _SYNTHESIZER_PROMPT = (
     " Use only the step results as evidence; call out any step that failed or"
     " was incomplete. Do not call tools. Do not copy internal execution"
     " transcripts, tool names, tool arguments, or raw returned JSON; translate"
-    " the evidence into conclusions, impact, and next actions."
+    " the evidence into conclusions, impact, and next actions.\n"
+    "A step may also carry a 'Supporting evidence' block: the raw data that step"
+    " gathered. It is authoritative — prefer it over the step's own wording when"
+    " they disagree, and when a step's summary is thin or only announces findings"
+    " without stating them, answer from that evidence rather than reporting the"
+    " step as having produced nothing. Only say a step produced no findings when"
+    " it carries no evidence either."
 )
 
 
@@ -215,13 +229,26 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
         if required_arguments:
             extra += f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
     elif action_kind == "answer":
-        extra += " This is an answer-only step: do not call tools; use the dependency context and return the result."
+        # The sentinel is the one exception: it is the protocol for ending a
+        # step, not a data-gathering action, and it is the only tool bound here.
+        extra += (
+            " This is an answer-only step: gather no data and call no tool other than"
+            f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
+        )
     extra += (
         " Use the available tools/skills to accomplish the goal, then return a"
         " concise factual result for this step only. Do not list internal action"
         " transcripts, tool names, arguments, or raw JSON unless the step goal"
         " explicitly requires raw data. Do not attempt other steps or restate"
         " the whole conversation."
+        " A later stage writes the user-facing report, so carry the facts and"
+        " skip tables, headings and restatement — a long result risks being cut"
+        " off by the output limit."
+        f" End the step by calling `{_STEP_RESULT_TOOL_NAME}` with that result."
+        " That call is the only way to finish; replying with plain text instead"
+        " does not end the step, and what you pass is all that survives it. So"
+        " never pass an announcement or preamble (e.g. 'All data collected, now"
+        " delivering the summary') — pass the complete findings themselves."
     )
     return f"{base}{extra}"
 
@@ -231,6 +258,22 @@ def _worker_user_message(step: dict[str, Any], dependency_context: str) -> str:
     if dependency_context:
         parts.append(f"\nRelevant results from prior steps:\n{dependency_context}")
     return "\n".join(parts)
+
+
+def _worker_result_truncated_message() -> str:
+    return (
+        f"Your `{_STEP_RESULT_TOOL_NAME}` call was cut off by the output limit, so the result was incomplete. "
+        "Call it again with a shorter result: keep every concrete finding and value, but drop tables, headings and "
+        "restatement. A later stage writes the user-facing report, so this only has to carry the facts."
+    )
+
+
+def _worker_finalize_violation_message() -> str:
+    return (
+        f"Your previous reply neither made a valid tool call nor called `{_STEP_RESULT_TOOL_NAME}`, so the step has "
+        "not ended. Either call the tools you still need, or call "
+        f"`{_STEP_RESULT_TOOL_NAME}` now with the complete factual result for this step. Plain text alone is ignored."
+    )
 
 
 def _worker_budget_exhausted_message() -> str:
@@ -787,6 +830,11 @@ async def _run_worker_step(
         if spec.name in _always_disclosed_names and spec.name not in active_names:
             active_specs.append(spec)
             active_names.add(spec.name)
+    # The sentinel is how a step ends, so no scoping rule may remove it: not
+    # progressive disclosure, not a single-action contract, not an answer-only
+    # step (which otherwise binds no tools at all).
+    active_specs.append(STEP_RESULT_TOOL.spec)
+    active_names.add(_STEP_RESULT_TOOL_NAME)
     newly_disclosed_names: set[str] = set()
     available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)
@@ -822,6 +870,11 @@ async def _run_worker_step(
     action_limit = (
         None if controller is not None and controller.enabled else settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
     )
+    # Bounded corrective retries for a model that ends a turn without calling the
+    # sentinel. Bounded because a model that cannot use the protocol must still
+    # finish the step rather than loop.
+    finalize_retries_left = max(0, settings.CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES)
+    finalize_violations = 0
     while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
@@ -840,6 +893,10 @@ async def _run_worker_step(
                 available,
                 config,
                 None,
+                # Request the cap explicitly so a submission cut off by it is
+                # detectable; without a known cap _effective_finish_reason cannot
+                # tell truncation from a clean stop.
+                max_output_tokens=settings.CHAT_LLM_MAX_TOKENS,
                 phase=f"worker:{step_id}",
             )
         except BudgetExceeded as exc:
@@ -852,8 +909,46 @@ async def _run_worker_step(
         step_output_tokens += turn.output_tokens
         step_cost_usd += turn.cost_usd
         ai_message = turn.message
-        requested = _tool_call_requests(ai_message, available)
+        submitted, requested = STEP_RESULT_TOOL.partition(_tool_call_requests(ai_message, available))
+        if submitted is not None:
+            # The model declared the step complete. Tools co-called in the same
+            # turn are deliberately not run: it has already committed to a
+            # result, so running more work whose output that result cannot
+            # reflect would only burn budget.
+            submitted_text = STEP_RESULT_TOOL.result_text(submitted)
+            # The result rides in a tool-call argument, so the output cap can cut
+            # it mid-sentence — and unlike a streamed answer, a tool argument has
+            # no continuation path. Ask for a shorter one while the evidence is
+            # still in this window. The truncated turn is left out of context on
+            # purpose: re-sending its tool_call with no matching ToolMessage is
+            # what providers reject.
+            if chat_graph._is_output_limit_finish_reason(turn.finish_reason) and finalize_retries_left > 0:
+                finalize_retries_left -= 1
+                finalize_violations += 1
+                messages = [*messages, HumanMessage(content=_worker_result_truncated_message())]
+                continue
+            output_text = submitted_text
+            break
         if not requested:
+            # Protocol violation: no valid tool call and no submission, so the
+            # step is not finished — whatever the model wrote, and whether it
+            # meant to continue or called a tool that does not exist. Say so and
+            # let it try again.
+            if finalize_retries_left > 0:
+                finalize_retries_left -= 1
+                finalize_violations += 1
+                narration = message_text(ai_message.content).strip()
+                # Rebuilt without tool_calls: any present were dropped as
+                # unrecognized, and a dangling tool_call with no matching
+                # ToolMessage makes some providers reject the next request.
+                messages = [
+                    *messages,
+                    *([AIMessage(content=narration)] if narration else []),
+                    HumanMessage(content=_worker_finalize_violation_message()),
+                ]
+                continue
+            # Retries spent. Fall back to reading the text as the result rather
+            # than hanging the step on a model that will not use the protocol.
             output_text = message_text(ai_message.content)
             break
         remaining = len(requested) if action_limit is None else action_limit - action_count
@@ -901,7 +996,9 @@ async def _run_worker_step(
                 for result in batch_results
             ],
         ]
-        context_limit = settings.CHAT_LLM_CONTEXT_MAX_CHARS
+        # Sized against what the run can still afford, then tightened further
+        # when this step or the run as a whole is already degraded.
+        context_limit = _budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS)
         if (controller is not None and controller.degraded) or step_degraded:
             context_limit = max(8_000, context_limit // 4)
         messages = _trim_inner_loop_messages(messages, max_chars=context_limit)
@@ -988,6 +1085,11 @@ async def _run_worker_step(
         step_result["awaiting_confirmation"] = True
         step_result["confirmation_id"] = _confirmation_id_from_content(confirmation_blocked[0].content)
         step_result["confirmation_message"] = _blocked_tool_call_response(confirmation_blocked)
+    if finalize_violations:
+        # Observability only: how often the model had to be told to use the
+        # protocol. A persistent nonzero count means the sentinel is not landing
+        # with this provider and the fallback is carrying the step.
+        step_result["finalize_violations"] = finalize_violations
     if confirmation_blocked:
         step_status = "awaiting"  # parked on an approval; a wait, not a failure
     elif blocked is not None or execution_error:
@@ -1155,10 +1257,23 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
     criteria = step.get("success_criteria") or "The result accomplishes the step goal."
     prompt = (
         "Judge whether the step result satisfies the success criteria. Be"
-        " lenient about formatting but strict about substance.\n\n"
+        " lenient about formatting but strict about substance. A result that"
+        " only announces, promises, or describes findings it does not actually"
+        " state ('all data collected, now delivering the summary') never"
+        " satisfies the criteria, however much work preceded it.\n\n"
         f"Goal: {step.get('goal', '')}\nSuccess criteria: {criteria}\n\n"
         f"Result:\n{_truncate_text(output, 4000)}"
     )
+    # The execution footprint is what makes a promise-shaped result legible as a
+    # failure: without it, "now delivering the summary" reads to the judge like a
+    # step that succeeded and is about to report.
+    tools_used = result.get("tools_used") or []
+    if tools_used:
+        prompt += (
+            f"\n\nExecution footprint: the sub-agent made {len(tools_used)} tool/skill call(s)"
+            f" and returned {len(output.strip())} characters of result text. The result above is"
+            " everything that survives this step — no tool output is carried forward."
+        )
     try:
         verdict = cast(
             _Verdict,
@@ -1331,22 +1446,83 @@ async def confirmation_pause_node(state: ChatState, config: RunnableConfig) -> d
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
 
 
-def _synthesis_context(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
+# Floor on each call's share of the evidence budget: below this a JSON row is
+# cut mid-record and reads as noise, so a step with many calls sends fewer whole
+# results rather than more useless fragments.
+_MIN_EVIDENCE_CHARS_PER_CALL = 400
+
+
+def _synthesis_context(
+    plan: list[dict[str, Any]], results: list[dict[str, Any]], *, include_evidence: bool = True
+) -> str:
+    """Render the executed plan for the synthesizer: each step's summary + evidence.
+
+    A worker's prose summary is the only thing it *chooses* to pass on, so a step
+    whose summary comes back thin (or is just a preamble the model meant to
+    continue from) used to take the whole step's findings down with it — the raw
+    tool output stopped at the step boundary. The evidence is already retained on
+    the step result for UI replay, so forwarding a bounded slice of it costs one
+    lookup and makes the summary a convenience rather than a single point of
+    failure.
+
+    ``include_evidence`` is False for renderings shown straight to the user: raw
+    tool output is model context, not an answer.
+    """
     results_by_id = {result["step_id"]: result for result in results}
+    evidence_budget = max(0, settings.CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS) if include_evidence else 0
+    # Split the budget evenly across the steps that actually gathered something,
+    # so one chatty step cannot crowd the others out of the context.
+    with_evidence = [step for step in plan if results_by_id.get(step["id"], {}).get("tool_details")]
+    per_step = evidence_budget // len(with_evidence) if with_evidence else 0
     blocks: list[str] = []
     for step in plan:
         result = results_by_id.get(step["id"], {})
         status = step.get("status", "")
         output = result.get("output") or "(no output)"
-        blocks.append(f"### Step {step['id']} — {step['goal']} [{status}]\n{_truncate_text(output, 4000)}")
+        block = f"### Step {step['id']} — {step['goal']} [{status}]\n{_truncate_text(output, 4000)}"
+        evidence = _step_evidence(result, max_chars=per_step)
+        if evidence:
+            block += f"\n\nSupporting evidence gathered in this step:\n{evidence}"
+        blocks.append(block)
     return "Executed plan and results:\n\n" + "\n\n".join(blocks)
+
+
+def _step_evidence(result: dict[str, Any], *, max_chars: int) -> str:
+    """Render a step's recorded tool/skill output, within ``max_chars``."""
+    details = [detail for detail in result.get("tool_details") or [] if str(detail.get("body") or "").strip()]
+    if not details or max_chars <= 0:
+        return ""
+    # Give every call a share rather than letting the first ones consume the
+    # budget: the last tool a step ran is as likely to matter as the first.
+    per_detail = max(_MIN_EVIDENCE_CHARS_PER_CALL, max_chars // len(details))
+    parts: list[str] = []
+    used = 0
+    for detail in details:
+        body = str(detail["body"]).strip()
+        label = str(detail.get("title") or "Result")
+        if len(body) > per_detail:
+            # The "cut short" signal goes in the label, not inline in the body.
+            # An inline marker sits inside prose the model reads as content, and
+            # it copies it — a live run ended a user-facing answer with a stray
+            # "... [truncated]" lifted straight out of an evidence block.
+            body = body[:per_detail]
+            label = f"{label} (first {per_detail} characters)"
+        chunk = f"- {label}:\n{body}"
+        if used + len(chunk) > max_chars and parts:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    return "\n".join(parts)
 
 
 def _synthesis_fallback(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     passed = sum(1 for step in plan if step.get("status") == "passed")
+    # This goes straight into the assistant bubble, so summaries only: the
+    # evidence blocks are raw tool JSON, which is model context and not an answer.
+    context = _synthesis_context(plan, results, include_evidence=False)
     return (
         f"I ran a {len(plan)}-step plan ({passed} step(s) verified) but could not produce a"
-        " final summary. Here is what each step found:\n\n" + _synthesis_context(plan, results)
+        f" final summary. Here is what each step found:\n\n{context}"
     )
 
 

@@ -81,6 +81,20 @@ class BudgetController:
     def finalizing(self) -> bool:
         return self.mode in ("finalizing", "exhausted")
 
+    @property
+    def remaining_normal_tokens(self) -> int | None:
+        """Tokens still spendable outside the finalization reserve.
+
+        ``None`` when no token limit is configured, so callers can tell "no
+        constraint" from "nothing left".
+        """
+        token_limit = int(self._ledger.get("token_limit") or 0)
+        if not token_limit:
+            return None
+        spent = int(self._ledger.get("total_tokens") or 0)
+        reserve = int(self._ledger.get("reserve_tokens") or 0)
+        return max(0, token_limit - reserve - spent)
+
     def set_estimated_remaining_tokens(self, tokens: int) -> None:
         self._ledger["estimated_remaining_tokens"] = max(0, tokens)
         token_limit = int(self._ledger.get("token_limit") or 0)

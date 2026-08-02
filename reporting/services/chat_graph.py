@@ -155,7 +155,11 @@ class ToolCallResult:
 class LLMTurnResult:
     message: AIMessage
     streamed: str
+    # Normalized: reads "length" whenever the turn was cut off by the output cap,
+    # including when the provider claimed otherwise. See _effective_finish_reason.
     finish_reason: str | None = None
+    # Exactly what the provider reported, kept for diagnosis when the two differ.
+    provider_finish_reason: str | None = None
     details: tuple[dict[str, Any], ...] = ()
     # True when the model emitted raw tool-call protocol markup as text instead
     # of a structured tool call (seen with some DeepSeek models). The markup is
@@ -185,12 +189,79 @@ class AnswerBudget:
 # reasoning_content normalization) that Seizu used to special-case here.
 _MOCK_PROVIDER = "mock"
 
-# Structural completion signal for the tool loop. Once Seizu has run an action,
-# the model finishes the turn by calling this synthetic tool with the final
-# answer (rather than us classifying plain text as "done"). Exposed post-action
-# only, so trivial pre-action replies keep streaming directly. The loop
-# intercepts the call by name and never dispatches it to MCP.
-_FINAL_ANSWER_TOOL = "respond_to_user"
+
+@dataclass(frozen=True)
+class TerminalTool:
+    """A synthetic tool whose call ends an agent loop and carries its result.
+
+    Both loops finish on this explicit call rather than on the model going quiet.
+    Absence of a tool call is ambiguous — the model may be about to continue, or
+    may have called a tool that does not exist, which ``_tool_call_requests``
+    drops silently — and reading that as completion is how a turn ends with a
+    preamble in place of its answer. The loops intercept the call by name and
+    never dispatch it to MCP.
+
+    Instances differ only in wording and in *when* they are offered, so the spec,
+    the argument extraction and the partition live here once.
+    """
+
+    name: str
+    argument: str
+    description: str
+    argument_description: str
+
+    @property
+    def spec(self) -> "ChatToolSpec":
+        return ChatToolSpec(
+            name=self.name,
+            kind="tool",
+            description=self.description,
+            input_schema={
+                "type": "object",
+                "properties": {self.argument: {"type": "string", "description": self.argument_description}},
+                "required": [self.argument],
+            },
+        )
+
+    def result_text(self, request: "ToolCallRequest") -> str:
+        value = request.arguments.get(self.argument)
+        return value.strip() if isinstance(value, str) else ""
+
+    def partition(self, requests: list["ToolCallRequest"]) -> tuple["ToolCallRequest | None", list["ToolCallRequest"]]:
+        """Split a turn's calls into (this tool's call if any, everything else)."""
+        terminal = next((request for request in requests if request.name == self.name), None)
+        return terminal, [request for request in requests if request.name != self.name]
+
+
+# Exposed post-action only, so trivial pre-action replies keep streaming directly
+# instead of arriving as one tool-argument blob.
+FINAL_ANSWER_TOOL = TerminalTool(
+    name="respond_to_user",
+    argument="answer",
+    description=(
+        "Deliver your complete final answer to the user and end the turn. Call this once you have enough "
+        "information from the tools/skills you already ran. Put the full user-facing answer in `answer`; do "
+        "not call any other tool in the same step. If you still need live data, call that tool instead."
+    ),
+    argument_description="The complete, user-facing final answer for this turn.",
+)
+
+# The orchestrator's per-step equivalent. Offered on every worker turn, not just
+# post-action: a worker's output is consumed by code rather than streamed, so
+# there is no fast path that plain text should be allowed to take.
+STEP_RESULT_TOOL = TerminalTool(
+    name="submit_step_result",
+    argument="result",
+    description=(
+        "Finish this step. Call this exactly once, when you have everything the step needs, passing the "
+        "complete factual result. This call is the only way to end the step."
+    ),
+    argument_description=(
+        "The complete factual result for this step: the concrete findings and values produced, plus any part "
+        "of the goal that could not be completed. This text is all that survives the step, so never pass a "
+        "preamble or a promise of findings to follow."
+    ),
+)
 
 # Appended to the system prompt for headless (automated) turns — scheduled
 # query agent runs and Temporal workflow sessions — where no human can answer.
@@ -403,14 +474,26 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # respond_to_user call; post-action prose is a stall, not streamed, so we
         # never ship un-retractable text.
         turn_writer = None if post_action else writer
-        turn_result = await _run_llm_tool_turn(
-            model,
-            turn_system_prompt,
-            messages,
-            available_specs,
-            config,
-            turn_writer,
-        )
+        try:
+            turn_result = await _run_llm_tool_turn(
+                model,
+                turn_system_prompt,
+                messages,
+                available_specs,
+                config,
+                turn_writer,
+            )
+        except BudgetExceeded as exc:
+            # Exhausting the run budget is an expected end to a long turn, not a
+            # crash. The orchestrator has always degraded here; this loop used to
+            # let the exception escape the node and kill the whole SSE stream, so
+            # the user got an error instead of an answer built from the work
+            # already done. Stop gathering and fall through to the forced
+            # synthesis below, which spends the reserve held back for exactly this.
+            controller = budget_controller_from_config(config)
+            if controller is not None:
+                controller.begin_finalization(str(exc))
+            break
         ai_message = turn_result.message
         streamed_in_last_turn = turn_result.streamed
         streamed_response = streamed_in_last_turn
@@ -431,16 +514,14 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             response = _blocked_tool_call_response(unavailable)
             break
 
-        requested = _tool_call_requests(ai_message, available_specs)
-        finish_requests = [request for request in requested if request.name == _FINAL_ANSWER_TOOL]
-        requested = [request for request in requested if request.name != _FINAL_ANSWER_TOOL]
+        finish_request, requested = FINAL_ANSWER_TOOL.partition(_tool_call_requests(ai_message, available_specs))
         if not requested:
             # Structural completion: an explicit respond_to_user call (or, for a
             # pre-action turn, plain text) is the terminal answer. Post-action
             # plain text that skipped respond_to_user is a stall — nudge once to
             # act-or-finish, then accept whatever the model returns next.
-            if finish_requests:
-                response = _final_answer_text(finish_requests[0]) or message_text(ai_message.content)
+            if finish_request is not None:
+                response = FINAL_ANSWER_TOOL.result_text(finish_request) or message_text(ai_message.content)
             else:
                 response = message_text(ai_message.content)
                 if response and post_action and not terminal_response_retry_used:
@@ -541,7 +622,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 for result in results
             ],
         ]
-        messages = _trim_inner_loop_messages(messages, max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS)
+        messages = _trim_inner_loop_messages(
+            messages,
+            max_chars=_budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS),
+        )
         if blocked_results:
             response = _blocked_tool_call_response(blocked_results)
             break
@@ -557,23 +641,39 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         synthesis_system_prompt = _combined_system_prompt(
             base_system_prompt, _final_synthesis_retry_message(action_summaries)
         )
-        turn_result = await _run_llm_tool_turn(model, synthesis_system_prompt, messages, [], config, None)
-        final_message = turn_result.message
-        streamed_in_last_turn = turn_result.streamed
-        streamed_response = streamed_in_last_turn
-        detail_events.extend(turn_result.details)
-        response = message_text(final_message.content)
-        if response and _internal_action_transcript_leaked(response):
-            retry_prompt = _combined_system_prompt(
-                synthesis_system_prompt,
-                _action_transcript_retry_message(),
+        # allow_reserve: this is the final synthesis the reserve is held back for.
+        # Without it a turn that used its normal allowance cannot say anything at
+        # all about the work it did.
+        try:
+            turn_result = await _run_llm_tool_turn(
+                model, synthesis_system_prompt, messages, [], config, None, allow_reserve=True
             )
-            turn_result = await _run_llm_tool_turn(model, retry_prompt, messages, [], config, None)
             final_message = turn_result.message
             streamed_in_last_turn = turn_result.streamed
             streamed_response = streamed_in_last_turn
             detail_events.extend(turn_result.details)
             response = message_text(final_message.content)
+        except BudgetExceeded:
+            # Even the reserve is gone. _empty_response_fallback below summarizes
+            # the actions that ran, which beats failing the turn outright.
+            response = ""
+        if response and _internal_action_transcript_leaked(response):
+            retry_prompt = _combined_system_prompt(
+                synthesis_system_prompt,
+                _action_transcript_retry_message(),
+            )
+            try:
+                turn_result = await _run_llm_tool_turn(
+                    model, retry_prompt, messages, [], config, None, allow_reserve=True
+                )
+                final_message = turn_result.message
+                streamed_in_last_turn = turn_result.streamed
+                streamed_response = streamed_in_last_turn
+                detail_events.extend(turn_result.details)
+                response = message_text(final_message.content)
+            except BudgetExceeded:
+                # Keep the leaky draft rather than nothing; it still answers.
+                pass
         if response:
             if writer is not None and not streamed_response:
                 writer({"kind": "token", "content": response})
@@ -819,16 +919,27 @@ async def _auto_continue_answer(
             HumanMessage(content=_continuation_prompt(prior_tail), id=f"msg_{uuid.uuid4().hex}"),
         ]
         stitch_writer, stitcher = _stitch_writer(writer, response)
-        turn = await _run_llm_tool_turn(
-            model,
-            system_prompt,
-            continuation_messages,
-            [],
-            config,
-            stitch_writer,
-            allow_reserve=allow_reserve,
-            phase="continuation",
-        )
+        try:
+            turn = await _run_llm_tool_turn(
+                model,
+                system_prompt,
+                continuation_messages,
+                [],
+                config,
+                stitch_writer,
+                allow_reserve=allow_reserve,
+                phase="continuation",
+                # Request the cap explicitly rather than inheriting the provider's
+                # default: it is what the budget already reserves for this turn, and
+                # a known cap is what lets _effective_finish_reason tell a
+                # continuation that was itself cut off from one that finished.
+                max_output_tokens=settings.CHAT_LLM_MAX_TOKENS,
+            )
+        except BudgetExceeded:
+            # A continuation extends an answer the user already has; it is never
+            # worth failing the turn for. Stop here and let the caller report the
+            # response as still truncated.
+            break
         added = stitcher.flush()
         details.extend(turn.details)
         finish_reason = turn.finish_reason
@@ -1260,6 +1371,13 @@ async def _run_llm_tool_turn(
         )
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
     leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
+    provider_finish_reason = finish_reason or _chunk_finish_reason(merged)
+    effective_finish_reason = _effective_finish_reason(
+        provider_finish_reason,
+        output_tokens=output_tokens,
+        output_token_limit=max_output_tokens,
+        usage_estimated=usage_estimated,
+    )
 
     if isinstance(merged, AIMessage):
         if tool_markup_leaked:
@@ -1267,7 +1385,8 @@ async def _run_llm_tool_turn(
         return LLMTurnResult(
             message=_strip_reasoning_context(merged),
             streamed=streamed,
-            finish_reason=finish_reason or _chunk_finish_reason(merged),
+            finish_reason=effective_finish_reason,
+            provider_finish_reason=provider_finish_reason,
             details=(reasoning_detail_data,) if reasoning_detail_data else (),
             tool_markup_leaked=tool_markup_leaked,
             leaked_tool_names=leaked_tool_names,
@@ -1290,7 +1409,8 @@ async def _run_llm_tool_turn(
     return LLMTurnResult(
         message=_strip_reasoning_context(fallback),
         streamed=streamed,
-        finish_reason=finish_reason or _chunk_finish_reason(merged),
+        finish_reason=effective_finish_reason,
+        provider_finish_reason=provider_finish_reason,
         details=(reasoning_detail_data,) if reasoning_detail_data else (),
         tool_markup_leaked=tool_markup_leaked,
         leaked_tool_names=leaked_tool_names,
@@ -1375,6 +1495,40 @@ def _append_output_limit_notice(
     return f"{response.rstrip()}{_OUTPUT_LIMIT_NOTICE}{summary_notice}", True
 
 
+def _effective_finish_reason(
+    provider_finish_reason: str | None,
+    *,
+    output_tokens: int,
+    output_token_limit: int | None,
+    usage_estimated: bool,
+) -> str | None:
+    """Correct a provider's finish reason against the output cap we requested.
+
+    ``finish_reason`` is the provider's *word* for why generation stopped, and
+    some are wrong: DeepSeek via LiteLLM reports ``stop`` on answers it cut at
+    ``max_tokens``. Everything downstream keys on that word — ``_auto_continue_answer``
+    never resumes and ``_append_output_limit_notice`` adds nothing — so the user
+    silently receives an answer that ends mid-sentence.
+
+    The token count is a fact we hold rather than a claim we are told: a turn
+    that emitted its entire allowance was cut off, because a model finishing
+    naturally stops short of the cap. Only usable when we set an explicit cap
+    (otherwise the provider's own default applies and we do not know it) and when
+    usage came from the provider rather than our own estimator.
+
+    A model that genuinely ends on the cap's last token is misread as truncated;
+    that costs one continuation turn that appends nothing, which the no-progress
+    guard already handles.
+    """
+    if _is_output_limit_finish_reason(provider_finish_reason):
+        return provider_finish_reason
+    if output_token_limit is None or output_token_limit <= 0 or usage_estimated:
+        return provider_finish_reason
+    if output_tokens >= output_token_limit:
+        return "length"
+    return provider_finish_reason
+
+
 def _is_output_limit_finish_reason(finish_reason: str | None) -> bool:
     if not finish_reason:
         return False
@@ -1418,15 +1572,80 @@ def _finish_reason_from_mapping(mapping: dict[str, Any]) -> str | None:
     return None
 
 
+# Marker + payload for a condensed-context message. The lines are kept in
+# additional_kwargs so a later trim pass can re-absorb an existing digest
+# verbatim instead of re-parsing its rendered text.
+_CONTEXT_DIGEST_KEY = "seizu_context_digest"
+_CONTEXT_DIGEST_HEADER = (
+    "Condensed results of earlier tool calls in this turn. This evidence was already gathered — "
+    "use it, and do not re-run these calls:"
+)
+# Floor on a digest line's share, below which a result is cut into noise.
+_MIN_DIGEST_LINE_CHARS = 200
+
+
+def _is_context_digest(message: BaseMessage) -> bool:
+    return isinstance(getattr(message, "additional_kwargs", None), dict) and bool(
+        message.additional_kwargs.get(_CONTEXT_DIGEST_KEY)
+    )
+
+
+def _context_digest_lines(message: BaseMessage) -> list[str]:
+    lines = message.additional_kwargs.get(_CONTEXT_DIGEST_KEY)
+    return [str(line) for line in lines] if isinstance(lines, list) else []
+
+
+def _digest_dropped_exchange(ai_message: AIMessage, tool_messages: list[ToolMessage]) -> list[str]:
+    """One line per tool call in a dropped exchange: what ran, and what it returned."""
+    by_id = {message.tool_call_id: message for message in tool_messages}
+    lines: list[str] = []
+    for call in ai_message.tool_calls or []:
+        name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
+        call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", "")
+        result = by_id.get(str(call_id))
+        body = message_text(result.content).strip() if result is not None else "(no result recorded)"
+        lines.append(f"- {name}: {body}")
+    if not lines:
+        # A dropped assistant turn with no tool calls still carried reasoning.
+        text = message_text(ai_message.content).strip()
+        if text:
+            lines.append(f"- (assistant note) {text}")
+    return lines
+
+
+def _context_digest_message(lines: list[str], *, max_chars: int) -> HumanMessage:
+    # Account for the joining newlines so every call keeps a line by construction:
+    # truncating all of them beats losing one call's evidence outright, since a
+    # missing line reads as "that call never happened".
+    per_line = max(_MIN_DIGEST_LINE_CHARS, (max_chars - len(lines)) // max(1, len(lines)))
+    kept = [line[:per_line] for line in lines]
+    # Only reachable once the per-line floor prices more lines than fit. Then shed
+    # the oldest, which are the most likely to have been superseded since.
+    while len(kept) > 1 and len("\n".join(kept)) > max_chars:
+        kept.pop(0)
+    return HumanMessage(
+        content=f"{_CONTEXT_DIGEST_HEADER}\n" + "\n".join(kept)[:max_chars],
+        id=f"msg_{uuid.uuid4().hex}",
+        additional_kwargs={_CONTEXT_DIGEST_KEY: kept},
+    )
+
+
 def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) -> list[BaseMessage]:
-    """Cap the inner-turn message list by total character count.
+    """Cap the inner-turn message list by total character count, condensing what it sheds.
 
     Tool results are bounded per call by ``CHAT_TOOL_RESULT_MAX_BYTES``, but
     nothing else stops the loop from accumulating up to
-    ``CHAT_LLM_MAX_AUTO_ACTIONS`` × that cap into the next LLM call. This drops
-    oldest AI+ToolMessage turn pairs from the head once the accumulated text
-    exceeds the cap, keeping the user's original turn at index 0 (when it is a
+    ``CHAT_LLM_MAX_AUTO_ACTIONS`` × that cap into the next LLM call. Once the
+    accumulated text exceeds the cap this sheds the oldest AI+ToolMessage turn
+    pairs, keeping the user's original turn at index 0 (when it is a
     ``HumanMessage``) and the most recent tool exchange intact.
+
+    What is shed is replaced by a single condensed message rather than deleted.
+    Dropping a tool result outright loses evidence the agent paid for and lets it
+    re-run the same call or answer without something it already knew; a digest
+    keeps the finding at a fraction of the size. It is built deterministically
+    from the messages themselves — no summarization call, so no added latency,
+    cost, or risk of inventing a finding that was never returned.
     """
     if max_chars <= 0 or len(messages) <= 4:
         return messages
@@ -1434,24 +1653,82 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
     if total <= max_chars:
         return messages
 
-    preserve_head = isinstance(messages[0], HumanMessage)
+    # Reserve room for the digest up front, so re-inserting it cannot push the
+    # result back over the cap we were asked to hit.
+    # Never let the reserve exceed half the cap: at small caps the per-line floor
+    # would otherwise price the digest above the whole budget and trim everything.
+    digest_budget = min(max_chars // 2, max(_MIN_DIGEST_LINE_CHARS, max_chars // 5))
+    target = max(0, max_chars - digest_budget)
+
+    preserve_head = isinstance(messages[0], HumanMessage) and not _is_context_digest(messages[0])
     head: list[BaseMessage] = [messages[0]] if preserve_head else []
     body = messages[1:] if preserve_head else messages[:]
 
+    carried: list[str] = []
+    fresh: list[str] = []
     # Drop AIMessage + its trailing ToolMessages as a unit; orphaning tool
     # results breaks every provider's tool-call protocol.
-    while body and total > max_chars:
-        if not isinstance(body[0], AIMessage):
-            dropped = body.pop(0)
-            total -= _message_context_size(dropped)
+    while body and total > target:
+        # Never shed the most recent exchange, however tight the cap: it is the
+        # tool output the next call reasons about, and without it the loop cannot
+        # make progress at all. Previously nothing enforced this, so a small cap
+        # could strip the body bare; reserving room for the digest made that
+        # reachable in practice.
+        if sum(1 for message in body if isinstance(message, AIMessage)) <= 1:
+            break
+        first = body[0]
+        total -= _message_context_size(first)
+        body.pop(0)
+        if _is_context_digest(first):
+            # Re-absorb an earlier digest so successive trims merge into one
+            # message instead of stacking up.
+            carried.extend(_context_digest_lines(first))
             continue
-        dropped = body.pop(0)
-        total -= _message_context_size(dropped)
+        if not isinstance(first, AIMessage):
+            continue
+        tool_messages: list[ToolMessage] = []
         while body and isinstance(body[0], ToolMessage):
             tool_dropped = body.pop(0)
             total -= _message_context_size(tool_dropped)
+            tool_messages.append(tool_dropped)
+        fresh.extend(_digest_dropped_exchange(first, tool_messages))
 
-    return [*head, *body]
+    lines = [*carried, *fresh]
+    if not lines:
+        return [*head, *body]
+    return [*head, _context_digest_message(lines, max_chars=digest_budget), *body]
+
+
+# Rough chars-per-token, used only to relate two caps expressed in different
+# units. Never used to bill the budget — that uses real provider usage.
+_CHARS_PER_TOKEN = 4
+# Never squeeze context below this: past it the model loses the thread of its own
+# turn and the loop stops making progress at all.
+_MIN_CONTEXT_MAX_CHARS = 8_000
+# Ceiling on the share of the remaining allowance one call may plan to spend, so
+# a single context-heavy call cannot consume everything the run has left.
+_CONTEXT_BUDGET_SHARE = 0.5
+
+
+def _budgeted_context_max_chars(config: RunnableConfig, *, base_max_chars: int) -> int:
+    """Fit the per-call context cap inside what the run can still afford.
+
+    ``CHAT_LLM_CONTEXT_MAX_CHARS`` bounds one call and ``CHAT_RUN_TOKEN_BUDGET``
+    bounds the whole run, and nothing related them: at the defaults, four calls
+    at the per-call cap exhaust the entire run budget. A long tool loop therefore
+    ran at full context until it hit a wall mid-turn, rather than tightening as
+    it went. Sizing each call against the remaining allowance makes the loop
+    degrade smoothly, and pairs with the digest in ``_trim_inner_loop_messages``
+    so tightening condenses evidence instead of discarding it.
+    """
+    controller = budget_controller_from_config(config)
+    if controller is None or not controller.enabled:
+        return base_max_chars
+    remaining = controller.remaining_normal_tokens
+    if remaining is None:
+        return base_max_chars
+    affordable = int(remaining * _CONTEXT_BUDGET_SHARE) * _CHARS_PER_TOKEN
+    return max(_MIN_CONTEXT_MAX_CHARS, min(base_max_chars, affordable))
 
 
 def _message_context_size(message: BaseMessage) -> int:
@@ -1565,34 +1842,7 @@ def _skill_tool_specs(skills: list[Prompt]) -> list[ChatToolSpec]:
 
 def _terminal_specs(post_action: bool) -> list[ChatToolSpec]:
     """The respond_to_user finish tool, exposed only after an action has run."""
-    if not post_action:
-        return []
-    return [
-        ChatToolSpec(
-            name=_FINAL_ANSWER_TOOL,
-            kind="tool",
-            description=(
-                "Deliver your complete final answer to the user and end the turn. Call this once you have enough "
-                "information from the tools/skills you already ran. Put the full user-facing answer in `answer`; do "
-                "not call any other tool in the same step. If you still need live data, call that tool instead."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "answer": {
-                        "type": "string",
-                        "description": "The complete, user-facing final answer for this turn.",
-                    }
-                },
-                "required": ["answer"],
-            },
-        )
-    ]
-
-
-def _final_answer_text(request: ToolCallRequest) -> str:
-    answer = request.arguments.get("answer")
-    return answer.strip() if isinstance(answer, str) else ""
+    return [FINAL_ANSWER_TOOL.spec] if post_action else []
 
 
 def _mcp_tool_specs(tools: list[Tool]) -> list[ChatToolSpec]:
@@ -1890,8 +2140,8 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "instead of stopping as a failure. "
         "Do not pretend to have executed a tool unless the conversation contains its "
         "result. After you have run one or more skills or tools, finish the turn by calling the "
-        f"`{_FINAL_ANSWER_TOOL}` tool with your complete final answer; do not deliver a post-action answer as plain "
-        "text, and never describe tool work you have not performed."
+        f"`{FINAL_ANSWER_TOOL.name}` tool with your complete final answer; do not deliver a post-action answer as "
+        "plain text, and never describe tool work you have not performed."
         f"{sandbox_note}{user_context}{provider_note}"
     )
 
@@ -2372,7 +2622,7 @@ def _terminal_stall_retry_message(action_summaries: list[str]) -> str:
     return (
         "You returned plain text after Seizu already ran one or more actions, without finishing the turn. "
         f"If the user's request needs more live data, make the next structured skill/tool call now. If you have "
-        f"enough evidence, deliver the complete final answer by calling the `{_FINAL_ANSWER_TOOL}` tool with the "
+        f"enough evidence, deliver the complete final answer by calling the `{FINAL_ANSWER_TOOL.name}` tool with the "
         "full answer in `answer`. Do not describe future work in plain text.\n\n"
         f"Completed action summaries so far:\n{_truncate_text(chr(10).join(action_summaries), 10000)}"
     )
