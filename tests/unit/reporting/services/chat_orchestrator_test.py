@@ -1558,3 +1558,90 @@ def test_worker_user_message_omits_the_block_when_isolation_is_kept():
     message = chat_orchestrator._worker_user_message(_step("s1"), "", "")
 
     assert "Earlier conversation" not in message
+
+
+# --- Per-step ceilings ---------------------------------------------------------
+
+
+class _LoopingModel:
+    """Calls a tool forever; only an external ceiling can stop it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.bound = False
+
+    def bind_tools(self, _tools: Any) -> "_LoopingModel":
+        self.bound = True
+        return self
+
+    async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+        if not self.bound:
+            # Forced synthesis runs with no tools, so nothing bound them.
+            yield AIMessage(content="Summary of what I gathered before stopping.")
+            return
+        self.bound = False
+        self.calls += 1
+        yield AIMessage(
+            content="",
+            tool_calls=[{"name": "t__one", "args": {}, "id": f"c{self.calls}"}],
+            usage_metadata={"input_tokens": 1000, "output_tokens": 1000, "total_tokens": 2000},
+        )
+
+
+def _looping_worker_kwargs(mocker: Any) -> dict[str, Any]:
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        return [chat_graph.ToolCallResult(request=req, content="{}") for req in batch]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+    return {
+        "current_user": _user(),
+        "session_key": "thread",
+        "tool_specs": [
+            chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+        ],
+        "disclosed_names": {"t__one"},
+        "progressive": True,
+        "writer": lambda _event: None,
+    }
+
+
+async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
+    # The step token ceiling stops it before the action ceiling does.
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 2.0)
+    controller = BudgetController(initial_budget_ledger())
+
+    # complexity "small" -> 4000 estimated tokens, ceiling 8000, and the model
+    # bills 2000 per turn, so it stops after four.
+    step = _step("s1", estimated_tokens=4000)
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_LoopingModel(),
+        config={"configurable": {"budget_controller": controller}},
+        **_looping_worker_kwargs(mocker),
+    )
+
+    assert len(result["tools_used"]) == 4
+    assert result["output"].strip()
+
+
+async def test_worker_ceiling_leaves_budget_for_the_rest_of_the_plan(mocker):
+    # The point of the ceiling: a runaway step must not starve its siblings.
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 2.0)
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
+    controller = BudgetController(initial_budget_ledger())
+
+    step = _step("s1", estimated_tokens=4000)
+    await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_LoopingModel(),
+        config={"configurable": {"budget_controller": controller}},
+        **_looping_worker_kwargs(mocker),
+    )
+
+    remaining = controller.remaining_normal_tokens
+    assert remaining is not None and remaining > 60_000
+    assert controller.mode == "normal"

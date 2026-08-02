@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import neo4j.exceptions
@@ -11,9 +12,11 @@ from reporting.services import reporting_neo4j
 def _clear_client_cache():
     reporting_neo4j._ASYNC_CLIENT_CACHE = None
     reporting_neo4j._SYNC_CLIENT_CACHE = None
+    reporting_neo4j.reset_graph_schema_cache()
     yield
     reporting_neo4j._ASYNC_CLIENT_CACHE = None
     reporting_neo4j._SYNC_CLIENT_CACHE = None
+    reporting_neo4j.reset_graph_schema_cache()
 
 
 def test__get_neo4j_client(mocker):
@@ -244,3 +247,69 @@ async def test_check_watch_scan_triggered_none_last_scheduled(mocker):
     # None → scheduled_unix = 0, any non-zero scan_time triggers
     result = await reporting_neo4j.check_watch_scan_triggered(None, [ScheduledQueryWatchScan(grouptype="test")])
     assert result is True
+
+
+# --- Graph schema cache --------------------------------------------------------
+
+
+async def test_fetch_graph_schema_is_cached_within_the_ttl(mocker):
+    uncached = mocker.patch(
+        "reporting.services.reporting_neo4j._fetch_graph_schema_uncached",
+        new=AsyncMock(return_value={"labels": ["CVE"]}),
+    )
+    mocker.patch("reporting.settings.GRAPH_SCHEMA_CACHE_TTL_SECONDS", 300)
+
+    first = await reporting_neo4j.fetch_graph_schema()
+    second = await reporting_neo4j.fetch_graph_schema()
+
+    assert first == second == {"labels": ["CVE"]}
+    # The point of the cache: an agent that re-introspects pays once.
+    assert uncached.await_count == 1
+
+
+async def test_fetch_graph_schema_refetches_after_the_ttl(mocker):
+    uncached = mocker.patch(
+        "reporting.services.reporting_neo4j._fetch_graph_schema_uncached",
+        new=AsyncMock(side_effect=[{"labels": ["old"]}, {"labels": ["new"]}]),
+    )
+    mocker.patch("reporting.settings.GRAPH_SCHEMA_CACHE_TTL_SECONDS", 300)
+    clock = [0.0]
+    mocker.patch("reporting.services.reporting_neo4j.time.monotonic", lambda: clock[0])
+
+    assert await reporting_neo4j.fetch_graph_schema() == {"labels": ["old"]}
+    clock[0] = 301.0
+    # A sync that adds a label must become visible without a restart.
+    assert await reporting_neo4j.fetch_graph_schema() == {"labels": ["new"]}
+    assert uncached.await_count == 2
+
+
+async def test_fetch_graph_schema_ttl_zero_disables_caching(mocker):
+    uncached = mocker.patch(
+        "reporting.services.reporting_neo4j._fetch_graph_schema_uncached",
+        new=AsyncMock(return_value={"labels": []}),
+    )
+    mocker.patch("reporting.settings.GRAPH_SCHEMA_CACHE_TTL_SECONDS", 0)
+
+    await reporting_neo4j.fetch_graph_schema()
+    await reporting_neo4j.fetch_graph_schema()
+
+    assert uncached.await_count == 2
+
+
+async def test_fetch_graph_schema_concurrent_callers_introspect_once(mocker):
+    started = 0
+
+    async def _slow() -> dict:
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0)
+        return {"labels": ["CVE"]}
+
+    mocker.patch("reporting.services.reporting_neo4j._fetch_graph_schema_uncached", new=_slow)
+    mocker.patch("reporting.settings.GRAPH_SCHEMA_CACHE_TTL_SECONDS", 300)
+
+    results = await asyncio.gather(*(reporting_neo4j.fetch_graph_schema() for _ in range(8)))
+
+    assert all(result == {"labels": ["CVE"]} for result in results)
+    # Parallel workers hitting a cold cache must not stampede the database.
+    assert started == 1

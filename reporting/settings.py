@@ -153,6 +153,14 @@ NEO4J_URI = str_env("NEO4J_URI", "bolt://localhost:7687")
 # the database is not fully populated (e.g. in development).
 NEO4J_NOTIFICATIONS_MIN_SEVERITY = str_env("NEO4J_NOTIFICATIONS_MIN_SEVERITY", "WARNING")
 
+# How long (seconds) to cache the introspected graph schema process-wide. The
+# schema is graph-wide rather than per-user, so one cache serves the schema
+# route, the graph__schema tool, the MCP server and the sandbox subagent. Agents
+# re-introspect constantly — each sandbox delegation starts a fresh subagent
+# with no memory — so this turns a per-call cost into a per-TTL one. Lower it if
+# a sync adds labels that must appear immediately; 0 disables caching.
+GRAPH_SCHEMA_CACHE_TTL_SECONDS = int_env("GRAPH_SCHEMA_CACHE_TTL_SECONDS", 300)
+
 # Username to connect to neo4j
 NEO4J_USER = str_env("NEO4J_USER")
 
@@ -589,7 +597,16 @@ CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
 # Compatibility guard for runs with all shared budget dimensions disabled.
 # Normal interactive and headless plans use the shared run-level
 # token/cost/call ledger instead of stopping at a per-step action count.
+# A budgeted run is bounded by CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN instead,
+# which is proportional to the work the planner expected rather than a flat
+# count, so a large headless plan is not truncated at an arbitrary action.
 CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
+# Multiple of the planner's per-step token estimate at which a step is stopped
+# and asked to summarize what it has. The estimate itself only downgrades the
+# step to the economy model; stopping there would kill work the planner merely
+# under-estimated. Without a ceiling one step can consume the whole run budget
+# and starve every step after it.
+CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 3.0)
 # Corrective retries when a worker ends a turn without calling the sentinel that
 # submits its step result. A step ends on that explicit call, never on the model
 # simply going quiet, so a plain-text turn is a protocol violation the worker

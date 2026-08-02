@@ -972,10 +972,28 @@ async def _run_worker_step(
     # finish the step rather than loop.
     finalize_retries_left = max(0, settings.CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES)
     finalize_violations = 0
+    # The planner's per-step estimate degrades the step (economy model) at 1x and
+    # stops it at this multiple. Two thresholds because the estimate is a guess
+    # from a coarse complexity label: degrading at the estimate is cheap if it
+    # was low, whereas stopping there would kill legitimate work. The ceiling is
+    # what keeps one step from spending a whole run's budget.
+    step_ceiling = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
     while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
         # synthesizer streams the final answer.
-        step_degraded = step_input_tokens + step_output_tokens >= step_budget
+        step_spend = step_input_tokens + step_output_tokens
+        if step_spend >= step_ceiling:
+            # Leave the loop with tool results but no final text, which is the
+            # condition the summary pass below already handles: it asks the
+            # worker to state what it found and what remains.
+            logger.info(
+                "chat orchestrator: step %s stopped at its token ceiling (%d >= %d)",
+                step_id,
+                step_spend,
+                step_ceiling,
+            )
+            break
+        step_degraded = step_spend >= step_budget
         active_model = (
             get_chat_model("worker", economy=True)
             if (step_degraded or (controller is not None and controller.degraded))
