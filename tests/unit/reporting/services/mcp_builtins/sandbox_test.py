@@ -1198,51 +1198,29 @@ async def test_with_a_backend_the_fetch_is_raised_to_the_file_bounds(mocker) -> 
     assert call.await_args.kwargs["result_max_rows"] == 50_000
 
 
-# --- preview_file ------------------------------------------------------------
+# --- read_file honesty ---------------------------------------------------------
 
 
-async def test_preview_returns_a_small_file_whole() -> None:
+async def test_read_file_returns_a_file_that_fits_verbatim() -> None:
     backend = _make_fake_backend()
     backend.read_file = AsyncMock(return_value="small contents")
-    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
+    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000):
         tools = {t.name: t for t in _build_sandbox_tools(backend)}
-        assert await tools["preview_file"].coroutine(path="/tmp/x") == "small contents"
+        assert await tools["read_file"].coroutine(path="/tmp/x") == "small contents"
 
 
-async def test_preview_of_a_large_file_returns_shape_not_contents() -> None:
-    """The double-travel fix: an oversized result was written out to keep it out
-    of context, and read_file let the agent pull it straight back in."""
+async def test_read_file_says_so_when_it_cannot_return_the_whole_file() -> None:
+    """Regression: a bare [truncated] marker let an agent believe it had the lot.
+
+    The same silent-truncation shape that made a cut-off model answer look
+    complete -- here it would have been a tenth of a result file.
+    """
     backend = _make_fake_backend()
-    backend.read_file = AsyncMock(return_value=_rows_json(5_000))
-    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 500):
+    backend.read_file = AsyncMock(return_value="x" * 500_000)
+    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000):
         tools = {t.name: t for t in _build_sandbox_tools(backend)}
-        returned = await tools["preview_file"].coroutine(path="/tmp/big.json")
+        returned = await tools["read_file"].coroutine(path="/tmp/big.json")
 
-    summary = json.loads(returned.split("\n\n")[0])
-    assert summary["rows"] == 5_000
-    assert summary["columns"] == ["cve", "score"]
-    assert summary["json"] == "dict"
-    assert "run_python" in summary["preview_only"]
-    # Shape is enough to write code against; the data itself stays in the file.
-    assert len(returned) < 2_000
-
-
-async def test_preview_describes_a_non_json_file() -> None:
-    backend = _make_fake_backend()
-    backend.read_file = AsyncMock(return_value="line\n" * 5_000)
-    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 200):
-        tools = {t.name: t for t in _build_sandbox_tools(backend)}
-        returned = await tools["preview_file"].coroutine(path="/tmp/log.txt")
-
-    summary = json.loads(returned.split("\n\n")[0])
-    assert summary["lines"] == 5_001
-    assert summary["bytes"] == 25_000
-    assert "json" not in summary
-
-
-async def test_there_is_no_read_file_tool_any_more() -> None:
-    backend = _make_fake_backend()
-    names = {t.name for t in _build_sandbox_tools(backend)}
-    # Keeping it would leave the route it was removed to close.
-    assert "read_file" not in names
-    assert names == {"run_python", "run_bash", "preview_file", "write_file", "list_files"}
+    assert "500000 bytes" in returned
+    assert "NOT the whole file" in returned
+    assert "run_python" in returned
