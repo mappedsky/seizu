@@ -1733,3 +1733,43 @@ async def test_one_steps_ceiling_does_not_bind_a_sibling():
     assert not controller.scope_exhausted("worker:s2")
     # Steps run concurrently, so a sibling must be unaffected.
     await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s2")
+
+
+async def test_a_budget_capped_step_is_not_retried_into_the_same_wall(mocker):
+    """A retry runs under the identical ceiling and is cut at the identical point.
+
+    Measured: one step cut four times, 121,643 tokens spent to fail four times.
+    """
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
+    plan = [_step("s1", "failed")]
+    results = [{"step_id": "s1", "goal": "goal s1", "output": "", "budget_capped": True}]
+
+    state = await chat_orchestrator.dispatcher_node(
+        {"plan": plan, "step_results": results, "iteration": 0, "messages": []},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    step = state["plan"][0]
+    assert step["no_retry"] is True
+    assert step["status"] == "failed"  # terminal, never reset to pending
+
+
+async def test_an_ordinary_failed_step_is_still_retried(mocker):
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
+    mocker.patch("reporting.services.chat_orchestrator._worker_tool_specs", new=AsyncMock(return_value=[]))
+    mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=_OrchestratorFakeModel())
+    mocker.patch(
+        "reporting.services.chat_orchestrator._run_worker_step",
+        new=AsyncMock(return_value={"step_id": "s1", "goal": "goal s1", "output": "retried"}),
+    )
+    plan = [_step("s1", "failed")]
+    results = [{"step_id": "s1", "goal": "goal s1", "output": "thin", "verify_reason": "too thin"}]
+
+    state = await chat_orchestrator.dispatcher_node(
+        {"plan": plan, "step_results": results, "iteration": 0, "messages": []},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    # Reset to pending, picked up, and re-run with the rejection as guidance.
+    assert state["plan"][0]["status"] == "ran"
+    assert state["iteration"] == 1

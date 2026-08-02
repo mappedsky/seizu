@@ -618,10 +618,17 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     # reset them to pending (carrying the failure reason) and consume one cycle.
     # Steps flagged ``no_retry`` (denied/expired confirmations) are terminal so
     # we never re-prompt the user for an action they already declined.
+    # A step stopped by its own token ceiling is terminal for the same reason a
+    # denied confirmation is: retrying changes nothing. The retry runs under the
+    # identical ceiling and is cut at the identical point, so a capped step
+    # measured four attempts and 121,643 tokens to fail four times.
+    results_by_id = {result["step_id"]: result for result in results}
+    for step in plan:
+        if step["status"] == "failed" and (results_by_id.get(step["id"], {}) or {}).get("budget_capped"):
+            step["no_retry"] = True
     failed = [step for step in plan if step["status"] == "failed" and not step.get("no_retry")]
     if failed and iteration < settings.CHAT_ORCHESTRATOR_MAX_ITERATIONS:
         iteration += 1
-        results_by_id = {result["step_id"]: result for result in results}
         for step in plan:
             if step["status"] == "failed" and not step.get("no_retry"):
                 reason = (results_by_id.get(step["id"], {}) or {}).get("verify_reason", "")
@@ -972,6 +979,7 @@ async def _run_worker_step(
     required_action = str(step.get("required_action") or "")
     execution_error = ""
     budget_exhausted = False
+    budget_capped = False
     step_budget = int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
     controller = _budget_controller(config)
     # Sub-agents reached through the built-in interface get no config, so the
@@ -1017,6 +1025,7 @@ async def _run_worker_step(
                 step_spend,
                 step_ceiling,
             )
+            budget_capped = True
             break
         step_degraded = step_spend >= step_budget
         active_model = (
@@ -1205,6 +1214,7 @@ async def _run_worker_step(
             pass
 
     step_result: dict[str, Any] = {
+        "budget_capped": budget_capped,
         "step_id": step["id"],
         "goal": step["goal"],
         "success_criteria": step.get("success_criteria", ""),

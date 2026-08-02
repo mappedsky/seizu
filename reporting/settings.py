@@ -606,7 +606,14 @@ CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACT
 # step to the economy model; stopping there would kill work the planner merely
 # under-estimated. Without a ceiling one step can consume the whole run budget
 # and starve every step after it.
-CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 3.0)
+# Raised from 3.0 once the ceiling began counting delegated sandbox spend. The
+# planner's per-step estimates (4k/8k/16k by complexity) were set when a step's
+# total meant its own loop only, so against a total that now includes a sandbox
+# sub-agent they are an order of magnitude low: a medium step was cut at 24,000
+# four times in a row, burning 121,643 tokens to fail four times where one
+# uninterrupted attempt had answered completely. 12x puts a medium step near the
+# ~80k per step the successful configuration actually used.
+CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
 # Episodic recall between sub-agents within one step. Each sandbox__delegate
 # call runs a fresh subagent that knows nothing of the previous one, so without
 # this they re-derive the same ground -- one observed step made 136 delegations
