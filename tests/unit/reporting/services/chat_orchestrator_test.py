@@ -1,7 +1,7 @@
 from typing import Any
 from unittest.mock import AsyncMock
 
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
@@ -9,6 +9,7 @@ from reporting.schema.report_config import User
 from reporting.services import chat_graph, chat_orchestrator
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import _ConfirmResolution
+from reporting.services.chat_messages import MessageTag, tag_message
 from reporting.services.chat_orchestrator import _Plan, _PlannedStep, _RouteDecision, _Verdict
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -77,6 +78,7 @@ class _OrchestratorFakeModel:
         self.stream_text = stream_text
         self.finish_reason = finish_reason
         self.astream_calls = 0
+        self.astream_inputs: list[Any] = []
 
     def with_structured_output(self, schema: type) -> _Structured:
         if schema is _RouteDecision:
@@ -93,6 +95,7 @@ class _OrchestratorFakeModel:
 
     async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
         self.astream_calls += 1
+        self.astream_inputs.append(_input)
         metadata = {"finish_reason": self.finish_reason} if self.finish_reason else {}
         if isinstance(self.stream_text, list):
             index = min(self.astream_calls - 1, len(self.stream_text) - 1)
@@ -1446,3 +1449,112 @@ async def test_disabled_orchestrator_uses_simple_path(mocker):
     assert "plan" not in detail_kinds and "routing" not in detail_kinds
     streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
     assert "simple reply" in streamed
+
+
+# --- Follow-up conversation context --------------------------------------------
+
+
+def _prior_turn() -> list[Any]:
+    return [
+        HumanMessage(content="give me a security overview"),
+        AIMessage(content="Top findings: CVE-2023-41419 on host-a and CVE-2024-3094 on host-b."),
+        HumanMessage(content="cross-check that against the graph"),
+    ]
+
+
+def test_conversation_context_carries_the_prior_turn_but_not_the_current_request():
+    context = chat_orchestrator._conversation_context(_prior_turn(), max_chars=4000)
+
+    # The referent the follow-up points at is what has to survive.
+    assert "CVE-2023-41419" in context
+    assert "Assistant:" in context and "User: give me a security overview" in context
+    # The current request reaches every node on its own; duplicating it here
+    # would just spend budget twice.
+    assert "cross-check that against the graph" not in context
+
+
+def test_conversation_context_is_empty_when_disabled():
+    assert chat_orchestrator._conversation_context(_prior_turn(), max_chars=0) == ""
+
+
+def test_conversation_context_keeps_the_newest_turns_within_the_cap():
+    messages: list[Any] = []
+    for index in range(6):
+        messages.append(HumanMessage(content=f"question {index}"))
+        messages.append(AIMessage(content=f"answer {index} " + "x" * 400))
+    messages.append(HumanMessage(content="follow-up"))
+
+    context = chat_orchestrator._conversation_context(messages, max_chars=1000)
+
+    assert len(context) <= 1000
+    # Newest kept, oldest shed: a back-reference almost always points at the
+    # turn immediately before it.
+    assert "answer 5" in context
+    assert "answer 0" not in context
+
+
+def test_conversation_context_skips_control_and_excluded_messages():
+    messages: list[Any] = [
+        HumanMessage(content="real request"),
+        AIMessage(content="real answer"),
+        tag_message(AIMessage(content="broken partial answer"), MessageTag.BROKEN),
+        HumanMessage(content="resume", additional_kwargs={"resume_confirmation_id": "c1"}),
+        ToolMessage(content="raw tool json", tool_call_id="t1"),
+        HumanMessage(content="the follow-up"),
+    ]
+
+    context = chat_orchestrator._conversation_context(messages, max_chars=4000)
+
+    assert "real answer" in context
+    assert "broken partial answer" not in context  # excluded from model context
+    assert "resume" not in context  # control directive, not conversation
+    assert "raw tool json" not in context  # execution scratch
+
+
+async def test_planner_sees_the_earlier_conversation_for_a_follow_up(mocker):
+    invoke = mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=ValueError("boom"),
+    )
+    mocker.patch("reporting.services.chat_orchestrator._list_chat_prompts", new_callable=AsyncMock, return_value=[])
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS", 4000)
+
+    await chat_orchestrator.planner_node(
+        {"messages": _prior_turn()},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    planner_input = invoke.await_args.args[1][-1].content
+    assert "CVE-2023-41419" in planner_input
+    assert "Current request: cross-check that against the graph" in planner_input
+
+
+async def test_worker_step_receives_the_earlier_conversation():
+    model = _OrchestratorFakeModel(stream_text="")
+    step = _step("s1", goal="Extract the CVE ids referenced in the previous turn")
+
+    await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        conversation_context="Assistant: Top findings: CVE-2023-41419 on host-a.",
+        model=model,
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[],
+        writer=lambda _event: None,
+    )
+
+    worker_prompt = model.astream_inputs[0][-1].content
+    assert "CVE-2023-41419" in worker_prompt
+    # Framed as background so the sub-agent does not answer the whole question.
+    assert "background, not your task" in worker_prompt
+
+
+def test_worker_user_message_omits_the_block_when_isolation_is_kept():
+    message = chat_orchestrator._worker_user_message(_step("s1"), "", "")
+
+    assert "Earlier conversation" not in message

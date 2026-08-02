@@ -603,6 +603,20 @@ CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES = int_env("CHAT_ORCHESTRATOR_WORKER_FI
 # means the synthesizer can still answer when a summary comes back thin. Set 0
 # to send summaries only (the pre-existing behavior).
 CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
+# Characters of earlier conversation given to the planner, so a follow-up whose
+# subject is a back-reference ("cross-check that", "which of those findings")
+# can be resolved into self-contained step goals. The orchestrated path is
+# otherwise built only from the latest user message, which leaves such a request
+# with no referent anywhere in the run. The planner makes one call per turn, so
+# this is charged once.
+CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS", 6_000)
+# The same conversation given to each sub-agent worker, for resolving references
+# in its step goal. Deliberately much tighter than the planner's: workers run in
+# parallel and each runs its own multi-call loop, so this is charged per step
+# per call, and a worker handed the whole transcript drifts toward answering the
+# user's overall question instead of its own step. Set 0 to restore strict
+# worker isolation (the pre-existing behavior).
+CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS", 2_000)
 # Per-turn chat orchestrator budget shared by interactive and automated runs.
 # The reserve is unavailable to normal planning/worker calls and is released
 # only for final summaries/synthesis.

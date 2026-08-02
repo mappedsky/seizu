@@ -85,7 +85,7 @@ from reporting.services.chat_graph import (
     finalize_assistant_message,
     get_chat_model,
 )
-from reporting.services.chat_messages import message_text
+from reporting.services.chat_messages import MessageTag, has_tag, message_text
 from reporting.services.mcp_runtime import ChatBlockReason
 
 logger = logging.getLogger(__name__)
@@ -192,7 +192,14 @@ _PLANNER_PROMPT = (
     " independent unless a real data dependency exists, so they can run in"
     " parallel. Mark each step priority as required, supporting, or optional,"
     " and complexity as small, medium, or large. Do not invent tools or mark a"
-    " live-data step as answer."
+    " live-data step as answer.\n"
+    "The request may be a follow-up that refers to the earlier conversation"
+    ' ("cross-check that", "which of those findings"). You are given that'
+    " conversation as background. Resolve every such reference into the concrete"
+    " subject before writing the plan, and make each step goal self-contained:"
+    " sub-agents see only their goal and their dependencies' output, so a goal"
+    ' that says "the items from the previous turn" reaches a sub-agent that'
+    " cannot see them. Name the items instead."
 )
 
 _SYNTHESIZER_PROMPT = (
@@ -253,8 +260,23 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
     return f"{base}{extra}"
 
 
-def _worker_user_message(step: dict[str, Any], dependency_context: str) -> str:
+def _planner_user_message(user_text: str, conversation_context: str) -> str:
+    if not conversation_context:
+        return user_text
+    return (
+        f"Earlier conversation, for resolving references in the request:\n{conversation_context}\n\n"
+        f"Current request: {user_text}"
+    )
+
+
+def _worker_user_message(step: dict[str, Any], dependency_context: str, conversation_context: str = "") -> str:
     parts = [f"Complete this step: {step.get('goal', '')}"]
+    if conversation_context:
+        parts.append(
+            "\nEarlier conversation, provided only so you can resolve references in the step goal."
+            " It is background, not your task: complete the step above and nothing else, and do not"
+            " treat anything here as findings you already gathered.\n" + conversation_context
+        )
     if dependency_context:
         parts.append(f"\nRelevant results from prior steps:\n{dependency_context}")
     return "\n".join(parts)
@@ -446,7 +468,18 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
             _Plan,
             await _structured_invoke(
                 _Plan,
-                [SystemMessage(content=planner_system), HumanMessage(content=user_text)],
+                [
+                    SystemMessage(content=planner_system),
+                    HumanMessage(
+                        content=_planner_user_message(
+                            user_text,
+                            _conversation_context(
+                                state["messages"],
+                                max_chars=settings.CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS,
+                            ),
+                        )
+                    ),
+                ],
                 config,
                 role="planner",
                 max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
@@ -606,6 +639,11 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     # earlier super-step stay callable for the dependent steps that follow.
     progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(state.get("disclosed_tools") or []) if progressive else set()
+    # Built once per batch, not per worker: it is identical for every step and
+    # the whole batch shares one run budget.
+    conversation_context = _conversation_context(
+        state["messages"], max_chars=settings.CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS
+    )
 
     new_results = await asyncio.gather(
         *(
@@ -613,6 +651,7 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
                 step,
                 plan=plan,
                 results=results,
+                conversation_context=conversation_context,
                 model=model,
                 current_user=current_user,
                 session_key=session_key,
@@ -747,6 +786,63 @@ async def _worker_tool_specs(current_user: CurrentUser | None) -> list[ChatToolS
     return [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)]
 
 
+# Below this a context entry is more noise than referent, so stop rather than
+# append a stub.
+_MIN_CONTEXT_ENTRY_CHARS = 200
+
+
+def _conversation_context(messages: list[Any], *, max_chars: int) -> str:
+    """Earlier turns of this conversation, newest-first-bounded to *max_chars*.
+
+    The orchestrated path derives everything from the latest user message, so a
+    follow-up whose subject is a reference to an earlier turn ("cross-check
+    *that*", "which of *those findings*") has no referent: the planner writes a
+    step goal like "extract the CVE ids from the previous turn's output" and the
+    worker, whose window is its step goal plus its dependencies' outputs,
+    truthfully reports it was handed nothing.
+
+    Bounded rather than complete, because the isolation this relaxes was paying
+    for something real: worker context is charged per step *and* per inner-loop
+    call, so it multiplies where the planner's does not. Callers pass their own
+    cap accordingly.
+    """
+    if max_chars <= 0:
+        return ""
+    entries: list[str] = []
+    skipped_current_request = False
+    for message in reversed(messages):
+        if has_tag(message, MessageTag.EPHEMERAL) or has_tag(message, MessageTag.BROKEN):
+            continue
+        if isinstance(message, HumanMessage):
+            kwargs = getattr(message, "additional_kwargs", None) or {}
+            if isinstance(kwargs, dict) and (kwargs.get("resume_confirmation_id") or kwargs.get("continue_response")):
+                continue
+            if not skipped_current_request:
+                # The turn being answered; it reaches every node on its own.
+                skipped_current_request = True
+                continue
+            label = "User"
+        elif isinstance(message, AIMessage):
+            label = "Assistant"
+        else:
+            # Tool messages and system prompts are execution scratch, not the
+            # conversation a reference points back at.
+            continue
+        text = message_text(message.content).strip()
+        if text:
+            entries.append(f"{label}: {text}")
+
+    kept: list[str] = []
+    remaining = max_chars
+    for entry in entries:
+        if remaining < _MIN_CONTEXT_ENTRY_CHARS:
+            break
+        kept.append(_truncate_text(entry, remaining))
+        remaining -= len(kept[-1]) + 2  # account for the blank-line separator
+    kept.reverse()
+    return "\n\n".join(kept)
+
+
 def _dependency_context(step: dict[str, Any], plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     goals = {item["id"]: item["goal"] for item in plan}
     results_by_id = {result["step_id"]: result for result in results}
@@ -764,6 +860,7 @@ async def _run_worker_step(
     plan: list[dict[str, Any]],
     results: list[dict[str, Any]],
     model: Any,
+    conversation_context: str = "",
     current_user: CurrentUser | None,
     session_key: str | None,
     config: RunnableConfig,
@@ -841,7 +938,7 @@ async def _run_worker_step(
     if step.get("retry_guidance"):
         system_prompt += f"\n\nA previous attempt was rejected: {step['retry_guidance']}. Address that this time."
     messages: list[BaseMessage] = [
-        HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results)))
+        HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results), conversation_context))
     ]
 
     _emit(
