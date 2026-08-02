@@ -1384,10 +1384,19 @@ async def _run_llm_tool_turn(
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
     leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
     provider_finish_reason = finish_reason or _chunk_finish_reason(merged)
+    # Derive the limit rather than take the argument, because callers that pass
+    # nothing are not unbounded: get_chat_model builds the model with
+    # CHAT_LLM_MAX_TOKENS, so the provider still cuts at that. Keying detection
+    # on the argument meant the main chat loop -- which passes none -- could
+    # never catch a provider reporting "stop" on a truncated response, which is
+    # the whole failure this check exists for.
+    effective_output_limit = max_output_tokens
+    if effective_output_limit is None and settings.CHAT_LLM_MAX_TOKENS > 0:
+        effective_output_limit = settings.CHAT_LLM_MAX_TOKENS
     effective_finish_reason = _effective_finish_reason(
         provider_finish_reason,
         output_tokens=output_tokens,
-        output_token_limit=max_output_tokens,
+        output_token_limit=effective_output_limit,
         usage_estimated=usage_estimated,
     )
 

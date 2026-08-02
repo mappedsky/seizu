@@ -27,6 +27,10 @@ class BudgetReservation:
     estimated_output_tokens: int
     estimated_cost_usd: float
     allow_reserve: bool
+    # Which bounded unit of work this belongs to (a plan step). Spend by any
+    # descendant -- notably a sandbox sub-agent, which reserves against the
+    # controller directly -- counts toward the same scope.
+    scope: str = ""
 
 
 def initial_budget_ledger() -> dict[str, Any]:
@@ -62,6 +66,29 @@ class BudgetController:
         self._ledger = dict(ledger or initial_budget_ledger())
         self._reservations: dict[str, BudgetReservation] = {}
         self._lock = asyncio.Lock()
+        # scope -> ceiling, and scope -> tokens committed. Held here rather than
+        # counted by the caller because steps run concurrently: a caller reading
+        # a snapshot before and after its own work would attribute a sibling's
+        # spend to itself, and miss its own sub-agents entirely.
+        self._scope_ceilings: dict[str, int] = {}
+        self._scope_spend: dict[str, int] = {}
+
+    def open_scope(self, scope: str, ceiling_tokens: int) -> None:
+        """Bound one unit of work, including anything it delegates to."""
+        if scope and ceiling_tokens > 0:
+            self._scope_ceilings[scope] = ceiling_tokens
+            self._scope_spend.setdefault(scope, 0)
+
+    def close_scope(self, scope: str) -> None:
+        self._scope_ceilings.pop(scope, None)
+        self._scope_spend.pop(scope, None)
+
+    def scope_spend(self, scope: str) -> int:
+        return int(self._scope_spend.get(scope, 0))
+
+    def scope_exhausted(self, scope: str) -> bool:
+        ceiling = self._scope_ceilings.get(scope)
+        return ceiling is not None and self.scope_spend(scope) >= ceiling
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._ledger)
@@ -115,6 +142,7 @@ class BudgetController:
         estimated_cost_usd: float = 0.0,
         allow_reserve: bool = False,
         phase: str = "unspecified",
+        scope: str = "",
     ) -> BudgetReservation:
         reservation = BudgetReservation(
             reservation_id=uuid.uuid4().hex,
@@ -123,11 +151,22 @@ class BudgetController:
             estimated_output_tokens=max(0, estimated_output_tokens),
             estimated_cost_usd=max(0.0, estimated_cost_usd),
             allow_reserve=allow_reserve,
+            scope=scope or current_budget_scope(),
         )
         async with self._lock:
             self._authorize_locked(reservation)
             self._reservations[reservation.reservation_id] = reservation
         return reservation
+
+    def ambient_scope(self) -> str:
+        """The scope a caller belongs to when it does not name one itself.
+
+        Every reservation made while a step is running should count toward that
+        step, whether it comes from the step's own loop or from something it
+        delegated to several layers down. Reading it here rather than threading
+        a parameter through every call site is what makes that hold by default.
+        """
+        return current_budget_scope()
 
     async def commit(
         self,
@@ -154,6 +193,8 @@ class BudgetController:
             phase_usage["llm_calls"] = int(phase_usage.get("llm_calls") or 0) + 1
             phases[reservation.phase] = phase_usage
             self._ledger["phases"] = phases
+            if reservation.scope in self._scope_spend:
+                self._scope_spend[reservation.scope] += max(0, input_tokens) + max(0, output_tokens)
             if usage_estimated:
                 self._ledger["usage_estimated"] = True
             self._refresh_mode_locked()
@@ -173,6 +214,14 @@ class BudgetController:
         self._ledger["exhaustion_reason"] = reason
 
     def _authorize_locked(self, reservation: BudgetReservation) -> None:
+        # Checked before `enabled`, and before the finalization gate, because a
+        # step ceiling bounds one step against its siblings rather than the run
+        # against itself: it must hold even where the run-level dimensions are
+        # all disabled, and a finalizing run's reserve is for the *run* to
+        # summarize, not for an over-budget step to keep working.
+        ceiling = self._scope_ceilings.get(reservation.scope)
+        if ceiling is not None and self._scope_spend.get(reservation.scope, 0) >= ceiling:
+            raise BudgetExceeded(f"Step {reservation.scope} reached its share of the run budget ({ceiling} tokens).")
         if not self.enabled:
             return
         if self.finalizing and not reservation.allow_reserve:
@@ -244,6 +293,18 @@ def set_current_budget_controller(controller: BudgetController | None) -> None:
 
 def current_budget_controller() -> BudgetController | None:
     return _current_budget_controller.get()
+
+
+_current_budget_scope: ContextVar[str] = ContextVar("_current_budget_scope", default="")
+
+
+def set_current_budget_scope(scope: str) -> None:
+    """Name the bounded unit of work that descendants' spend belongs to."""
+    _current_budget_scope.set(scope)
+
+
+def current_budget_scope() -> str:
+    return _current_budget_scope.get()
 
 
 def budget_controller_from_config(config: dict[str, Any]) -> BudgetController | None:

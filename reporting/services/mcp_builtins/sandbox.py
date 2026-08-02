@@ -384,6 +384,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         controller = chat_budget.current_budget_controller()
         if controller is None:
             return await self._model.ainvoke(normalized, config=config, **kwargs)
+        scope = chat_budget.current_budget_scope()
 
         # Every inner LLM call funnels through here, so this is the one place
         # the sandbox subagent's spend can be seen at all. Reserving (rather
@@ -391,10 +392,24 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         # delegating instead of continuing to spend invisibly.
         messages = normalized if isinstance(normalized, list) else []
         estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
+        estimated_output = settings.CHAT_LLM_MAX_TOKENS
         reservation = await controller.reserve(
             estimated_input_tokens=estimated_input,
-            estimated_output_tokens=settings.CHAT_LLM_MAX_TOKENS,
-            phase=_SANDBOX_BUDGET_PHASE,
+            estimated_output_tokens=estimated_output,
+            # Reserve the cost too, matching the outer LLM path. Without it a
+            # deployment budgeting on cost alone (CHAT_RUN_COST_BUDGET_USD with
+            # the token dimension disabled) authorizes every sandbox call at
+            # zero, so concurrent calls can overshoot the ceiling before any of
+            # them records what it spent.
+            estimated_cost_usd=chat_budget.usage_cost_usd(self._model, estimated_input, estimated_output),
+            # Scope, so this counts against the delegating step's ceiling. A
+            # step's own counter cannot see this spend -- it happens below the
+            # outer loop -- so without the scope a step could spend hundreds of
+            # thousands of tokens here while its local total stayed small, and
+            # starve every sibling step. Phase is a child of the scope so the
+            # ledger shows where it went.
+            scope=scope,
+            phase=f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE,
         )
         try:
             response = await self._model.ainvoke(normalized, config=config, **kwargs)

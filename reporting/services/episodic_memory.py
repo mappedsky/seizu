@@ -28,9 +28,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from reporting import settings
+from reporting.services.untrusted import untrusted_instruction, untrusted_text
 
 # Below this an entry is a stub rather than a recollection, so drop it instead.
 _MIN_ENTRY_CHARS = 120
+
+
+def _wrapper_overhead() -> int:
+    """Characters the security boundary itself costs, whatever it wraps."""
+    return len(f"{untrusted_instruction()}\n\n") + len(untrusted_text(""))
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,11 @@ class EpisodeLog:
         budget = settings.CHAT_EPISODIC_RECALL_MAX_CHARS if max_chars is None else max_chars
         if budget <= 0 or not self._episodes:
             return ""
+        # The boundary preamble and tags are context the caller pays for, so
+        # they come out of the budget rather than sitting on top of it.
+        budget -= _wrapper_overhead()
+        if budget < _MIN_ENTRY_CHARS:
+            return ""
         kept: list[str] = []
         remaining = budget
         for index, episode in enumerate(reversed(self._episodes), start=1):
@@ -77,11 +88,17 @@ class EpisodeLog:
                 break
             entry = f"{index}. Task: {episode.task}\n   Result: {episode.outcome}"
             if len(entry) > remaining:
-                entry = entry[:remaining].rstrip() + "…"
+                # Slice one short: the ellipsis is appended after the cut, so
+                # slicing to `remaining` yields remaining + 1 characters.
+                entry = entry[: remaining - 1].rstrip() + "…"
             kept.append(entry)
             remaining -= len(entry) + 2
         kept.reverse()
-        return "\n\n".join(kept)
+        # Fenced: an outcome is a sub-agent's report of what graph and tool data
+        # said, so it carries that data's content and can carry text shaped like
+        # an instruction with it. Replaying it into the next sub-agent's prompt
+        # is exactly where that would take effect.
+        return f"{untrusted_instruction()}\n\n" + untrusted_text("\n\n".join(kept))
 
 
 _current_episode_log: ContextVar[EpisodeLog | None] = ContextVar("_current_episode_log", default=None)

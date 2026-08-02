@@ -3576,3 +3576,44 @@ async def test_run_tool_call_interactive_keeps_confirmation_flow(mocker):
     assert kwargs["confirmation_source"] == "chat"
     assert kwargs["confirmation_session_key"] == "thread-1"
     assert "bypass_confirmations" not in kwargs
+
+
+async def test_chat_graph_detects_a_dishonest_stop_on_the_single_agent_path(mocker):
+    """Regression: detection only worked where a caller passed max_output_tokens.
+
+    chat_agent_node passes none, so on the main chat path a provider reporting
+    "stop" on a response it cut at max_tokens was believed -- the exact case the
+    check exists for. The limit is now derived from CHAT_LLM_MAX_TOKENS, which is
+    what get_chat_model builds the model with.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _DishonestModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(
+                content="answer cut off mid-",
+                # The provider claims a clean stop while reporting usage that
+                # exactly reaches the configured ceiling.
+                response_metadata={"finish_reason": "stop"},
+                usage_metadata={"input_tokens": 10, "output_tokens": 64, "total_tokens": 74},
+            )
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 64)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=_DishonestModel())
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="write a long answer")]},
+            {"configurable": {"thread_id": "thread-dishonest-stop", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    assert {"kind": "finish_reason", "finish_reason": "length"} in chunks
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "hit its output limit" in streamed

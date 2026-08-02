@@ -686,6 +686,43 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
     )
 
 
+# Keys under which a tool result carries its rows. ``graph__query`` returns
+# ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
+# same shape, so treating only a top-level list as rows meant the row cap never
+# applied to the tools most likely to return thousands of them.
+_ROW_KEYS = ("results", "rows", "records", "items", "data")
+
+
+def _payload_rows(payload: Any) -> list[Any] | None:
+    rows, _ = _payload_rows_and_key(payload)
+    return rows
+
+
+def _payload_rows_and_key(payload: Any) -> tuple[list[Any] | None, str | None]:
+    """The rows in a tool result, and the key holding them if it is a mapping."""
+    if isinstance(payload, list):
+        return payload, None
+    if isinstance(payload, dict):
+        for key in _ROW_KEYS:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value, key
+    return None, None
+
+
+def _rebuild(payload: Any, key: str | None, rows: list[Any], marker: dict[str, Any]) -> Any:
+    """Put capped rows back where they came from, keeping the rest of the payload.
+
+    A mapping result carries more than its rows -- ``graph__query`` returns
+    validator ``warnings`` alongside them -- and replacing the whole payload with
+    a bare rows envelope would discard that silently at exactly the moment the
+    caller is being told something was cut.
+    """
+    if key is None:
+        return {"results": rows, **marker}
+    return {**payload, key: rows, **marker}
+
+
 def _bounded_text_response(
     payload: Any,
     *,
@@ -700,11 +737,11 @@ def _bounded_text_response(
     nothing — only falling back to an error marker when not even one row fits
     (a single oversized row, or a non-list payload that can't be row-shed).
     """
-    rows = payload if isinstance(payload, list) else None
+    rows, row_key = _payload_rows_and_key(payload)
     capped: list[Any] | None
     if rows is not None and max_rows is not None and max_rows > 0 and len(rows) > max_rows:
         capped = rows[:max_rows]
-        bounded: Any = _row_limit_payload(capped, max_rows=max_rows)
+        bounded: Any = _rebuild(payload, row_key, capped, _row_limit_marker(max_rows=max_rows))
     else:
         capped = rows
         bounded = payload
@@ -717,19 +754,25 @@ def _bounded_text_response(
     if capped is None:
         return _emit(_byte_limit_error(max_bytes))
     total = len(rows) if rows is not None else len(capped)
-    keep = _rows_within_byte_budget(capped, total=total, max_bytes=max_bytes)
+    keep = _rows_within_byte_budget(capped, total=total, max_bytes=max_bytes, payload=payload, row_key=row_key)
     if keep <= 0:
         return _emit(_byte_limit_error(max_bytes))
-    return _emit(_byte_limit_payload(capped[:keep], total=total, returned=keep, max_bytes=max_bytes))
+    return _emit(
+        _rebuild(
+            payload,
+            row_key,
+            capped[:keep],
+            _byte_limit_marker(total=total, returned=keep, max_bytes=max_bytes),
+        )
+    )
 
 
-def _row_limit_payload(rows: list[Any], *, max_rows: int) -> dict[str, Any]:
-    return {"results": rows, "truncated": True, "truncated_reason": "row_limit", "max_rows": max_rows}
+def _row_limit_marker(*, max_rows: int) -> dict[str, Any]:
+    return {"truncated": True, "truncated_reason": "row_limit", "max_rows": max_rows}
 
 
-def _byte_limit_payload(rows: list[Any], *, total: int, returned: int, max_bytes: int) -> dict[str, Any]:
+def _byte_limit_marker(*, total: int, returned: int, max_bytes: int) -> dict[str, Any]:
     return {
-        "results": rows,
         "truncated": True,
         "truncated_reason": "byte_limit",
         "returned": returned,
@@ -747,16 +790,28 @@ def _byte_limit_error(max_bytes: int) -> dict[str, Any]:
     }
 
 
-def _rows_within_byte_budget(rows: list[Any], *, total: int, max_bytes: int) -> int:
-    """Largest k such that the byte-limit payload for rows[:k] fits max_bytes."""
+def _rows_within_byte_budget(
+    rows: list[Any],
+    *,
+    total: int,
+    max_bytes: int,
+    payload: Any = None,
+    row_key: str | None = None,
+) -> int:
+    """Largest k such that the emitted payload for rows[:k] fits max_bytes.
+
+    Sizes the payload as it will actually be emitted, siblings included: a
+    mapping result's other keys are part of what the caller receives, so
+    measuring a bare rows envelope would under-count and overshoot the budget.
+    """
     return largest_prefix_within_bytes(
         rows,
         max_bytes=max_bytes,
-        envelope=lambda values: _byte_limit_payload(
+        envelope=lambda values: _rebuild(
+            payload,
+            row_key,
             values,
-            total=total,
-            returned=len(values),
-            max_bytes=max_bytes,
+            _byte_limit_marker(total=total, returned=len(values), max_bytes=max_bytes),
         ),
         indent=2,
     )

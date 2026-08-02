@@ -1094,3 +1094,45 @@ async def test_bypass_confirmations_does_not_affect_interactive_path(mocker):
 
     assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
     assert json.loads(outcome.text)["confirmation_required"] is True
+
+
+# --- Row cap on nested payloads ------------------------------------------------
+
+
+def test_row_cap_applies_to_a_nested_results_payload():
+    """The reviewer's reproduction: 50,001 rows under max_rows=50,000 came back whole.
+
+    graph__query returns {"results": [...]}, and only a top-level list counted as
+    rows, so the cap never applied to the tools most likely to return thousands.
+    """
+    payload = {"results": [{"i": i} for i in range(50_001)], "warnings": ["w"]}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=50_000, max_bytes=None)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["results"]) == 50_000
+    assert decoded["truncated"] is True
+    assert decoded["truncated_reason"] == "row_limit"
+    # Siblings survive: dropping them would discard validator warnings at
+    # exactly the moment the caller is told something was cut.
+    assert decoded["warnings"] == ["w"]
+
+
+def test_row_cap_still_applies_to_a_top_level_list():
+    emitted = mcp_runtime._bounded_text_response([{"i": i} for i in range(50)], max_rows=10, max_bytes=None)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["results"]) == 10
+    assert decoded["truncated_reason"] == "row_limit"
+
+
+def test_byte_shedding_keeps_a_nested_payloads_siblings():
+    payload = {"results": [{"i": i, "pad": "x" * 200} for i in range(200)], "warnings": ["w"]}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=5_000)
+    decoded = json.loads(emitted[0].text)
+
+    assert decoded["truncated_reason"] == "byte_limit"
+    assert decoded["warnings"] == ["w"]
+    assert 0 < len(decoded["results"]) < 200
+    assert len(emitted[0].text.encode()) <= 5_000
