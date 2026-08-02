@@ -1056,7 +1056,7 @@ async def test_a_failed_inner_call_releases_its_reservation() -> None:
     await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, phase="after")
 
 
-# --- Bulk results via the sandbox filesystem ------------------------------------
+# --- Oversized results routed to the sandbox filesystem ------------------------
 
 
 def _rows_json(n: int) -> str:
@@ -1092,100 +1092,106 @@ async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "gr
     return tools[0]
 
 
-async def test_bulk_result_goes_to_a_file_and_only_a_receipt_returns(mocker) -> None:
-    backend = _make_fake_backend()
-    backend.write_file = AsyncMock(return_value="ok")
-    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
-
-    returned = await tool.coroutine(query="MATCH (c:CVE) RETURN c", save_to_path="/tmp/cves.json")
-
-    backend.write_file.assert_awaited_once()
-    written_path, written_body = backend.write_file.await_args.args
-    assert written_path == "/tmp/cves.json"
-    assert len(json.loads(written_body)["results"]) == 500  # full data reached the sandbox
-
-    receipt = json.loads(returned)
-    assert receipt["saved_to"] == "/tmp/cves.json"
-    assert receipt["rows"] == 500
-    assert receipt["columns"] == ["cve", "score"]
-    assert len(receipt["sample"]) == 2
-    # The whole point: the rows never entered the model's context.
-    assert len(returned) < 500
-
-
-async def test_file_bound_results_are_not_held_to_the_context_row_cap(mocker) -> None:
+async def test_a_result_over_the_row_cap_goes_to_a_file(mocker) -> None:
     backend = _make_fake_backend()
     backend.write_file = AsyncMock(return_value="ok")
     mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
-    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
+
+    returned = await tool.coroutine(query="MATCH (c:CVE) RETURN c")
+
+    written_path, written_body = backend.write_file.await_args.args
+    assert written_path.startswith("/tmp/seizu_results/graph__query_")
+    assert len(json.loads(written_body)["results"]) == 500  # all of it reached the sandbox
+
+    receipt = json.loads(returned)
+    assert receipt["status"] == "too_large_to_return"
+    assert receipt["rows"] == 500
+    assert receipt["columns"] == ["cve", "score"]
+    assert len(receipt["sample"]) == 2
+    assert "run_python" in receipt["next_step"]
+    assert len(returned) < 600  # the rows never entered the model's context
+
+
+async def test_a_result_over_the_byte_cap_goes_to_a_file(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100_000)
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(200))
+
+    returned = await tool.coroutine(query="q")
+
+    backend.write_file.assert_awaited_once()
+    assert json.loads(returned)["status"] == "too_large_to_return"
+
+
+async def test_a_result_that_fits_is_returned_unchanged(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
     tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
-    # Re-patch after building: the closure resolves the runtime at call time, so
-    # this is the mock the tool will actually reach.
+
+    returned = await tool.coroutine(query="q")
+
+    # Where the data fits, nothing about the old behaviour changes.
+    backend.write_file.assert_not_awaited()
+    assert len(json.loads(returned)["results"]) == 3
+
+
+async def test_the_agent_is_given_no_choice_about_the_file(mocker) -> None:
+    """The correction of the first attempt: routing is the system's decision.
+
+    Offered the choice, the model took it for every call, read none of the files
+    back, and re-queried instead at several times the spend.
+    """
+    backend = _make_fake_backend()
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+
+    properties = tool.args_schema.model_json_schema()["properties"]
+    assert set(properties) == {"query"}
+
+
+async def test_a_failed_write_falls_back_to_the_truncated_result(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(side_effect=RuntimeError("disk full"))
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
+
+    returned = await tool.coroutine(query="q")
+
+    # Exactly what would have happened without this path, so a write failure
+    # costs nothing beyond the rows that never fit anyway.
+    assert "CVE-2026-00000" in returned
+    assert "too_large_to_return" not in returned
+
+
+async def test_without_a_backend_the_context_caps_still_apply(mocker) -> None:
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+    tool = await _seizu_tool(None, mocker, result=_rows_json(3))
     call = mocker.patch(
         "reporting.services.mcp_runtime.call_tool_for_chat",
         new=AsyncMock(return_value=_outcome(_rows_json(3))),
     )
 
-    await tool.coroutine(query="q", save_to_path="/tmp/x.json")
-    assert call.await_args.kwargs["result_max_rows"] == 50_000
-
-    call.reset_mock()
     await tool.coroutine(query="q")
-    # Returned results still protect the context window they actually enter.
+
+    # Nowhere to put an oversized result, so do not fetch one.
     assert call.await_args.kwargs["result_max_rows"] == 100
 
 
-async def test_without_a_path_the_result_still_comes_back_inline(mocker) -> None:
+async def test_with_a_backend_the_fetch_is_raised_to_the_file_bounds(mocker) -> None:
     backend = _make_fake_backend()
-    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
     tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
-
-    returned = await tool.coroutine(query="q")
-
-    backend.write_file.assert_not_awaited()
-    assert len(json.loads(returned)["results"]) == 3
-
-
-async def test_a_failed_write_returns_the_data_rather_than_losing_the_call(mocker) -> None:
-    backend = _make_fake_backend()
-    backend.write_file = AsyncMock(side_effect=RuntimeError("disk full"))
-    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
-
-    returned = await tool.coroutine(query="q", save_to_path="/tmp/x.json")
-
-    assert "could not write" in returned
-    assert "CVE-2026-00000" in returned  # the answer survives, just expensively
-
-
-async def test_no_file_argument_is_offered_without_a_backend(mocker) -> None:
-    tool = await _seizu_tool(None, mocker, result=_rows_json(3))
-    assert "save_to_path" not in (tool.args_schema.model_json_schema()["properties"])
-
-
-async def test_a_tools_own_parameter_is_not_shadowed(mocker) -> None:
-    backend = _make_fake_backend()
-    mocker.patch(
-        "reporting.services.mcp_runtime.list_tools_for_user",
-        new=AsyncMock(
-            return_value=[
-                Tool(
-                    name="custom__export",
-                    description="x",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {"save_to_path": {"type": "string", "description": "the tool's own"}},
-                    },
-                )
-            ]
-        ),
-    )
     call = mocker.patch(
         "reporting.services.mcp_runtime.call_tool_for_chat",
-        new=AsyncMock(return_value=_outcome("done")),
+        new=AsyncMock(return_value=_outcome(_rows_json(3))),
     )
-    tools = await _build_seizu_tools(_current_user(), backend)
 
-    await tools[0].coroutine(save_to_path="/its/own/meaning")
+    await tool.coroutine(query="q")
 
-    # The tool's parameter reached the tool instead of being intercepted.
-    assert call.await_args.args[2] == {"save_to_path": "/its/own/meaning"}
+    # Whether a result is oversized cannot be known before fetching it.
+    assert call.await_args.kwargs["result_max_rows"] == 50_000

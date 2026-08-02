@@ -35,23 +35,32 @@ Alongside those five operations the inner agent gets the Seizu tools its user is
 entitled to (`graph__query`, user-defined toolset tools, and so on), so it can
 fetch data itself rather than having it relayed through `context`.
 
-Each of those tools accepts an optional **`save_to_path`**. Without it, the
-result comes back as the tool's return value — into the agent's context — and is
-bounded by `CHAT_TOOL_RESULT_MAX_ROWS`. With it, the full result is written to
-that path in the sandbox and the agent receives only a receipt: the path, byte
-size, row count, column names, and two sample rows.
+A result that fits is returned to the agent as it always was. A result **too
+large to return** — more rows than `CHAT_TOOL_RESULT_MAX_ROWS`, or more bytes
+than `SANDBOX_MAX_OUTPUT_BYTES` — is instead written to a file under
+`/tmp/seizu_results/` and replaced by a receipt: the path, byte size, row count,
+column names, and two sample rows, plus a note that the full data is in the
+file. The agent then processes it with `run_python`.
 
-Use `save_to_path` whenever the result is going to be computed over rather than
-read. Without it the only route from a query to `run_python` runs through the
-model: it must read every row out of its own context and re-emit them as a
-Python literal, so the data crosses the model twice and it hand-serializes in
-between — precisely the work the sandbox exists to avoid. Written results are
-also freed from the row cap, which protects a context window a file never
-touches; they are bounded instead by `SANDBOX_FILE_RESULT_MAX_ROWS` and
+This matters because the sandbox exists to handle data *as data*. Without the
+file path, the only route from a query to `run_python` runs through the model:
+it has to read every row out of its own context and re-emit them as a Python
+literal, so the data crosses the model twice and it hand-serializes in between.
+Oversized results also stop being silently capped at
+`CHAT_TOOL_RESULT_MAX_ROWS`, since the row cap protects a context window a file
+never enters; they are bounded instead by `SANDBOX_FILE_RESULT_MAX_ROWS` and
 `SANDBOX_FILE_RESULT_MAX_BYTES`.
 
-If the write fails, the tool returns the data inline with a warning rather than
-losing the call — the agent still gets its answer, just the expensive way.
+**Routing is decided by size, never by the agent.** An earlier version exposed a
+`save_to_path` argument and let the agent choose. Given the choice it wrote
+every result to a file — including schema lookups it needed to read — read none
+of them back, and re-ran the queries instead, at over four times the sandbox
+token spend. Because the trigger is size, a file now appears only where the
+alternative was a truncated result, so the file is strictly more than the agent
+would otherwise have received, and where a result fits nothing changes at all.
+
+If the write fails, the truncated result is returned instead — exactly what
+would have happened without this path.
 
 ### Adding a new backend
 

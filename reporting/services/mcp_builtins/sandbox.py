@@ -25,6 +25,7 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import uuid
@@ -115,16 +116,9 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     ]
 
 
-# Argument added to every Seizu tool exposed to the sub-agent. Distinctive
-# enough not to collide with a user-defined tool's own parameters; if one does
-# use this name, its parameter wins and the file path is not offered.
-_SAVE_TO_PATH_ARG = "save_to_path"
-_SAVE_TO_PATH_DESCRIPTION = (
-    "Optional sandbox file path (e.g. /tmp/cves.json). When set, the full result is written there and only a "
-    "short receipt is returned instead of the data. Use this whenever you intend to compute over the result "
-    "with run_python rather than read it yourself: it avoids pulling rows through your context and lets the "
-    "result exceed the row limit that applies to returned data."
-)
+# Where oversized results land in the sandbox. A fixed directory and a running
+# number keep paths predictable in a transcript.
+_RESULT_DIR = "/tmp/seizu_results"
 # Rows returned per sample in a receipt: enough to show the shape, not the data.
 _RECEIPT_SAMPLE_ROWS = 2
 
@@ -150,27 +144,35 @@ def _result_rows(text: str) -> list[Any] | None:
 
 
 def _file_result_receipt(path: str, text: str) -> str:
-    """Describe a result written to the sandbox instead of returning it.
+    """Describe a result too large to return, which was written to the sandbox.
 
     Carries shape (row count, columns, a couple of samples) so the agent can
-    write code against the file without having read it — which is the entire
-    point of writing it out rather than returning it.
+    write code against the file without having read it. The wording states the
+    situation rather than recommending a habit: this result *cannot* be
+    returned, so reading the file is the only way to see it, and re-running the
+    query will produce the same outcome.
     """
-    receipt: dict[str, Any] = {"saved_to": path, "bytes": len(text.encode())}
+    receipt: dict[str, Any] = {
+        "status": "too_large_to_return",
+        "saved_to": path,
+        "bytes": len(text.encode()),
+    }
     rows = _result_rows(text)
-    if rows is None:
-        receipt["note"] = "Result is not a row list; read the file to inspect it."
-        return json.dumps(receipt)
-    receipt["rows"] = len(rows)
-    columns: list[str] = []
-    for row in rows:
-        if isinstance(row, dict):
-            for key in row:
-                if key not in columns:
-                    columns.append(key)
-    if columns:
-        receipt["columns"] = columns
-    receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+    if rows is not None:
+        receipt["rows"] = len(rows)
+        columns: list[str] = []
+        for row in rows:
+            if isinstance(row, dict):
+                for key in row:
+                    if key not in columns:
+                        columns.append(key)
+        if columns:
+            receipt["columns"] = columns
+        receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+    receipt["next_step"] = (
+        f"The full result is in {path}; only the sample above was returned. Read or process the file with "
+        "run_python (e.g. json.load(open(path))). Re-running this call will return this same receipt."
+    )
     return json.dumps(receipt, default=str)
 
 
@@ -190,16 +192,20 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
     mutations stay with the outer chat agent where the user can approve them. The
     runtime also fail-closes if such a tool were somehow reached here.
 
-    Given a ``backend``, every tool also accepts ``save_to_path``, which writes
-    the full result into the sandbox filesystem and returns only a receipt. This
-    exists because the sandbox is for handling data *as data*: without it the
-    only route from a query to ``run_python`` is through the model, which must
-    read the rows out of its own context and re-emit them as a Python literal.
-    The data crosses the model twice and it hand-serializes in between — the work
-    an LLM is worst at, and the opposite of why the sandbox exists. Written
-    results skip both crossings, so they are also freed from
-    ``CHAT_TOOL_RESULT_MAX_ROWS``, which exists to protect a context window a
-    file never touches.
+    Given a ``backend``, a result too large to return is written into the
+    sandbox filesystem and replaced by a receipt describing it. The sandbox is
+    for handling data *as data*, but the only route from a query to
+    ``run_python`` otherwise runs through the model: it must read the rows out
+    of its own context and re-emit them as a Python literal, crossing the model
+    twice and hand-serializing in between.
+
+    The trigger is size and never the model's choice, which is the correction of
+    an earlier attempt that exposed the path as an argument for the agent to
+    set. Given the option it wrote everything to files, read none of them back,
+    and re-queried instead. Routing on size means a file appears only where the
+    result would otherwise have been truncated, so the file is strictly more
+    than the agent would have received — and where a result does fit, nothing
+    changes at all.
     """
     from pydantic import Field, create_model
 
@@ -216,6 +222,8 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
     seizu_tools = [t for t in all_tools if t.name != "sandbox__delegate"]
 
     _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
+    # Shared by every tool in this delegation so paths stay distinct.
+    _result_seq = itertools.count(1)
 
     result: list[Any] = []
     for tool in seizu_tools:
@@ -230,33 +238,24 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
                 fields[prop_name] = (py_type, Field(..., description=desc))
             else:
                 fields[prop_name] = (py_type | None, Field(None, description=desc))
-        # A tool that already defines this name keeps its own parameter; offering
-        # the file path would shadow it and silently change what the tool does.
-        offers_file_output = backend is not None and _SAVE_TO_PATH_ARG not in fields
-        if offers_file_output:
-            fields[_SAVE_TO_PATH_ARG] = (str | None, Field(None, description=_SAVE_TO_PATH_DESCRIPTION))
         args_schema = create_model("_Input", **fields) if fields else None
 
         tool_name = tool.name
 
-        async def call(_tool_name: str = tool_name, _to_file: bool = offers_file_output, **kwargs: Any) -> str:
+        async def call(_tool_name: str = tool_name, **kwargs: Any) -> str:
             from reporting import settings as _settings
             from reporting.services import mcp_runtime as _rt
 
-            save_to_path = str(kwargs.pop(_SAVE_TO_PATH_ARG, None) or "").strip() if _to_file else ""
-            # A result bound for a file never enters the model's context, so the
-            # context-shaped caps do not apply to it. The file caps are still
-            # finite: write_file takes a string, so the whole result materializes
-            # in this process before it reaches the sandbox.
-            if save_to_path:
-                max_rows = _settings.SANDBOX_FILE_RESULT_MAX_ROWS
-                max_bytes = _settings.SANDBOX_FILE_RESULT_MAX_BYTES
-            else:
-                # Bound the result the same way the outer chat agent does, then byte-
-                # cap as a final guard, so a large graph__query / user-tool result
-                # can't blow up the inner model's context (mirrors _build_sandbox_tools).
+            # Fetch to the file bounds when a sandbox exists, because whether a
+            # result is oversized cannot be known before fetching it, and the
+            # source caps would have already discarded the excess. Without a
+            # backend there is nowhere to put it, so keep the context caps.
+            if backend is None:
                 max_rows = _settings.CHAT_TOOL_RESULT_MAX_ROWS
                 max_bytes = _settings.CHAT_TOOL_RESULT_MAX_BYTES
+            else:
+                max_rows = max(_settings.CHAT_TOOL_RESULT_MAX_ROWS, _settings.SANDBOX_FILE_RESULT_MAX_ROWS)
+                max_bytes = max(_settings.CHAT_TOOL_RESULT_MAX_BYTES, _settings.SANDBOX_FILE_RESULT_MAX_BYTES)
 
             outcome = await _rt.call_tool_for_chat(
                 current_user,
@@ -270,18 +269,32 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
             if outcome.blocked:
                 return f"[blocked: {outcome.blocked}]"
             text = outcome.text or "(no output)"
-            if not save_to_path:
+
+            # The trigger is size, not the model's choice. An earlier version
+            # offered the agent a save_to_path argument and let it decide; it
+            # then used it for all 233 calls of a measured run -- including
+            # schema lookups it needed to read -- read none of the files back,
+            # and re-queried instead, at 4.4x the sandbox spend. Routing on size
+            # removes the decision: a file appears only where the alternative
+            # was a truncated result, so reading it is strictly better than what
+            # the agent would otherwise have had.
+            rows = _result_rows(text)
+            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
+                rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
+            )
+            if backend is None or not oversized:
                 return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
-            assert backend is not None  # offers_file_output implies a backend
+
+            path = f"{_RESULT_DIR}/{_tool_name}_{next(_result_seq):03d}.json"
             try:
-                await backend.write_file(save_to_path, text)
-            except Exception as exc:
-                # Fall back to returning the data rather than losing the call: the
-                # agent still gets its answer, just the expensive way.
-                logger.warning("sandbox: could not write %s result to %s", _tool_name, save_to_path, exc_info=True)
-                capped = _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
-                return f"[could not write to {save_to_path}: {exc}; returning the result instead]\n{capped}"
-            return _file_result_receipt(save_to_path, text)
+                await backend.write_file(path, text)
+            except Exception:
+                # Returning the truncated result is exactly what would have
+                # happened without this path, so a write failure costs nothing
+                # beyond the rows that never fit.
+                logger.warning("sandbox: could not write %s result to %s", _tool_name, path, exc_info=True)
+                return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
+            return _file_result_receipt(path, text)
 
         result.append(
             StructuredTool.from_function(
