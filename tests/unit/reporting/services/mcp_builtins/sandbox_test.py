@@ -1,6 +1,8 @@
 """Tests for the ``sandbox__delegate`` MCP built-in."""
 
+import json
 from contextlib import ExitStack, asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1052,3 +1054,138 @@ async def test_a_failed_inner_call_releases_its_reservation() -> None:
     # A leaked reservation would permanently shrink the run's headroom.
     assert controller.snapshot()["llm_calls"] == 0
     await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, phase="after")
+
+
+# --- Bulk results via the sandbox filesystem ------------------------------------
+
+
+def _rows_json(n: int) -> str:
+    return json.dumps({"results": [{"cve": f"CVE-2026-{i:05d}", "score": 7.5} for i in range(n)]})
+
+
+def _outcome(text: str) -> Any:
+    return SimpleNamespace(blocked=None, text=text)
+
+
+async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "graph__query") -> Any:
+    mocker.patch(
+        "reporting.services.mcp_runtime.list_tools_for_user",
+        new=AsyncMock(
+            return_value=[
+                Tool(
+                    name=name,
+                    description="Run a query",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "description": "cypher"}},
+                        "required": ["query"],
+                    },
+                )
+            ]
+        ),
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome(result)),
+    )
+    tools = await _build_seizu_tools(_current_user(), backend)
+    return tools[0]
+
+
+async def test_bulk_result_goes_to_a_file_and_only_a_receipt_returns(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
+
+    returned = await tool.coroutine(query="MATCH (c:CVE) RETURN c", save_to_path="/tmp/cves.json")
+
+    backend.write_file.assert_awaited_once()
+    written_path, written_body = backend.write_file.await_args.args
+    assert written_path == "/tmp/cves.json"
+    assert len(json.loads(written_body)["results"]) == 500  # full data reached the sandbox
+
+    receipt = json.loads(returned)
+    assert receipt["saved_to"] == "/tmp/cves.json"
+    assert receipt["rows"] == 500
+    assert receipt["columns"] == ["cve", "score"]
+    assert len(receipt["sample"]) == 2
+    # The whole point: the rows never entered the model's context.
+    assert len(returned) < 500
+
+
+async def test_file_bound_results_are_not_held_to_the_context_row_cap(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+    # Re-patch after building: the closure resolves the runtime at call time, so
+    # this is the mock the tool will actually reach.
+    call = mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome(_rows_json(3))),
+    )
+
+    await tool.coroutine(query="q", save_to_path="/tmp/x.json")
+    assert call.await_args.kwargs["result_max_rows"] == 50_000
+
+    call.reset_mock()
+    await tool.coroutine(query="q")
+    # Returned results still protect the context window they actually enter.
+    assert call.await_args.kwargs["result_max_rows"] == 100
+
+
+async def test_without_a_path_the_result_still_comes_back_inline(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+
+    returned = await tool.coroutine(query="q")
+
+    backend.write_file.assert_not_awaited()
+    assert len(json.loads(returned)["results"]) == 3
+
+
+async def test_a_failed_write_returns_the_data_rather_than_losing_the_call(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(side_effect=RuntimeError("disk full"))
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+
+    returned = await tool.coroutine(query="q", save_to_path="/tmp/x.json")
+
+    assert "could not write" in returned
+    assert "CVE-2026-00000" in returned  # the answer survives, just expensively
+
+
+async def test_no_file_argument_is_offered_without_a_backend(mocker) -> None:
+    tool = await _seizu_tool(None, mocker, result=_rows_json(3))
+    assert "save_to_path" not in (tool.args_schema.model_json_schema()["properties"])
+
+
+async def test_a_tools_own_parameter_is_not_shadowed(mocker) -> None:
+    backend = _make_fake_backend()
+    mocker.patch(
+        "reporting.services.mcp_runtime.list_tools_for_user",
+        new=AsyncMock(
+            return_value=[
+                Tool(
+                    name="custom__export",
+                    description="x",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"save_to_path": {"type": "string", "description": "the tool's own"}},
+                    },
+                )
+            ]
+        ),
+    )
+    call = mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome("done")),
+    )
+    tools = await _build_seizu_tools(_current_user(), backend)
+
+    await tools[0].coroutine(save_to_path="/its/own/meaning")
+
+    # The tool's parameter reached the tool instead of being intercepted.
+    assert call.await_args.args[2] == {"save_to_path": "/its/own/meaning"}

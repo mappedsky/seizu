@@ -25,6 +25,7 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Any
@@ -114,7 +115,66 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     ]
 
 
-async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
+# Argument added to every Seizu tool exposed to the sub-agent. Distinctive
+# enough not to collide with a user-defined tool's own parameters; if one does
+# use this name, its parameter wins and the file path is not offered.
+_SAVE_TO_PATH_ARG = "save_to_path"
+_SAVE_TO_PATH_DESCRIPTION = (
+    "Optional sandbox file path (e.g. /tmp/cves.json). When set, the full result is written there and only a "
+    "short receipt is returned instead of the data. Use this whenever you intend to compute over the result "
+    "with run_python rather than read it yourself: it avoids pulling rows through your context and lets the "
+    "result exceed the row limit that applies to returned data."
+)
+# Rows returned per sample in a receipt: enough to show the shape, not the data.
+_RECEIPT_SAMPLE_ROWS = 2
+
+
+def _result_rows(text: str) -> list[Any] | None:
+    """Best-effort row list from a tool result, for describing it in a receipt.
+
+    Tool results are strings by contract, so this parses rather than assumes.
+    Returning ``None`` simply means the receipt describes bytes instead of rows.
+    """
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("results", "rows", "records", "items", "data"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                return value
+    return None
+
+
+def _file_result_receipt(path: str, text: str) -> str:
+    """Describe a result written to the sandbox instead of returning it.
+
+    Carries shape (row count, columns, a couple of samples) so the agent can
+    write code against the file without having read it — which is the entire
+    point of writing it out rather than returning it.
+    """
+    receipt: dict[str, Any] = {"saved_to": path, "bytes": len(text.encode())}
+    rows = _result_rows(text)
+    if rows is None:
+        receipt["note"] = "Result is not a row list; read the file to inspect it."
+        return json.dumps(receipt)
+    receipt["rows"] = len(rows)
+    columns: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            for key in row:
+                if key not in columns:
+                    columns.append(key)
+    if columns:
+        receipt["columns"] = columns
+    receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+    return json.dumps(receipt, default=str)
+
+
+async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend | None = None) -> list[Any]:
     """Build LangChain StructuredTools wrapping the Seizu MCP tools the sandbox
     inner agent may call.
 
@@ -129,6 +189,17 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
     drive the interactive, session-scoped confirmation round-trip, so gated
     mutations stay with the outer chat agent where the user can approve them. The
     runtime also fail-closes if such a tool were somehow reached here.
+
+    Given a ``backend``, every tool also accepts ``save_to_path``, which writes
+    the full result into the sandbox filesystem and returns only a receipt. This
+    exists because the sandbox is for handling data *as data*: without it the
+    only route from a query to ``run_python`` is through the model, which must
+    read the rows out of its own context and re-emit them as a Python literal.
+    The data crosses the model twice and it hand-serializes in between — the work
+    an LLM is worst at, and the opposite of why the sandbox exists. Written
+    results skip both crossings, so they are also freed from
+    ``CHAT_TOOL_RESULT_MAX_ROWS``, which exists to protect a context window a
+    file never touches.
     """
     from pydantic import Field, create_model
 
@@ -159,13 +230,33 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
                 fields[prop_name] = (py_type, Field(..., description=desc))
             else:
                 fields[prop_name] = (py_type | None, Field(None, description=desc))
+        # A tool that already defines this name keeps its own parameter; offering
+        # the file path would shadow it and silently change what the tool does.
+        offers_file_output = backend is not None and _SAVE_TO_PATH_ARG not in fields
+        if offers_file_output:
+            fields[_SAVE_TO_PATH_ARG] = (str | None, Field(None, description=_SAVE_TO_PATH_DESCRIPTION))
         args_schema = create_model("_Input", **fields) if fields else None
 
         tool_name = tool.name
 
-        async def call(_tool_name: str = tool_name, **kwargs: Any) -> str:
+        async def call(_tool_name: str = tool_name, _to_file: bool = offers_file_output, **kwargs: Any) -> str:
             from reporting import settings as _settings
             from reporting.services import mcp_runtime as _rt
+
+            save_to_path = str(kwargs.pop(_SAVE_TO_PATH_ARG, None) or "").strip() if _to_file else ""
+            # A result bound for a file never enters the model's context, so the
+            # context-shaped caps do not apply to it. The file caps are still
+            # finite: write_file takes a string, so the whole result materializes
+            # in this process before it reaches the sandbox.
+            if save_to_path:
+                max_rows = _settings.SANDBOX_FILE_RESULT_MAX_ROWS
+                max_bytes = _settings.SANDBOX_FILE_RESULT_MAX_BYTES
+            else:
+                # Bound the result the same way the outer chat agent does, then byte-
+                # cap as a final guard, so a large graph__query / user-tool result
+                # can't blow up the inner model's context (mirrors _build_sandbox_tools).
+                max_rows = _settings.CHAT_TOOL_RESULT_MAX_ROWS
+                max_bytes = _settings.CHAT_TOOL_RESULT_MAX_BYTES
 
             outcome = await _rt.call_tool_for_chat(
                 current_user,
@@ -173,15 +264,24 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
                 kwargs,
                 gate_permission=Permission.CHAT_TOOLS_CALL,
                 chat_safe_only=True,
-                # Bound the result the same way the outer chat agent does, then byte-
-                # cap as a final guard, so a large graph__query / user-tool result
-                # can't blow up the inner model's context (mirrors _build_sandbox_tools).
-                result_max_rows=_settings.CHAT_TOOL_RESULT_MAX_ROWS,
-                result_max_bytes=_settings.CHAT_TOOL_RESULT_MAX_BYTES,
+                result_max_rows=max_rows,
+                result_max_bytes=max_bytes,
             )
             if outcome.blocked:
                 return f"[blocked: {outcome.blocked}]"
-            return _truncate_bytes(outcome.text or "(no output)", _settings.SANDBOX_MAX_OUTPUT_BYTES)
+            text = outcome.text or "(no output)"
+            if not save_to_path:
+                return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
+            assert backend is not None  # offers_file_output implies a backend
+            try:
+                await backend.write_file(save_to_path, text)
+            except Exception as exc:
+                # Fall back to returning the data rather than losing the call: the
+                # agent still gets its answer, just the expensive way.
+                logger.warning("sandbox: could not write %s result to %s", _tool_name, save_to_path, exc_info=True)
+                capped = _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
+                return f"[could not write to {save_to_path}: {exc}; returning the result instead]\n{capped}"
+            return _file_result_receipt(save_to_path, text)
 
         result.append(
             StructuredTool.from_function(
@@ -487,7 +587,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         async with open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
             tools = _build_sandbox_tools(backend)
             if current_user is not None:
-                tools = [*tools, *await _build_seizu_tools(current_user)]
+                tools = [*tools, *await _build_seizu_tools(current_user, backend)]
             tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
             model = _get_sandbox_model()
             agent = create_react_agent(model=model, tools=tools)

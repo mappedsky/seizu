@@ -780,6 +780,14 @@ SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+# Caps for a sub-agent tool result written to a sandbox file rather than
+# returned. Far larger than the in-context caps because the context window they
+# protect is not involved: the agent computes over the file with run_python and
+# never reads the rows itself. Still finite -- write_file takes a string, so the
+# whole result materializes in the Seizu process before reaching the sandbox,
+# and an unbounded query would be a memory event here rather than there.
+SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
 # LiteLLM model id for the sandbox subagent.  Empty → inherits CHAT_LLM_MODEL.
 # Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.

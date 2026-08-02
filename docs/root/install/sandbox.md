@@ -29,6 +29,30 @@ The `SandboxBackend` protocol (`reporting/services/mcp_builtins/sandbox.py`) def
 
 These names and descriptions are fixed regardless of which backend is active, so the inner agent's behaviour is consistent across providers.
 
+### Getting data into the sandbox
+
+Alongside those five operations the inner agent gets the Seizu tools its user is
+entitled to (`graph__query`, user-defined toolset tools, and so on), so it can
+fetch data itself rather than having it relayed through `context`.
+
+Each of those tools accepts an optional **`save_to_path`**. Without it, the
+result comes back as the tool's return value — into the agent's context — and is
+bounded by `CHAT_TOOL_RESULT_MAX_ROWS`. With it, the full result is written to
+that path in the sandbox and the agent receives only a receipt: the path, byte
+size, row count, column names, and two sample rows.
+
+Use `save_to_path` whenever the result is going to be computed over rather than
+read. Without it the only route from a query to `run_python` runs through the
+model: it must read every row out of its own context and re-emit them as a
+Python literal, so the data crosses the model twice and it hand-serializes in
+between — precisely the work the sandbox exists to avoid. Written results are
+also freed from the row cap, which protects a context window a file never
+touches; they are bounded instead by `SANDBOX_FILE_RESULT_MAX_ROWS` and
+`SANDBOX_FILE_RESULT_MAX_BYTES`.
+
+If the write fails, the tool returns the data inline with a warning rather than
+losing the call — the agent still gets its answer, just the expensive way.
+
 ### Adding a new backend
 
 Implement `SandboxBackend` and open it inside `_open_backend`:
@@ -71,6 +95,8 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_ALLOW_INTERNET` | `false` | Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access. |
 | `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
+| `SANDBOX_FILE_RESULT_MAX_ROWS` | `50000` | Row cap for a Seizu tool result written to a sandbox file via `save_to_path` rather than returned. Much higher than `CHAT_TOOL_RESULT_MAX_ROWS`, which protects a context window a file never enters. |
+| `SANDBOX_FILE_RESULT_MAX_BYTES` | `10000000` | Byte cap for the same. Finite because the result materializes in the Seizu process before reaching the sandbox. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |
 
 ## Other sandbox consumers
