@@ -104,11 +104,14 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAT_RUN_TOKEN_BUDGET` | `120000` | Per-run token budget; `0` disables this dimension. |
+| `CHAT_RUN_TOKEN_BUDGET` | `400000` | Per-run token budget; `0` disables this dimension. Includes sandbox sub-agent spend, which is typically 70-85% of a delegating turn — lower it if the sandbox is disabled or rarely used. |
 | `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
+| `CHAT_EPISODIC_RECALL_MAX_CHARS` | `4000` | Results carried from earlier sandbox delegations into the next one's prompt, so each fresh sub-agent does not re-derive what the last one found; `0` disables. |
+| `CHAT_EPISODIC_MAX_ENTRIES` | `20` | Delegation results retained before the oldest are shed. |
+| `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `3.0` | Multiple of the planner's per-step token estimate at which a step is stopped and asked to summarize. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_WORKER_MODEL` | `""` | Optional worker model override. |
 | `CHAT_LLM_VERIFIER_MODEL` | `""` | Optional verifier model override. |

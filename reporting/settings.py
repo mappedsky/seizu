@@ -649,7 +649,13 @@ CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_C
 # only for final summaries/synthesis.
 # A zero token or cost limit disables that dimension; the LLM-call ceiling
 # remains an emergency loop guard.
-CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 120_000)
+# Sized to cover sandbox sub-agent spend, which this budget now includes. Before
+# that spend was metered, a delegating turn billed only its outer loop -- two
+# measured turns put the sandbox at 69% and 84% of real usage -- so the previous
+# 120k default was, for such turns, closer to 400k in practice. Lower it if
+# delegation is disabled or rare; a turn that never delegates spends the same as
+# it always did.
+CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 400_000)
 CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 0.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
