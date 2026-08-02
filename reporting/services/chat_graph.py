@@ -36,7 +36,14 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
-from reporting.services import action_confirmations, episodic_memory, mcp_builtins, mcp_runtime, report_store
+from reporting.services import (
+    action_confirmations,
+    chat_budget,
+    episodic_memory,
+    mcp_builtins,
+    mcp_runtime,
+    report_store,
+)
 from reporting.services.chat_budget import (
     BudgetExceeded,
     budget_controller_from_config,
@@ -406,6 +413,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # same shape as an orchestrator step: many tool calls, each spawning a
     # subagent that would otherwise start cold. One log per turn.
     episodic_memory.start_episode_log()
+    chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
     messages = _llm_context_messages(state["messages"])
     model = get_chat_model()

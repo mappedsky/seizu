@@ -5,13 +5,15 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from mcp.types import Tool
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
-from reporting.services import episodic_memory
+from reporting.services import chat_budget, episodic_memory
+from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
@@ -957,3 +959,96 @@ async def test_delegation_works_with_no_ambient_log() -> None:
         result = await _handle_delegate({"task": "do a thing"}, _current_user())
 
     assert result["result"] == "done"
+
+
+# --- Sandbox spend metering ----------------------------------------------------
+
+
+class _MeteredModel:
+    """Records usage the way a real provider does."""
+
+    def __init__(self, *, input_tokens: int = 500, output_tokens: int = 100) -> None:
+        self.calls = 0
+        self.usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+
+    def bind_tools(self, _tools: Any, **_kw: Any) -> "_MeteredModel":
+        return self
+
+    async def ainvoke(self, _input: Any, config: Any = None, **_kw: Any) -> Any:
+        self.calls += 1
+        return AIMessage(content="inner answer", usage_metadata=self.usage)
+
+
+async def test_sandbox_subagent_spend_reaches_the_run_ledger() -> None:
+    """Regression: inner calls used to bill nobody, so a delegation-heavy turn
+    reported a comfortable ledger while making thousands of LLM calls."""
+    controller = BudgetController(initial_budget_ledger())
+    wrapped = _ToolMessageNormalizingModel(_MeteredModel(input_tokens=500, output_tokens=100))
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        await wrapped.ainvoke([HumanMessage(content="do a thing")])
+        await wrapped.ainvoke([HumanMessage(content="do another")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    ledger = controller.snapshot()
+    assert ledger["total_tokens"] == 2 * 600
+    assert ledger["llm_calls"] == 2
+    # Billed to its own phase so sandbox spend is legible next to the outer loop.
+    assert ledger["phases"]["sandbox_subagent"]["total_tokens"] == 1200
+
+
+async def test_sandbox_subagent_stops_when_the_run_budget_is_spent() -> None:
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 2_000, "reserve_tokens": 0, "max_llm_calls": 0})
+    controller = BudgetController(ledger)
+    model = _MeteredModel(input_tokens=800, output_tokens=200)
+    wrapped = _ToolMessageNormalizingModel(model)
+
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        with pytest.raises(BudgetExceeded):
+            for _ in range(20):
+                await wrapped.ainvoke([HumanMessage(content="keep going")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    # It stopped rather than spending indefinitely.
+    assert model.calls < 20
+
+
+async def test_sandbox_metering_is_inert_without_a_controller() -> None:
+    model = _MeteredModel()
+    wrapped = _ToolMessageNormalizingModel(model)
+    chat_budget.set_current_budget_controller(None)
+
+    result = await wrapped.ainvoke([HumanMessage(content="no ledger here")])
+
+    assert result.content == "inner answer"
+    assert model.calls == 1
+
+
+async def test_a_failed_inner_call_releases_its_reservation() -> None:
+    class _Boom:
+        def bind_tools(self, _tools: Any, **_kw: Any) -> "_Boom":
+            return self
+
+        async def ainvoke(self, _input: Any, config: Any = None, **_kw: Any) -> Any:
+            raise RuntimeError("provider down")
+
+    controller = BudgetController(initial_budget_ledger())
+    wrapped = _ToolMessageNormalizingModel(_Boom())
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        with pytest.raises(RuntimeError):
+            await wrapped.ainvoke([HumanMessage(content="x")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    # A leaked reservation would permanently shrink the run's headroom.
+    assert controller.snapshot()["llm_calls"] == 0
+    await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, phase="after")

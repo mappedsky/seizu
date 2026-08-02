@@ -35,15 +35,18 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt import create_react_agent
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import episodic_memory
+from reporting.services import chat_budget, episodic_memory
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
 
 GROUP = "sandbox"
+# Distinct ledger phase so sandbox spend is legible next to the outer loop.
+_SANDBOX_BUDGET_PHASE = "sandbox_subagent"
 
 
 _INPUT_SCHEMA: dict[str, Any] = {
@@ -243,7 +246,43 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         return self._model.invoke(self._normalize(input), config, **kwargs)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
-        return await self._model.ainvoke(self._normalize(input), config=config, **kwargs)
+        normalized = self._normalize(input)
+        controller = chat_budget.current_budget_controller()
+        if controller is None:
+            return await self._model.ainvoke(normalized, config=config, **kwargs)
+
+        # Every inner LLM call funnels through here, so this is the one place
+        # the sandbox subagent's spend can be seen at all. Reserving (rather
+        # than only recording afterwards) is what makes an exhausted run stop
+        # delegating instead of continuing to spend invisibly.
+        messages = normalized if isinstance(normalized, list) else []
+        estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
+        reservation = await controller.reserve(
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=settings.CHAT_LLM_MAX_TOKENS,
+            phase=_SANDBOX_BUDGET_PHASE,
+        )
+        try:
+            response = await self._model.ainvoke(normalized, config=config, **kwargs)
+        except Exception:
+            await controller.release(reservation)
+            raise
+        usage = getattr(response, "usage_metadata", None) or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        estimated = not (input_tokens or output_tokens)
+        if estimated:
+            # No provider usage: bill the estimate rather than nothing, so an
+            # unreported call still moves the ledger.
+            input_tokens, output_tokens = estimated_input, 0
+        await controller.commit(
+            reservation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=chat_budget.usage_cost_usd(self._model, input_tokens, output_tokens),
+            usage_estimated=estimated,
+        )
+        return response
 
 
 def _get_sandbox_model() -> "_ToolMessageNormalizingModel":

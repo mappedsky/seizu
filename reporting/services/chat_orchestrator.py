@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_graph, episodic_memory, mcp_builtins
+from reporting.services import chat_budget, chat_graph, episodic_memory, mcp_builtins
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -969,6 +969,9 @@ async def _run_worker_step(
     budget_exhausted = False
     step_budget = int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
     controller = _budget_controller(config)
+    # Sub-agents reached through the built-in interface get no config, so the
+    # ledger has to travel by context or their spend bills nobody.
+    chat_budget.set_current_budget_controller(controller)
     action_limit = (
         None if controller is not None and controller.enabled else settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS
     )

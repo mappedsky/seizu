@@ -3,6 +3,7 @@
 import asyncio
 import math
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -223,6 +224,26 @@ class BudgetController:
             self.mark_exhausted("The run exhausted its cost budget.")
         elif max_calls and int(self._ledger["llm_calls"]) >= max_calls:
             self.mark_exhausted("The run exhausted its LLM-call budget.")
+
+
+_current_budget_controller: ContextVar[BudgetController | None] = ContextVar("_current_budget_controller", default=None)
+
+
+def set_current_budget_controller(controller: BudgetController | None) -> None:
+    """Publish the run's ledger to code that cannot be handed the graph config.
+
+    Sub-agents reached through the MCP built-in interface get ``(args,
+    current_user)`` and nothing else, so there is no parameter by which the
+    controller could travel. Without this their model calls bill nobody: the
+    sandbox subagent builds its own model and runs outside
+    ``_run_llm_tool_turn``, and one measured turn made 2,001 inner tool calls
+    while the ledger reported 37,535 tokens in "normal" mode.
+    """
+    _current_budget_controller.set(controller)
+
+
+def current_budget_controller() -> BudgetController | None:
+    return _current_budget_controller.get()
 
 
 def budget_controller_from_config(config: dict[str, Any]) -> BudgetController | None:
