@@ -607,6 +607,16 @@ CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACT
 # under-estimated. Without a ceiling one step can consume the whole run budget
 # and starve every step after it.
 CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 3.0)
+# Episodic recall between sub-agents within one step. Each sandbox__delegate
+# call runs a fresh subagent that knows nothing of the previous one, so without
+# this they re-derive the same ground -- one observed step made 136 delegations
+# and 678 graph queries answering a question about eight CVEs. Entries are the
+# prior sub-agents' own task/outcome pairs, replayed into the next one's prompt.
+# Set the recall budget to 0 to disable.
+CHAT_EPISODIC_RECALL_MAX_CHARS = int_env("CHAT_EPISODIC_RECALL_MAX_CHARS", 4_000)
+# Entries retained before the oldest are shed. Bounds memory and keeps recall
+# relevant: recent sub-agents cover ground the next one is likeliest to repeat.
+CHAT_EPISODIC_MAX_ENTRIES = int_env("CHAT_EPISODIC_MAX_ENTRIES", 20)
 # Corrective retries when a worker ends a turn without calling the sentinel that
 # submits its step result. A step ends on that explicit call, never on the model
 # simply going quiet, so a plain-text turn is a protocol violation the worker

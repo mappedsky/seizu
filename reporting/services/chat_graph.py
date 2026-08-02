@@ -36,7 +36,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
-from reporting.services import action_confirmations, mcp_builtins, mcp_runtime, report_store
+from reporting.services import action_confirmations, episodic_memory, mcp_builtins, mcp_runtime, report_store
 from reporting.services.chat_budget import (
     BudgetExceeded,
     budget_controller_from_config,
@@ -402,6 +402,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         return await _resume_confirmed_tool_turn(state, config, current_user, resume_confirmation_id)
     if provider == "mock":
         return await mock_agent_node(state, config)
+    # The single-agent path reaches sandbox__delegate too, and its loop is the
+    # same shape as an orchestrator step: many tool calls, each spawning a
+    # subagent that would otherwise start cold. One log per turn.
+    episodic_memory.start_episode_log()
 
     messages = _llm_context_messages(state["messages"])
     model = get_chat_model()

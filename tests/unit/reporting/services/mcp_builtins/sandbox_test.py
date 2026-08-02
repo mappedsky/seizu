@@ -1,6 +1,6 @@
 """Tests for the ``sandbox__delegate`` MCP built-in."""
 
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +11,7 @@ from mcp.types import Tool
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
+from reporting.services import episodic_memory
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
@@ -877,3 +878,82 @@ async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:
     assert "envs" not in captured
     assert "allow_internet" not in captured
     assert "timeout_seconds" not in captured
+
+
+# --- Episodic carry between delegations ----------------------------------------
+
+
+def _sandbox_patches(fake_backend: Any, ainvoke: Any) -> list[Any]:
+    return [
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", return_value=MagicMock(ainvoke=ainvoke)),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ]
+
+
+async def test_a_later_delegation_sees_what_an_earlier_one_found() -> None:
+    """The carry that stops each fresh subagent re-deriving the same ground."""
+    fake_backend = _make_fake_backend()
+    prompts: list[str] = []
+    outcomes = iter(["The graph has 412 CVE nodes.", "second done"])
+
+    async def fake_ainvoke(inputs: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(inputs["messages"][0].content)
+        return _make_fake_agent_result(next(outcomes))
+
+    episodic_memory.start_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        await _handle_delegate({"task": "count the CVE nodes"}, _current_user())
+        await _handle_delegate({"task": "list the critical ones"}, _current_user())
+
+    assert "412 CVE nodes" not in prompts[0]  # nothing to carry yet
+    assert "412 CVE nodes" in prompts[1]
+    assert "count the CVE nodes" in prompts[1]
+    # Framed as prior results so the subagent does not read them as its task.
+    assert "not instructions" in prompts[1]
+
+
+async def test_a_failed_delegation_is_not_recorded_as_covered_ground() -> None:
+    fake_backend = _make_fake_backend()
+    prompts: list[str] = []
+    calls = {"n": 0}
+
+    async def fake_ainvoke(inputs: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(inputs["messages"][0].content)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("sandbox exploded")
+        return _make_fake_agent_result("second done")
+
+    episodic_memory.start_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        failed = await _handle_delegate({"task": "count the CVE nodes"}, _current_user())
+        await _handle_delegate({"task": "list the critical ones"}, _current_user())
+
+    assert "error" in failed
+    log = episodic_memory.current_episode_log()
+    assert log is not None and len(log) == 1
+    # Recording a failure would teach the next subagent the ground was covered.
+    assert "count the CVE nodes" not in prompts[1]
+
+
+async def test_delegation_works_with_no_ambient_log() -> None:
+    fake_backend = _make_fake_backend()
+    episodic_memory.clear_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "do a thing"}, _current_user())
+
+    assert result["result"] == "done"

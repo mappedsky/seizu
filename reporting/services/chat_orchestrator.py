@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_graph, mcp_builtins
+from reporting.services import chat_graph, episodic_memory, mcp_builtins
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -876,6 +876,11 @@ async def _run_worker_step(
     the start, with the rest unlocked when a rendered skill declares them.
     """
     step_id = str(step["id"])
+    # One log per step. Scoped by construction: parallel steps get independent
+    # logs because asyncio.gather copies the context per task, while tool calls
+    # within this step share the object by reference — which is the carry that
+    # stops each fresh sandbox subagent re-deriving what the last one found.
+    episodic_memory.start_episode_log()
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
