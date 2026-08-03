@@ -66,6 +66,20 @@ would otherwise have received, and where a result fits nothing changes at all.
 If the write fails, the truncated result is returned instead — exactly what
 would have happened without this path.
 
+**One sandbox per step, not per delegation.** A sandbox is opened lazily on a
+step's first `sandbox__delegate` call and destroyed when the step ends, so files
+written by one delegation are still there for the next. Each delegation used to
+open and destroy its own, which meant a result file — and the receipt pointing
+at it — was gone before anything could read it, and a turn making 31–79
+delegations paid that many sandbox creations. Parallel steps get separate
+sandboxes, so one step can never read another's files, and untrusted code
+persists only for the life of a single step.
+
+The agent reads such files with **`preview_file`**, which returns files at or
+under `SANDBOX_PREVIEW_MAX_BYTES` whole and, above that, only shape plus the
+beginning. That keeps a file written to stay out of context from being pulled
+straight back into it; `run_python` is how the full contents get used.
+
 `read_file` is deliberately not a way around this. Asked for a file larger than
 `SANDBOX_MAX_OUTPUT_BYTES` it returns the beginning together with the file's real
 size and an explicit statement that this is not the whole file, rather than a
@@ -114,6 +128,8 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_ALLOW_INTERNET` | `false` | Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access. |
 | `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
+| `SANDBOX_PREVIEW_MAX_BYTES` | `2000` | Bytes of a file `preview_file` returns. Files at or under this come back whole; larger ones return shape (size, lines, JSON structure, columns) plus the beginning, so a result file cannot be read back into context. `0` restores `read_file`. |
+| `SANDBOX_SESSION_TIMEOUT_SECONDS` | `1800` | Lifetime of the sandbox shared by a step's delegations. |
 | `SANDBOX_FILE_RESULT_MAX_ROWS` | `50000` | Row bound the sub-agent fetches to, so an oversized result can be detected and written to a file rather than silently truncated. Much higher than `CHAT_TOOL_RESULT_MAX_ROWS`, which protects a context window a file never enters. |
 | `SANDBOX_FILE_RESULT_MAX_BYTES` | `10000000` | Byte cap for the same. Finite because the result materializes in the Seizu process before reaching the sandbox. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |

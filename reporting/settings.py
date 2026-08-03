@@ -812,12 +812,19 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # has to outlive a whole step; the provider would otherwise reap it mid-step.
 # Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
 # preview_file, which returns files at or under this size whole and otherwise
-# only shape plus the beginning; at 0 it gets read_file, which returns up to
-# SANDBOX_MAX_OUTPUT_BYTES. preview_file measured worse when every delegation
-# had its own sandbox -- it pointed the agent at files that no longer existed --
-# so 0 keeps the behaviour that verdict was actually rendered on until the
-# comparison is redone against shared sandboxes.
-SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 0)
+# only shape -- size, line count, JSON structure, columns -- plus the beginning,
+# so a result written to a file to keep it out of context cannot be read
+# straight back into it. At 0 it gets read_file, which returns up to
+# SANDBOX_MAX_OUTPUT_BYTES.
+#
+# Enabled by default on a three-sample comparison against shared sandboxes:
+# queries 5/95/190 against 562/593/1023 and delegations 27/33/58 against
+# 71/71/90, both cleanly separated, with the only run in the sweep that did not
+# exhaust the budget. An earlier comparison rejected this, but it was taken
+# while each delegation had its own sandbox, so the files preview_file points at
+# no longer existed by the time anything could read them and re-querying was the
+# agent's only option.
+SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)

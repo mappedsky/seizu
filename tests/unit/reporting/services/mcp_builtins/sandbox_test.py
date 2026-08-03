@@ -1202,9 +1202,13 @@ async def test_with_a_backend_the_fetch_is_raised_to_the_file_bounds(mocker) -> 
 
 
 async def test_read_file_returns_a_file_that_fits_verbatim() -> None:
+    """read_file is no longer the default but stays available at preview 0."""
     backend = _make_fake_backend()
     backend.read_file = AsyncMock(return_value="small contents")
-    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000):
+    with (
+        patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+    ):
         tools = {t.name: t for t in _build_sandbox_tools(backend)}
         assert await tools["read_file"].coroutine(path="/tmp/x") == "small contents"
 
@@ -1217,7 +1221,10 @@ async def test_read_file_says_so_when_it_cannot_return_the_whole_file() -> None:
     """
     backend = _make_fake_backend()
     backend.read_file = AsyncMock(return_value="x" * 500_000)
-    with patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000):
+    with (
+        patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000),
+    ):
         tools = {t.name: t for t in _build_sandbox_tools(backend)}
         returned = await tools["read_file"].coroutine(path="/tmp/big.json")
 
