@@ -909,12 +909,14 @@ def _step_thresholds(
         return floor, floor
     outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
     soft = max(floor, remaining // max(1, outstanding))
-    # Hard stop at everything the run can spend outside its finalization
-    # reserve. Between the two the step is degraded and told to converge, so a
-    # step that genuinely needs more than a fair share can have it when no
-    # sibling is contending, rather than being killed mid-work and handing the
-    # verifier a truncated summary to reject.
-    return soft, max(soft, remaining)
+    # How far past its fair share a step may go before it is stopped outright.
+    # At 1.0 the share is itself the hard cut; large values let a step use
+    # everything the run can spend outside its finalization reserve. Between the
+    # two thresholds the step is degraded and told to converge, so it can exceed
+    # a fair share when no sibling is contending rather than being killed
+    # mid-work and handing the verifier a truncated summary to reject.
+    multiple = max(1.0, settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE)
+    return soft, max(soft, min(remaining, int(soft * multiple)))
 
 
 async def _run_worker_step(

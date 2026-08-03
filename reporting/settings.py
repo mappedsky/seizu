@@ -614,6 +614,12 @@ CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACT
 # uninterrupted attempt had answered completely. 12x puts a medium step near the
 # ~80k per step the successful configuration actually used.
 CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
+# How far past its fair share of the remaining run budget a step may go before
+# it is stopped. 1.0 makes the share a hard cut; a large value lets one step use
+# everything outside the finalization reserve. Below it the step is only
+# degraded and asked to converge, so this is the point at which a step is ended
+# rather than pressured.
+CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 2.0)
 # Episodic recall between sub-agents within one step. Each sandbox__delegate
 # call runs a fresh subagent that knows nothing of the previous one, so without
 # this they re-derive the same ground -- one observed step made 136 delegations

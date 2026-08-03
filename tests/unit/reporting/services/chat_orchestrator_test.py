@@ -1838,7 +1838,7 @@ def test_the_fair_share_is_soft_and_the_reserve_is_the_hard_stop():
     soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
     assert soft == 160_000  # its share of the two outstanding steps
-    assert hard == 320_000  # everything outside the finalization reserve
+    assert hard == 320_000  # at the default multiple, twice its share
     # Between them the step is degraded and told to converge, not killed: a step
     # that needs more than a fair share can have it when nothing is contending.
     assert hard > soft
