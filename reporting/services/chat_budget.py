@@ -262,8 +262,23 @@ class BudgetController:
         # all disabled, and a finalizing run's reserve is for the *run* to
         # summarize, not for an over-budget step to keep working.
         ceiling = self._scope_ceilings.get(reservation.scope)
-        if ceiling is not None and self._scope_spend.get(reservation.scope, 0) >= ceiling:
-            raise BudgetExceeded(f"Step {reservation.scope} reached its share of the run budget ({ceiling} tokens).")
+        if ceiling is not None:
+            # Count what the scope has in flight as well as what it has spent,
+            # matching the run-wide check below. On committed spend alone a
+            # parallel batch authorizes every call at once -- each sees the same
+            # unchanged total -- so a scope can overshoot its ceiling by however
+            # many delegations happen to start together, and starve the siblings
+            # the ceiling exists to protect.
+            in_flight = sum(
+                item.estimated_input_tokens + item.estimated_output_tokens
+                for item in self._reservations.values()
+                if item.scope == reservation.scope
+            )
+            requested = reservation.estimated_input_tokens + reservation.estimated_output_tokens
+            if self._scope_spend.get(reservation.scope, 0) + in_flight + requested > ceiling:
+                raise BudgetExceeded(
+                    f"Step {reservation.scope} reached its share of the run budget ({ceiling} tokens)."
+                )
         if not self.enabled:
             return
         if self.finalizing and not reservation.allow_reserve:

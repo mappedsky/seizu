@@ -19,6 +19,7 @@ turn, holds no credentials, and is destroyed when the step ends -- but it is a
 deliberate widening of the blast radius, not a side effect.
 """
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from contextvars import ContextVar
@@ -35,21 +36,39 @@ class SandboxSession:
     def __init__(self) -> None:
         self._stack: AsyncExitStack | None = None
         self._backend: SandboxBackend | None = None
+        self._lock = asyncio.Lock()
 
     async def backend(self) -> SandboxBackend:
-        if self._backend is None:
-            self._stack = AsyncExitStack()
-            self._backend = await self._stack.enter_async_context(
-                open_backend(
-                    api_key=settings.SANDBOX_API_KEY,
-                    domain=settings.SANDBOX_DOMAIN,
-                    # An explicit lifetime, because a shared sandbox has to
-                    # outlive a whole step rather than a single delegation, and
-                    # the provider default would kill it mid-step.
-                    timeout_seconds=settings.SANDBOX_SESSION_TIMEOUT_SECONDS,
+        """The session's sandbox, opening it on first use.
+
+        Locked, because the delegations sharing a session run concurrently: a
+        tool batch dispatches them through ``asyncio.gather``. A plain
+        check-then-act across the ``await`` lets two callers both see no backend
+        and both open one, which defeats the file continuity this exists for --
+        each would write into a different sandbox -- and leaves the exit stack
+        holding whichever finished last, so the other is never torn down.
+        """
+        if self._backend is not None:
+            return self._backend
+        async with self._lock:
+            # Re-check inside the lock: a caller that waited here while another
+            # opened the sandbox must use that one, not open a second.
+            if self._backend is None:
+                stack = AsyncExitStack()
+                backend = await stack.enter_async_context(
+                    open_backend(
+                        api_key=settings.SANDBOX_API_KEY,
+                        domain=settings.SANDBOX_DOMAIN,
+                        # An explicit lifetime, because a shared sandbox has to
+                        # outlive a whole step rather than a single delegation,
+                        # and the provider default would kill it mid-step.
+                        timeout_seconds=settings.SANDBOX_SESSION_TIMEOUT_SECONDS,
+                    )
                 )
-            )
-        return self._backend
+                # Publish both together, so the stack can never belong to a
+                # different backend than the one callers are handed.
+                self._stack, self._backend = stack, backend
+            return self._backend
 
     @property
     def opened(self) -> bool:

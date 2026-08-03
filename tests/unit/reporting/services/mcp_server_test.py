@@ -282,9 +282,9 @@ async def test_call_tool_query_success():
             return_value=ValidationResult(errors=[], warnings=[]),
         ),
         patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query",
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_bounded_with_retry",
             new_callable=AsyncMock,
-            return_value=[{"n": 1}],
+            return_value=([{"n": 1}], False),
         ),
     ):
         server = _build_mcp_server()
@@ -304,7 +304,7 @@ async def test_call_tool_query_execution_error():
             return_value=ValidationResult(errors=[], warnings=[]),
         ),
         patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query",
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_bounded_with_retry",
             new_callable=AsyncMock,
             side_effect=RuntimeError("neo4j down"),
         ),
@@ -525,9 +525,9 @@ async def test_call_tool_user_defined_success():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
             new_callable=AsyncMock,
-            return_value=[{"n": "value"}],
+            return_value=([{"n": "value"}], False),
         ) as run_query,
     ):
         server = _build_mcp_server()
@@ -535,7 +535,7 @@ async def test_call_tool_user_defined_success():
         data = json.loads(result[0].text)
         assert data[0]["n"] == "value"
     get_enabled_tool.assert_awaited_once_with("ts1", "t1")
-    run_query.assert_awaited_once_with(tool.cypher, parameters={})
+    assert run_query.await_args.args[:2] == (tool.cypher, {})
 
 
 async def test_call_tool_user_defined_coerces_decimal_parameter_defaults():
@@ -553,9 +553,9 @@ async def test_call_tool_user_defined_coerces_decimal_parameter_defaults():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
             new_callable=AsyncMock,
-            return_value=[{"n": "value"}],
+            return_value=([{"n": "value"}], False),
         ) as run_query,
     ):
         server = _build_mcp_server()
@@ -563,7 +563,7 @@ async def test_call_tool_user_defined_coerces_decimal_parameter_defaults():
         data = json.loads(result[0].text)
         assert data[0]["n"] == "value"
     get_enabled_tool.assert_awaited_once_with("ts1", "t1")
-    run_query.assert_awaited_once_with(tool.cypher, parameters={"limit": 10, "threshold": 2.5})
+    assert run_query.await_args.args[:2] == (tool.cypher, {"limit": 10, "threshold": 2.5})
 
 
 async def test_call_tool_user_defined_execution_error():
@@ -575,7 +575,7 @@ async def test_call_tool_user_defined_execution_error():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
             new_callable=AsyncMock,
             side_effect=RuntimeError("db error"),
         ),

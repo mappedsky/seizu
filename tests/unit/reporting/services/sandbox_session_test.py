@@ -94,3 +94,36 @@ async def test_a_teardown_failure_does_not_fail_the_step(mocker):
     # The step's work already succeeded; the provider reaps the sandbox anyway.
     await sandbox_session.close_sandbox_session()
     assert sandbox_session.current_sandbox_session() is None
+
+
+async def test_concurrent_delegations_open_only_one_sandbox(mocker):
+    """Delegations in a step run through asyncio.gather, so this is the real path.
+
+    Unsynchronized lazy init let both callers see no backend and open their own:
+    two sandboxes, two filesystems, and an exit stack holding only one of them.
+    """
+    opened: list[Any] = []
+    closed: list[Any] = []
+
+    @asynccontextmanager
+    async def _slow_open(**_kwargs: Any):
+        backend = MagicMock()
+        # Yield control while opening, which is what makes the race reachable.
+        await asyncio.sleep(0)
+        opened.append(backend)
+        try:
+            yield backend
+        finally:
+            closed.append(backend)
+
+    mocker.patch("reporting.services.sandbox_session.open_backend", _slow_open)
+    session = sandbox_session.start_sandbox_session()
+
+    first, second, third = await asyncio.gather(session.backend(), session.backend(), session.backend())
+
+    assert len(opened) == 1
+    assert first is second is third
+
+    await sandbox_session.close_sandbox_session()
+    # The one that was opened is the one that gets torn down.
+    assert closed == opened

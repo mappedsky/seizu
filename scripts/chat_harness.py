@@ -41,6 +41,7 @@ only the standard library so the host needs no project environment.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -77,8 +78,24 @@ def _post(path: str, payload: dict[str, Any], *, stream: bool = False) -> str:
         return response.read().decode(errors="replace") if stream else response.read().decode()
 
 
-def _compose(*args: str, capture: bool = False) -> str:
-    result = subprocess.run(["docker", "compose", *args], cwd=REPO, capture_output=True, text=True, check=False)
+class HarnessError(RuntimeError):
+    """A run could not be trusted, so it must not be recorded as a sample."""
+
+
+def _compose(*args: str, capture: bool = False, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(
+        ["docker", "compose", *args],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **(env or {})},
+    )
+    if result.returncode != 0:
+        # Never soft-fail. A compose failure leaves the previous arm's service
+        # running and healthy, so every sample that follows is recorded under a
+        # label describing a configuration that was never applied.
+        raise HarnessError(f"docker compose {' '.join(args)} failed:\n{result.stderr.strip()}")
     return result.stdout if capture else ""
 
 
@@ -88,13 +105,12 @@ def apply_arm(arm: str) -> str:
         OVERLAY.write_text("services:\n  seizu:\n    environment: []\n")
     else:
         OVERLAY.write_text(f"services:\n  seizu:\n    environment:\n      - {arm}\n")
-    env = {"COMPOSE_FILE": f"docker-compose.yml:{OVERLAY.name}"}
-    subprocess.run(
-        ["docker", "compose", "up", "-d", "--force-recreate", "seizu"],
-        cwd=REPO,
-        env={**os.environ, **env},
-        capture_output=True,
-        check=False,
+    _compose(
+        "up",
+        "-d",
+        "--force-recreate",
+        "seizu",
+        env={"COMPOSE_FILE": f"docker-compose.yml:{OVERLAY.name}"},
     )
     for _ in range(60):
         try:
@@ -102,9 +118,11 @@ def apply_arm(arm: str) -> str:
             break
         except (urllib.error.URLError, OSError):
             time.sleep(2)
+    else:
+        raise HarnessError("backend did not become healthy after recreating it")
     if arm == "baseline":
         return "baseline"
-    key = arm.split("=", 1)[0]
+    key, _, expected = arm.partition("=")
     out = _compose(
         "exec",
         "-T",
@@ -118,7 +136,23 @@ def apply_arm(arm: str) -> str:
         f"from reporting import settings; print(settings.{key})",
         capture=True,
     )
-    return out.strip().splitlines()[-1] if out.strip() else "?"
+    applied = out.strip().splitlines()[-1] if out.strip() else ""
+    # Compare, do not merely print. An override that never reaches the service
+    # leaves it running the default, which measures perfectly well and is then
+    # recorded under the experimental arm's label -- a silently invented result.
+    # Settings are typed, so compare loosely enough that "2000" matches 2000.
+    if not _same_value(applied, expected):
+        raise HarnessError(f"arm {arm} did not apply: {key} is {applied!r}, expected {expected!r}")
+    return applied
+
+
+def _same_value(applied: str, expected: str) -> bool:
+    if applied == expected:
+        return True
+    try:
+        return float(applied) == float(expected)
+    except ValueError:
+        return False
 
 
 def stream_metrics(sse: str) -> dict[str, Any]:
@@ -197,8 +231,11 @@ def run_sample(arm: str, index: int, user_id: str, out_dir: Path) -> dict[str, A
     started = time.time()
     _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": SETUP_TURN}, stream=True)
     sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": FOLLOW_UP_TURN}, stream=True)
-    (out_dir / f"{arm.replace('=', '-')}_{index}.sse").write_text(sse)
-    row = {"arm": arm, "sample": index, "thread": thread_id, "seconds": int(time.time() - started)}
+    # Hash the arm rather than embedding it: an ordinary value such as
+    # "openai/gpt-4" carries a path separator and would write outside out_dir.
+    slug = "baseline" if arm == "baseline" else hashlib.sha256(arm.encode()).hexdigest()[:10]
+    (out_dir / f"{slug}_{index}.sse").write_text(sse)
+    row = {"arm": arm, "slug": slug, "sample": index, "thread": thread_id, "seconds": int(time.time() - started)}
     row.update(stream_metrics(sse))
     row.update(ledger(thread_id, user_id))
     return row

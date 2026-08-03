@@ -111,7 +111,8 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
 | `CHAT_EPISODIC_RECALL_MAX_CHARS` | `4000` | Results carried from earlier sandbox delegations into the next one's prompt, so each fresh sub-agent does not re-derive what the last one found; `0` disables. |
 | `CHAT_EPISODIC_MAX_ENTRIES` | `20` | Delegation results retained before the oldest are shed. |
-| `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `3.0` | Multiple of the planner's per-step token estimate at which a step is stopped and asked to summarize. |
+| `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `12.0` | Floor on a step's token ceiling, as a multiple of the planner's per-step estimate. The ceiling is normally a share of what the run has left. |
+| `CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE` | `1.0` | How far past its fair share a step may go before being stopped rather than only degraded and asked to converge. `1.0` makes the share a hard cut. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |
 | `CHAT_LLM_WORKER_MODEL` | `""` | Optional worker model override. |
 | `CHAT_LLM_VERIFIER_MODEL` | `""` | Optional verifier model override. |

@@ -2,6 +2,7 @@
 
 import json
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -10,6 +11,7 @@ import neo4j.exceptions
 from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
 from pydantic import ValidationError
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
@@ -459,7 +461,16 @@ async def _call_tool_core(
                         payload["error"] = "Action was denied for this confirmation window"
                     return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
         try:
-            result = await builtin.handler(args, current_user)
+            # Publish the row cap first. _bounded_text_response only trims what a
+            # handler already built, so a broad query would be fully fetched and
+            # serialized before any limit applied -- fast, unbounded, and
+            # reachable by any authenticated caller. A handler that reads this
+            # can stop at the source instead.
+            token = _current_result_row_cap.set(result_max_rows)
+            try:
+                result = await builtin.handler(args, current_user)
+            finally:
+                _current_result_row_cap.reset(token)
             return (
                 _bounded_text_response(result, max_rows=result_max_rows, max_bytes=result_max_bytes),
                 None,
@@ -494,10 +505,22 @@ async def _call_tool_core(
         params_with_defaults = {p.name: p.default for p in target_tool.parameters}
         params_with_defaults.update(args)
 
-        results = await reporting_neo4j.run_query(target_tool.cypher, parameters=params_with_defaults)
+        results, truncated = await reporting_neo4j.run_query_bounded_with_retry(
+            target_tool.cypher,
+            params_with_defaults,
+            max_rows=result_max_rows or settings.CHAT_TOOL_RESULT_MAX_ROWS,
+        )
         serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
+        # Keep the un-truncated shape a bare list, which is what MCP clients
+        # consume; only a truncated result gains the envelope, and it is the same
+        # envelope _bounded_text_response would have produced had it done the
+        # trimming itself.
+        cap = result_max_rows or settings.CHAT_TOOL_RESULT_MAX_ROWS
+        bounded: Any = (
+            _rebuild(serialized, None, serialized, _row_limit_marker(max_rows=cap)) if truncated else serialized
+        )
         return (
-            _bounded_text_response(serialized, max_rows=result_max_rows, max_bytes=result_max_bytes),
+            _bounded_text_response(bounded, max_rows=result_max_rows, max_bytes=result_max_bytes),
             None,
         )
     except neo4j.exceptions.Neo4jError as exc:
@@ -690,6 +713,16 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
 # ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
 # same shape, so treating only a top-level list as rows meant the row cap never
 # applied to the tools most likely to return thousands of them.
+# The row cap in force for the handler currently running. Handlers are called
+# before any limit is applied, so one that fetches from the graph needs the
+# bound at the source rather than after materializing everything.
+_current_result_row_cap: ContextVar[int | None] = ContextVar("_current_result_row_cap", default=None)
+
+
+def current_result_row_cap() -> int | None:
+    return _current_result_row_cap.get()
+
+
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
 
