@@ -1281,10 +1281,12 @@ async def test_the_subagent_is_told_what_it_may_spend() -> None:
 async def test_a_nearly_spent_scope_tells_the_subagent_to_finish() -> None:
     """A limit it cannot see is one it cannot plan against."""
     controller = BudgetController(initial_budget_ledger())
-    controller.open_scope("worker:s1", 1_000)
+    # Past its fair share (the soft threshold) but well inside the hard bound.
+    controller.open_scope("worker:s1", 10_000, soft_tokens=500)
     reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s1")
     await controller.commit(reservation, input_tokens=800, output_tokens=0, cost_usd=0.0, usage_estimated=False)
     assert controller.scope_soft_limit_reached("worker:s1")
+    assert not controller.scope_exhausted("worker:s1")
 
     chat_budget.set_current_budget_scope("worker:s1")
     chat_budget.set_current_budget_controller(controller)

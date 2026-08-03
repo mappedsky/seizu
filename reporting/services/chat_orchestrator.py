@@ -247,6 +247,14 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
             " This is an answer-only step: gather no data and call no tool other than"
             f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
         )
+    if step.get("retry_guidance"):
+        extra += f"\n\nA previous attempt was rejected: {step['retry_guidance']}. Address that this time."
+    if step.get("resume_from"):
+        extra += (
+            "\n\nA previous attempt ran out of budget before finishing and established the following."
+            " Continue from it: do not re-gather what is already here, and fold it into your result so"
+            f" nothing it found is lost.\n{_truncate_text(str(step['resume_from']), 4000)}"
+        )
     extra += (
         " Use the available tools/skills to accomplish the goal, then return a"
         " concise factual result for this step only. Do not list internal action"
@@ -618,14 +626,20 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     # reset them to pending (carrying the failure reason) and consume one cycle.
     # Steps flagged ``no_retry`` (denied/expired confirmations) are terminal so
     # we never re-prompt the user for an action they already declined.
-    # A step stopped by its own token ceiling is terminal for the same reason a
-    # denied confirmation is: retrying changes nothing. The retry runs under the
-    # identical ceiling and is cut at the identical point, so a capped step
-    # measured four attempts and 121,643 tokens to fail four times.
+    # A capped step used to be marked terminal, because a retry restarted from
+    # scratch under the identical ceiling and was cut at the identical point --
+    # measured as four attempts and 121,643 tokens to fail four times. It
+    # resumes now instead: the previous attempt's findings are handed back so
+    # the retry continues from them, and the ceiling has moved because earlier
+    # spend already came out of what the run has left. A retry that carries
+    # nothing forward is the thing that was worthless, not the retry itself.
     results_by_id = {result["step_id"]: result for result in results}
     for step in plan:
-        if step["status"] == "failed" and (results_by_id.get(step["id"], {}) or {}).get("budget_capped"):
-            step["no_retry"] = True
+        if step["status"] != "failed":
+            continue
+        partial = (results_by_id.get(step["id"], {}) or {}).get("partial_output") or ""
+        if partial:
+            step["resume_from"] = partial
     failed = [step for step in plan if step["status"] == "failed" and not step.get("no_retry")]
     if failed and iteration < settings.CHAT_ORCHESTRATOR_MAX_ITERATIONS:
         iteration += 1
@@ -866,12 +880,12 @@ def _dependency_context(step: dict[str, Any], plan: list[dict[str, Any]], result
     return "\n".join(blocks)
 
 
-def _step_ceiling(
+def _step_thresholds(
     step: dict[str, Any],
     plan: list[dict[str, Any]],
     controller: BudgetController | None,
     step_budget: int,
-) -> int:
+) -> tuple[int, int]:
     """How much this step may spend, itself and everything it delegates to.
 
     Derived from the run budget rather than the planner's complexity label. The
@@ -889,13 +903,18 @@ def _step_ceiling(
     """
     floor = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
     if controller is None:
-        return floor
+        return floor, floor
     remaining = controller.remaining_normal_tokens
     if remaining is None:
-        return floor
+        return floor, floor
     outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
-    share = remaining // max(1, outstanding)
-    return max(floor, share)
+    soft = max(floor, remaining // max(1, outstanding))
+    # Hard stop at everything the run can spend outside its finalization
+    # reserve. Between the two the step is degraded and told to converge, so a
+    # step that genuinely needs more than a fair share can have it when no
+    # sibling is contending, rather than being killed mid-work and handing the
+    # verifier a truncated summary to reject.
+    return soft, max(soft, remaining)
 
 
 async def _run_worker_step(
@@ -984,8 +1003,7 @@ async def _run_worker_step(
     newly_disclosed_names: set[str] = set()
     available = _with_provider_tool_names(active_specs)
     system_prompt = _worker_system_prompt(step)
-    if step.get("retry_guidance"):
-        system_prompt += f"\n\nA previous attempt was rejected: {step['retry_guidance']}. Address that this time."
+
     messages: list[BaseMessage] = [
         HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results), conversation_context))
     ]
@@ -1030,7 +1048,7 @@ async def _run_worker_step(
     # from a coarse complexity label: degrading at the estimate is cheap if it
     # was low, whereas stopping there would kill legitimate work. The ceiling is
     # what keeps one step from spending a whole run's budget.
-    step_ceiling = _step_ceiling(step, plan, controller, step_budget)
+    step_soft, step_ceiling = _step_thresholds(step, plan, controller, step_budget)
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far
@@ -1039,7 +1057,7 @@ async def _run_worker_step(
     # sibling's spend to this one.
     budget_scope = f"worker:{step_id}"
     if controller is not None:
-        controller.open_scope(budget_scope, step_ceiling)
+        controller.open_scope(budget_scope, step_ceiling, soft_tokens=step_soft)
     chat_budget.set_current_budget_scope(budget_scope)
     while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
@@ -1059,7 +1077,7 @@ async def _run_worker_step(
             )
             budget_capped = True
             break
-        step_degraded = step_spend >= step_budget
+        step_degraded = step_spend >= min(step_budget, step_soft)
         active_model = (
             get_chat_model("worker", economy=True)
             if (step_degraded or (controller is not None and controller.degraded))
@@ -1232,7 +1250,11 @@ async def _run_worker_step(
                 [],
                 config,
                 None,
-                allow_reserve=budget_exhausted,
+                # A step stopped at its hard bound was stopped precisely because
+                # continuing would reach the finalization reserve, so its summary
+                # is the case the reserve is for: without it the step reports
+                # nothing and everything it gathered is lost.
+                allow_reserve=budget_exhausted or budget_capped,
                 phase=f"worker_summary:{step_id}",
                 max_output_tokens=1024,
             )
@@ -1247,6 +1269,13 @@ async def _run_worker_step(
 
     step_result: dict[str, Any] = {
         "budget_capped": budget_capped,
+        # What the step had established when it was stopped, by either bound: its
+        # own scope, or the run budget refusing the next call. A retry resumes
+        # from this instead of starting over, which is what makes retrying worth
+        # doing at all -- the previous attempt's spend is not thrown away, and
+        # the verifier can decide the partial result is already enough rather
+        # than being handed nothing.
+        "partial_output": output_text if (budget_capped or budget_exhausted) else "",
         "step_id": step["id"],
         "goal": step["goal"],
         "success_criteria": step.get("success_criteria", ""),
@@ -1445,12 +1474,24 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
     if not output.strip():
         return False, "Step produced no output."
     criteria = step.get("success_criteria") or "The result accomplishes the step goal."
+    # Say when a result is partial, so the judgement can be "incomplete but
+    # sufficient" rather than only "incomplete". A capped step is retried by
+    # resuming from this result, so rejecting one that already answers the
+    # criteria spends more budget to reach the same place.
+    capped_note = (
+        "\n\nThis step stopped at its budget before finishing, so the result is what it had"
+        " established by then. Judge it on whether that already satisfies the criteria; if it"
+        " does, pass it rather than requiring the work it did not get to."
+        if result.get("budget_capped")
+        else ""
+    )
     prompt = (
         "Judge whether the step result satisfies the success criteria. Be"
         " lenient about formatting but strict about substance. A result that"
         " only announces, promises, or describes findings it does not actually"
         " state ('all data collected, now delivering the summary') never"
-        " satisfies the criteria, however much work preceded it.\n\n"
+        " satisfies the criteria, however much work preceded it."
+        f"{capped_note}\n\n"
         f"Goal: {step.get('goal', '')}\nSuccess criteria: {criteria}\n\n"
         f"Result:\n{_truncate_text(output, 4000)}"
     )

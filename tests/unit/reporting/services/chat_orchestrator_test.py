@@ -1565,26 +1565,38 @@ def test_worker_user_message_omits_the_block_when_isolation_is_kept():
 
 
 class _LoopingModel:
-    """Calls a tool forever; only an external ceiling can stop it."""
+    """Calls a tool forever; only an external bound can stop it.
+
+    ``bind_tools`` returns a separate bound view rather than mutating this one,
+    so "was I called with tools" cannot leak between turns. It can: budget
+    authorization raises *after* bind_tools and before astream, which with a
+    stateful flag left the following tool-free summary turn looking bound and
+    yielding a tool call instead of the text the step reports through.
+    """
 
     def __init__(self) -> None:
         self.calls = 0
-        self.bound = False
 
-    def bind_tools(self, _tools: Any) -> "_LoopingModel":
-        self.bound = True
+    def bind_tools(self, _tools: Any) -> "_BoundLoopingModel":
+        return _BoundLoopingModel(self)
+
+    async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+        # No tools bound: this is the forced-summary turn.
+        yield AIMessage(content="Summary of what I gathered before stopping.")
+
+
+class _BoundLoopingModel:
+    def __init__(self, parent: _LoopingModel) -> None:
+        self._parent = parent
+
+    def bind_tools(self, _tools: Any) -> "_BoundLoopingModel":
         return self
 
     async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
-        if not self.bound:
-            # Forced synthesis runs with no tools, so nothing bound them.
-            yield AIMessage(content="Summary of what I gathered before stopping.")
-            return
-        self.bound = False
-        self.calls += 1
+        self._parent.calls += 1
         yield AIMessage(
             content="",
-            tool_calls=[{"name": "t__one", "args": {}, "id": f"c{self.calls}"}],
+            tool_calls=[{"name": "t__one", "args": {}, "id": f"c{self._parent.calls}"}],
             usage_metadata={"input_tokens": 1000, "output_tokens": 1000, "total_tokens": 2000},
         )
 
@@ -1611,9 +1623,11 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
     still to finish -- not a multiple of the planner's complexity guess."""
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 1.0)
     ledger = initial_budget_ledger()
-    # 16k spendable across two outstanding steps -> 8k each, and the model bills
-    # 2k a turn, so this step stops after four.
-    ledger.update({"token_limit": 20_000, "reserve_tokens": 4_000, "soft_limit_ratio": 1.0})
+    # 16k spendable across two outstanding steps -> an 8k share, and a 16k hard
+    # bound. The model bills 2k a turn, so it passes its share after four calls
+    # and stops at the bound after eight. The reserve is sized to leave room for
+    # the summary pass, which is what the step reports through.
+    ledger.update({"token_limit": 30_000, "reserve_tokens": 14_000, "soft_limit_ratio": 1.0})
     controller = BudgetController(ledger)
 
     step = _step("s1", estimated_tokens=1_000)
@@ -1627,9 +1641,16 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
         **_looping_worker_kwargs(mocker),
     )
 
-    assert len(result["tools_used"]) == 4
+    # Ran past its 8k share rather than dying there, and stopped before the 16k
+    # bound. The exact count depends on reservation sizing, so the property under
+    # test is that the share did not end it and the bound did.
+    assert 4 < len(result["tools_used"]) <= 8
     assert result["output"].strip()  # still summarizes rather than returning nothing
-    assert result["budget_capped"] is True  # terminal: a retry hits the same wall
+    # Stopped by a budget -- here the run's own check, which authorizes on
+    # estimates and so bites before the scope's bound on committed tokens.
+    # Either way the findings are handed to a retry rather than discarded.
+    assert result["budget_capped"] or result["budget_exhausted"]
+    assert result["partial_output"]
 
 
 async def test_worker_ceiling_leaves_budget_for_the_rest_of_the_plan(mocker):
@@ -1650,12 +1671,12 @@ async def test_worker_ceiling_leaves_budget_for_the_rest_of_the_plan(mocker):
         **_looping_worker_kwargs(mocker),
     )
 
-    remaining = controller.remaining_normal_tokens
-    assert remaining is not None
-    # This step's share was half the spendable budget (plus a small summary pass);
-    # the sibling keeps roughly the other half rather than finding it spent.
-    assert 35_000 <= remaining <= 45_000
-    assert controller.mode == "normal"
+    # A step may exceed its fair share when nothing is contending -- that is the
+    # point of making the share soft -- but never the finalization reserve, which
+    # is what keeps the run able to answer at all.
+    snapshot = controller.snapshot()
+    assert snapshot["total_tokens"] <= snapshot["token_limit"] - snapshot["reserve_tokens"]
+    assert controller.mode != "exhausted"
 
 
 # --- Review findings: untrusted evidence, and the step ceiling seeing sandbox spend
@@ -1745,25 +1766,6 @@ async def test_one_steps_ceiling_does_not_bind_a_sibling():
     await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s2")
 
 
-async def test_a_budget_capped_step_is_not_retried_into_the_same_wall(mocker):
-    """A retry runs under the identical ceiling and is cut at the identical point.
-
-    Measured: one step cut four times, 121,643 tokens spent to fail four times.
-    """
-    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
-    plan = [_step("s1", "failed")]
-    results = [{"step_id": "s1", "goal": "goal s1", "output": "", "budget_capped": True}]
-
-    state = await chat_orchestrator.dispatcher_node(
-        {"plan": plan, "step_results": results, "iteration": 0, "messages": []},
-        {"configurable": {"current_user": _user()}},
-    )
-
-    step = state["plan"][0]
-    assert step["no_retry"] is True
-    assert step["status"] == "failed"  # terminal, never reset to pending
-
-
 async def test_an_ordinary_failed_step_is_still_retried(mocker):
     mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
     mocker.patch("reporting.services.chat_orchestrator._worker_tool_specs", new=AsyncMock(return_value=[]))
@@ -1796,10 +1798,10 @@ def test_step_ceiling_is_a_share_of_what_the_run_has_left():
     controller = BudgetController(ledger)
     plan = [_step("s1"), _step("s2", "passed"), _step("s3")]
 
-    ceiling = chat_orchestrator._step_ceiling(plan[0], plan, controller, 4_000)
+    soft, _hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
     # 320k spendable, two steps still outstanding.
-    assert ceiling == 160_000
+    assert soft == 160_000
 
 
 def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
@@ -1810,7 +1812,7 @@ def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
     plan = [_step("s1"), _step("s2")]
 
     # Almost nothing left to share, so the floor governs instead.
-    assert chat_orchestrator._step_ceiling(plan[0], plan, controller, 4_000) == 48_000
+    assert chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)[0] == 48_000
 
 
 def test_step_ceiling_falls_back_to_the_floor_without_a_token_budget(mocker):
@@ -1820,5 +1822,66 @@ def test_step_ceiling_falls_back_to_the_floor_without_a_token_budget(mocker):
     controller = BudgetController(ledger)
     plan = [_step("s1")]
 
-    assert chat_orchestrator._step_ceiling(plan[0], plan, controller, 8_000) == 96_000
-    assert chat_orchestrator._step_ceiling(plan[0], plan, None, 8_000) == 96_000
+    assert chat_orchestrator._step_thresholds(plan[0], plan, controller, 8_000) == (96_000, 96_000)
+    assert chat_orchestrator._step_thresholds(plan[0], plan, None, 8_000) == (96_000, 96_000)
+
+
+# --- Soft share, hard reserve, and resuming a capped step ----------------------
+
+
+def test_the_fair_share_is_soft_and_the_reserve_is_the_hard_stop():
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 400_000, "reserve_tokens": 80_000, "total_tokens": 0})
+    controller = BudgetController(ledger)
+    plan = [_step("s1"), _step("s2")]
+
+    soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+
+    assert soft == 160_000  # its share of the two outstanding steps
+    assert hard == 320_000  # everything outside the finalization reserve
+    # Between them the step is degraded and told to converge, not killed: a step
+    # that needs more than a fair share can have it when nothing is contending.
+    assert hard > soft
+
+
+async def test_crossing_the_share_signals_without_stopping_the_step():
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 10_000, soft_tokens=1_000)
+    reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s1")
+    await controller.commit(reservation, input_tokens=1_500, output_tokens=0, cost_usd=0.0, usage_estimated=False)
+
+    assert controller.scope_soft_limit_reached("worker:s1")  # converge
+    assert not controller.scope_exhausted("worker:s1")  # but keep working
+    await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s1")
+
+
+async def test_a_capped_step_hands_its_findings_to_the_retry(mocker):
+    """Retrying was worthless because it restarted, not because it retried."""
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
+    plan = [_step("s1", "failed")]
+    results = [
+        {
+            "step_id": "s1",
+            "goal": "goal s1",
+            "output": "found 3 of 8 CVEs",
+            "budget_capped": True,
+            "partial_output": "found 3 of 8 CVEs",
+        }
+    ]
+
+    state = await chat_orchestrator.dispatcher_node(
+        {"plan": plan, "step_results": results, "iteration": 0, "messages": []},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    assert state["plan"][0]["resume_from"] == "found 3 of 8 CVEs"
+
+
+def test_the_worker_is_told_to_continue_from_a_partial_result():
+    step = _step("s1", resume_from="found 3 of 8 CVEs")
+
+    prompt = chat_orchestrator._worker_system_prompt(step)
+
+    assert "found 3 of 8 CVEs" in prompt
+    assert "Continue from it" in prompt
+    assert "do not re-gather" in prompt

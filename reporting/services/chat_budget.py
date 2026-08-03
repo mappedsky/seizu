@@ -71,19 +71,43 @@ class BudgetController:
         # a snapshot before and after its own work would attribute a sibling's
         # spend to itself, and miss its own sub-agents entirely.
         self._scope_ceilings: dict[str, int] = {}
+        self._scope_soft: dict[str, int] = {}
         self._scope_spend: dict[str, int] = {}
 
-    def open_scope(self, scope: str, ceiling_tokens: int) -> None:
-        """Bound one unit of work, including anything it delegates to."""
+    def open_scope(self, scope: str, ceiling_tokens: int, soft_tokens: int = 0) -> None:
+        """Bound one unit of work, including anything it delegates to.
+
+        Two thresholds, because they answer different questions. ``soft_tokens``
+        is the step's fair share of what the run has left -- crossing it means
+        siblings are now being competed with, which is a reason to converge, not
+        a reason to die. ``ceiling_tokens`` is the point where continuing would
+        eat the run's finalization reserve, which is a reason to stop.
+
+        Measured with the share as a hard cut, every configuration where it bound
+        produced a degraded answer, because a step killed mid-work hands the
+        verifier a truncated summary to reject.
+        """
         if scope and ceiling_tokens > 0:
             self._scope_ceilings[scope] = ceiling_tokens
+            self._scope_soft[scope] = soft_tokens if soft_tokens > 0 else ceiling_tokens
             self._scope_spend.setdefault(scope, 0)
 
     def close_scope(self, scope: str) -> None:
         self._scope_ceilings.pop(scope, None)
+        self._scope_soft.pop(scope, None)
         self._scope_spend.pop(scope, None)
 
     def scope_spend(self, scope: str) -> int:
+        """Tokens a scope has actually spent.
+
+        Committed actuals, where run-level authorization works on *estimates*
+        (including a full CHAT_LLM_MAX_TOKENS of assumed output). The two are
+        deliberately different: a scope bounds work that has happened, while
+        authorization has to refuse a call before it happens. The consequence is
+        that the run's own token check can refuse a call while a scope still
+        looks well inside its bound, so a scope ceiling is never the only thing
+        standing between a step and the reserve.
+        """
         return int(self._scope_spend.get(scope, 0))
 
     def scope_exhausted(self, scope: str) -> bool:
@@ -98,18 +122,15 @@ class BudgetController:
         return max(0, ceiling - self.scope_spend(scope))
 
     def scope_soft_limit_reached(self, scope: str) -> bool:
-        """Whether a scope has crossed the point where it should start finishing.
+        """Whether a scope has spent its fair share and should be converging.
 
         The run has always had this as a mode change (a cheaper model, optional
         steps dropped). A scope needs it as a *signal it can act on*, because
         the thing spending a step's budget is often a sub-agent that will
         otherwise work until it is cut mid-task and lose what it had.
         """
-        ceiling = self._scope_ceilings.get(scope)
-        if ceiling is None:
-            return False
-        ratio = float(self._ledger.get("soft_limit_ratio") or 1.0)
-        return self.scope_spend(scope) >= ceiling * ratio
+        soft = self._scope_soft.get(scope)
+        return soft is not None and self.scope_spend(scope) >= soft
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._ledger)
