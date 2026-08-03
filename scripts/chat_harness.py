@@ -1,0 +1,269 @@
+"""Multi-sample A/B harness for chat agent settings.
+
+Runs the same two-turn conversation N times per arm against a live backend and
+reports medians and ranges, so a comparison rests on more than one sample.
+
+    make chat_harness ARMS="baseline CHAT_EPISODIC_RECALL_MAX_CHARS=0" SAMPLES=4
+
+Each arm is ``KEY=VALUE`` for any setting in ``reporting.settings``, or the
+literal ``baseline`` for no override. An arm is applied by recreating the
+``seizu`` service with a compose overlay, and the value is then read back out of
+the running container before any sample is taken -- an override that silently
+fails to reach the service is otherwise indistinguishable from one that had no
+effect.
+
+**Why this exists.** Answer quality on the same configuration has been observed
+to vary several-fold between runs. Single-run comparisons of this system have
+repeatedly produced "clean separations" that did not survive more samples, and
+several conclusions were drawn from them before that was understood. Four
+settings have since been swept without a distinguishable difference between any
+of them, which is itself the useful result: it says the tuning surface is not
+where the remaining problems are.
+
+**Counting.** Delegations and inner tool calls are de-duplicated on
+``detail_id``. A subagent detail is re-emitted after *every* inner tool call,
+each time carrying the whole children list so the UI can reconcile one growing
+section, so counting stream events instead inflates a delegation once per
+emission and its Nth child N times over -- quadratic in the size of a
+delegation, and therefore distorting comparisons between configurations
+non-linearly. A run measured that way as 121 delegations and 1,726 queries was
+3 and 54.
+
+Token totals, budget mode and step outcomes are read from the persisted ledger
+rather than inferred from the stream, so they are unaffected by any of that.
+
+Requires the dev stack running (``make up``) with ``CHAT_ENABLED=true`` and a
+real ``CHAT_LLM_PROVIDER``. Sessions are left in place for inspection.
+
+Runs on the host rather than in a container -- it recreates the ``seizu``
+service between arms, which it could not do from inside that service -- and uses
+only the standard library so the host needs no project environment.
+"""
+
+import argparse
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+REPO = Path(__file__).resolve().parent.parent
+OVERLAY = REPO / "chat-harness-arm.yml"
+API = "http://localhost:8080"
+
+SETUP_TURN = "Give me a security overview of the most critical vulnerabilities in the graph"
+FOLLOW_UP_TURN = (
+    "Now cross-check that against the actual CVE data in the graph and tell me "
+    "which of those findings are actually reachable from the internet"
+)
+
+_ARM_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[^\s]*$")
+
+
+def _post(path: str, payload: dict[str, Any], *, stream: bool = False) -> str:
+    request = urllib.request.Request(
+        f"{API}{path}",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "X-Seizu-Csrf": "1"},
+    )
+    # No timeout: a turn legitimately runs for many minutes.
+    with urllib.request.urlopen(request) as response:  # noqa: S310 - localhost dev stack
+        return response.read().decode(errors="replace") if stream else response.read().decode()
+
+
+def _compose(*args: str, capture: bool = False) -> str:
+    result = subprocess.run(["docker", "compose", *args], cwd=REPO, capture_output=True, text=True, check=False)
+    return result.stdout if capture else ""
+
+
+def apply_arm(arm: str) -> str:
+    """Recreate the backend with this arm applied, and read the value back."""
+    if arm == "baseline":
+        OVERLAY.write_text("services:\n  seizu:\n    environment: []\n")
+    else:
+        OVERLAY.write_text(f"services:\n  seizu:\n    environment:\n      - {arm}\n")
+    env = {"COMPOSE_FILE": f"docker-compose.yml:{OVERLAY.name}"}
+    subprocess.run(
+        ["docker", "compose", "up", "-d", "--force-recreate", "seizu"],
+        cwd=REPO,
+        env={**os.environ, **env},
+        capture_output=True,
+        check=False,
+    )
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(f"{API}/healthcheck", timeout=5)  # noqa: S310
+            break
+        except (urllib.error.URLError, OSError):
+            time.sleep(2)
+    if arm == "baseline":
+        return "baseline"
+    key = arm.split("=", 1)[0]
+    out = _compose(
+        "exec",
+        "-T",
+        "seizu",
+        "uv",
+        "run",
+        "--frozen",
+        "--no-sync",
+        "python",
+        "-c",
+        f"from reporting import settings; print(settings.{key})",
+        capture=True,
+    )
+    return out.strip().splitlines()[-1] if out.strip() else "?"
+
+
+def stream_metrics(sse: str) -> dict[str, Any]:
+    """Metrics from one turn's SSE stream, counting distinct calls."""
+    delegations: set[str] = set()
+    children: dict[str, str] = {}
+    answer: list[str] = []
+    steps: dict[str, str] = {}
+    for line in sse.splitlines():
+        if not line.startswith("data: ") or line.strip().endswith("[DONE]"):
+            continue
+        try:
+            event = json.loads(line[6:])
+        except ValueError:
+            continue
+        kind = event.get("type", "")
+        if kind == "text-delta":
+            answer.append(event.get("delta", ""))
+        elif kind.startswith("data-seizu-detail"):
+            data = event.get("data", {})
+            if data.get("kind") == "subagent":
+                delegations.add(str(data.get("detail_id")))
+                for child in data.get("children") or []:
+                    if child.get("detail_id"):
+                        children[child["detail_id"]] = child.get("title", "?")
+            elif data.get("kind") in ("step", "verify"):
+                steps[f"{data['kind']}:{data.get('step_id')}"] = str(data.get("status"))
+    titles = list(children.values())
+    verifies = {k: v for k, v in steps.items() if k.startswith("verify:")}
+    return {
+        "delegations": len(delegations),
+        "inner_calls": len(children),
+        "queries": titles.count("Sandbox: graph__query"),
+        "run_python": titles.count("Sandbox: run_python"),
+        "answer_chars": len("".join(answer)),
+        "steps_failed": sum(1 for v in verifies.values() if v != "completed"),
+        "steps_total": len(verifies),
+    }
+
+
+def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
+    """The persisted budget for the turn -- the only trustworthy token source."""
+    script = (
+        "import asyncio, json\n"
+        "from reporting.services import chat_graph\n"
+        "async def main():\n"
+        "    await chat_graph.initialize_chat_checkpoints()\n"
+        "    graph = chat_graph.get_chat_graph()\n"
+        f"    key = 'user:{user_id}:thread:{thread_id}'\n"
+        "    state = await graph.aget_state({'configurable': {'thread_id': key}})\n"
+        "    budgets = [\n"
+        "        b for m in (getattr(state, 'values', {}) or {}).get('messages', [])\n"
+        "        if (b := (getattr(m, 'response_metadata', {}) or {}).get('seizu_budget'))\n"
+        "    ]\n"
+        "    print('LEDGER' + json.dumps(budgets[-1] if budgets else {}))\n"
+        "asyncio.run(main())"
+    )
+    out = _compose("exec", "-T", "seizu", "uv", "run", "--frozen", "--no-sync", "python", "-c", script, capture=True)
+    for line in out.splitlines():
+        if line.startswith("LEDGER"):
+            budget = json.loads(line[len("LEDGER") :])
+            phases = budget.get("phases") or {}
+            return {
+                "total_tokens": budget.get("total_tokens", 0),
+                "mode": budget.get("mode", ""),
+                "sandbox_tokens": sum(
+                    v.get("total_tokens", 0) for k, v in phases.items() if k.endswith("sandbox_subagent")
+                ),
+            }
+    return {"total_tokens": 0, "mode": "?", "sandbox_tokens": 0}
+
+
+def run_sample(arm: str, index: int, user_id: str, out_dir: Path) -> dict[str, Any]:
+    session = json.loads(_post("/api/v1/chat/sessions", {"title": f"harness {arm} #{index}"}))
+    thread_id = session["thread_id"]
+    started = time.time()
+    _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": SETUP_TURN}, stream=True)
+    sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": FOLLOW_UP_TURN}, stream=True)
+    (out_dir / f"{arm.replace('=', '-')}_{index}.sse").write_text(sse)
+    row = {"arm": arm, "sample": index, "thread": thread_id, "seconds": int(time.time() - started)}
+    row.update(stream_metrics(sse))
+    row.update(ledger(thread_id, user_id))
+    return row
+
+
+def summarize(rows: list[dict[str, Any]]) -> None:
+    arms: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        arms.setdefault(row["arm"], []).append(row)
+    keys = ("answer_chars", "queries", "inner_calls", "delegations", "total_tokens")
+    print(f"\n{'arm':38} {'n':>2}  " + "  ".join(f"{k:>22}" for k in keys))
+    for arm, samples in arms.items():
+        cells = []
+        for key in keys:
+            values = sorted(int(s[key]) for s in samples)
+            cells.append(f"{int(statistics.median(values))} [{values[0]}-{values[-1]}]".rjust(22))
+        print(f"{arm[:38]:38} {len(samples):>2}  " + "  ".join(cells))
+    print()
+    for arm, samples in arms.items():
+        failed = sum(s["steps_failed"] for s in samples)
+        total = sum(s["steps_total"] for s in samples)
+        clean = sum(1 for s in samples if s["mode"] == "normal")
+        print(f"{arm[:38]:38} steps failed {failed}/{total}   budget not exhausted {clean}/{len(samples)}")
+    print("\nRanges overlapping between arms mean the setting is not distinguishable at this sample size.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--samples", type=int, default=4)
+    parser.add_argument("--arms", nargs="+", required=True, help='"baseline" or KEY=VALUE')
+    parser.add_argument("--user-id", required=True, help="Seizu user id whose threads to read budgets from")
+    parser.add_argument("--out", default="chat-harness-results")
+    args = parser.parse_args()
+
+    for arm in args.arms:
+        if arm != "baseline" and not _ARM_RE.match(arm):
+            parser.error(f"arm {arm!r} must be 'baseline' or KEY=VALUE")
+
+    out_dir = REPO / args.out
+    out_dir.mkdir(exist_ok=True)
+    results = out_dir / "results.jsonl"
+    results.write_text("")
+
+    rows: list[dict[str, Any]] = []
+    try:
+        for arm in args.arms:
+            applied = apply_arm(arm)
+            print(f"ARM {arm} applied={applied}", flush=True)
+            for index in range(1, args.samples + 1):
+                row = run_sample(arm, index, args.user_id, out_dir)
+                rows.append(row)
+                with results.open("a") as handle:
+                    handle.write(json.dumps(row) + "\n")
+                print(json.dumps(row), flush=True)
+    finally:
+        OVERLAY.unlink(missing_ok=True)
+        subprocess.run(
+            ["docker", "compose", "up", "-d", "--force-recreate", "seizu"],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+    summarize(rows)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

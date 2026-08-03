@@ -57,6 +57,13 @@ remediation_smoke:
 		-e SMOKE_PROXY=$(SMOKE_PROXY) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
+# Runs on the host, not in a container: it recreates the seizu service between
+# arms, which it could not do from inside that service. Standard library only,
+# so the host needs no project environment.
+chat_harness:
+	python3 -m scripts.chat_harness --samples $(or $(SAMPLES),4) \
+		--user-id $(USER_ID) --arms $(ARMS)
+
 .PHONY: test_frontend
 test_frontend:
 	@docker compose run --rm --no-deps seizu-node bun run type-check

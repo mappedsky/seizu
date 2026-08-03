@@ -52,7 +52,20 @@ make auth_enable / auth_disable
 make sqlmodel_enable / sqlmodel_disable
 make build_cartography_worker     # build the cartography sync-worker image
 make cartography_contract_test    # verify registry flags against the pinned CLI
+make chat_harness USER_ID=<id> ARMS="baseline KEY=VALUE" [SAMPLES=4]
 ```
+
+**Measuring chat agent settings:** `scripts/chat_harness.py` runs the same two-turn
+conversation N times per arm and reports medians and ranges. Use it rather than
+comparing single runs — answer quality on an *unchanged* configuration has been
+observed to vary several-fold, and single-run comparisons of this system have
+repeatedly shown "clean separations" that vanished under more samples. Four
+settings have been swept without a distinguishable difference between any of
+them. It runs on the host (it recreates the `seizu` service between arms) and is
+standard-library only. Note when reading any stream-derived metric: a subagent
+detail is re-emitted after every inner tool call carrying the whole children
+list, so counts must be de-duplicated on `detail_id` or they inflate
+quadratically in the size of a delegation.
 
 ## Adjacent Services Configuration
 
