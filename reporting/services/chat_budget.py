@@ -90,6 +90,27 @@ class BudgetController:
         ceiling = self._scope_ceilings.get(scope)
         return ceiling is not None and self.scope_spend(scope) >= ceiling
 
+    def scope_remaining(self, scope: str) -> int | None:
+        """Tokens the scope may still spend, or ``None`` when it is unbounded."""
+        ceiling = self._scope_ceilings.get(scope)
+        if ceiling is None:
+            return None
+        return max(0, ceiling - self.scope_spend(scope))
+
+    def scope_soft_limit_reached(self, scope: str) -> bool:
+        """Whether a scope has crossed the point where it should start finishing.
+
+        The run has always had this as a mode change (a cheaper model, optional
+        steps dropped). A scope needs it as a *signal it can act on*, because
+        the thing spending a step's budget is often a sub-agent that will
+        otherwise work until it is cut mid-task and lose what it had.
+        """
+        ceiling = self._scope_ceilings.get(scope)
+        if ceiling is None:
+            return False
+        ratio = float(self._ledger.get("soft_limit_ratio") or 1.0)
+        return self.scope_spend(scope) >= ceiling * ratio
+
     def snapshot(self) -> dict[str, Any]:
         return dict(self._ledger)
 

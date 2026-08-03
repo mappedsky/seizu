@@ -560,7 +560,7 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     fake_result = _make_fake_agent_result("result")
     captured_tools: list[Any] = []
 
-    def fake_create_react_agent(*, model: Any, tools: list[Any]) -> Any:
+    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
         captured_tools.extend(tools)
         return MagicMock(ainvoke=AsyncMock(return_value=fake_result))
 
@@ -1224,3 +1224,87 @@ async def test_read_file_says_so_when_it_cannot_return_the_whole_file() -> None:
     assert "500000 bytes" in returned
     assert "NOT the whole file" in returned
     assert "run_python" in returned
+
+
+# --- Sub-agent guidance --------------------------------------------------------
+
+
+async def test_the_subagent_is_told_how_the_data_is_shaped() -> None:
+    """It had no system prompt at all, so it re-derived all of this every run."""
+    backend = _make_fake_backend()
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        stack.enter_context(patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent))
+        await _handle_delegate({"task": "count them"}, _current_user())
+
+    prompt = captured["prompt"]
+    assert "too_large_to_return" in prompt  # what an oversized result looks like
+    assert "json.load(open(path))" in prompt  # and how to use one
+    assert "run_python" in prompt
+    assert '"results"' in prompt  # the shape a query result arrives in
+
+
+async def test_the_subagent_is_told_what_it_may_spend() -> None:
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 100_000)
+    chat_budget.set_current_budget_scope("worker:s1")
+    chat_budget.set_current_budget_controller(controller)
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    try:
+        with ExitStack() as stack:
+            for item in _sandbox_patches(backend := _make_fake_backend(), AsyncMock()):
+                stack.enter_context(item)
+            stack.enter_context(
+                patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent)
+            )
+            await _handle_delegate({"task": "count them"}, _current_user())
+    finally:
+        chat_budget.set_current_budget_scope("")
+        chat_budget.set_current_budget_controller(None)
+
+    assert "100000 tokens are available" in captured["prompt"]
+    assert backend is not None
+
+
+async def test_a_nearly_spent_scope_tells_the_subagent_to_finish() -> None:
+    """A limit it cannot see is one it cannot plan against."""
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 1_000)
+    reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s1")
+    await controller.commit(reservation, input_tokens=800, output_tokens=0, cost_usd=0.0, usage_estimated=False)
+    assert controller.scope_soft_limit_reached("worker:s1")
+
+    chat_budget.set_current_budget_scope("worker:s1")
+    chat_budget.set_current_budget_controller(controller)
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    try:
+        with ExitStack() as stack:
+            for item in _sandbox_patches(_make_fake_backend(), AsyncMock()):
+                stack.enter_context(item)
+            stack.enter_context(
+                patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent)
+            )
+            await _handle_delegate({"task": "count them"}, _current_user())
+    finally:
+        chat_budget.set_current_budget_scope("")
+        chat_budget.set_current_budget_controller(None)
+
+    assert "return your findings now" in captured["prompt"]
+    assert "loses everything you have not yet reported" in captured["prompt"]

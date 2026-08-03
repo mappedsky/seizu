@@ -581,6 +581,54 @@ def _truncate_bytes(text: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode(errors="replace") + "\n[truncated]"
 
 
+# The inner agent had no system prompt at all: it was handed tools and a task and
+# left to work out the shape of the data, the cost of its choices, and what to do
+# with an oversized result, every single time. Measured runs showed exactly that
+# -- schema re-introspection on every delegation, hundreds of repeat queries, and
+# results pulled into context that code could have processed.
+_SUBAGENT_PROMPT = """You are a sub-agent working inside an ephemeral sandbox for one task.
+
+You exist so data is handled by code rather than by a model. Fetch what you need, \
+process it with run_python, and return conclusions. Pulling rows into your own context \
+to reason over them is the expensive path and usually the wrong one.
+
+What the data looks like:
+- Seizu tools return JSON. Query-style results are an object with a "results" list of \
+  row objects, often alongside "warnings".
+- A result too large to return is written to a file instead, and you get \
+  {"status": "too_large_to_return", "saved_to": "<path>", "rows": N, "columns": [...], \
+  "sample": [...]}. The rows are in that file, not in the receipt.
+- When you get such a receipt, read the file in code: json.load(open(path))["results"] \
+  gives the rows. Do not preview or re-run the query to try to see them; the receipt is \
+  what the call returns.
+- A result that carries "truncated": true is incomplete. Say so rather than treating it \
+  as the whole set.
+
+How to work:
+- Query once, save what you get, and compute over it. Repeating a query to see more of it \
+  costs more than processing what you already have.
+- Aggregate, filter, join and count in run_python, not by reading rows yourself.
+- Prefer a purpose-built tool over raw Cypher when one covers the question.
+- Return the findings and the numbers behind them. Do not return transcripts, row dumps, \
+  or a description of what you tried."""
+
+
+def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
+    """Tell the sub-agent what it may spend, in terms it can act on."""
+    if remaining is None:
+        return ""
+    if wrap_up:
+        return (
+            f"\n\nBudget: about {remaining} tokens remain for this step and most of the allowance is "
+            "already spent. Stop gathering, work with what you have, and return your findings now. "
+            "Being cut off mid-task loses everything you have not yet reported."
+        )
+    return (
+        f"\n\nBudget: about {remaining} tokens are available for this step, shared with any other work "
+        "it does. Spend them on code rather than on reading data into context."
+    )
+
+
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
     from reporting.services.chat_graph import _child_detail_event_accumulator, _current_tool_detail_id
@@ -621,6 +669,15 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     episode_log = episodic_memory.current_episode_log()
     recall = episode_log.recall() if episode_log is not None else ""
 
+    # Budget stated to the sub-agent rather than only enforced around it. A limit
+    # it cannot see is one it cannot plan against: it works until it is cut, and
+    # loses whatever it had not yet reported.
+    budget_controller = chat_budget.current_budget_controller()
+    budget_scope = chat_budget.current_budget_scope()
+    remaining = budget_controller.scope_remaining(budget_scope) if budget_controller else None
+    wrap_up = bool(budget_controller and budget_controller.scope_soft_limit_reached(budget_scope))
+    system_prompt = _SUBAGENT_PROMPT + _budget_note(remaining, wrap_up=wrap_up)
+
     prompt = task
     if context:
         prompt = f"Context:\n{context}\n\nTask:\n{task}"
@@ -639,7 +696,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
                 tools = [*tools, *await _build_seizu_tools(current_user, backend)]
             tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
             model = _get_sandbox_model()
-            agent = create_react_agent(model=model, tools=tools)
+            agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)
             result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
             messages = result.get("messages", [])
             for msg in reversed(messages):

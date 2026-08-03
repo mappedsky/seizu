@@ -1607,16 +1607,20 @@ def _looping_worker_kwargs(mocker: Any) -> dict[str, Any]:
 
 
 async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
-    # The step token ceiling stops it before the action ceiling does.
-    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 2.0)
-    controller = BudgetController(initial_budget_ledger())
+    """The ceiling is a share of what the run has left, split between the steps
+    still to finish -- not a multiple of the planner's complexity guess."""
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 1.0)
+    ledger = initial_budget_ledger()
+    # 16k spendable across two outstanding steps -> 8k each, and the model bills
+    # 2k a turn, so this step stops after four.
+    ledger.update({"token_limit": 20_000, "reserve_tokens": 4_000, "soft_limit_ratio": 1.0})
+    controller = BudgetController(ledger)
 
-    # complexity "small" -> 4000 estimated tokens, ceiling 8000, and the model
-    # bills 2000 per turn, so it stops after four.
-    step = _step("s1", estimated_tokens=4000)
+    step = _step("s1", estimated_tokens=1_000)
+    other = _step("s2")
     result = await chat_orchestrator._run_worker_step(
         step,
-        plan=[step],
+        plan=[step, other],
         results=[],
         model=_LoopingModel(),
         config={"configurable": {"budget_controller": controller}},
@@ -1624,19 +1628,22 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
     )
 
     assert len(result["tools_used"]) == 4
-    assert result["output"].strip()
+    assert result["output"].strip()  # still summarizes rather than returning nothing
+    assert result["budget_capped"] is True  # terminal: a retry hits the same wall
 
 
 async def test_worker_ceiling_leaves_budget_for_the_rest_of_the_plan(mocker):
     # The point of the ceiling: a runaway step must not starve its siblings.
-    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 2.0)
-    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
-    controller = BudgetController(initial_budget_ledger())
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 1.0)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 100_000, "reserve_tokens": 20_000, "soft_limit_ratio": 1.0})
+    controller = BudgetController(ledger)
 
-    step = _step("s1", estimated_tokens=4000)
+    step = _step("s1", estimated_tokens=1_000)
+    other = _step("s2")
     await chat_orchestrator._run_worker_step(
         step,
-        plan=[step],
+        plan=[step, other],
         results=[],
         model=_LoopingModel(),
         config={"configurable": {"budget_controller": controller}},
@@ -1644,7 +1651,10 @@ async def test_worker_ceiling_leaves_budget_for_the_rest_of_the_plan(mocker):
     )
 
     remaining = controller.remaining_normal_tokens
-    assert remaining is not None and remaining > 60_000
+    assert remaining is not None
+    # This step's share was half the spendable budget (plus a small summary pass);
+    # the sibling keeps roughly the other half rather than finding it spent.
+    assert 35_000 <= remaining <= 45_000
     assert controller.mode == "normal"
 
 
@@ -1773,3 +1783,42 @@ async def test_an_ordinary_failed_step_is_still_retried(mocker):
     # Reset to pending, picked up, and re-run with the rejection as guidance.
     assert state["plan"][0]["status"] == "ran"
     assert state["iteration"] == 1
+
+
+def test_step_ceiling_is_a_share_of_what_the_run_has_left():
+    """Derived from the run budget, not the planner's complexity guess.
+
+    A step that queried eight CVEs and their exposure was labelled "small" and
+    cut at 4,000 x 12, on a question that needed roughly 80,000.
+    """
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 400_000, "reserve_tokens": 80_000, "total_tokens": 0})
+    controller = BudgetController(ledger)
+    plan = [_step("s1"), _step("s2", "passed"), _step("s3")]
+
+    ceiling = chat_orchestrator._step_ceiling(plan[0], plan, controller, 4_000)
+
+    # 320k spendable, two steps still outstanding.
+    assert ceiling == 160_000
+
+
+def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 400_000, "reserve_tokens": 80_000, "total_tokens": 310_000})
+    controller = BudgetController(ledger)
+    plan = [_step("s1"), _step("s2")]
+
+    # Almost nothing left to share, so the floor governs instead.
+    assert chat_orchestrator._step_ceiling(plan[0], plan, controller, 4_000) == 48_000
+
+
+def test_step_ceiling_falls_back_to_the_floor_without_a_token_budget(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 0})
+    controller = BudgetController(ledger)
+    plan = [_step("s1")]
+
+    assert chat_orchestrator._step_ceiling(plan[0], plan, controller, 8_000) == 96_000
+    assert chat_orchestrator._step_ceiling(plan[0], plan, None, 8_000) == 96_000

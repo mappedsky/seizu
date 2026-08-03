@@ -866,6 +866,38 @@ def _dependency_context(step: dict[str, Any], plan: list[dict[str, Any]], result
     return "\n".join(blocks)
 
 
+def _step_ceiling(
+    step: dict[str, Any],
+    plan: list[dict[str, Any]],
+    controller: BudgetController | None,
+    step_budget: int,
+) -> int:
+    """How much this step may spend, itself and everything it delegates to.
+
+    Derived from the run budget rather than the planner's complexity label. The
+    label is a guess made before any work happens and has no relationship to how
+    much sandbox delegation a goal implies: a step that queried eight CVEs and
+    their exposure was labelled "small" and cut at 4,000 x 12, on a question the
+    successful configuration answered using roughly 80,000 per step. Raising the
+    multiplier only moves the wall to the next mislabelled step.
+
+    A share of what the run has left, divided between the steps still to finish,
+    states the actual purpose directly: no step may starve its siblings. It also
+    tracks CHAT_RUN_TOKEN_BUDGET automatically, instead of needing a second
+    constant retuned whenever that one changes. The complexity estimate stays as
+    a floor so a trivial step cannot claim a whole share it will never use.
+    """
+    floor = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
+    if controller is None:
+        return floor
+    remaining = controller.remaining_normal_tokens
+    if remaining is None:
+        return floor
+    outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
+    share = remaining // max(1, outstanding)
+    return max(floor, share)
+
+
 async def _run_worker_step(
     step: dict[str, Any],
     *,
@@ -998,7 +1030,7 @@ async def _run_worker_step(
     # from a coarse complexity label: degrading at the estimate is cheap if it
     # was low, whereas stopping there would kill legitimate work. The ceiling is
     # what keeps one step from spending a whole run's budget.
-    step_ceiling = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
+    step_ceiling = _step_ceiling(step, plan, controller, step_budget)
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far
