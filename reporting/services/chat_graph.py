@@ -43,6 +43,7 @@ from reporting.services import (
     mcp_builtins,
     mcp_runtime,
     report_store,
+    sandbox_session,
 )
 from reporting.services.chat_budget import (
     BudgetExceeded,
@@ -401,6 +402,19 @@ async def mock_agent_node(state: ChatState, _config: RunnableConfig) -> ChatStat
     return {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
 
 
+async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig) -> ChatState:
+    """Run the turn, and destroy its sandbox however the turn ends.
+
+    The session is opened lazily inside the node, so this only has work to do
+    when a delegation actually happened. Without the finally an error path would
+    leave a sandbox running until the provider reaped it on its own timeout.
+    """
+    try:
+        return await chat_agent_node(state, config)
+    finally:
+        await sandbox_session.close_sandbox_session()
+
+
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
     provider = _chat_provider()
     current_user = _current_user_from_config(config)
@@ -413,6 +427,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # same shape as an orchestrator step: many tool calls, each spawning a
     # subagent that would otherwise start cold. One log per turn.
     episodic_memory.start_episode_log()
+    sandbox_session.start_sandbox_session()
     chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
     messages = _llm_context_messages(state["messages"])
@@ -3059,7 +3074,7 @@ def build_chat_graph(checkpointer: Any) -> ChatGraph:
 
     graph = StateGraph(ChatState)
     graph.add_node("router", orchestrator.router_node)
-    graph.add_node("chat_agent", chat_agent_node)
+    graph.add_node("chat_agent", _chat_agent_node_with_session)
     graph.add_node("planner", orchestrator.planner_node)
     graph.add_node("dispatcher", orchestrator.dispatcher_node)
     graph.add_node("verifier", orchestrator.verifier_node)

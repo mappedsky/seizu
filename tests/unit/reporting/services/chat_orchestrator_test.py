@@ -1641,10 +1641,9 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
         **_looping_worker_kwargs(mocker),
     )
 
-    # Ran past its 8k share rather than dying there, and stopped before the 16k
-    # bound. The exact count depends on reservation sizing, so the property under
-    # test is that the share did not end it and the bound did.
-    assert 4 < len(result["tools_used"]) <= 8
+    # At the default multiple the share is the hard cut, so the step stops there:
+    # 8k share at 2k a turn.
+    assert len(result["tools_used"]) == 4
     assert result["output"].strip()  # still summarizes rather than returning nothing
     # Stopped by a budget -- here the run's own check, which authorizes on
     # estimates and so bites before the scope's bound on committed tokens.
@@ -1804,6 +1803,22 @@ def test_step_ceiling_is_a_share_of_what_the_run_has_left():
     assert soft == 160_000
 
 
+def test_a_higher_multiple_gives_a_step_headroom_past_its_share(mocker):
+    """Above 1.0 the share only degrades the step; the hard stop moves out."""
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 2.0)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 400_000, "reserve_tokens": 80_000, "total_tokens": 0})
+    controller = BudgetController(ledger)
+    plan = [_step("s1"), _step("s2")]
+
+    soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+
+    assert soft == 160_000
+    assert hard == 320_000
+    # Never past what the run can spend outside its finalization reserve.
+    assert hard <= 320_000
+
+
 def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
     ledger = initial_budget_ledger()
@@ -1838,10 +1853,10 @@ def test_the_fair_share_is_soft_and_the_reserve_is_the_hard_stop():
     soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
     assert soft == 160_000  # its share of the two outstanding steps
-    assert hard == 320_000  # at the default multiple, twice its share
-    # Between them the step is degraded and told to converge, not killed: a step
-    # that needs more than a fair share can have it when nothing is contending.
-    assert hard > soft
+    # At the default multiple of 1.0 the share is itself the hard cut. Chosen
+    # because a three-arm sweep found no difference between settings, so the
+    # strongest sibling protection wins by default.
+    assert hard == 160_000
 
 
 async def test_crossing_the_share_signals_without_stopping_the_step():

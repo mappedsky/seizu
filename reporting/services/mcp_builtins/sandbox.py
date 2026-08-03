@@ -40,7 +40,7 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, episodic_memory
+from reporting.services import chat_budget, episodic_memory, sandbox_session
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
@@ -306,7 +306,10 @@ async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend 
             if backend is None or not oversized:
                 return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
 
-            path = f"{_RESULT_DIR}/{_tool_name}_{next(_result_seq):03d}.json"
+            # Unique per call, not just per delegation: delegations in one step
+            # now share a filesystem and can run concurrently, so a per-builder
+            # counter would collide.
+            path = f"{_RESULT_DIR}/{_tool_name}_{next(_result_seq):03d}_{uuid.uuid4().hex[:8]}.json"
             try:
                 await backend.write_file(path, text)
             except Exception:
@@ -689,21 +692,31 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             f"{recall}\n\n---\n\n{prompt}"
         )
 
-    async def _run() -> str:
-        async with open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
-            tools = _build_sandbox_tools(backend)
-            if current_user is not None:
-                tools = [*tools, *await _build_seizu_tools(current_user, backend)]
-            tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
-            model = _get_sandbox_model()
-            agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)
-            result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
-            messages = result.get("messages", [])
-            for msg in reversed(messages):
-                if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
-                    content = msg.content
-                    return content if isinstance(content, str) else str(content)
+    async def _agent_over(backend: SandboxBackend) -> str:
+        tools = _build_sandbox_tools(backend)
+        if current_user is not None:
+            tools = [*tools, *await _build_seizu_tools(current_user, backend)]
+        tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
+        model = _get_sandbox_model()
+        agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)
+        result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
+                content = msg.content
+                return content if isinstance(content, str) else str(content)
         return "(no output)"
+
+    async def _run() -> str:
+        # Reuse the step's sandbox when one is ambient, so files written by an
+        # earlier delegation are still there for this one. Falling back to a
+        # private sandbox keeps every caller without a session working -- the
+        # MCP path, tests, and anything outside a chat step.
+        session = sandbox_session.current_sandbox_session()
+        if session is not None:
+            return await _agent_over(await session.backend())
+        async with open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
+            return await _agent_over(backend)
 
     try:
         output = await asyncio.wait_for(_run(), timeout=settings.SANDBOX_TIMEOUT_SECONDS)

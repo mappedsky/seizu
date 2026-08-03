@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_budget, chat_graph, episodic_memory, mcp_builtins
+from reporting.services import chat_budget, chat_graph, episodic_memory, mcp_builtins, sandbox_session
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -673,7 +673,7 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
 
     new_results = await asyncio.gather(
         *(
-            _run_worker_step(
+            _run_worker_step_with_session(
                 step,
                 plan=plan,
                 results=results,
@@ -919,6 +919,19 @@ def _step_thresholds(
     return soft, max(soft, min(remaining, int(soft * multiple)))
 
 
+async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    """Run a step, and destroy its sandbox however the step ends.
+
+    The step closes its own session before the summary pass, so on the ordinary
+    path this has nothing left to do. It exists for the error path, where a
+    leaked session would keep a sandbox alive until the provider's timeout.
+    """
+    try:
+        return await _run_worker_step(step, **kwargs)
+    finally:
+        await sandbox_session.close_sandbox_session()
+
+
 async def _run_worker_step(
     step: dict[str, Any],
     *,
@@ -946,6 +959,10 @@ async def _run_worker_step(
     # within this step share the object by reference — which is the carry that
     # stops each fresh sandbox subagent re-deriving what the last one found.
     episodic_memory.start_episode_log()
+    # One sandbox for the whole step, opened on first use. Delegations used to
+    # get their own and lose everything on return, so a result written to a file
+    # was gone before the next delegation could read it.
+    sandbox_session.start_sandbox_session()
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
@@ -1222,6 +1239,8 @@ async def _run_worker_step(
             active_names.update(spec.name for spec in added)
             newly_disclosed_names.update(spec.name for spec in added)
             available = _with_provider_tool_names(active_specs)
+
+    await sandbox_session.close_sandbox_session()
 
     # The step's own work is over; release its ceiling before the summary pass.
     # That pass is how a step reports what it found, so it must not be refused

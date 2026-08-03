@@ -1310,3 +1310,42 @@ async def test_a_nearly_spent_scope_tells_the_subagent_to_finish() -> None:
 
     assert "return your findings now" in captured["prompt"]
     assert "loses everything you have not yet reported" in captured["prompt"]
+
+
+async def test_delegations_in_a_step_reuse_one_sandbox(mocker) -> None:
+    """Files written by one delegation survive to the next, which is the point."""
+    shared = _make_fake_backend()
+    opened: list[Any] = []
+
+    class _Session:
+        async def backend(self) -> Any:
+            opened.append(shared)
+            return shared
+
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=_Session(),
+    )
+    private = _make_fake_backend()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(private, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        await _handle_delegate({"task": "one"}, _current_user())
+        await _handle_delegate({"task": "two"}, _current_user())
+
+    assert opened == [shared, shared]  # the session's sandbox, both times
+
+
+async def test_a_delegation_without_a_session_still_opens_its_own(mocker) -> None:
+    """The MCP path and anything outside a chat step keep working unchanged."""
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=None,
+    )
+    backend = _make_fake_backend()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "standalone"}, _current_user())
+
+    assert result["result"] == "done"

@@ -619,7 +619,15 @@ CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET
 # everything outside the finalization reserve. Below it the step is only
 # degraded and asked to converge, so this is the point at which a step is ended
 # rather than pressured.
-CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 2.0)
+#
+# 1.0 because a three-arm, three-sample sweep (1.0 / 2.0 / effectively
+# unbounded) found no discernible difference: every usable sample consumed the
+# whole spendable budget, ended in finalization, and failed a verification, with
+# within-arm spread (449-1,114 characters) as large as anything between arms.
+# Chosen for the strongest sibling protection at no measured cost, not because
+# it scored best. The ceiling is not the binding constraint -- the run budget
+# is, and the work does not fit inside it.
+CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 1.0)
 # Episodic recall between sub-agents within one step. Each sandbox__delegate
 # call runs a fresh subagent that knows nothing of the previous one, so without
 # this they re-derive the same ground -- one observed step made 136 delegations
@@ -799,6 +807,10 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # never reads the rows itself. Still finite -- write_file takes a string, so the
 # whole result materializes in the Seizu process before reaching the sandbox,
 # and an unbounded query would be a memory event here rather than there.
+# Lifetime of the sandbox shared by a step's delegations. Longer than
+# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox now
+# has to outlive a whole step; the provider would otherwise reap it mid-step.
+SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
