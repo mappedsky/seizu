@@ -78,7 +78,10 @@ persists only for the life of a single step.
 The agent reads such files with **`preview_file`**, which returns files at or
 under `SANDBOX_PREVIEW_MAX_BYTES` whole and, above that, only shape plus the
 beginning. That keeps a file written to stay out of context from being pulled
-straight back into it; `run_python` is how the full contents get used.
+straight back into it; `run_python` is how the full contents get used. This is a
+design choice rather than a measured improvement — a four-sample comparison found
+no difference against `read_file` — so set `SANDBOX_PREVIEW_MAX_BYTES=0` if you
+prefer whole-file reads.
 
 `read_file` is deliberately not a way around this. Asked for a file larger than
 `SANDBOX_MAX_OUTPUT_BYTES` it returns the beginning together with the file's real
