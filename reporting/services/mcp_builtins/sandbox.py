@@ -722,6 +722,19 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         output = await asyncio.wait_for(_run(), timeout=settings.SANDBOX_TIMEOUT_SECONDS)
     except TimeoutError:
         return {"error": f"Sandbox task timed out after {settings.SANDBOX_TIMEOUT_SECONDS}s"}
+    except chat_budget.BudgetExceeded as exc:
+        # Expected, not a fault: the step spent its allowance mid-delegation.
+        # The generic handler logged this as a crash with a full traceback and
+        # told the caller "Sandbox task failed", which is both noisy and
+        # unactionable -- indistinguishable from a broken sandbox, so the only
+        # sensible response (stop and report) was not available to it.
+        logger.info("sandbox__delegate stopped on budget: %s", exc)
+        return {
+            "error": (
+                f"Stopped: {exc} This step cannot fund more delegation. Do not retry this or start new "
+                "work; report what you have already gathered."
+            )
+        }
     except Exception:
         logger.exception("sandbox__delegate failed")
         return {"error": "Sandbox task failed — see server logs for details"}

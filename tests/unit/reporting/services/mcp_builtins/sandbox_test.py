@@ -1349,3 +1349,26 @@ async def test_a_delegation_without_a_session_still_opens_its_own(mocker) -> Non
         result = await _handle_delegate({"task": "standalone"}, _current_user())
 
     assert result["result"] == "done"
+
+
+async def test_a_budget_stop_is_reported_as_such_not_as_a_crash(mocker) -> None:
+    """It was caught by the generic handler and reported as "Sandbox task failed".
+
+    Indistinguishable from a broken sandbox, so the caller could not do the one
+    sensible thing -- stop and report what it has.
+    """
+    backend = _make_fake_backend()
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=None,
+    )
+    failing = AsyncMock(side_effect=BudgetExceeded("The run token budget is reserved for final synthesis."))
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, failing):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "keep going"}, _current_user())
+
+    assert "Stopped:" in result["error"]
+    assert "report what you have already gathered" in result["error"]
+    assert "see server logs" not in result["error"]
