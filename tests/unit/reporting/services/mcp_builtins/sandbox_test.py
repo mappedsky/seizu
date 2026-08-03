@@ -1372,3 +1372,36 @@ async def test_a_budget_stop_is_reported_as_such_not_as_a_crash(mocker) -> None:
     assert "Stopped:" in result["error"]
     assert "report what you have already gathered" in result["error"]
     assert "see server logs" not in result["error"]
+
+
+async def test_preview_replaces_read_file_when_a_preview_budget_is_set() -> None:
+    backend = _make_fake_backend()
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
+        names = {t.name for t in _build_sandbox_tools(backend)}
+    assert "preview_file" in names and "read_file" not in names
+
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0):
+        names = {t.name for t in _build_sandbox_tools(backend)}
+    assert "read_file" in names and "preview_file" not in names
+
+
+async def test_preview_of_a_large_file_returns_shape_not_contents() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value=_rows_json(5_000))
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 500):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        returned = await tools["preview_file"].coroutine(path="/tmp/big.json")
+
+    summary = json.loads(returned.split("\n\n")[0])
+    assert summary["rows"] == 5_000
+    assert summary["columns"] == ["cve", "score"]
+    assert "run_python" in summary["preview_only"]
+    assert len(returned) < 2_000
+
+
+async def test_preview_returns_a_small_file_whole() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="small contents")
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        assert await tools["preview_file"].coroutine(path="/tmp/x") == "small contents"

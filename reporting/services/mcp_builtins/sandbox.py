@@ -95,6 +95,15 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
         """Run a shell command in the sandbox and return stdout and stderr."""
         return _cap(await backend.run_bash(cmd))
 
+    async def preview_file(path: str) -> str:
+        """Inspect a file: its size, shape, and beginning.
+
+        Returns small files whole. For anything larger this returns a summary
+        and the first part only — it is for working out how to process a file,
+        not for loading one. Use run_python to work with the full contents.
+        """
+        return _file_preview(path, await backend.read_file(path))
+
     async def read_file(path: str) -> str:
         """Read the contents of a file in the sandbox filesystem."""
         content = await backend.read_file(path)
@@ -124,7 +133,20 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     return [
         StructuredTool.from_function(coroutine=run_python, name="run_python", description=run_python.__doc__ or ""),
         StructuredTool.from_function(coroutine=run_bash, name="run_bash", description=run_bash.__doc__ or ""),
-        StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__ or ""),
+        # preview_file when a preview budget is set, read_file otherwise. Both
+        # exist because the earlier verdict on preview_file was rendered while
+        # every delegation got a fresh sandbox: it told the agent to process a
+        # file with run_python, and across delegations that file did not exist.
+        # The comparison is only meaningful now sandboxes are shared per step.
+        (
+            StructuredTool.from_function(
+                coroutine=preview_file, name="preview_file", description=preview_file.__doc__ or ""
+            )
+            if settings.SANDBOX_PREVIEW_MAX_BYTES > 0
+            else StructuredTool.from_function(
+                coroutine=read_file, name="read_file", description=read_file.__doc__ or ""
+            )
+        ),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__ or ""),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__ or ""),
     ]
@@ -155,6 +177,45 @@ def _result_rows(text: str) -> list[Any] | None:
             if isinstance(value, list):
                 return value
     return None
+
+
+def _file_preview(path: str, content: str) -> str:
+    """Describe a file compactly enough that code can be written against it.
+
+    A file inside the preview budget comes back whole, so nothing changes for
+    the small files an agent writes itself. Beyond it the agent gets shape --
+    size, line count, JSON structure, columns -- and only the beginning, so a
+    result file written to keep data out of context cannot be pulled straight
+    back into it.
+    """
+    size = len(content.encode())
+    budget = max(0, settings.SANDBOX_PREVIEW_MAX_BYTES)
+    if size <= budget:
+        return content
+
+    summary: dict[str, Any] = {"path": path, "bytes": size, "lines": content.count("\n") + 1}
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        parsed = None
+    if parsed is not None:
+        summary["json"] = type(parsed).__name__
+        rows = _result_rows(content)
+        if rows is not None:
+            summary["rows"] = len(rows)
+            columns: list[str] = []
+            for row in rows:
+                if isinstance(row, dict):
+                    for key in row:
+                        if key not in columns:
+                            columns.append(key)
+            if columns:
+                summary["columns"] = columns
+    summary["preview_only"] = (
+        f"This is a {size}-byte file and only its first {budget} bytes follow. To use the whole file, process it "
+        "in code with run_python (e.g. json.load(open(path))) rather than previewing it again."
+    )
+    return json.dumps(summary, default=str) + "\n\n" + _truncate_bytes(content, budget)
 
 
 def _file_result_receipt(path: str, text: str) -> str:

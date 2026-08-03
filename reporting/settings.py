@@ -810,6 +810,14 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # Lifetime of the sandbox shared by a step's delegations. Longer than
 # SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox now
 # has to outlive a whole step; the provider would otherwise reap it mid-step.
+# Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
+# preview_file, which returns files at or under this size whole and otherwise
+# only shape plus the beginning; at 0 it gets read_file, which returns up to
+# SANDBOX_MAX_OUTPUT_BYTES. preview_file measured worse when every delegation
+# had its own sandbox -- it pointed the agent at files that no longer existed --
+# so 0 keeps the behaviour that verdict was actually rendered on until the
+# comparison is redone against shared sandboxes.
+SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 0)
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
