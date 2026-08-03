@@ -817,13 +817,18 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # straight back into it. At 0 it gets read_file, which returns up to
 # SANDBOX_MAX_OUTPUT_BYTES.
 #
-# Enabled by default on a three-sample comparison against shared sandboxes:
-# queries 5/95/190 against 562/593/1023 and delegations 27/33/58 against
-# 71/71/90, both cleanly separated, with the only run in the sweep that did not
-# exhaust the budget. An earlier comparison rejected this, but it was taken
-# while each delegation had its own sandbox, so the files preview_file points at
-# no longer existed by the time anything could read them and re-querying was the
-# agent's only option.
+# Enabled by default on answer length against shared sandboxes
+# (2,373/3,276/1,189 against 1,913/1,602/1,102 over three samples each) and on
+# the mechanism: a result written to a file to keep it out of context should not
+# be readable straight back into it. An earlier comparison rejected this, but it
+# was taken while each delegation had its own sandbox, so the files preview_file
+# points at no longer existed by the time anything could read them, and
+# re-querying was the agent's only option.
+#
+# The tool-call counts first cited here were wrong -- the measurement counted
+# stream events rather than distinct calls, inflating them quadratically in the
+# size of a delegation -- so treat this default as resting on answer length and
+# on the mechanism, not on a demonstrated difference in call volume.
 SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
