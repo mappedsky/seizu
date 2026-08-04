@@ -1253,3 +1253,53 @@ def test_explicit_zero_limits_mean_unbounded_not_omitted(mocker):
     limits = mcp_runtime._effective_limits(0, 0)
     assert limits.max_rows == 0
     assert limits.max_bytes == 0
+
+
+def test_no_data_bearing_response_exceeds_its_byte_budget():
+    """Regression: the sizing search measured a smaller envelope than the one
+    emitted, so responses could exceed the budget the search exists to enforce."""
+    over = []
+    for budget in range(200, 2000, 11):
+        for rows in (1, 5, 30):
+            for pad in (0, 60, 400):
+                payload = {"results": [{"i": i, "p": "x" * pad} for i in range(rows)], "warnings": ["w"]}
+                emitted = mcp_runtime._bounded_text_response(payload, max_rows=7, max_bytes=budget)[0].text
+                if len(emitted.encode()) > budget and "error" not in json.loads(emitted):
+                    over.append((budget, len(emitted.encode())))
+    assert over == []
+
+
+def test_the_only_response_allowed_to_exceed_the_budget_is_the_empty_one():
+    """A fixed message cannot be shortened below its own length."""
+    payload = {"results": [{"p": "x" * 400}]}
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=100)[0].text
+    decoded = json.loads(emitted)
+    assert "error" in decoded
+    assert decoded["truncated_reasons"] == ["byte_limit"]
+
+
+def test_a_source_only_truncation_reports_the_full_contract():
+    """Regression: the stream marker omitted returned and total_rows_at_least,
+    so a source-truncated result did not match its own documentation."""
+    from reporting.services.result_limits import ResultLimits, stream_truncation
+
+    fields = stream_truncation("row_limit", [{"i": 0}, {"i": 1}, {"i": 2}], ResultLimits(max_rows=3)).fields()
+
+    assert fields["truncated"] is True
+    assert fields["truncated_reasons"] == ["row_limit"]
+    assert fields["returned"] == 3
+    assert fields["total_rows_at_least"] == 3
+    assert fields["max_rows"] == 3
+    assert "total_rows" not in fields
+
+
+def test_a_row_then_byte_cut_keeps_both_limits():
+    """The final marker was passed only max_bytes, dropping the row bound that
+    had already been applied."""
+    payload = {"results": [{"p": "x" * 300} for _ in range(50)]}
+
+    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=900)[0].text)
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["max_rows"] == 10
+    assert decoded["max_bytes"] == 900

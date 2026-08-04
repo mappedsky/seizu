@@ -315,3 +315,8 @@ A truncated result carries:
 
 Do not treat `total_rows_at_least` as a total. It is the number of rows that
 reached the response bound, not the number the query would have produced.
+
+Every response carrying data is bounded exactly by `MCP_TOOL_RESULT_MAX_BYTES`.
+The single exception is the message returned when not even one row fits: it is a
+fixed string, so a budget smaller than that message cannot be honoured. This
+only arises with budgets in the low hundreds of bytes.

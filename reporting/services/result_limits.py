@@ -67,3 +67,68 @@ def current_result_limits() -> ResultLimits:
     bound is the right default rather than no bound at all.
     """
     return _current_result_limits.get() or ResultLimits.for_mcp()
+
+
+@dataclass(frozen=True)
+class Truncation:
+    """Everything a client is told about why a result is incomplete.
+
+    One object shared by the three places that can shorten a result -- the
+    streaming read, the response limiter, and the byte-sizing search that
+    decides how many rows the limiter can keep. They drifted apart when each
+    built its own dict: the stream marker omitted ``returned``, the graph
+    built-in omitted the limits, a row-then-byte cut dropped ``max_rows``, and
+    the sizing search measured a smaller envelope than the one actually emitted,
+    so responses could exceed the very budget the search existed to enforce.
+    """
+
+    reasons: tuple[str, ...]
+    returned: int
+    source_rows: int
+    source_complete: bool
+    max_rows: int | None = None
+    max_bytes: int | None = None
+
+    def with_reason(self, reason: str, **limits: int | None) -> "Truncation":
+        """A further cut, keeping what earlier bounds already established."""
+        return Truncation(
+            reasons=(*self.reasons, reason),
+            returned=self.returned,
+            source_rows=self.source_rows,
+            source_complete=self.source_complete,
+            max_rows=limits.get("max_rows", self.max_rows),
+            max_bytes=limits.get("max_bytes", self.max_bytes),
+        )
+
+    def fields(self) -> dict[str, object]:
+        """The response fields, identical wherever this is rendered."""
+        marker: dict[str, object] = {
+            "truncated": True,
+            "truncated_reasons": list(self.reasons),
+            "returned": self.returned,
+        }
+        # A total is claimed only when the query ran out of rows on its own.
+        # Otherwise the real number is unknown and larger than anything seen,
+        # and calling the visible count a total invites a client to page toward
+        # an end that does not exist.
+        if self.source_complete:
+            marker["total_rows"] = self.source_rows
+        else:
+            marker["total_rows_at_least"] = self.source_rows
+        if self.max_rows is not None:
+            marker["max_rows"] = self.max_rows
+        if self.max_bytes is not None:
+            marker["max_bytes"] = self.max_bytes
+        return marker
+
+
+def stream_truncation(reason: str, rows: list[object], limits: ResultLimits) -> Truncation:
+    """State for a read the database stopped early."""
+    return Truncation(
+        reasons=(reason,),
+        returned=len(rows),
+        source_rows=len(rows),
+        source_complete=False,
+        max_rows=limits.max_rows if reason == "row_limit" else None,
+        max_bytes=limits.max_bytes if reason == "byte_limit" else None,
+    )

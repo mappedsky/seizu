@@ -19,7 +19,13 @@ from reporting.services import action_confirmations, report_store, reporting_neo
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
-from reporting.services.result_limits import ResultLimits, reset_current_result_limits, set_current_result_limits
+from reporting.services.result_limits import (
+    ResultLimits,
+    Truncation,
+    reset_current_result_limits,
+    set_current_result_limits,
+    stream_truncation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +535,9 @@ async def _call_tool_core(
         # the bound that actually stopped it -- reporting a byte stop as a row
         # limit points a client at the wrong remedy.
         bounded: Any = (
-            _rebuild(serialized, None, serialized, _stream_limit_marker(reason, limits)) if reason else serialized
+            _rebuild(serialized, None, serialized, stream_truncation(reason, serialized, limits).fields())
+            if reason
+            else serialized
         )
         return (
             _bounded_text_response(bounded, max_rows=limits.max_rows, max_bytes=limits.max_bytes),
@@ -740,12 +748,10 @@ def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimi
     return ResultLimits.for_mcp()
 
 
-def _stream_limit_marker(reason: str, limits: ResultLimits) -> dict[str, Any]:
-    if reason == "byte_limit":
-        return {"truncated": True, "truncated_reasons": ["byte_limit"], "max_bytes": limits.max_bytes}
-    return {"truncated": True, "truncated_reasons": ["row_limit"], "max_rows": limits.max_rows}
-
-
+# Keys under which a tool result carries its rows. ``graph__query`` returns
+# ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
+# same shape, so treating only a top-level list as rows meant the row cap never
+# applied to the tools most likely to return thousands of them.
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
 
@@ -801,54 +807,65 @@ def _bounded_text_response(
     (a single oversized row, or a non-list payload that can't be row-shed).
     """
     rows, row_key = _payload_rows_and_key(payload)
+    prior = _prior_truncation(payload)
+
+    def render(kept: list[Any], state: Truncation) -> Any:
+        return _rebuild(payload, row_key, kept, state.fields())
+
+    if rows is None:
+        # Nothing row-shaped to shorten: emit or fail whole.
+        text = json.dumps(payload, indent=2, default=str)
+        if max_bytes is None or max_bytes <= 0 or json_size_bytes(payload, indent=2) <= max_bytes:
+            return [TextContent(type="text", text=text)]
+        return _emit(_byte_limit_error(max_bytes))
+
     # A result can be cut twice: once at the source, and again here when the
     # assembled payload -- indentation, envelope, sibling fields -- exceeds the
-    # byte budget. Carry what the source already reported rather than
-    # overwriting it, because the second cut knows neither why the first
-    # happened nor how many rows there really were.
-    prior = _prior_truncation(payload)
-    capped: list[Any] | None
-    reasons = list(prior)
-    if rows is not None and max_rows is not None and max_rows > 0 and len(rows) > max_rows:
+    # byte budget. Carry what the source reported rather than overwriting it.
+    base = Truncation(
+        reasons=tuple(prior),
+        returned=len(rows),
+        source_rows=len(rows),
+        source_complete=not prior,
+    )
+    capped = rows
+    state = base
+    if max_rows is not None and max_rows > 0 and len(rows) > max_rows:
         capped = rows[:max_rows]
-        reasons = [*reasons, "row_limit"]
-        bounded: Any = _rebuild(
-            payload,
-            row_key,
-            capped,
-            _truncation_marker(
-                reasons, returned=len(capped), source_rows=len(rows), source_complete=not prior, max_rows=max_rows
-            ),
+        state = base.with_reason("row_limit", max_rows=max_rows)
+        state = Truncation(
+            reasons=state.reasons,
+            returned=len(capped),
+            source_rows=base.source_rows,
+            source_complete=base.source_complete,
+            max_rows=max_rows,
+            max_bytes=state.max_bytes,
         )
-    else:
-        capped = rows
-        bounded = payload
 
-    text = json.dumps(bounded, indent=2, default=str)
+    bounded: Any = render(capped, state) if state.reasons else payload
     if max_bytes is None or max_bytes <= 0 or json_size_bytes(bounded, indent=2) <= max_bytes:
-        return [TextContent(type="text", text=text)]
+        return [TextContent(type="text", text=json.dumps(bounded, indent=2, default=str))]
 
-    # Over the byte budget: shed whole rows if the payload is a list.
-    if capped is None:
-        return _emit(_byte_limit_error(max_bytes))
-    source_rows = len(rows) if rows is not None else len(capped)
-    keep = _rows_within_byte_budget(capped, total=source_rows, max_bytes=max_bytes, payload=payload, row_key=row_key)
-    if keep <= 0:
-        return _emit(_byte_limit_error(max_bytes))
-    return _emit(
-        _rebuild(
-            payload,
-            row_key,
-            capped[:keep],
-            _truncation_marker(
-                [*reasons, "byte_limit"],
-                returned=keep,
-                source_rows=source_rows,
-                source_complete=not prior,
+    # Over the byte budget: shed whole rows. The search must measure exactly
+    # what will be emitted -- sizing a smaller envelope than the final one is
+    # how responses came to exceed the budget the search exists to enforce.
+    def render_shed(kept: list[Any]) -> Any:
+        return render(
+            kept,
+            Truncation(
+                reasons=(*state.reasons, "byte_limit"),
+                returned=len(kept),
+                source_rows=base.source_rows,
+                source_complete=base.source_complete,
+                max_rows=state.max_rows,
                 max_bytes=max_bytes,
             ),
         )
-    )
+
+    keep = largest_prefix_within_bytes(capped, max_bytes=max_bytes, envelope=render_shed, indent=2)
+    if keep <= 0:
+        return _emit(_byte_limit_error(max_bytes))
+    return _emit(render_shed(capped[:keep]))
 
 
 def _prior_truncation(payload: Any) -> list[str]:
@@ -862,87 +879,20 @@ def _prior_truncation(payload: Any) -> list[str]:
     return [str(single)] if single else ["unknown"]
 
 
-def _truncation_marker(
-    reasons: list[str],
-    *,
-    returned: int,
-    source_rows: int,
-    source_complete: bool,
-    max_rows: int | None = None,
-    max_bytes: int | None = None,
-) -> dict[str, Any]:
-    """Describe every bound that shaped this result, not only the last one.
-
-    ``total_rows`` is stated only when the source ran to completion. Where it
-    did not, the true total is unknown and larger than anything visible here, so
-    reporting the length of an already-truncated list as the total is simply
-    wrong -- it tells a client it has seen everything up to that point and
-    invites the wrong remedy.
-    """
-    marker: dict[str, Any] = {
-        "truncated": True,
-        "truncated_reasons": reasons,
-        "returned": returned,
-    }
-    if source_complete:
-        marker["total_rows"] = source_rows
-    else:
-        marker["total_rows_at_least"] = source_rows
-    if max_rows is not None:
-        marker["max_rows"] = max_rows
-    if max_bytes is not None:
-        marker["max_bytes"] = max_bytes
-    return marker
-
-
-def _row_limit_marker(*, max_rows: int) -> dict[str, Any]:
-    return {"truncated": True, "truncated_reasons": ["row_limit"], "max_rows": max_rows}
-
-
-def _byte_limit_marker(*, total: int, returned: int, max_bytes: int) -> dict[str, Any]:
-    return {
-        "truncated": True,
-        "truncated_reasons": ["byte_limit"],
-        "returned": returned,
-        "total_rows": total,
-        "max_bytes": max_bytes,
-    }
-
-
 def _byte_limit_error(max_bytes: int) -> dict[str, Any]:
+    """Said when not even one row fits.
+
+    This is the one response that can exceed ``max_bytes``: it is a fixed
+    message, and a budget smaller than the message leaves nothing to shorten.
+    Every response carrying data is bounded exactly. Callers configuring a
+    budget in the low hundreds of bytes should expect this floor.
+    """
     return {
         "error": "Tool result exceeded chat size limit",
         "truncated": True,
         "truncated_reasons": ["byte_limit"],
         "max_bytes": max_bytes,
     }
-
-
-def _rows_within_byte_budget(
-    rows: list[Any],
-    *,
-    total: int,
-    max_bytes: int,
-    payload: Any = None,
-    row_key: str | None = None,
-) -> int:
-    """Largest k such that the emitted payload for rows[:k] fits max_bytes.
-
-    Sizes the payload as it will actually be emitted, siblings included: a
-    mapping result's other keys are part of what the caller receives, so
-    measuring a bare rows envelope would under-count and overshoot the budget.
-    """
-    return largest_prefix_within_bytes(
-        rows,
-        max_bytes=max_bytes,
-        envelope=lambda values: _rebuild(
-            payload,
-            row_key,
-            values,
-            _byte_limit_marker(total=total, returned=len(values), max_bytes=max_bytes),
-        ),
-        indent=2,
-    )
 
 
 def _emit(payload: Any) -> list[TextContent]:

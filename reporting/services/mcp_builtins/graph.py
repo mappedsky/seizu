@@ -8,7 +8,7 @@ from reporting.routes.query import _serialize_neo4j_value
 from reporting.services import reporting_neo4j
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.query_validator import validate_query
-from reporting.services.result_limits import current_result_limits
+from reporting.services.result_limits import current_result_limits, stream_truncation
 
 GROUP = "graph"
 
@@ -37,9 +37,10 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     )
     payload: dict[str, Any] = {"results": serialized, "warnings": validation.warnings}
     if stopped_by:
-        # Carry the count so a later byte-bound pass can report a lower bound
-        # rather than mistaking this already-truncated list for the total.
-        payload |= {"truncated": True, "truncated_reasons": [stopped_by], "total_rows_at_least": len(serialized)}
+        # The same shape every other truncation reports, so a later byte-bound
+        # pass has a lower bound to carry rather than a length it might mistake
+        # for a total -- and so clients see one contract, not three.
+        payload |= stream_truncation(stopped_by, serialized, limits).fields()
     return payload
 
 
