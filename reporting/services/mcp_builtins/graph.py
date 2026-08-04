@@ -37,7 +37,9 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     )
     payload: dict[str, Any] = {"results": serialized, "warnings": validation.warnings}
     if stopped_by:
-        payload |= {"truncated": True, "truncated_reason": stopped_by}
+        # Carry the count so a later byte-bound pass can report a lower bound
+        # rather than mistaking this already-truncated list for the total.
+        payload |= {"truncated": True, "truncated_reasons": [stopped_by], "total_rows_at_least": len(serialized)}
     return payload
 
 

@@ -242,7 +242,10 @@ async def test_chat_tool_call_applies_row_limit(mocker):
     assert json.loads(result[0].text) == {
         "results": [{"name": "node-1"}],
         "truncated": True,
-        "truncated_reason": "row_limit",
+        "truncated_reasons": ["row_limit"],
+        "returned": 1,
+        # The source ran to completion, so this total is real.
+        "total_rows": 2,
         "max_rows": 1,
     }
 
@@ -266,7 +269,7 @@ async def test_chat_tool_call_applies_byte_limit(mocker):
     assert json.loads(result[0].text) == {
         "error": "Tool result exceeded chat size limit",
         "truncated": True,
-        "truncated_reason": "byte_limit",
+        "truncated_reasons": ["byte_limit"],
         "max_bytes": 20,
     }
 
@@ -287,7 +290,7 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
 
     data = json.loads(result[0].text)
     # Graceful: keep as many whole rows as fit rather than discarding everything.
-    assert data["truncated_reason"] == "byte_limit"
+    assert data["truncated_reasons"] == ["byte_limit"]
     assert data["total_rows"] == 12
     assert 1 <= len(data["results"]) < 12
     assert data["returned"] == len(data["results"])
@@ -1115,7 +1118,7 @@ def test_row_cap_applies_to_a_nested_results_payload():
 
     assert len(decoded["results"]) == 50_000
     assert decoded["truncated"] is True
-    assert decoded["truncated_reason"] == "row_limit"
+    assert decoded["truncated_reasons"] == ["row_limit"]
     # Siblings survive: dropping them would discard validator warnings at
     # exactly the moment the caller is told something was cut.
     assert decoded["warnings"] == ["w"]
@@ -1126,7 +1129,7 @@ def test_row_cap_still_applies_to_a_top_level_list():
     decoded = json.loads(emitted[0].text)
 
     assert len(decoded["results"]) == 10
-    assert decoded["truncated_reason"] == "row_limit"
+    assert decoded["truncated_reasons"] == ["row_limit"]
 
 
 def test_byte_shedding_keeps_a_nested_payloads_siblings():
@@ -1135,7 +1138,7 @@ def test_byte_shedding_keeps_a_nested_payloads_siblings():
     emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=5_000)
     decoded = json.loads(emitted[0].text)
 
-    assert decoded["truncated_reason"] == "byte_limit"
+    assert decoded["truncated_reasons"] == ["byte_limit"]
     assert decoded["warnings"] == ["w"]
     assert 0 < len(decoded["results"]) < 200
     assert len(emitted[0].text.encode()) <= 5_000
@@ -1188,3 +1191,65 @@ def test_a_caller_stating_no_limits_gets_the_mcp_contract(mocker):
     # to be unlimited.
     assert limits.max_rows == 50_000
     assert limits.max_bytes == 25_000_000
+
+
+# --- Truncation metadata survives a second bound ------------------------------
+
+
+def test_a_second_truncation_keeps_the_first_reason():
+    """Regression: the byte pass overwrote the source's reason, so a client saw
+    only byte_limit and never learned the source had stopped early too."""
+    payload = {
+        "results": [{"pad": "x" * 300} for _ in range(10)],
+        "truncated": True,
+        "truncated_reasons": ["row_limit"],
+        "total_rows_at_least": 10,
+    }
+
+    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["returned"] == len(decoded["results"])
+
+
+def test_a_total_is_never_claimed_when_the_source_stopped_early():
+    """The real total is unknown and larger; reporting the length of an already
+    truncated list as the total tells a client it has seen everything."""
+    payload = {
+        "results": [{"pad": "x" * 300} for _ in range(10)],
+        "truncated": True,
+        "truncated_reasons": ["row_limit"],
+    }
+
+    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+
+    assert "total_rows" not in decoded
+    assert decoded["total_rows_at_least"] == 10
+
+
+def test_a_complete_source_still_reports_a_real_total():
+    payload = {"results": [{"pad": "x" * 300} for _ in range(10)]}
+
+    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+
+    assert decoded["total_rows"] == 10
+    assert "total_rows_at_least" not in decoded
+    assert decoded["truncated_reasons"] == ["byte_limit"]
+
+
+def test_row_then_byte_truncation_in_one_pass_records_both():
+    payload = {"results": [{"pad": "x" * 300} for _ in range(50)]}
+
+    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=600)[0].text)
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["total_rows"] == 50  # the source was complete, so this is real
+
+
+def test_explicit_zero_limits_mean_unbounded_not_omitted(mocker):
+    """The streaming helper defines 0 as unbounded, so a caller disabling a
+    dimension must not have the MCP default put back in its place."""
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    limits = mcp_runtime._effective_limits(0, 0)
+    assert limits.max_rows == 0
+    assert limits.max_bytes == 0

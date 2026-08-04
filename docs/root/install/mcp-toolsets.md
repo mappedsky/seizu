@@ -298,7 +298,20 @@ tighter because they protect a model's context; an MCP client is not a model
 context and is not bounded by them.
 
 **Response shape when truncated.** A result within the limits is returned
-unchanged. One that exceeds them is returned as an object carrying the rows
-that fit plus `truncated: true` and `truncated_reason`, where an untruncated
-user-defined tool result is a bare list. Clients that consume these results
-should handle both shapes.
+unchanged. One that exceeds them is returned as an object carrying the rows that
+fit, where an untruncated user-defined tool result is a bare list. Clients that
+consume these results should handle both shapes.
+
+A truncated result carries:
+
+| Field | Meaning |
+|-------|---------|
+| `truncated` | Always `true` |
+| `truncated_reasons` | Every bound that shaped the result, in the order applied — `row_limit`, `byte_limit`, or both. A result can be cut twice: once while streaming from the database, and again when the assembled response exceeds the byte budget |
+| `returned` | Rows actually emitted |
+| `total_rows` | The real total — **only** present when the query ran to completion |
+| `total_rows_at_least` | A lower bound, present instead of `total_rows` when the source stopped early and the true total is unknown |
+| `max_rows` / `max_bytes` | The bound that applied |
+
+Do not treat `total_rows_at_least` as a total. It is the number of rows that
+reached the response bound, not the number the query would have produced.
