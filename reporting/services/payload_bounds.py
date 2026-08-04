@@ -29,14 +29,35 @@ def largest_prefix_within_bytes(
     if max_bytes <= 0:
         return len(rows)
     wrap = envelope or (lambda values: values)
-    lo, hi, best = 0, len(rows), 0
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        if json_size_bytes(wrap(rows[:mid]), indent=indent) <= max_bytes:
-            best, lo = mid, mid + 1
-        else:
-            hi = mid - 1
-    return best
+    if not rows:
+        return 0
+
+    # One sizing pass, not a binary search over whole prefixes. The search
+    # serialized the entire candidate on every probe -- about seventeen full
+    # dumps of a multi-megabyte payload, six seconds of synchronous CPU inside
+    # an async handler at the MCP byte ceiling, blocking the worker. Sizing each
+    # row once costs roughly one dump in total.
+    overhead = json_size_bytes(wrap([]), indent=indent)
+    if overhead > max_bytes:
+        return 0
+    # Separator between rows: ", " compact, or a comma plus newline and indent.
+    separator = 2 if indent is None else indent + 3
+    used = 0
+    keep = 0
+    for row in rows:
+        cost = json_size_bytes(row, indent=indent) + (separator if keep else 0)
+        if used + cost > max_bytes - overhead:
+            break
+        used += cost
+        keep += 1
+
+    # Verify, because sizing a row alone under-counts the indentation it gains
+    # once nested. Shrinking proportionally converges in a couple of passes, and
+    # erring toward slightly fewer rows is the right way to be wrong: the bound
+    # is a promise, the last row is not.
+    while keep > 0 and json_size_bytes(wrap(rows[:keep]), indent=indent) > max_bytes:
+        keep -= max(1, keep // 16)
+    return max(0, keep)
 
 
 def bounded_json_rows(

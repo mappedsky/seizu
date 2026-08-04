@@ -1303,3 +1303,28 @@ def test_a_row_then_byte_cut_keeps_both_limits():
     assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
     assert decoded["max_rows"] == 10
     assert decoded["max_bytes"] == 900
+
+
+def test_sizing_a_large_response_does_not_stall_the_event_loop():
+    """Regression: the bound was found by binary search over whole prefixes, so
+    a multi-megabyte payload was serialized about seventeen times -- six seconds
+    of synchronous CPU inside an async handler, blocking the worker."""
+    import time
+
+    from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
+
+    rows = [{"i": i, "pad": "x" * 500} for i in range(20_000)]
+    envelope = {"results": None, "truncated": True, "truncated_reasons": ["byte_limit"]}
+
+    def wrap(kept):
+        return {**envelope, "results": kept, "returned": len(kept)}
+
+    started = time.perf_counter()
+    keep = largest_prefix_within_bytes(rows, max_bytes=8_000_000, envelope=wrap, indent=2)
+    elapsed = time.perf_counter() - started
+
+    assert json_size_bytes(wrap(rows[:keep]), indent=2) <= 8_000_000  # the bound is a promise
+    assert keep > 0
+    # Generous, so this fails on a return to whole-prefix search rather than on
+    # a slow machine.
+    assert elapsed < 2.0
