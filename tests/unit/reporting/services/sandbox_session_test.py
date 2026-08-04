@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from reporting.services import sandbox_session
 
 
@@ -127,3 +129,16 @@ async def test_concurrent_delegations_open_only_one_sandbox(mocker):
     await sandbox_session.close_sandbox_session()
     # The one that was opened is the one that gets torn down.
     assert closed == opened
+
+
+async def test_opening_after_close_is_refused_rather_than_orphaned(mocker):
+    """A delegation still queued when its step unwinds must not open a sandbox
+    into a session nobody holds -- it would live to the provider timeout."""
+    opened: list[Any] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_open_backend(opened, []))
+    session = sandbox_session.start_sandbox_session()
+    await sandbox_session.close_sandbox_session()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await session.backend()
+    assert opened == []

@@ -475,11 +475,20 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             scope=scope,
             phase=f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE,
         )
+        settled = False
         try:
             response = await self._model.ainvoke(normalized, config=config, **kwargs)
-        except Exception:
-            await controller.release(reservation)
-            raise
+        finally:
+            if not settled:
+                # BaseException, not Exception: every delegation runs under
+                # asyncio.wait_for(SANDBOX_TIMEOUT_SECONDS), so cancellation is
+                # the routine ending, not an exotic one. Catching only Exception
+                # leaked the reservation on every timeout, and because scope
+                # authorization counts in-flight reservations, each leak
+                # permanently consumed part of the step's ceiling. Discarding is
+                # synchronous because awaiting a lock while being cancelled can
+                # itself be interrupted.
+                controller.discard(reservation)
         usage = getattr(response, "usage_metadata", None) or {}
         input_tokens = int(usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or 0)
@@ -488,6 +497,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # No provider usage: bill the estimate rather than nothing, so an
             # unreported call still moves the ledger.
             input_tokens, output_tokens = estimated_input, 0
+        settled = True
         await controller.commit(
             reservation,
             input_tokens=input_tokens,

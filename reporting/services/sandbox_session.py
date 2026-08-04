@@ -37,6 +37,7 @@ class SandboxSession:
         self._stack: AsyncExitStack | None = None
         self._backend: SandboxBackend | None = None
         self._lock = asyncio.Lock()
+        self._closed = False
 
     async def backend(self) -> SandboxBackend:
         """The session's sandbox, opening it on first use.
@@ -51,6 +52,11 @@ class SandboxSession:
         if self._backend is not None:
             return self._backend
         async with self._lock:
+            if self._closed:
+                # The step that owned this session has ended. Opening now would
+                # produce a sandbox nobody holds a reference to, alive until the
+                # provider reaps it half an hour later.
+                raise RuntimeError("sandbox session is closed")
             # Re-check inside the lock: a caller that waited here while another
             # opened the sandbox must use that one, not open a second.
             if self._backend is None:
@@ -75,7 +81,11 @@ class SandboxSession:
         return self._backend is not None
 
     async def aclose(self) -> None:
-        stack, self._stack, self._backend = self._stack, None, None
+        # Under the lock, so a delegation part-way through opening cannot
+        # publish its sandbox into a session that has already been torn down.
+        async with self._lock:
+            self._closed = True
+            stack, self._stack, self._backend = self._stack, None, None
         if stack is not None:
             try:
                 await stack.aclose()

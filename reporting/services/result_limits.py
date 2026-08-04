@@ -113,8 +113,12 @@ class Truncation:
         # an end that does not exist.
         if self.source_complete:
             marker["total_rows"] = self.source_rows
-        else:
+        elif self.source_rows:
             marker["total_rows_at_least"] = self.source_rows
+        # Where nothing was kept -- a first row too large to fit -- there is no
+        # lower bound worth stating. "at least 0" is true of every result and
+        # would read as "the query found nothing", which is the opposite of what
+        # happened.
         if self.max_rows is not None:
             marker["max_rows"] = self.max_rows
         if self.max_bytes is not None:

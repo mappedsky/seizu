@@ -96,6 +96,13 @@ class BudgetController:
         self._scope_ceilings.pop(scope, None)
         self._scope_soft.pop(scope, None)
         self._scope_spend.pop(scope, None)
+        # Drop anything still reserved against it. A reservation that outlives
+        # its scope keeps inflating the run's projected spend and call count for
+        # the rest of the turn, on work that has already finished or been
+        # cancelled.
+        for key, item in list(self._reservations.items()):
+            if item.scope == scope:
+                self._reservations.pop(key, None)
 
     def scope_spend(self, scope: str) -> int:
         """Tokens a scope has actually spent.
@@ -244,6 +251,15 @@ class BudgetController:
     async def release(self, reservation: BudgetReservation) -> None:
         async with self._lock:
             self._reservations.pop(reservation.reservation_id, None)
+
+    def discard(self, reservation: BudgetReservation) -> None:
+        """Drop a reservation without awaiting.
+
+        For cleanup that must run while a task is being cancelled, where
+        awaiting the lock can itself be interrupted and leave the reservation
+        held forever. A single dict pop needs no lock to be safe.
+        """
+        self._reservations.pop(reservation.reservation_id, None)
 
     def begin_finalization(self, reason: str) -> None:
         if self.mode != "exhausted":

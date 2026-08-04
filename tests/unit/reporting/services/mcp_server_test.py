@@ -331,6 +331,7 @@ async def test_call_tool_validate_query_valid():
             return_value=ValidationResult(errors=[], warnings=["uses an unindexed scan"]),
         ),
         patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query", run_query),
+        patch("reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed", run_query),
     ):
         server = _build_mcp_server()
         result = await _call_tool(server, "graph__validate_query", {"query": "MATCH (n) RETURN n"})

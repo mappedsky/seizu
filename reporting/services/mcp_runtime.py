@@ -754,10 +754,28 @@ def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimi
 # applied to the tools most likely to return thousands of them.
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
-
-def _payload_rows(payload: Any) -> list[Any] | None:
-    rows, _ = _payload_rows_and_key(payload)
-    return rows
+# Collection fields built-ins return. Enumerated rather than inferred, because
+# inferring "the single list field" trims whatever list a payload happens to
+# have: it picked `permissions` on a role, `parameters` on a tool, and
+# `warnings` on an explain plan. Role updates are replace-semantics, so an agent
+# reading a role and writing it back would have silently deleted the permissions
+# that were trimmed off. A list that must be enumerated is a nuisance; one that
+# guesses wrong corrupts data.
+#
+# Adding a built-in group that returns a collection means adding its key here.
+_COLLECTION_KEYS = (
+    "reports",
+    "roles",
+    "scheduled_queries",
+    "skills",
+    "skillsets",
+    "spaces",
+    "subspaces",
+    "tools",
+    "toolsets",
+    "versions",
+    "workflows",
+)
 
 
 def _payload_rows_and_key(payload: Any) -> tuple[list[Any] | None, str | None]:
@@ -769,13 +787,10 @@ def _payload_rows_and_key(payload: Any) -> tuple[list[Any] | None, str | None]:
             value = payload.get(key)
             if isinstance(value, list):
                 return value, key
-        # Built-ins return their own envelopes -- {"reports": [...]},
-        # {"roles": [...]}, and so on -- and enumerating every one would rot as
-        # groups are added. Where exactly one field is a list, that is the
-        # collection; where several are, do not guess.
-        lists = [(key, value) for key, value in payload.items() if isinstance(value, list)]
-        if len(lists) == 1:
-            return lists[0][1], lists[0][0]
+        for key in _COLLECTION_KEYS:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value, key
     return None, None
 
 
@@ -850,10 +865,15 @@ def _bounded_text_response(
     # what will be emitted -- sizing a smaller envelope than the final one is
     # how responses came to exceed the budget the search exists to enforce.
     def render_shed(kept: list[Any]) -> Any:
+        # Do not repeat a reason the source already reported. The streamer counts
+        # compact bytes while the response is sized indented, so a byte-stopped
+        # read routinely exceeds the budget again here -- listing "byte_limit"
+        # twice describes one cause as two.
+        shed_reasons = state.reasons if state.reasons[-1:] == ("byte_limit",) else (*state.reasons, "byte_limit")
         return render(
             kept,
             Truncation(
-                reasons=(*state.reasons, "byte_limit"),
+                reasons=shed_reasons,
                 returned=len(kept),
                 source_rows=base.source_rows,
                 source_complete=base.source_complete,

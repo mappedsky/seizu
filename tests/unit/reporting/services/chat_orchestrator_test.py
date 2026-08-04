@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -2062,3 +2063,49 @@ def test_fenced_context_keeps_what_fits_when_escaping_expands():
     assert 0 < len(context) <= 900
     assert "Security boundary:" in context
     assert "&lt;" in context  # some content survived, neutralized
+
+
+async def test_a_cancelled_call_does_not_hold_its_reservation(mocker):
+    """Regression: every delegation runs under asyncio.wait_for, so cancellation
+    is the routine ending. Catching only Exception leaked the reservation, and
+    scope authorization counts in-flight reservations -- so each timeout
+    permanently consumed part of the step's ceiling."""
+    from reporting.services.mcp_builtins.sandbox import _ToolMessageNormalizingModel
+
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 10_000)
+
+    class _Hangs:
+        def bind_tools(self, _t, **_k):
+            return self
+
+        async def ainvoke(self, *_a, **_k):
+            await asyncio.sleep(10)
+
+    chat_budget.set_current_budget_controller(controller)
+    chat_budget.set_current_budget_scope("worker:s1")
+    try:
+        for _ in range(3):
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    _ToolMessageNormalizingModel(_Hangs()).ainvoke([HumanMessage(content="x")]), timeout=0.01
+                )
+        # Nothing was spent, so nothing may be held against the ceiling.
+        await controller.reserve(estimated_input_tokens=9_000, estimated_output_tokens=0, scope="worker:s1")
+    finally:
+        chat_budget.set_current_budget_controller(None)
+        chat_budget.set_current_budget_scope("")
+
+
+async def test_closing_a_scope_drops_its_outstanding_reservations():
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 10_000)
+    await controller.reserve(estimated_input_tokens=500, estimated_output_tokens=0, scope="worker:s1")
+
+    controller.close_scope("worker:s1")
+
+    # A reservation outliving its scope inflates the run's projected spend and
+    # call count for the rest of the turn, on work that has already finished.
+    assert controller.snapshot()["llm_calls"] == 0
+    controller.open_scope("worker:s1", 600)
+    await controller.reserve(estimated_input_tokens=500, estimated_output_tokens=0, scope="worker:s1")

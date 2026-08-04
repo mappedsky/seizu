@@ -28,15 +28,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from reporting import settings
-from reporting.services.untrusted import untrusted_instruction, untrusted_text
+from reporting.services.untrusted import fence_overhead, fenced_within
 
 # Below this an entry is a stub rather than a recollection, so drop it instead.
 _MIN_ENTRY_CHARS = 120
-
-
-def _wrapper_overhead() -> int:
-    """Characters the security boundary itself costs, whatever it wraps."""
-    return len(f"{untrusted_instruction()}\n\n") + len(untrusted_text(""))
 
 
 @dataclass(frozen=True)
@@ -78,7 +73,7 @@ class EpisodeLog:
             return ""
         # The boundary preamble and tags are context the caller pays for, so
         # they come out of the budget rather than sitting on top of it.
-        budget -= _wrapper_overhead()
+        budget -= fence_overhead()
         if budget < _MIN_ENTRY_CHARS:
             return ""
         kept: list[str] = []
@@ -98,7 +93,7 @@ class EpisodeLog:
         # said, so it carries that data's content and can carry text shaped like
         # an instruction with it. Replaying it into the next sub-agent's prompt
         # is exactly where that would take effect.
-        return f"{untrusted_instruction()}\n\n" + untrusted_text("\n\n".join(kept))
+        return fenced_within("\n\n".join(kept), budget)
 
 
 _current_episode_log: ContextVar[EpisodeLog | None] = ContextVar("_current_episode_log", default=None)
