@@ -1156,24 +1156,63 @@ def test_a_non_query_builtin_is_bounded_by_the_mcp_limits(mocker):
     payload = {"reports": [{"i": i} for i in range(20)]}
 
     limits = mcp_runtime._effective_limits(None, None)
-    emitted = mcp_runtime._bounded_text_response(payload, max_rows=limits.max_rows, max_bytes=limits.max_bytes)
+    emitted = mcp_runtime._bounded_text_response(
+        payload, max_rows=limits.max_rows, max_bytes=limits.max_bytes, collection_key="reports"
+    )
     decoded = json.loads(emitted[0].text)
 
     assert len(decoded["reports"]) == 5
     assert decoded["truncated"] is True
 
 
-def test_rows_are_found_in_a_builtins_own_envelope():
-    """Enumerating every collection key would rot as groups are added."""
-    for key in ("reports", "roles", "spaces", "toolsets", "workflows", "scheduled_queries"):
-        rows, found = mcp_runtime._payload_rows_and_key({key: [{"i": 1}], "next_cursor": None})
-        assert found == key, key
-        assert rows == [{"i": 1}]
+def test_a_builtin_declares_which_field_holds_its_rows():
+    from reporting.services.mcp_builtins import find_builtin
+
+    assert find_builtin("reports__list").collection_key == "reports"
+    assert find_builtin("toolsets__list_tools").collection_key == "tools"
+    # A tool that returns one record declares nothing, so nothing of it is
+    # treated as rows.
+    assert find_builtin("roles__get").collection_key is None
 
 
-def test_an_ambiguous_payload_is_not_guessed_at():
-    rows, found = mcp_runtime._payload_rows_and_key({"a": [1], "b": [2]})
-    assert rows is None and found is None
+def test_a_semantic_list_is_never_mistaken_for_rows():
+    """Regression: inferring "the single list field" picked permissions on a
+    role. Role updates are replace-semantics, so an agent reading a role and
+    writing it back would silently delete whatever was trimmed off."""
+    from reporting.services.mcp_builtins import find_builtin
+
+    role = {"role_id": "r", "name": "admin", "permissions": [f"p{i}" for i in range(41)]}
+    rows, key = mcp_runtime._payload_rows_and_key(role, find_builtin("roles__get").collection_key)
+
+    assert rows is None and key is None
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(role, max_rows=5, max_bytes=None, collection_key=None)[0].text
+    )
+    assert len(decoded["permissions"]) == 41
+    assert "truncated" not in decoded
+
+
+def test_every_builtin_returning_a_collection_declares_it():
+    """The declaration lives next to the tool so it cannot drift from the
+    handler, but nothing stops a new one being forgotten -- so check."""
+    import inspect
+    import re
+
+    from reporting.services import mcp_builtins
+
+    missing = []
+    for tool in mcp_builtins.list_builtin_tools():
+        handler = mcp_builtins.find_builtin(tool.name)
+        if handler is None or handler.collection_key:
+            continue
+        try:
+            source = inspect.getsource(handler.handler)
+        except (OSError, TypeError):
+            continue
+        returned = set(re.findall(r'return \{"(\w+)": \[', source))
+        if returned:
+            missing.append((tool.name, sorted(returned)))
+    assert missing == [], f"builtins return a collection without declaring it: {missing}"
 
 
 def test_a_chat_caller_keeps_its_own_tighter_limits(mocker):

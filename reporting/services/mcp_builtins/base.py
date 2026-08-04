@@ -57,6 +57,16 @@ class BuiltinTool:
     # (e.g. ``lambda: settings.SANDBOX_ENABLED``) so disabled features never
     # surface to the model and don't produce unnecessary call-time errors.
     enabled: EnabledCheck = None
+    # Field holding this tool's collection, when it returns one -- e.g.
+    # "reports" for ``{"reports": [...]}``. The result limiter needs to know
+    # which field holds rows so it can trim them and say so, and declaring it
+    # here is the only way it can know reliably. Inferring it from the payload
+    # is what a previous version did, and it picked ``permissions`` on a role
+    # and ``parameters`` on a tool; role updates are replace-semantics, so an
+    # agent reading a role and writing it back would have deleted whatever was
+    # trimmed. A tool that returns a collection and does not declare it is
+    # simply not row-bounded, which is safe -- unlike guessing.
+    collection_key: str | None = None
 
 
 def model_input_schema(

@@ -311,6 +311,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.REPORTS_READ.value],
             handler=_list,
+            collection_key="reports",
         ),
         BuiltinTool(
             name="reports__get",
@@ -424,6 +425,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.REPORTS_READ.value],
             handler=_list_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="reports__get_version",

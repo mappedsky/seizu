@@ -485,7 +485,12 @@ async def _call_tool_core(
             finally:
                 reset_current_result_limits(token)
             return (
-                _bounded_text_response(result, max_rows=limits.max_rows, max_bytes=limits.max_bytes),
+                _bounded_text_response(
+                    result,
+                    max_rows=limits.max_rows,
+                    max_bytes=limits.max_bytes,
+                    collection_key=builtin.collection_key,
+                ),
                 None,
             )
         except (ValidationError, ValueError) as exc:
@@ -754,40 +759,24 @@ def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimi
 # applied to the tools most likely to return thousands of them.
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
-# Collection fields built-ins return. Enumerated rather than inferred, because
-# inferring "the single list field" trims whatever list a payload happens to
-# have: it picked `permissions` on a role, `parameters` on a tool, and
-# `warnings` on an explain plan. Role updates are replace-semantics, so an agent
-# reading a role and writing it back would have silently deleted the permissions
-# that were trimmed off. A list that must be enumerated is a nuisance; one that
-# guesses wrong corrupts data.
-#
-# Adding a built-in group that returns a collection means adding its key here.
-_COLLECTION_KEYS = (
-    "reports",
-    "roles",
-    "scheduled_queries",
-    "skills",
-    "skillsets",
-    "spaces",
-    "subspaces",
-    "tools",
-    "toolsets",
-    "versions",
-    "workflows",
-)
 
+def _payload_rows_and_key(payload: Any, collection_key: str | None = None) -> tuple[list[Any] | None, str | None]:
+    """The rows in a tool result, and the key holding them if it is a mapping.
 
-def _payload_rows_and_key(payload: Any) -> tuple[list[Any] | None, str | None]:
-    """The rows in a tool result, and the key holding them if it is a mapping."""
+    ``collection_key`` is what the tool itself declares. Query-shaped results
+    keep the name-based match, because a user-defined tool's Cypher output is
+    built by the runtime and always uses those names. A built-in that declares
+    nothing is not row-bounded, which is the safe way to be wrong: inferring a
+    collection from the payload picked ``permissions`` on a role.
+    """
     if isinstance(payload, list):
         return payload, None
     if isinstance(payload, dict):
-        for key in _ROW_KEYS:
-            value = payload.get(key)
+        if collection_key:
+            value = payload.get(collection_key)
             if isinstance(value, list):
-                return value, key
-        for key in _COLLECTION_KEYS:
+                return value, collection_key
+        for key in _ROW_KEYS:
             value = payload.get(key)
             if isinstance(value, list):
                 return value, key
@@ -812,6 +801,7 @@ def _bounded_text_response(
     *,
     max_rows: int | None,
     max_bytes: int | None,
+    collection_key: str | None = None,
 ) -> list[TextContent]:
     """Serialize a tool result for chat, bounding by rows then bytes.
 
@@ -821,7 +811,7 @@ def _bounded_text_response(
     nothing — only falling back to an error marker when not even one row fits
     (a single oversized row, or a non-list payload that can't be row-shed).
     """
-    rows, row_key = _payload_rows_and_key(payload)
+    rows, row_key = _payload_rows_and_key(payload, collection_key)
     prior = _prior_truncation(payload)
 
     def render(kept: list[Any], state: Truncation) -> Any:
