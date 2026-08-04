@@ -347,7 +347,7 @@ def test_last_user_request_skips_control_directives():
 def test_terminal_specs_exposed_only_after_an_action_has_run():
     assert chat_graph._terminal_specs(post_action=False) == []
     specs = chat_graph._terminal_specs(post_action=True)
-    assert [spec.name for spec in specs] == [chat_graph._FINAL_ANSWER_TOOL]
+    assert [spec.name for spec in specs] == [chat_graph.FINAL_ANSWER_TOOL.name]
     assert specs[0].input_schema["required"] == ["answer"]
 
 
@@ -756,6 +756,185 @@ async def test_chat_graph_marks_output_limit_cutoff(mocker):
     assert "hit its output limit" in persisted.content
 
 
+async def test_exhausted_budget_degrades_to_synthesis_instead_of_killing_the_turn(mocker):
+    # Regression: BudgetExceeded raised inside the single-agent loop propagated
+    # out of chat_agent_node and out of graph.astream, so the SSE stream died
+    # with an error and the user got nothing — even though tools had already run
+    # and the reserve was being held back for exactly this synthesis. The
+    # orchestrator has always degraded here; this loop did not.
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
+
+    calls = {"n": 0}
+
+    class _BudgetBoundModel:
+        def bind_tools(self, _tools: Any) -> "_BudgetBoundModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield AIMessageChunk(content="", tool_calls=[_tool_call("graph__schema", {}, "c1")])
+            elif calls["n"] == 2:
+                # The gathering turn that runs out of budget.
+                raise BudgetExceeded("The run token budget is reserved for final synthesis.")
+            else:
+                # The forced synthesis, which must be allowed to spend the reserve.
+                yield AIMessageChunk(content="Here is what I found before running out of budget.")
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", False)
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", False)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=_BudgetBoundModel())
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
+        return_value=[Tool(name="graph__schema", description="Schema", inputSchema={"type": "object"})],
+    )
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        return [chat_graph.ToolCallResult(request=req, content='{"labels": []}') for req in batch]
+
+    mocker.patch("reporting.services.chat_graph._run_tool_call_batch", _fake_batch)
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="do a lot of work")], "budget": initial_budget_ledger()},
+            {
+                "configurable": {
+                    "thread_id": "thread-budget-degrade",
+                    "current_user": _user(),
+                    "budget_controller": BudgetController(initial_budget_ledger()),
+                }
+            },
+            stream_mode="custom",
+        )
+    ]
+
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "before running out of budget" in streamed
+
+
+def test_terminal_tools_share_one_mechanism():
+    # Both agent loops finish on an explicit call rather than on the model going
+    # quiet. The worker's sentinel was once a second, parallel implementation of
+    # respond_to_user; keeping them on one construct is what stops them drifting.
+    from reporting.services import chat_orchestrator
+
+    assert isinstance(chat_graph.FINAL_ANSWER_TOOL, chat_graph.TerminalTool)
+    assert isinstance(chat_graph.STEP_RESULT_TOOL, chat_graph.TerminalTool)
+    # The orchestrator uses the shared instance, not a copy of its own.
+    assert chat_orchestrator.STEP_RESULT_TOOL is chat_graph.STEP_RESULT_TOOL
+    # Distinct names, or the loops would intercept each other's calls.
+    assert chat_graph.FINAL_ANSWER_TOOL.name != chat_graph.STEP_RESULT_TOOL.name
+
+
+def test_terminal_tool_builds_a_spec_and_extracts_its_argument():
+    tool = chat_graph.TerminalTool(
+        name="finish_now", argument="payload", description="Finish.", argument_description="The payload."
+    )
+
+    spec = tool.spec
+    assert spec.name == "finish_now"
+    assert spec.input_schema["required"] == ["payload"]
+    assert spec.input_schema["properties"]["payload"]["description"] == "The payload."
+
+    request = chat_graph.ToolCallRequest(id="c1", name="finish_now", arguments={"payload": "  done  "}, spec=spec)
+    assert tool.result_text(request) == "done"
+    # A missing or non-string argument yields empty rather than raising, so the
+    # caller's own empty-result recovery decides what happens next.
+    assert tool.result_text(chat_graph.ToolCallRequest(id="c2", name="finish_now", arguments={}, spec=spec)) == ""
+    bad = chat_graph.ToolCallRequest(id="c3", name="finish_now", arguments={"payload": 5}, spec=spec)
+    assert tool.result_text(bad) == ""
+
+
+def test_terminal_tool_partition_splits_the_terminal_call_from_the_rest():
+    tool = chat_graph.TerminalTool(name="finish_now", argument="payload", description="d", argument_description="a")
+    spec = tool.spec
+    other = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    requests = [
+        chat_graph.ToolCallRequest(id="c1", name="t__one", arguments={}, spec=other),
+        chat_graph.ToolCallRequest(id="c2", name="finish_now", arguments={"payload": "done"}, spec=spec),
+    ]
+
+    terminal, rest = tool.partition(requests)
+
+    assert terminal is not None and terminal.id == "c2"
+    assert [r.name for r in rest] == ["t__one"]
+    # No terminal call present: everything passes through untouched.
+    assert tool.partition(requests[:1]) == (None, requests[:1])
+
+
+def test_effective_finish_reason_corrects_a_provider_that_hides_truncation():
+    # DeepSeek via LiteLLM reports "stop" on an answer it cut at max_tokens. The
+    # token count is a fact we hold, so it overrides the provider's claim.
+    assert (
+        chat_graph._effective_finish_reason("stop", output_tokens=2048, output_token_limit=2048, usage_estimated=False)
+        == "length"
+    )
+    # Over the cap (provider counted differently) still reads as truncated.
+    assert (
+        chat_graph._effective_finish_reason("stop", output_tokens=2050, output_token_limit=2048, usage_estimated=False)
+        == "length"
+    )
+
+
+def test_effective_finish_reason_leaves_honest_and_unknowable_cases_alone():
+    # Finished well short of the cap: the provider's "stop" is the truth.
+    assert (
+        chat_graph._effective_finish_reason("stop", output_tokens=100, output_token_limit=2048, usage_estimated=False)
+        == "stop"
+    )
+    # No explicit cap was requested, so the provider's own default applied and we
+    # cannot know what it was — never guess.
+    assert (
+        chat_graph._effective_finish_reason(
+            "stop", output_tokens=99_999, output_token_limit=None, usage_estimated=False
+        )
+        == "stop"
+    )
+    # Usage came from our estimator, not the provider: comparing it to the cap
+    # would be comparing a guess to a fact.
+    assert (
+        chat_graph._effective_finish_reason("stop", output_tokens=4096, output_token_limit=2048, usage_estimated=True)
+        == "stop"
+    )
+    # A provider that reports truncation honestly keeps its own wording.
+    assert (
+        chat_graph._effective_finish_reason(
+            "max_tokens", output_tokens=10, output_token_limit=2048, usage_estimated=False
+        )
+        == "max_tokens"
+    )
+
+
+async def test_turn_reports_length_when_the_provider_hides_truncation(mocker):
+    # End to end through _run_llm_tool_turn: the raw provider value is preserved
+    # for diagnosis while the normalized one drives continuation and the notice.
+    class _SilentTruncationModel:
+        async def astream(self, _input, config=None, **_kwargs):
+            chunk = AIMessageChunk(content="cut off mid-", response_metadata={"finish_reason": "stop"})
+            chunk.usage_metadata = {"input_tokens": 10, "output_tokens": 64, "total_tokens": 74}
+            yield chunk
+
+    turn = await chat_graph._run_llm_tool_turn(
+        _SilentTruncationModel(),
+        "system",
+        [HumanMessage(content="write a long answer")],
+        [],
+        {"configurable": {}},
+        None,
+        max_output_tokens=64,
+    )
+
+    assert turn.finish_reason == "length"
+    assert turn.provider_finish_reason == "stop"
+    assert chat_graph._is_output_limit_finish_reason(turn.finish_reason)
+
+
 async def test_output_limit_notice_keeps_tool_details_out_of_user_text():
     response, hit_limit = chat_graph._append_output_limit_notice(
         "partial synthesis",
@@ -837,7 +1016,7 @@ async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge
             AIMessage(
                 content="",
                 tool_calls=[
-                    _tool_call(chat_graph._FINAL_ANSWER_TOOL, {"answer": "Three repos are high-risk."}, "call_2")
+                    _tool_call(chat_graph.FINAL_ANSWER_TOOL.name, {"answer": "Three repos are high-risk."}, "call_2")
                 ],
             ),
         ]
@@ -873,7 +1052,7 @@ async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge
     assert not [
         c
         for c in chunks
-        if c.get("kind") == "detail" and c["data"]["title"] == f"Tool: {chat_graph._FINAL_ANSWER_TOOL}"
+        if c.get("kind") == "detail" and c["data"]["title"] == f"Tool: {chat_graph.FINAL_ANSWER_TOOL.name}"
     ]
     assert fake_model.calls == 2
 
@@ -1367,7 +1546,7 @@ async def test_chat_graph_retries_nonterminal_post_action_text_without_streaming
     assert [call.args[1] for call in call_tool.await_args_list] == ["security__one", "security__two"]
     # The stall nudge is appended to the next turn's system prompt.
     assert "without finishing the turn" in fake_model.inputs[2][0].content
-    assert chat_graph._FINAL_ANSWER_TOOL in fake_model.inputs[2][0].content
+    assert chat_graph.FINAL_ANSWER_TOOL.name in fake_model.inputs[2][0].content
 
 
 async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):
@@ -2522,8 +2701,116 @@ def test_trim_inner_loop_messages_ignores_reasoning_content_but_counts_tool_call
     retained = chat_graph._trim_inner_loop_messages(messages, max_chars=140)
     retained_without_reasoning = chat_graph._trim_inner_loop_messages(without_reasoning, max_chars=140)
 
-    assert retained == [messages[0], messages[3], messages[4]]
+    # The oldest exchange is shed but condensed, not deleted: the user turn, a
+    # digest of what was dropped, then the most recent exchange intact.
+    assert retained[0] is messages[0]
+    assert chat_graph._is_context_digest(retained[1])
+    assert "security__one" in retained[1].content
+    assert retained[2:] == [messages[3], messages[4]]
+    # reasoning_content must not count toward the size budget, so both inputs
+    # trim to the same thing (ids differ: the digest is freshly built).
     assert [message.content for message in retained] == [message.content for message in retained_without_reasoning]
+
+
+def test_trim_inner_loop_condenses_dropped_evidence_instead_of_deleting_it():
+    # Dropping a tool result outright loses evidence the agent paid for and lets
+    # it re-run the same call or answer without something it already knew.
+    messages: list[Any] = [HumanMessage(content="audit the org")]
+    for index in range(6):
+        messages.append(AIMessage(content="", tool_calls=[_tool_call(f"t__{index}", {}, f"call_{index}")]))
+        messages.append(
+            ToolMessage(content=f"FINDING_{index} " + "x" * 2000, tool_call_id=f"call_{index}", name=f"t__{index}")
+        )
+
+    retained = chat_graph._trim_inner_loop_messages(messages, max_chars=9000)
+
+    digests = [m for m in retained if chat_graph._is_context_digest(m)]
+    assert len(digests) == 1
+    # Findings from the shed exchanges survive in condensed form...
+    assert "FINDING_0" in digests[0].content
+    assert "t__0" in digests[0].content
+    # ...and the whole thing now fits the cap it was given.
+    assert sum(chat_graph._message_context_size(m) for m in retained) <= 9000
+    # The user's turn stays at the head and the newest exchange stays intact.
+    assert retained[0] is messages[0]
+    assert retained[-2:] == messages[-2:]
+
+
+def test_trim_inner_loop_merges_successive_digests_into_one():
+    # Successive trims must merge, or each pass would stack another digest
+    # message and the condensed context would itself grow without bound.
+    messages: list[Any] = [HumanMessage(content="audit the org")]
+    for index in range(4):
+        messages.append(AIMessage(content="", tool_calls=[_tool_call(f"t__{index}", {}, f"call_{index}")]))
+        messages.append(
+            ToolMessage(content=f"FINDING_{index} " + "y" * 3000, tool_call_id=f"call_{index}", name=f"t__{index}")
+        )
+
+    once = chat_graph._trim_inner_loop_messages(messages, max_chars=9000)
+    # Simulate the loop continuing: two more exchanges, then trim again.
+    grown = [
+        *once,
+        AIMessage(content="", tool_calls=[_tool_call("t__late", {}, "call_late")]),
+        ToolMessage(content="LATE_FINDING " + "z" * 6000, tool_call_id="call_late", name="t__late"),
+    ]
+
+    twice = chat_graph._trim_inner_loop_messages(grown, max_chars=9000)
+
+    digests = [m for m in twice if chat_graph._is_context_digest(m)]
+    assert len(digests) == 1  # merged, not stacked
+    assert sum(chat_graph._message_context_size(m) for m in twice) <= 9000
+
+
+def test_trim_inner_loop_keeps_the_newest_exchange_at_any_cap():
+    messages: list[Any] = [
+        HumanMessage(content="q"),
+        AIMessage(content="", tool_calls=[_tool_call("t__old", {}, "call_old")]),
+        ToolMessage(content="old " + "x" * 5000, tool_call_id="call_old", name="t__old"),
+        AIMessage(content="", tool_calls=[_tool_call("t__new", {}, "call_new")]),
+        ToolMessage(content="new " + "x" * 5000, tool_call_id="call_new", name="t__new"),
+    ]
+
+    retained = chat_graph._trim_inner_loop_messages(messages, max_chars=100)
+
+    # Even at an impossible cap the newest exchange survives: it is what the next
+    # call reasons about, and without it the loop cannot progress.
+    assert retained[-2:] == messages[-2:]
+
+
+def test_budgeted_context_cap_shrinks_as_the_run_spends(mocker):
+    # CHAT_LLM_CONTEXT_MAX_CHARS bounds one call and CHAT_RUN_TOKEN_BUDGET bounds
+    # the run; nothing related them, so a long tool loop ran at full context
+    # until it hit a wall mid-turn instead of tightening as it went.
+    from reporting.services.chat_budget import BudgetController, initial_budget_ledger
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
+    mocker.patch("reporting.settings.CHAT_RUN_RESERVE_PERCENT", 20)
+
+    fresh = BudgetController(initial_budget_ledger())
+    config = {"configurable": {"budget_controller": fresh}}
+    # Fresh run: 96k normal tokens * 0.5 * 4 chars = 192k, above the base cap, so
+    # the configured per-call cap still applies.
+    assert chat_graph._budgeted_context_max_chars(config, base_max_chars=120_000) == 120_000
+
+    spent = BudgetController({**initial_budget_ledger(), "total_tokens": 90_000})
+    spent_config = {"configurable": {"budget_controller": spent}}
+    # 120k - 24k reserve - 90k spent = 6k left; half of that, in chars.
+    assert chat_graph._budgeted_context_max_chars(spent_config, base_max_chars=120_000) == 12_000
+
+    drained = BudgetController({**initial_budget_ledger(), "total_tokens": 119_000})
+    drained_config = {"configurable": {"budget_controller": drained}}
+    # Never squeeze below the floor, or the model loses its own turn.
+    assert chat_graph._budgeted_context_max_chars(drained_config, base_max_chars=120_000) == 8_000
+
+
+def test_budgeted_context_cap_is_inert_without_a_token_budget(mocker):
+    from reporting.services.chat_budget import BudgetController, initial_budget_ledger
+
+    assert chat_graph._budgeted_context_max_chars({"configurable": {}}, base_max_chars=120_000) == 120_000
+    # Call-limit-only runs have no token ceiling to divide up.
+    ledger = {**initial_budget_ledger(), "token_limit": 0, "enabled": True}
+    config = {"configurable": {"budget_controller": BudgetController(ledger)}}
+    assert chat_graph._budgeted_context_max_chars(config, base_max_chars=120_000) == 120_000
 
 
 def test_llm_context_messages_drops_broken_ai_output_but_keeps_good_context():
@@ -3289,3 +3576,44 @@ async def test_run_tool_call_interactive_keeps_confirmation_flow(mocker):
     assert kwargs["confirmation_source"] == "chat"
     assert kwargs["confirmation_session_key"] == "thread-1"
     assert "bypass_confirmations" not in kwargs
+
+
+async def test_chat_graph_detects_a_dishonest_stop_on_the_single_agent_path(mocker):
+    """Regression: detection only worked where a caller passed max_output_tokens.
+
+    chat_agent_node passes none, so on the main chat path a provider reporting
+    "stop" on a response it cut at max_tokens was believed -- the exact case the
+    check exists for. The limit is now derived from CHAT_LLM_MAX_TOKENS, which is
+    what get_chat_model builds the model with.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    class _DishonestModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(
+                content="answer cut off mid-",
+                # The provider claims a clean stop while reporting usage that
+                # exactly reaches the configured ceiling.
+                response_metadata={"finish_reason": "stop"},
+                usage_metadata={"input_tokens": 10, "output_tokens": 64, "total_tokens": 74},
+            )
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 64)
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=_DishonestModel())
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    graph = chat_graph.build_chat_graph(MemorySaver())
+
+    chunks = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [HumanMessage(content="write a long answer")]},
+            {"configurable": {"thread_id": "thread-dishonest-stop", "current_user": _user()}},
+            stream_mode="custom",
+        )
+    ]
+
+    assert {"kind": "finish_reason", "finish_reason": "length"} in chunks
+    streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
+    assert "hit its output limit" in streamed

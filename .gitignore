@@ -170,3 +170,7 @@ gunicorn.ctl
 
 # claude working directory
 .claude
+
+# Output from scripts/chat_harness.py
+chat-harness-results/
+chat-harness-arm.yml

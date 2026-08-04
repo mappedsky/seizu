@@ -19,6 +19,13 @@ from reporting.services import action_confirmations, report_store, reporting_neo
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
+from reporting.services.result_limits import (
+    ResultLimits,
+    Truncation,
+    reset_current_result_limits,
+    set_current_result_limits,
+    stream_truncation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -459,9 +466,31 @@ async def _call_tool_core(
                         payload["error"] = "Action was denied for this confirmation window"
                     return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
         try:
-            result = await builtin.handler(args, current_user)
+            # Publish the row cap first. _bounded_text_response only trims what a
+            # handler already built, so a broad query would be fully fetched and
+            # serialized before any limit applied -- fast, unbounded, and
+            # reachable by any authenticated caller. A handler that reads this
+            # can stop at the source instead.
+            # One set of limits, used twice: as the source bound a handler can
+            # stream to, and as the bound on the response actually emitted.
+            # Publishing them only to the context var left the final call using
+            # the caller's raw arguments -- None for a normal MCP call -- so
+            # everything except graph__query came back unbounded, and even it
+            # was bounded by row count at the source rather than by the size of
+            # the response that was sent.
+            limits = _effective_limits(result_max_rows, result_max_bytes)
+            token = set_current_result_limits(limits)
+            try:
+                result = await builtin.handler(args, current_user)
+            finally:
+                reset_current_result_limits(token)
             return (
-                _bounded_text_response(result, max_rows=result_max_rows, max_bytes=result_max_bytes),
+                _bounded_text_response(
+                    result,
+                    max_rows=limits.max_rows,
+                    max_bytes=limits.max_bytes,
+                    collection_key=builtin.collection_key,
+                ),
                 None,
             )
         except (ValidationError, ValueError) as exc:
@@ -494,10 +523,35 @@ async def _call_tool_core(
         params_with_defaults = {p.name: p.default for p in target_tool.parameters}
         params_with_defaults.update(args)
 
-        results = await reporting_neo4j.run_query(target_tool.cypher, parameters=params_with_defaults)
-        serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
+        # A chat caller states its bounds; anyone else gets the MCP contract,
+        # which is far looser. Inheriting the chat caps here silently truncated
+        # ordinary MCP calls at 100 rows and contradicted their documented
+        # behaviour.
+        limits = _effective_limits(result_max_rows, result_max_bytes)
+        serialized, reason = await reporting_neo4j.run_query_streamed(
+            target_tool.cypher,
+            params_with_defaults,
+            max_rows=limits.max_rows,
+            max_bytes=limits.max_bytes,
+            serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
+        )
+        # Keep the un-truncated shape a bare list, which is what MCP clients
+        # consume; only a truncated result gains the envelope. The marker names
+        # the bound that actually stopped it -- reporting a byte stop as a row
+        # limit points a client at the wrong remedy.
+        bounded: Any = (
+            _rebuild(serialized, None, serialized, stream_truncation(reason, serialized, limits).fields())
+            if reason
+            else serialized
+        )
         return (
-            _bounded_text_response(serialized, max_rows=result_max_rows, max_bytes=result_max_bytes),
+            _bounded_text_response(
+                bounded,
+                max_rows=limits.max_rows,
+                max_bytes=limits.max_bytes,
+                # Built a few lines up, so the key is known rather than guessed.
+                collection_key=_USER_TOOL_ROWS_KEY,
+            ),
             None,
         )
     except neo4j.exceptions.Neo4jError as exc:
@@ -686,11 +740,76 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
     )
 
 
+# Keys under which a tool result carries its rows. ``graph__query`` returns
+# ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
+# same shape, so treating only a top-level list as rows meant the row cap never
+# applied to the tools most likely to return thousands of them.
+def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimits:
+    """What actually bounds this call.
+
+    A chat caller states its own, far tighter, bounds. Anyone else gets the MCP
+    contract rather than nothing: a caller passing no limits is an MCP client,
+    not a request to be unbounded.
+    """
+    # `is not None`, not truthiness: the streaming helper defines 0 as
+    # unbounded, so a caller explicitly disabling a dimension must not have the
+    # MCP default quietly put back in its place.
+    if max_rows is not None or max_bytes is not None:
+        return ResultLimits(max_rows=max_rows, max_bytes=max_bytes)
+    return ResultLimits.for_mcp()
+
+
+# The field the runtime puts rows in when it builds an envelope itself: a
+# user-defined tool's result, and the truncation envelope around it. Named once
+# so the builder and the limiter cannot disagree about it.
+#
+# This replaced a tuple of names to match against -- results, rows, records,
+# items, data -- of which only the first was ever produced here. The rest could
+# only ever have fired on a payload that happened to use the word, which is the
+# same accident that had `permissions` on a role treated as rows. Every caller
+# now states its key instead.
+_USER_TOOL_ROWS_KEY = "results"
+
+
+def _payload_rows_and_key(payload: Any, collection_key: str | None = None) -> tuple[list[Any] | None, str | None]:
+    """The rows in a tool result, and the key holding them if it is a mapping.
+
+    ``collection_key`` is stated by the caller -- a built-in declares it, and
+    the user-defined tool path builds its own envelope and so knows it outright.
+    Nothing is matched by name.
+
+    A payload whose key is not stated is not row-bounded: returned whole or
+    refused whole, never silently shortened in the wrong place.
+    """
+    if isinstance(payload, list):
+        return payload, None
+    if isinstance(payload, dict):
+        if collection_key:
+            value = payload.get(collection_key)
+            if isinstance(value, list):
+                return value, collection_key
+    return None, None
+
+
+def _rebuild(payload: Any, key: str | None, rows: list[Any], marker: dict[str, Any]) -> Any:
+    """Put capped rows back where they came from, keeping the rest of the payload.
+
+    A mapping result carries more than its rows -- ``graph__query`` returns
+    validator ``warnings`` alongside them -- and replacing the whole payload with
+    a bare rows envelope would discard that silently at exactly the moment the
+    caller is being told something was cut.
+    """
+    if key is None:
+        return {_USER_TOOL_ROWS_KEY: rows, **marker}
+    return {**payload, key: rows, **marker}
+
+
 def _bounded_text_response(
     payload: Any,
     *,
     max_rows: int | None,
     max_bytes: int | None,
+    collection_key: str | None = None,
 ) -> list[TextContent]:
     """Serialize a tool result for chat, bounding by rows then bytes.
 
@@ -700,66 +819,98 @@ def _bounded_text_response(
     nothing — only falling back to an error marker when not even one row fits
     (a single oversized row, or a non-list payload that can't be row-shed).
     """
-    rows = payload if isinstance(payload, list) else None
-    capped: list[Any] | None
-    if rows is not None and max_rows is not None and max_rows > 0 and len(rows) > max_rows:
-        capped = rows[:max_rows]
-        bounded: Any = _row_limit_payload(capped, max_rows=max_rows)
-    else:
-        capped = rows
-        bounded = payload
+    rows, row_key = _payload_rows_and_key(payload, collection_key)
+    prior = _prior_truncation(payload)
 
-    text = json.dumps(bounded, indent=2, default=str)
-    if max_bytes is None or max_bytes <= 0 or json_size_bytes(bounded, indent=2) <= max_bytes:
-        return [TextContent(type="text", text=text)]
+    def render(kept: list[Any], state: Truncation) -> Any:
+        return _rebuild(payload, row_key, kept, state.fields())
 
-    # Over the byte budget: shed whole rows if the payload is a list.
-    if capped is None:
+    if rows is None:
+        # Nothing row-shaped to shorten: emit or fail whole.
+        text = json.dumps(payload, indent=2, default=str)
+        if max_bytes is None or max_bytes <= 0 or json_size_bytes(payload, indent=2) <= max_bytes:
+            return [TextContent(type="text", text=text)]
         return _emit(_byte_limit_error(max_bytes))
-    total = len(rows) if rows is not None else len(capped)
-    keep = _rows_within_byte_budget(capped, total=total, max_bytes=max_bytes)
+
+    # A result can be cut twice: once at the source, and again here when the
+    # assembled payload -- indentation, envelope, sibling fields -- exceeds the
+    # byte budget. Carry what the source reported rather than overwriting it.
+    base = Truncation(
+        reasons=tuple(prior),
+        returned=len(rows),
+        source_rows=len(rows),
+        source_complete=not prior,
+    )
+    capped = rows
+    state = base
+    if max_rows is not None and max_rows > 0 and len(rows) > max_rows:
+        capped = rows[:max_rows]
+        state = base.with_reason("row_limit", max_rows=max_rows)
+        state = Truncation(
+            reasons=state.reasons,
+            returned=len(capped),
+            source_rows=base.source_rows,
+            source_complete=base.source_complete,
+            max_rows=max_rows,
+            max_bytes=state.max_bytes,
+        )
+
+    bounded: Any = render(capped, state) if state.reasons else payload
+    if max_bytes is None or max_bytes <= 0 or json_size_bytes(bounded, indent=2) <= max_bytes:
+        return [TextContent(type="text", text=json.dumps(bounded, indent=2, default=str))]
+
+    # Over the byte budget: shed whole rows. The search must measure exactly
+    # what will be emitted -- sizing a smaller envelope than the final one is
+    # how responses came to exceed the budget the search exists to enforce.
+    def render_shed(kept: list[Any]) -> Any:
+        # Do not repeat a reason the source already reported. The streamer counts
+        # compact bytes while the response is sized indented, so a byte-stopped
+        # read routinely exceeds the budget again here -- listing "byte_limit"
+        # twice describes one cause as two.
+        shed_reasons = state.reasons if state.reasons[-1:] == ("byte_limit",) else (*state.reasons, "byte_limit")
+        return render(
+            kept,
+            Truncation(
+                reasons=shed_reasons,
+                returned=len(kept),
+                source_rows=base.source_rows,
+                source_complete=base.source_complete,
+                max_rows=state.max_rows,
+                max_bytes=max_bytes,
+            ),
+        )
+
+    keep = largest_prefix_within_bytes(capped, max_bytes=max_bytes, envelope=render_shed, indent=2)
     if keep <= 0:
         return _emit(_byte_limit_error(max_bytes))
-    return _emit(_byte_limit_payload(capped[:keep], total=total, returned=keep, max_bytes=max_bytes))
+    return _emit(render_shed(capped[:keep]))
 
 
-def _row_limit_payload(rows: list[Any], *, max_rows: int) -> dict[str, Any]:
-    return {"results": rows, "truncated": True, "truncated_reason": "row_limit", "max_rows": max_rows}
-
-
-def _byte_limit_payload(rows: list[Any], *, total: int, returned: int, max_bytes: int) -> dict[str, Any]:
-    return {
-        "results": rows,
-        "truncated": True,
-        "truncated_reason": "byte_limit",
-        "returned": returned,
-        "total_rows": total,
-        "max_bytes": max_bytes,
-    }
+def _prior_truncation(payload: Any) -> list[str]:
+    """Reasons a payload was already truncated before it reached this bound."""
+    if not isinstance(payload, dict) or not payload.get("truncated"):
+        return []
+    reasons = payload.get("truncated_reasons")
+    if isinstance(reasons, list) and reasons:
+        return [str(reason) for reason in reasons]
+    single = payload.get("truncated_reason")
+    return [str(single)] if single else ["unknown"]
 
 
 def _byte_limit_error(max_bytes: int) -> dict[str, Any]:
+    """Said when not even one row fits.
+
+    This is the one response that can exceed ``max_bytes``: it is a fixed
+    message, and a budget smaller than the message leaves nothing to shorten.
+    Every response carrying data is bounded exactly. Callers configuring a
+    budget in the low hundreds of bytes should expect this floor.
+    """
     return {
         "error": "Tool result exceeded chat size limit",
         "truncated": True,
-        "truncated_reason": "byte_limit",
+        "truncated_reasons": ["byte_limit"],
         "max_bytes": max_bytes,
     }
-
-
-def _rows_within_byte_budget(rows: list[Any], *, total: int, max_bytes: int) -> int:
-    """Largest k such that the byte-limit payload for rows[:k] fits max_bytes."""
-    return largest_prefix_within_bytes(
-        rows,
-        max_bytes=max_bytes,
-        envelope=lambda values: _byte_limit_payload(
-            values,
-            total=total,
-            returned=len(values),
-            max_bytes=max_bytes,
-        ),
-        indent=2,
-    )
 
 
 def _emit(payload: Any) -> list[TextContent]:

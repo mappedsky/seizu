@@ -250,6 +250,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.TOOLSETS_READ.value],
             handler=_list_toolsets,
+            collection_key="toolsets",
         ),
         BuiltinTool(
             name="toolsets__get",
@@ -311,6 +312,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.TOOLSETS_READ.value],
             handler=_list_toolset_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="toolsets__get_version",
@@ -338,6 +340,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.TOOLS_READ.value],
             handler=_list_tools,
+            collection_key="tools",
         ),
         BuiltinTool(
             name="toolsets__get_tool",
@@ -405,6 +408,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.TOOLS_READ.value],
             handler=_list_tool_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="toolsets__get_tool_version",

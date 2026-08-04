@@ -1,4 +1,7 @@
+import asyncio
 import logging
+import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal, cast
 
@@ -7,11 +10,15 @@ from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Q
 
 from reporting import settings
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
+from reporting.services.payload_bounds import json_size_bytes
 
 logger = logging.getLogger(__name__)
 
 _ASYNC_CLIENT_CACHE: neo4j.AsyncDriver | None = None
 _SYNC_CLIENT_CACHE: Driver | None = None
+# (monotonic timestamp, schema) for the process-wide graph schema cache.
+_SCHEMA_CACHE: tuple[float, dict[str, Any]] | None = None
+_SCHEMA_CACHE_LOCK = asyncio.Lock()
 
 
 def _get_async_neo4j_client() -> neo4j.AsyncDriver:
@@ -112,14 +119,7 @@ async def _fetch_indexes() -> list[dict[str, Any]]:
     ]
 
 
-async def fetch_graph_schema() -> dict[str, Any]:
-    """Introspect the graph: node labels, relationship types, property keys, indexes.
-
-    Runs privileged catalog queries (incl. SHOW INDEXES) directly — the user query
-    validator intentionally blocks these for ad-hoc user queries, so they are only
-    reachable through this server-side path. Shared by the schema route and the
-    graph__schema built-in tool.
-    """
+async def _fetch_graph_schema_uncached() -> dict[str, Any]:
     labels = await run_query(_LABELS_QUERY)
     rels = await run_query(_RELS_QUERY)
     props = await run_query(_PROPS_QUERY)
@@ -130,6 +130,66 @@ async def fetch_graph_schema() -> dict[str, Any]:
         "property_keys": [str(record["key"]) for record in props],
         "indexes": indexes,
     }
+
+
+def reset_graph_schema_cache() -> None:
+    """Drop the cached schema. For tests and for callers that just changed it."""
+    global _SCHEMA_CACHE
+    _SCHEMA_CACHE = None
+
+
+async def fetch_graph_schema() -> dict[str, Any]:
+    """Introspect the graph: node labels, relationship types, property keys, indexes.
+
+    Runs privileged catalog queries (incl. SHOW INDEXES) directly — the user query
+    validator intentionally blocks these for ad-hoc user queries, so they are only
+    reachable through this server-side path. Shared by the schema route and the
+    graph__schema built-in tool.
+
+    Cached process-wide for ``GRAPH_SCHEMA_CACHE_TTL_SECONDS``. Four catalog
+    queries per call is cheap once and expensive in a loop: an agent exploring
+    the graph re-introspects constantly (one observed chat step called this 73
+    times, ~292 round trips, because each sandbox delegation starts a fresh
+    subagent that knows nothing). The TTL, not invalidation, is what bounds
+    staleness after a sync adds a label.
+
+    **Why one cache is safe to share across users and sessions.** The result is
+    graph-wide, not per-caller: this takes no user or database argument, and
+    every query runs as the single service account in ``NEO4J_USER`` — so the
+    schema returned is already identical for every caller, and the cache holds
+    nothing one user could not have fetched itself. Authorization happens
+    strictly above this: the ``/api/v1/graph/schema`` route and the
+    ``graph__schema`` built-in each require ``query:execute`` before calling
+    here (the sandbox subagent reaches it only through the built-in, with its
+    delegating user's permissions), so a caller without the permission is
+    refused whether or not a value is cached. The content is label,
+    relationship-type, property-key and index *names* — no rows, no user data.
+
+    That reasoning depends on the schema being user-independent. Introducing
+    per-user Neo4j credentials, database-per-tenant routing, or label-level
+    access control would each make it false, and the cache would then need the
+    scoping dimension in its key rather than a single global slot.
+    """
+    ttl = max(0, settings.GRAPH_SCHEMA_CACHE_TTL_SECONDS)
+    if not ttl:
+        return await _fetch_graph_schema_uncached()
+
+    global _SCHEMA_CACHE
+    cached = _SCHEMA_CACHE
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < ttl:
+        return cached[1]
+
+    # Single-flight: a cold cache under concurrent workers would otherwise fire
+    # one introspection per caller, which is the stampede this exists to stop.
+    async with _SCHEMA_CACHE_LOCK:
+        cached = _SCHEMA_CACHE
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < ttl:
+            return cached[1]
+        schema = await _fetch_graph_schema_uncached()
+        _SCHEMA_CACHE = (time.monotonic(), schema)
+        return schema
 
 
 async def run_query_with_retry(cypher: str, parameters: dict = None) -> list[Record]:
@@ -172,6 +232,70 @@ async def run_query_bounded_with_retry(
                     if len(records) > max_rows:
                         break
             return records[:max_rows], len(records) > max_rows
+        except neo4j.exceptions.ServiceUnavailable:
+            logger.debug("Unable to connect to neo4j, retrying...")
+            if attempt >= 5:
+                raise
+            attempt += 1
+
+
+async def run_query_streamed(
+    cypher: str,
+    parameters: dict | None,
+    *,
+    max_rows: int | None,
+    max_bytes: int | None,
+    serialize: Callable[[Record], Any],
+) -> tuple[list[Any], str]:
+    """Stream, serializing each record, and stop at whichever bound comes first.
+
+    Serializing inside the loop is what makes the byte bound real. Counting rows
+    alone does not bound memory -- a hundred records of large maps, or a single
+    ``collect()`` aggregate, blow any budget -- and applying a byte cap after
+    materializing the result does not bound it either, because by then the whole
+    thing is already in the process.
+
+    A record that would not fit on its own is dropped rather than retained, so
+    one enormous row cannot sit in memory alongside everything already read.
+    That leaves the driver's own per-record allocation as the floor, which is
+    not something this layer can do anything about.
+
+    Returns the rows kept and which bound stopped it: ``""`` when the result was
+    complete, else ``"row_limit"`` or ``"byte_limit"``. Naming the bound matters
+    downstream -- a client told a byte stop was a row limit is pointed at the
+    wrong remedy, and will page rather than narrow its projection.
+
+    These bounds protect *this process*: they stop an unbounded result being
+    read into memory. They are not the size of the response eventually emitted,
+    which is bounded exactly by the caller once the payload is assembled.
+    """
+    attempt = 1
+    while True:
+        try:
+            rows: list[Any] = []
+            used = 0
+            reason = ""
+            driver = _get_async_neo4j_client()
+            async with driver.session() as session:
+                result = await session.run(
+                    Query(cypher, timeout=settings.NEO4J_QUERY_TIMEOUT),
+                    parameters=parameters,
+                )
+                async for record in result:
+                    if max_rows is not None and max_rows > 0 and len(rows) >= max_rows:
+                        reason = "row_limit"
+                        break
+                    row = serialize(record)
+                    if max_bytes is not None and max_bytes > 0:
+                        size = json_size_bytes(row)
+                        if used + size > max_bytes:
+                            # Closing the session here discards the rest rather
+                            # than reading it into memory to throw away.
+                            reason = "byte_limit"
+                            break
+                        used += size
+                    rows.append(row)
+            return rows, reason
         except neo4j.exceptions.ServiceUnavailable:
             logger.debug("Unable to connect to neo4j, retrying...")
             if attempt >= 5:

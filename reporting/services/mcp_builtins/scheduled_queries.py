@@ -174,6 +174,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.SCHEDULED_QUERIES_READ.value],
             handler=_list,
+            collection_key="scheduled_queries",
         ),
         BuiltinTool(
             name="scheduled_queries__get",
@@ -257,6 +258,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.SCHEDULED_QUERIES_READ.value],
             handler=_list_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="scheduled_queries__get_version",

@@ -8,6 +8,7 @@ from reporting.routes.query import _serialize_neo4j_value
 from reporting.services import reporting_neo4j
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.query_validator import validate_query
+from reporting.services.result_limits import current_result_limits, stream_truncation
 
 GROUP = "graph"
 
@@ -23,9 +24,24 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     validation = await validate_query(cypher)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
-    results = await reporting_neo4j.run_query(cypher)
-    serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
-    return {"results": serialized, "warnings": validation.warnings}
+    # Stream and serialize under the caller's bounds rather than fetching
+    # everything and trimming after. An unbounded MATCH is fast to issue and can
+    # materialize the graph in worker memory before any limit is consulted.
+    limits = current_result_limits()
+    serialized, stopped_by = await reporting_neo4j.run_query_streamed(
+        cypher,
+        None,
+        max_rows=limits.max_rows,
+        max_bytes=limits.max_bytes,
+        serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
+    )
+    payload: dict[str, Any] = {"results": serialized, "warnings": validation.warnings}
+    if stopped_by:
+        # The same shape every other truncation reports, so a later byte-bound
+        # pass has a lower bound to carry rather than a length it might mistake
+        # for a total -- and so clients see one contract, not three.
+        payload |= stream_truncation(stopped_by, serialized, limits).fields()
+    return payload
 
 
 async def _handle_validate_query(args: dict[str, Any], current_user: CurrentUser | None) -> dict[str, Any]:
@@ -90,6 +106,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.QUERY_EXECUTE.value],
             handler=_handle_query,
+            collection_key="results",
         ),
         BuiltinTool(
             name="graph__validate_query",

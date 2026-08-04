@@ -130,6 +130,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.ROLES_READ.value],
             handler=_list,
+            collection_key="roles",
         ),
         BuiltinTool(
             name="roles__get",
@@ -191,6 +192,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.ROLES_READ.value],
             handler=_list_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="roles__get_version",

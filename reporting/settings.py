@@ -153,6 +153,14 @@ NEO4J_URI = str_env("NEO4J_URI", "bolt://localhost:7687")
 # the database is not fully populated (e.g. in development).
 NEO4J_NOTIFICATIONS_MIN_SEVERITY = str_env("NEO4J_NOTIFICATIONS_MIN_SEVERITY", "WARNING")
 
+# How long (seconds) to cache the introspected graph schema process-wide. The
+# schema is graph-wide rather than per-user, so one cache serves the schema
+# route, the graph__schema tool, the MCP server and the sandbox subagent. Agents
+# re-introspect constantly — each sandbox delegation starts a fresh subagent
+# with no memory — so this turns a per-call cost into a per-TTL one. Lower it if
+# a sync adds labels that must appear immediately; 0 disables caching.
+GRAPH_SCHEMA_CACHE_TTL_SECONDS = int_env("GRAPH_SCHEMA_CACHE_TTL_SECONDS", 300)
+
 # Username to connect to neo4j
 NEO4J_USER = str_env("NEO4J_USER")
 
@@ -589,13 +597,86 @@ CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
 # Compatibility guard for runs with all shared budget dimensions disabled.
 # Normal interactive and headless plans use the shared run-level
 # token/cost/call ledger instead of stopping at a per-step action count.
+# A budgeted run is bounded by CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN instead,
+# which is proportional to the work the planner expected rather than a flat
+# count, so a large headless plan is not truncated at an arbitrary action.
 CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS = int_env("CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 24)
+# Multiple of the planner's per-step token estimate at which a step is stopped
+# and asked to summarize what it has. The estimate itself only downgrades the
+# step to the economy model; stopping there would kill work the planner merely
+# under-estimated. Without a ceiling one step can consume the whole run budget
+# and starve every step after it.
+# Raised from 3.0 once the ceiling began counting delegated sandbox spend. The
+# planner's per-step estimates (4k/8k/16k by complexity) were set when a step's
+# total meant its own loop only, so against a total that now includes a sandbox
+# sub-agent they are an order of magnitude low: a medium step was cut at 24,000
+# four times in a row, burning 121,643 tokens to fail four times where one
+# uninterrupted attempt had answered completely. 12x puts a medium step near the
+# ~80k per step the successful configuration actually used.
+CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
+# How far past its fair share of the remaining run budget a step may go before
+# it is stopped. 1.0 makes the share a hard cut; a large value lets one step use
+# everything outside the finalization reserve. Below it the step is only
+# degraded and asked to converge, so this is the point at which a step is ended
+# rather than pressured.
+#
+# 1.0 because a three-arm, three-sample sweep (1.0 / 2.0 / effectively
+# unbounded) found no discernible difference: every usable sample consumed the
+# whole spendable budget, ended in finalization, and failed a verification, with
+# within-arm spread (449-1,114 characters) as large as anything between arms.
+# Chosen for the strongest sibling protection at no measured cost, not because
+# it scored best. The ceiling is not the binding constraint -- the run budget
+# is, and the work does not fit inside it.
+CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 1.0)
+# Episodic recall between sub-agents within one step. Each sandbox__delegate
+# call runs a fresh subagent that knows nothing of the previous one, so without
+# this they re-derive the same ground -- one observed step made 136 delegations
+# and 678 graph queries answering a question about eight CVEs. Entries are the
+# prior sub-agents' own task/outcome pairs, replayed into the next one's prompt.
+# Set the recall budget to 0 to disable.
+CHAT_EPISODIC_RECALL_MAX_CHARS = int_env("CHAT_EPISODIC_RECALL_MAX_CHARS", 4_000)
+# Entries retained before the oldest are shed. Bounds memory and keeps recall
+# relevant: recent sub-agents cover ground the next one is likeliest to repeat.
+CHAT_EPISODIC_MAX_ENTRIES = int_env("CHAT_EPISODIC_MAX_ENTRIES", 20)
+# Corrective retries when a worker ends a turn without calling the sentinel that
+# submits its step result. A step ends on that explicit call, never on the model
+# simply going quiet, so a plain-text turn is a protocol violation the worker
+# points out and re-asks. After this many retries it falls back to reading the
+# text as the result, so a model that will not use the protocol still finishes.
+CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES = int_env("CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES", 2)
+# Characters of raw step evidence (the tool/skill output each worker gathered)
+# carried into the synthesizer's context, shared across all steps of a plan.
+# A worker's prose summary is a lossy channel: whatever it omits is gone, since
+# nothing else crosses the step boundary. Passing the underlying evidence too
+# means the synthesizer can still answer when a summary comes back thin. Set 0
+# to send summaries only (the pre-existing behavior).
+CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
+# Characters of earlier conversation given to the planner, so a follow-up whose
+# subject is a back-reference ("cross-check that", "which of those findings")
+# can be resolved into self-contained step goals. The orchestrated path is
+# otherwise built only from the latest user message, which leaves such a request
+# with no referent anywhere in the run. The planner makes one call per turn, so
+# this is charged once.
+CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS", 6_000)
+# The same conversation given to each sub-agent worker, for resolving references
+# in its step goal. Deliberately much tighter than the planner's: workers run in
+# parallel and each runs its own multi-call loop, so this is charged per step
+# per call, and a worker handed the whole transcript drifts toward answering the
+# user's overall question instead of its own step. Set 0 to restore strict
+# worker isolation (the pre-existing behavior).
+CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS", 2_000)
 # Per-turn chat orchestrator budget shared by interactive and automated runs.
 # The reserve is unavailable to normal planning/worker calls and is released
 # only for final summaries/synthesis.
 # A zero token or cost limit disables that dimension; the LLM-call ceiling
 # remains an emergency loop guard.
-CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 120_000)
+# Sized to cover sandbox sub-agent spend, which this budget now includes. Before
+# that spend was metered, a delegating turn billed only its outer loop -- two
+# measured turns put the sandbox at 69% and 84% of real usage -- so the previous
+# 120k default was, for such turns, closer to 400k in practice. Lower it if
+# delegation is disabled or rare; a turn that never delegates spends the same as
+# it always did.
+CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 400_000)
 CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 0.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
@@ -660,6 +741,15 @@ CHAT_HISTORY_LIMIT = int_env("CHAT_HISTORY_LIMIT", 100)
 CHAT_TOOL_RESULT_MAX_ROWS = int_env("CHAT_TOOL_RESULT_MAX_ROWS", 100)
 # Maximum serialized bytes returned to chat from a single MCP tool call.
 CHAT_TOOL_RESULT_MAX_BYTES = int_env("CHAT_TOOL_RESULT_MAX_BYTES", 200_000)
+# Bounds for a normal (non-chat) MCP tool call. Separate from the chat caps
+# above, which exist to protect a model's context and are far tighter: an
+# external MCP client is not a model context and has never been limited by one.
+# These exist so the server has a finite bound at all -- a broad query is
+# otherwise materialized in full before anything can trim it -- and are set well
+# above what any chat turn permits. A result that hits them is returned
+# truncated with a marker rather than failing.
+MCP_TOOL_RESULT_MAX_ROWS = int_env("MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
@@ -720,6 +810,35 @@ SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+# Caps for a sub-agent tool result written to a sandbox file rather than
+# returned. Far larger than the in-context caps because the context window they
+# protect is not involved: the agent computes over the file with run_python and
+# never reads the rows itself. Still finite -- write_file takes a string, so the
+# whole result materializes in the Seizu process before reaching the sandbox,
+# and an unbounded query would be a memory event here rather than there.
+# Lifetime of the sandbox shared by a step's delegations. Longer than
+# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox now
+# has to outlive a whole step; the provider would otherwise reap it mid-step.
+# Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
+# preview_file, which returns files at or under this size whole and otherwise
+# only shape -- size, line count, JSON structure, columns -- plus the beginning,
+# so a result written to a file to keep it out of context cannot be read
+# straight back into it. At 0 it gets read_file, which returns up to
+# SANDBOX_MAX_OUTPUT_BYTES.
+#
+# On by default as a design choice, with no measured effect either way. A
+# four-sample comparison found the arms indistinguishable: median answer 925
+# characters with it against 929 without, median queries 26 against 25. An
+# earlier three-sample run appeared to favour it and did not replicate.
+#
+# It is kept because it is the only setting consistent with routing oversized
+# results to files at all: read_file returns up to SANDBOX_MAX_OUTPUT_BYTES, so
+# a result written out precisely to keep it out of context could be read
+# straight back into it. Set 0 for read_file if that trade is not wanted.
+SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
+SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
+SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
 # LiteLLM model id for the sandbox subagent.  Empty → inherits CHAT_LLM_MODEL.
 # Example: "anthropic/claude-haiku-4-5-20251001" for a cheaper inner agent.

@@ -25,6 +25,8 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 """
 
 import asyncio
+import itertools
+import json
 import logging
 import uuid
 from typing import Any
@@ -35,14 +37,18 @@ from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt import create_react_agent
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
+from reporting.services import chat_budget, episodic_memory, sandbox_session
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
 
 GROUP = "sandbox"
+# Distinct ledger phase so sandbox spend is legible next to the outer loop.
+_SANDBOX_BUDGET_PHASE = "sandbox_subagent"
 
 
 _INPUT_SCHEMA: dict[str, Any] = {
@@ -89,9 +95,32 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
         """Run a shell command in the sandbox and return stdout and stderr."""
         return _cap(await backend.run_bash(cmd))
 
+    async def preview_file(path: str) -> str:
+        """Inspect a file: its size, shape, and beginning.
+
+        Returns small files whole. For anything larger this returns a summary
+        and the first part only — it is for working out how to process a file,
+        not for loading one. Use run_python to work with the full contents.
+        """
+        return _file_preview(path, await backend.read_file(path))
+
     async def read_file(path: str) -> str:
         """Read the contents of a file in the sandbox filesystem."""
-        return _cap(await backend.read_file(path))
+        content = await backend.read_file(path)
+        size = len(content.encode())
+        if size <= settings.SANDBOX_MAX_OUTPUT_BYTES:
+            return content
+        # Say what was lost and what to do instead. The bare `[truncated]`
+        # marker this used to return is easy to read past: an agent that asked
+        # for a 500KB result file got a tenth of it and no reason to think it
+        # had anything less than the whole thing -- the same silent-truncation
+        # failure that made a cut-off model answer look complete.
+        head = _truncate_bytes(content, settings.SANDBOX_MAX_OUTPUT_BYTES)
+        return (
+            f"[{path} is {size} bytes, larger than the {settings.SANDBOX_MAX_OUTPUT_BYTES} that can be read into "
+            "context. The first part follows, but it is NOT the whole file. To use all of it, process the file in "
+            "code with run_python instead of reading it.]\n" + head
+        )
 
     async def write_file(path: str, content: str) -> str:
         """Write content to a file in the sandbox filesystem."""
@@ -104,13 +133,125 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
     return [
         StructuredTool.from_function(coroutine=run_python, name="run_python", description=run_python.__doc__ or ""),
         StructuredTool.from_function(coroutine=run_bash, name="run_bash", description=run_bash.__doc__ or ""),
-        StructuredTool.from_function(coroutine=read_file, name="read_file", description=read_file.__doc__ or ""),
+        # preview_file when a preview budget is set, read_file otherwise. Both
+        # exist because the earlier verdict on preview_file was rendered while
+        # every delegation got a fresh sandbox: it told the agent to process a
+        # file with run_python, and across delegations that file did not exist.
+        # The comparison is only meaningful now sandboxes are shared per step.
+        (
+            StructuredTool.from_function(
+                coroutine=preview_file, name="preview_file", description=preview_file.__doc__ or ""
+            )
+            if settings.SANDBOX_PREVIEW_MAX_BYTES > 0
+            else StructuredTool.from_function(
+                coroutine=read_file, name="read_file", description=read_file.__doc__ or ""
+            )
+        ),
         StructuredTool.from_function(coroutine=write_file, name="write_file", description=write_file.__doc__ or ""),
         StructuredTool.from_function(coroutine=list_files, name="list_files", description=list_files.__doc__ or ""),
     ]
 
 
-async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
+# Where oversized results land in the sandbox. A fixed directory and a running
+# number keep paths predictable in a transcript.
+_RESULT_DIR = "/tmp/seizu_results"
+# Rows returned per sample in a receipt: enough to show the shape, not the data.
+_RECEIPT_SAMPLE_ROWS = 2
+
+
+def _result_rows(text: str) -> list[Any] | None:
+    """Best-effort row list from a tool result, for describing it in a receipt.
+
+    Tool results are strings by contract, so this parses rather than assumes.
+    Returning ``None`` simply means the receipt describes bytes instead of rows.
+    """
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        for key in ("results", "rows", "records", "items", "data"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                return value
+    return None
+
+
+def _file_preview(path: str, content: str) -> str:
+    """Describe a file compactly enough that code can be written against it.
+
+    A file inside the preview budget comes back whole, so nothing changes for
+    the small files an agent writes itself. Beyond it the agent gets shape --
+    size, line count, JSON structure, columns -- and only the beginning, so a
+    result file written to keep data out of context cannot be pulled straight
+    back into it.
+    """
+    size = len(content.encode())
+    budget = max(0, settings.SANDBOX_PREVIEW_MAX_BYTES)
+    if size <= budget:
+        return content
+
+    summary: dict[str, Any] = {"path": path, "bytes": size, "lines": content.count("\n") + 1}
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        parsed = None
+    if parsed is not None:
+        summary["json"] = type(parsed).__name__
+        rows = _result_rows(content)
+        if rows is not None:
+            summary["rows"] = len(rows)
+            columns: list[str] = []
+            for row in rows:
+                if isinstance(row, dict):
+                    for key in row:
+                        if key not in columns:
+                            columns.append(key)
+            if columns:
+                summary["columns"] = columns
+    summary["preview_only"] = (
+        f"This is a {size}-byte file and only its first {budget} bytes follow. To use the whole file, process it "
+        "in code with run_python (e.g. json.load(open(path))) rather than previewing it again."
+    )
+    return json.dumps(summary, default=str) + "\n\n" + _truncate_bytes(content, budget)
+
+
+def _file_result_receipt(path: str, text: str) -> str:
+    """Describe a result too large to return, which was written to the sandbox.
+
+    Carries shape (row count, columns, a couple of samples) so the agent can
+    write code against the file without having read it. The wording states the
+    situation rather than recommending a habit: this result *cannot* be
+    returned, so reading the file is the only way to see it, and re-running the
+    query will produce the same outcome.
+    """
+    receipt: dict[str, Any] = {
+        "status": "too_large_to_return",
+        "saved_to": path,
+        "bytes": len(text.encode()),
+    }
+    rows = _result_rows(text)
+    if rows is not None:
+        receipt["rows"] = len(rows)
+        columns: list[str] = []
+        for row in rows:
+            if isinstance(row, dict):
+                for key in row:
+                    if key not in columns:
+                        columns.append(key)
+        if columns:
+            receipt["columns"] = columns
+        receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+    receipt["next_step"] = (
+        f"The full result is in {path}; only the sample above was returned. Read or process the file with "
+        "run_python (e.g. json.load(open(path))). Re-running this call will return this same receipt."
+    )
+    return json.dumps(receipt, default=str)
+
+
+async def _build_seizu_tools(current_user: CurrentUser, backend: SandboxBackend | None = None) -> list[Any]:
     """Build LangChain StructuredTools wrapping the Seizu MCP tools the sandbox
     inner agent may call.
 
@@ -125,6 +266,21 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
     drive the interactive, session-scoped confirmation round-trip, so gated
     mutations stay with the outer chat agent where the user can approve them. The
     runtime also fail-closes if such a tool were somehow reached here.
+
+    Given a ``backend``, a result too large to return is written into the
+    sandbox filesystem and replaced by a receipt describing it. The sandbox is
+    for handling data *as data*, but the only route from a query to
+    ``run_python`` otherwise runs through the model: it must read the rows out
+    of its own context and re-emit them as a Python literal, crossing the model
+    twice and hand-serializing in between.
+
+    The trigger is size and never the model's choice, which is the correction of
+    an earlier attempt that exposed the path as an argument for the agent to
+    set. Given the option it wrote everything to files, read none of them back,
+    and re-queried instead. Routing on size means a file appears only where the
+    result would otherwise have been truncated, so the file is strictly more
+    than the agent would have received — and where a result does fit, nothing
+    changes at all.
     """
     from pydantic import Field, create_model
 
@@ -141,6 +297,8 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
     seizu_tools = [t for t in all_tools if t.name != "sandbox__delegate"]
 
     _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
+    # Shared by every tool in this delegation so paths stay distinct.
+    _result_seq = itertools.count(1)
 
     result: list[Any] = []
     for tool in seizu_tools:
@@ -163,21 +321,65 @@ async def _build_seizu_tools(current_user: CurrentUser) -> list[Any]:
             from reporting import settings as _settings
             from reporting.services import mcp_runtime as _rt
 
+            # Fetch to the file bounds when a sandbox exists, because whether a
+            # result is oversized cannot be known before fetching it, and the
+            # source caps would have already discarded the excess. Without a
+            # backend there is nowhere to put it, so keep the context caps.
+            if backend is None:
+                max_rows = _settings.CHAT_TOOL_RESULT_MAX_ROWS
+                max_bytes = _settings.CHAT_TOOL_RESULT_MAX_BYTES
+            else:
+                max_rows = max(_settings.CHAT_TOOL_RESULT_MAX_ROWS, _settings.SANDBOX_FILE_RESULT_MAX_ROWS)
+                max_bytes = max(_settings.CHAT_TOOL_RESULT_MAX_BYTES, _settings.SANDBOX_FILE_RESULT_MAX_BYTES)
+
             outcome = await _rt.call_tool_for_chat(
                 current_user,
                 _tool_name,
                 kwargs,
                 gate_permission=Permission.CHAT_TOOLS_CALL,
                 chat_safe_only=True,
-                # Bound the result the same way the outer chat agent does, then byte-
-                # cap as a final guard, so a large graph__query / user-tool result
-                # can't blow up the inner model's context (mirrors _build_sandbox_tools).
-                result_max_rows=_settings.CHAT_TOOL_RESULT_MAX_ROWS,
-                result_max_bytes=_settings.CHAT_TOOL_RESULT_MAX_BYTES,
+                result_max_rows=max_rows,
+                result_max_bytes=max_bytes,
             )
             if outcome.blocked:
                 return f"[blocked: {outcome.blocked}]"
-            return _truncate_bytes(outcome.text or "(no output)", _settings.SANDBOX_MAX_OUTPUT_BYTES)
+            text = outcome.text or "(no output)"
+
+            # The trigger is size, not the model's choice. An earlier version
+            # offered the agent a save_to_path argument and let it decide; it
+            # then used it for all 233 calls of a measured run -- including
+            # schema lookups it needed to read -- read none of the files back,
+            # and re-queried instead, at 4.4x the sandbox spend. Routing on size
+            # removes the decision: a file appears only where the alternative
+            # was a truncated result, so reading it is strictly better than what
+            # the agent would otherwise have had.
+            # Either bound, because the fetch above deliberately exceeds both.
+            # Triggering on bytes alone was tried and was much worse: with the
+            # fetch raised to the file bounds, the row cap is the only thing
+            # keeping an inline result small in row terms, so dropping it let
+            # multi-thousand-row results return in full. A measured turn went
+            # from 124 inner calls and a complete answer to 880 calls, 791 of
+            # them queries, and a 581-character answer with both steps failing.
+            rows = _result_rows(text)
+            oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
+                rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
+            )
+            if backend is None or not oversized:
+                return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
+
+            # Unique per call, not just per delegation: delegations in one step
+            # now share a filesystem and can run concurrently, so a per-builder
+            # counter would collide.
+            path = f"{_RESULT_DIR}/{_tool_name}_{next(_result_seq):03d}_{uuid.uuid4().hex[:8]}.json"
+            try:
+                await backend.write_file(path, text)
+            except Exception:
+                # Returning the truncated result is exactly what would have
+                # happened without this path, so a write failure costs nothing
+                # beyond the rows that never fit.
+                logger.warning("sandbox: could not write %s result to %s", _tool_name, path, exc_info=True)
+                return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
+            return _file_result_receipt(path, text)
 
         result.append(
             StructuredTool.from_function(
@@ -242,7 +444,68 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         return self._model.invoke(self._normalize(input), config, **kwargs)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
-        return await self._model.ainvoke(self._normalize(input), config=config, **kwargs)
+        normalized = self._normalize(input)
+        controller = chat_budget.current_budget_controller()
+        if controller is None:
+            return await self._model.ainvoke(normalized, config=config, **kwargs)
+        scope = chat_budget.current_budget_scope()
+
+        # Every inner LLM call funnels through here, so this is the one place
+        # the sandbox subagent's spend can be seen at all. Reserving (rather
+        # than only recording afterwards) is what makes an exhausted run stop
+        # delegating instead of continuing to spend invisibly.
+        messages = normalized if isinstance(normalized, list) else []
+        estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
+        estimated_output = settings.CHAT_LLM_MAX_TOKENS
+        reservation = await controller.reserve(
+            estimated_input_tokens=estimated_input,
+            estimated_output_tokens=estimated_output,
+            # Reserve the cost too, matching the outer LLM path. Without it a
+            # deployment budgeting on cost alone (CHAT_RUN_COST_BUDGET_USD with
+            # the token dimension disabled) authorizes every sandbox call at
+            # zero, so concurrent calls can overshoot the ceiling before any of
+            # them records what it spent.
+            estimated_cost_usd=chat_budget.usage_cost_usd(self._model, estimated_input, estimated_output),
+            # Scope, so this counts against the delegating step's ceiling. A
+            # step's own counter cannot see this spend -- it happens below the
+            # outer loop -- so without the scope a step could spend hundreds of
+            # thousands of tokens here while its local total stayed small, and
+            # starve every sibling step. Phase is a child of the scope so the
+            # ledger shows where it went.
+            scope=scope,
+            phase=f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE,
+        )
+        settled = False
+        try:
+            response = await self._model.ainvoke(normalized, config=config, **kwargs)
+        finally:
+            if not settled:
+                # BaseException, not Exception: every delegation runs under
+                # asyncio.wait_for(SANDBOX_TIMEOUT_SECONDS), so cancellation is
+                # the routine ending, not an exotic one. Catching only Exception
+                # leaked the reservation on every timeout, and because scope
+                # authorization counts in-flight reservations, each leak
+                # permanently consumed part of the step's ceiling. Discarding is
+                # synchronous because awaiting a lock while being cancelled can
+                # itself be interrupted.
+                controller.discard(reservation)
+        usage = getattr(response, "usage_metadata", None) or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        estimated = not (input_tokens or output_tokens)
+        if estimated:
+            # No provider usage: bill the estimate rather than nothing, so an
+            # unreported call still moves the ledger.
+            input_tokens, output_tokens = estimated_input, 0
+        settled = True
+        await controller.commit(
+            reservation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=chat_budget.usage_cost_usd(self._model, input_tokens, output_tokens),
+            usage_estimated=estimated,
+        )
+        return response
 
 
 def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
@@ -392,6 +655,54 @@ def _truncate_bytes(text: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode(errors="replace") + "\n[truncated]"
 
 
+# The inner agent had no system prompt at all: it was handed tools and a task and
+# left to work out the shape of the data, the cost of its choices, and what to do
+# with an oversized result, every single time. Measured runs showed exactly that
+# -- schema re-introspection on every delegation, hundreds of repeat queries, and
+# results pulled into context that code could have processed.
+_SUBAGENT_PROMPT = """You are a sub-agent working inside an ephemeral sandbox for one task.
+
+You exist so data is handled by code rather than by a model. Fetch what you need, \
+process it with run_python, and return conclusions. Pulling rows into your own context \
+to reason over them is the expensive path and usually the wrong one.
+
+What the data looks like:
+- Seizu tools return JSON. Query-style results are an object with a "results" list of \
+  row objects, often alongside "warnings".
+- A result too large to return is written to a file instead, and you get \
+  {"status": "too_large_to_return", "saved_to": "<path>", "rows": N, "columns": [...], \
+  "sample": [...]}. The rows are in that file, not in the receipt.
+- When you get such a receipt, read the file in code: json.load(open(path))["results"] \
+  gives the rows. Do not preview or re-run the query to try to see them; the receipt is \
+  what the call returns.
+- A result that carries "truncated": true is incomplete. Say so rather than treating it \
+  as the whole set.
+
+How to work:
+- Query once, save what you get, and compute over it. Repeating a query to see more of it \
+  costs more than processing what you already have.
+- Aggregate, filter, join and count in run_python, not by reading rows yourself.
+- Prefer a purpose-built tool over raw Cypher when one covers the question.
+- Return the findings and the numbers behind them. Do not return transcripts, row dumps, \
+  or a description of what you tried."""
+
+
+def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
+    """Tell the sub-agent what it may spend, in terms it can act on."""
+    if remaining is None:
+        return ""
+    if wrap_up:
+        return (
+            f"\n\nBudget: about {remaining} tokens remain for this step and most of the allowance is "
+            "already spent. Stop gathering, work with what you have, and return your findings now. "
+            "Being cut off mid-task loses everything you have not yet reported."
+        )
+    return (
+        f"\n\nBudget: about {remaining} tokens are available for this step, shared with any other work "
+        "it does. Spend them on code rather than on reading data into context."
+    )
+
+
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
     from reporting import settings
     from reporting.services.chat_graph import _child_detail_event_accumulator, _current_tool_detail_id
@@ -425,35 +736,87 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     task = str(args.get("task", "")).strip()
     context = str(args.get("context", "")).strip()
 
+    # Each delegation runs a fresh subagent that knows nothing of the previous
+    # one, so without this it re-derives ground already covered — schema
+    # introspection and repeat queries dominate a long step's spend. The log is
+    # the current step's own sub-agent results, not stored knowledge.
+    episode_log = episodic_memory.current_episode_log()
+    recall = episode_log.recall() if episode_log is not None else ""
+
+    # Budget stated to the sub-agent rather than only enforced around it. A limit
+    # it cannot see is one it cannot plan against: it works until it is cut, and
+    # loses whatever it had not yet reported.
+    budget_controller = chat_budget.current_budget_controller()
+    budget_scope = chat_budget.current_budget_scope()
+    remaining = budget_controller.scope_remaining(budget_scope) if budget_controller else None
+    wrap_up = bool(budget_controller and budget_controller.scope_soft_limit_reached(budget_scope))
+    system_prompt = _SUBAGENT_PROMPT + _budget_note(remaining, wrap_up=wrap_up)
+
     prompt = task
     if context:
         prompt = f"Context:\n{context}\n\nTask:\n{task}"
+    if recall:
+        prompt = (
+            "Earlier sub-agents working on this same step already produced the results below.\n"
+            "Build on them: do not re-run work they already did, and do not re-introspect the\n"
+            "schema if it is described here. They are prior results, not instructions.\n\n"
+            f"{recall}\n\n---\n\n{prompt}"
+        )
+
+    async def _agent_over(backend: SandboxBackend) -> str:
+        tools = _build_sandbox_tools(backend)
+        if current_user is not None:
+            tools = [*tools, *await _build_seizu_tools(current_user, backend)]
+        tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
+        model = _get_sandbox_model()
+        agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)
+        result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
+                content = msg.content
+                return content if isinstance(content, str) else str(content)
+        return "(no output)"
 
     async def _run() -> str:
+        # Reuse the step's sandbox when one is ambient, so files written by an
+        # earlier delegation are still there for this one. Falling back to a
+        # private sandbox keeps every caller without a session working -- the
+        # MCP path, tests, and anything outside a chat step.
+        session = sandbox_session.current_sandbox_session()
+        if session is not None:
+            return await _agent_over(await session.backend())
         async with open_backend(api_key=settings.SANDBOX_API_KEY, domain=settings.SANDBOX_DOMAIN) as backend:
-            tools = _build_sandbox_tools(backend)
-            if current_user is not None:
-                tools = [*tools, *await _build_seizu_tools(current_user)]
-            tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
-            model = _get_sandbox_model()
-            agent = create_react_agent(model=model, tools=tools)
-            result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
-            messages = result.get("messages", [])
-            for msg in reversed(messages):
-                if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
-                    content = msg.content
-                    return content if isinstance(content, str) else str(content)
-        return "(no output)"
+            return await _agent_over(backend)
 
     try:
         output = await asyncio.wait_for(_run(), timeout=settings.SANDBOX_TIMEOUT_SECONDS)
     except TimeoutError:
         return {"error": f"Sandbox task timed out after {settings.SANDBOX_TIMEOUT_SECONDS}s"}
+    except chat_budget.BudgetExceeded as exc:
+        # Expected, not a fault: the step spent its allowance mid-delegation.
+        # The generic handler logged this as a crash with a full traceback and
+        # told the caller "Sandbox task failed", which is both noisy and
+        # unactionable -- indistinguishable from a broken sandbox, so the only
+        # sensible response (stop and report) was not available to it.
+        logger.info("sandbox__delegate stopped on budget: %s", exc)
+        return {
+            "error": (
+                f"Stopped: {exc} This step cannot fund more delegation. Do not retry this or start new "
+                "work; report what you have already gathered."
+            )
+        }
     except Exception:
         logger.exception("sandbox__delegate failed")
         return {"error": "Sandbox task failed — see server logs for details"}
 
-    return {"result": _truncate_bytes(output, settings.SANDBOX_MAX_OUTPUT_BYTES)}
+    result_text = _truncate_bytes(output, settings.SANDBOX_MAX_OUTPUT_BYTES)
+    # Record only on success: a timeout or crash returns above, and logging a
+    # failure as a "result" would teach the next sub-agent that the ground was
+    # already covered when it was not.
+    if episode_log is not None:
+        episode_log.append(task, result_text)
+    return {"result": result_text}
 
 
 def _sandbox_enabled() -> bool:

@@ -263,6 +263,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.SKILLSETS_READ.value],
             handler=_list_skillsets,
+            collection_key="skillsets",
         ),
         BuiltinTool(
             name="skillsets__get",
@@ -312,6 +313,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": _skillset_id_prop(), "required": ["skillset_id"]},
             required_permissions=[Permission.SKILLSETS_READ.value],
             handler=_list_skillset_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="skillsets__get_version",
@@ -332,6 +334,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": _skillset_id_prop(), "required": ["skillset_id"]},
             required_permissions=[Permission.SKILLS_READ.value],
             handler=_list_skills,
+            collection_key="skills",
         ),
         BuiltinTool(
             name="skillsets__get_skill",
@@ -413,6 +416,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.SKILLS_READ.value],
             handler=_list_skill_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="skillsets__get_skill_version",

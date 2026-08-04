@@ -344,6 +344,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.SPACES_READ.value],
             handler=_list_spaces,
+            collection_key="spaces",
         ),
         BuiltinTool(
             name="spaces__get",
@@ -438,6 +439,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.SPACES_READ.value],
             handler=_list_subspaces,
+            collection_key="subspaces",
         ),
         BuiltinTool(
             name="spaces__create_subspace",

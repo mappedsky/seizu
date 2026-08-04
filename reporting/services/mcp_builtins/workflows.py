@@ -118,6 +118,7 @@ GROUP_DEF = BuiltinGroup(
             input_schema={"type": "object", "properties": {}},
             required_permissions=[Permission.WORKFLOWS_READ.value],
             handler=_list,
+            collection_key="workflows",
         ),
         BuiltinTool(
             name="workflows__get",
@@ -194,6 +195,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.WORKFLOWS_READ.value],
             handler=_versions,
+            collection_key="versions",
         ),
         BuiltinTool(
             name="workflows__get_version",

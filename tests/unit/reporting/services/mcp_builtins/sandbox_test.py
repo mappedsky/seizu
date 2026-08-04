@@ -1,16 +1,21 @@
 """Tests for the ``sandbox__delegate`` MCP built-in."""
 
-from contextlib import asynccontextmanager
+import json
+from contextlib import ExitStack, asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
 from mcp.types import Tool
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
+from reporting.services import chat_budget, episodic_memory
+from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
@@ -555,7 +560,7 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     fake_result = _make_fake_agent_result("result")
     captured_tools: list[Any] = []
 
-    def fake_create_react_agent(*, model: Any, tools: list[Any]) -> Any:
+    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
         captured_tools.extend(tools)
         return MagicMock(ainvoke=AsyncMock(return_value=fake_result))
 
@@ -877,3 +882,533 @@ async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:
     assert "envs" not in captured
     assert "allow_internet" not in captured
     assert "timeout_seconds" not in captured
+
+
+# --- Episodic carry between delegations ----------------------------------------
+
+
+def _sandbox_patches(fake_backend: Any, ainvoke: Any) -> list[Any]:
+    return [
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", return_value=MagicMock(ainvoke=ainvoke)),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ]
+
+
+async def test_a_later_delegation_sees_what_an_earlier_one_found() -> None:
+    """The carry that stops each fresh subagent re-deriving the same ground."""
+    fake_backend = _make_fake_backend()
+    prompts: list[str] = []
+    outcomes = iter(["The graph has 412 CVE nodes.", "second done"])
+
+    async def fake_ainvoke(inputs: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(inputs["messages"][0].content)
+        return _make_fake_agent_result(next(outcomes))
+
+    episodic_memory.start_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        await _handle_delegate({"task": "count the CVE nodes"}, _current_user())
+        await _handle_delegate({"task": "list the critical ones"}, _current_user())
+
+    assert "412 CVE nodes" not in prompts[0]  # nothing to carry yet
+    assert "412 CVE nodes" in prompts[1]
+    assert "count the CVE nodes" in prompts[1]
+    # Framed as prior results so the subagent does not read them as its task.
+    assert "not instructions" in prompts[1]
+
+
+async def test_a_failed_delegation_is_not_recorded_as_covered_ground() -> None:
+    fake_backend = _make_fake_backend()
+    prompts: list[str] = []
+    calls = {"n": 0}
+
+    async def fake_ainvoke(inputs: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(inputs["messages"][0].content)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("sandbox exploded")
+        return _make_fake_agent_result("second done")
+
+    episodic_memory.start_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        failed = await _handle_delegate({"task": "count the CVE nodes"}, _current_user())
+        await _handle_delegate({"task": "list the critical ones"}, _current_user())
+
+    assert "error" in failed
+    log = episodic_memory.current_episode_log()
+    assert log is not None and len(log) == 1
+    # Recording a failure would teach the next subagent the ground was covered.
+    assert "count the CVE nodes" not in prompts[1]
+
+
+async def test_delegation_works_with_no_ambient_log() -> None:
+    fake_backend = _make_fake_backend()
+    episodic_memory.clear_episode_log()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "do a thing"}, _current_user())
+
+    assert result["result"] == "done"
+
+
+# --- Sandbox spend metering ----------------------------------------------------
+
+
+class _MeteredModel:
+    """Records usage the way a real provider does."""
+
+    def __init__(self, *, input_tokens: int = 500, output_tokens: int = 100) -> None:
+        self.calls = 0
+        self.usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+
+    def bind_tools(self, _tools: Any, **_kw: Any) -> "_MeteredModel":
+        return self
+
+    async def ainvoke(self, _input: Any, config: Any = None, **_kw: Any) -> Any:
+        self.calls += 1
+        return AIMessage(content="inner answer", usage_metadata=self.usage)
+
+
+async def test_sandbox_subagent_spend_reaches_the_run_ledger() -> None:
+    """Regression: inner calls used to bill nobody, so a delegation-heavy turn
+    reported a comfortable ledger while making thousands of LLM calls."""
+    controller = BudgetController(initial_budget_ledger())
+    wrapped = _ToolMessageNormalizingModel(_MeteredModel(input_tokens=500, output_tokens=100))
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        await wrapped.ainvoke([HumanMessage(content="do a thing")])
+        await wrapped.ainvoke([HumanMessage(content="do another")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    ledger = controller.snapshot()
+    assert ledger["total_tokens"] == 2 * 600
+    assert ledger["llm_calls"] == 2
+    # Billed to its own phase so sandbox spend is legible next to the outer loop.
+    assert ledger["phases"]["sandbox_subagent"]["total_tokens"] == 1200
+
+
+async def test_sandbox_subagent_stops_when_the_run_budget_is_spent() -> None:
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 2_000, "reserve_tokens": 0, "max_llm_calls": 0})
+    controller = BudgetController(ledger)
+    model = _MeteredModel(input_tokens=800, output_tokens=200)
+    wrapped = _ToolMessageNormalizingModel(model)
+
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        with pytest.raises(BudgetExceeded):
+            for _ in range(20):
+                await wrapped.ainvoke([HumanMessage(content="keep going")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    # It stopped rather than spending indefinitely.
+    assert model.calls < 20
+
+
+async def test_sandbox_metering_is_inert_without_a_controller() -> None:
+    model = _MeteredModel()
+    wrapped = _ToolMessageNormalizingModel(model)
+    chat_budget.set_current_budget_controller(None)
+
+    result = await wrapped.ainvoke([HumanMessage(content="no ledger here")])
+
+    assert result.content == "inner answer"
+    assert model.calls == 1
+
+
+async def test_a_failed_inner_call_releases_its_reservation() -> None:
+    class _Boom:
+        def bind_tools(self, _tools: Any, **_kw: Any) -> "_Boom":
+            return self
+
+        async def ainvoke(self, _input: Any, config: Any = None, **_kw: Any) -> Any:
+            raise RuntimeError("provider down")
+
+    controller = BudgetController(initial_budget_ledger())
+    wrapped = _ToolMessageNormalizingModel(_Boom())
+    chat_budget.set_current_budget_controller(controller)
+    try:
+        with pytest.raises(RuntimeError):
+            await wrapped.ainvoke([HumanMessage(content="x")])
+    finally:
+        chat_budget.set_current_budget_controller(None)
+
+    # A leaked reservation would permanently shrink the run's headroom.
+    assert controller.snapshot()["llm_calls"] == 0
+    await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, phase="after")
+
+
+# --- Oversized results routed to the sandbox filesystem ------------------------
+
+
+def _rows_json(n: int) -> str:
+    return json.dumps({"results": [{"cve": f"CVE-2026-{i:05d}", "score": 7.5} for i in range(n)]})
+
+
+def _outcome(text: str) -> Any:
+    return SimpleNamespace(blocked=None, text=text)
+
+
+async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "graph__query") -> Any:
+    mocker.patch(
+        "reporting.services.mcp_runtime.list_tools_for_user",
+        new=AsyncMock(
+            return_value=[
+                Tool(
+                    name=name,
+                    description="Run a query",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string", "description": "cypher"}},
+                        "required": ["query"],
+                    },
+                )
+            ]
+        ),
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome(result)),
+    )
+    tools = await _build_seizu_tools(_current_user(), backend)
+    return tools[0]
+
+
+async def test_a_result_over_the_row_cap_goes_to_a_file(mocker) -> None:
+    """Rows must trigger it as well as bytes.
+
+    The fetch deliberately exceeds both bounds so oversize can be detected, which
+    leaves the row cap as the only thing keeping an inline result small in row
+    terms. Triggering on bytes alone was measured at 880 inner calls and a
+    581-character answer, against 124 and a complete one.
+    """
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 5_000_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(5_000))
+
+    returned = await tool.coroutine(query="q")
+
+    backend.write_file.assert_awaited_once()
+    receipt = json.loads(returned)
+    assert receipt["status"] == "too_large_to_return"
+    assert receipt["rows"] == 5_000
+
+
+async def test_a_result_over_the_byte_cap_goes_to_a_file(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100_000)
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(200))
+
+    returned = await tool.coroutine(query="q")
+
+    backend.write_file.assert_awaited_once()
+    assert json.loads(returned)["status"] == "too_large_to_return"
+
+
+async def test_a_result_that_fits_is_returned_unchanged(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+
+    returned = await tool.coroutine(query="q")
+
+    # Where the data fits, nothing about the old behaviour changes.
+    backend.write_file.assert_not_awaited()
+    assert len(json.loads(returned)["results"]) == 3
+
+
+async def test_the_agent_is_given_no_choice_about_the_file(mocker) -> None:
+    """The correction of the first attempt: routing is the system's decision.
+
+    Offered the choice, the model took it for every call, read none of the files
+    back, and re-queried instead at several times the spend.
+    """
+    backend = _make_fake_backend()
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+
+    properties = tool.args_schema.model_json_schema()["properties"]
+    assert set(properties) == {"query"}
+
+
+async def test_a_failed_write_falls_back_to_the_truncated_result(mocker) -> None:
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(side_effect=RuntimeError("disk full"))
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(500))
+
+    returned = await tool.coroutine(query="q")
+
+    # Exactly what would have happened without this path, so a write failure
+    # costs nothing beyond the rows that never fit anyway.
+    assert "CVE-2026-00000" in returned
+    assert "too_large_to_return" not in returned
+
+
+async def test_without_a_backend_the_context_caps_still_apply(mocker) -> None:
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+    tool = await _seizu_tool(None, mocker, result=_rows_json(3))
+    call = mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome(_rows_json(3))),
+    )
+
+    await tool.coroutine(query="q")
+
+    # Nowhere to put an oversized result, so do not fetch one.
+    assert call.await_args.kwargs["result_max_rows"] == 100
+
+
+async def test_with_a_backend_the_fetch_is_raised_to_the_file_bounds(mocker) -> None:
+    backend = _make_fake_backend()
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(3))
+    call = mocker.patch(
+        "reporting.services.mcp_runtime.call_tool_for_chat",
+        new=AsyncMock(return_value=_outcome(_rows_json(3))),
+    )
+
+    await tool.coroutine(query="q")
+
+    # Whether a result is oversized cannot be known before fetching it.
+    assert call.await_args.kwargs["result_max_rows"] == 50_000
+
+
+# --- read_file honesty ---------------------------------------------------------
+
+
+async def test_read_file_returns_a_file_that_fits_verbatim() -> None:
+    """read_file is no longer the default but stays available at preview 0."""
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="small contents")
+    with (
+        patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+    ):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        assert await tools["read_file"].coroutine(path="/tmp/x") == "small contents"
+
+
+async def test_read_file_says_so_when_it_cannot_return_the_whole_file() -> None:
+    """Regression: a bare [truncated] marker let an agent believe it had the lot.
+
+    The same silent-truncation shape that made a cut-off model answer look
+    complete -- here it would have been a tenth of a result file.
+    """
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="x" * 500_000)
+    with (
+        patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000),
+    ):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        returned = await tools["read_file"].coroutine(path="/tmp/big.json")
+
+    assert "500000 bytes" in returned
+    assert "NOT the whole file" in returned
+    assert "run_python" in returned
+
+
+# --- Sub-agent guidance --------------------------------------------------------
+
+
+async def test_the_subagent_is_told_how_the_data_is_shaped() -> None:
+    """It had no system prompt at all, so it re-derived all of this every run."""
+    backend = _make_fake_backend()
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        stack.enter_context(patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent))
+        await _handle_delegate({"task": "count them"}, _current_user())
+
+    prompt = captured["prompt"]
+    assert "too_large_to_return" in prompt  # what an oversized result looks like
+    assert "json.load(open(path))" in prompt  # and how to use one
+    assert "run_python" in prompt
+    assert '"results"' in prompt  # the shape a query result arrives in
+
+
+async def test_the_subagent_is_told_what_it_may_spend() -> None:
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 100_000)
+    chat_budget.set_current_budget_scope("worker:s1")
+    chat_budget.set_current_budget_controller(controller)
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    try:
+        with ExitStack() as stack:
+            for item in _sandbox_patches(backend := _make_fake_backend(), AsyncMock()):
+                stack.enter_context(item)
+            stack.enter_context(
+                patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent)
+            )
+            await _handle_delegate({"task": "count them"}, _current_user())
+    finally:
+        chat_budget.set_current_budget_scope("")
+        chat_budget.set_current_budget_controller(None)
+
+    assert "100000 tokens are available" in captured["prompt"]
+    assert backend is not None
+
+
+async def test_a_nearly_spent_scope_tells_the_subagent_to_finish() -> None:
+    """A limit it cannot see is one it cannot plan against."""
+    controller = BudgetController(initial_budget_ledger())
+    # Past its fair share (the soft threshold) but well inside the hard bound.
+    controller.open_scope("worker:s1", 10_000, soft_tokens=500)
+    reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, scope="worker:s1")
+    await controller.commit(reservation, input_tokens=800, output_tokens=0, cost_usd=0.0, usage_estimated=False)
+    assert controller.scope_soft_limit_reached("worker:s1")
+    assert not controller.scope_exhausted("worker:s1")
+
+    chat_budget.set_current_budget_scope("worker:s1")
+    chat_budget.set_current_budget_controller(controller)
+    captured: dict[str, Any] = {}
+
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured["prompt"] = prompt
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    try:
+        with ExitStack() as stack:
+            for item in _sandbox_patches(_make_fake_backend(), AsyncMock()):
+                stack.enter_context(item)
+            stack.enter_context(
+                patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_agent)
+            )
+            await _handle_delegate({"task": "count them"}, _current_user())
+    finally:
+        chat_budget.set_current_budget_scope("")
+        chat_budget.set_current_budget_controller(None)
+
+    assert "return your findings now" in captured["prompt"]
+    assert "loses everything you have not yet reported" in captured["prompt"]
+
+
+async def test_delegations_in_a_step_reuse_one_sandbox(mocker) -> None:
+    """Files written by one delegation survive to the next, which is the point."""
+    shared = _make_fake_backend()
+    opened: list[Any] = []
+
+    class _Session:
+        async def backend(self) -> Any:
+            opened.append(shared)
+            return shared
+
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=_Session(),
+    )
+    private = _make_fake_backend()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(private, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        await _handle_delegate({"task": "one"}, _current_user())
+        await _handle_delegate({"task": "two"}, _current_user())
+
+    assert opened == [shared, shared]  # the session's sandbox, both times
+
+
+async def test_a_delegation_without_a_session_still_opens_its_own(mocker) -> None:
+    """The MCP path and anything outside a chat step keep working unchanged."""
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=None,
+    )
+    backend = _make_fake_backend()
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, AsyncMock(return_value=_make_fake_agent_result("done"))):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "standalone"}, _current_user())
+
+    assert result["result"] == "done"
+
+
+async def test_a_budget_stop_is_reported_as_such_not_as_a_crash(mocker) -> None:
+    """It was caught by the generic handler and reported as "Sandbox task failed".
+
+    Indistinguishable from a broken sandbox, so the caller could not do the one
+    sensible thing -- stop and report what it has.
+    """
+    backend = _make_fake_backend()
+    mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.sandbox_session.current_sandbox_session",
+        return_value=None,
+    )
+    failing = AsyncMock(side_effect=BudgetExceeded("The run token budget is reserved for final synthesis."))
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(backend, failing):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "keep going"}, _current_user())
+
+    assert "Stopped:" in result["error"]
+    assert "report what you have already gathered" in result["error"]
+    assert "see server logs" not in result["error"]
+
+
+async def test_preview_replaces_read_file_when_a_preview_budget_is_set() -> None:
+    backend = _make_fake_backend()
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
+        names = {t.name for t in _build_sandbox_tools(backend)}
+    assert "preview_file" in names and "read_file" not in names
+
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 0):
+        names = {t.name for t in _build_sandbox_tools(backend)}
+    assert "read_file" in names and "preview_file" not in names
+
+
+async def test_preview_of_a_large_file_returns_shape_not_contents() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value=_rows_json(5_000))
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 500):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        returned = await tools["preview_file"].coroutine(path="/tmp/big.json")
+
+    summary = json.loads(returned.split("\n\n")[0])
+    assert summary["rows"] == 5_000
+    assert summary["columns"] == ["cve", "score"]
+    assert "run_python" in summary["preview_only"]
+    assert len(returned) < 2_000
+
+
+async def test_preview_returns_a_small_file_whole() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(return_value="small contents")
+    with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
+        tools = {t.name: t for t in _build_sandbox_tools(backend)}
+        assert await tools["preview_file"].coroutine(path="/tmp/x") == "small contents"

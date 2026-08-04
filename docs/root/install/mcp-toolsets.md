@@ -281,3 +281,42 @@ Without this, the OAuth handshake will be rejected. For the development Authenti
 > **VM / remote development:** If Claude is running on the VM, its OAuth callback server binds to port **8888 on the VM**. Authentik redirects the browser (on your local machine) to `http://localhost:8888/callback`, which means your local machine's port 8888 must be tunnelled to the VM. Add `-L 8888:localhost:8888` to your SSH tunnel command alongside the other ports — see the [quickstart](quickstart.html#running-on-a-vm-or-remote-host) for the full tunnel commands.
 
 See the [backend configuration](backend.html#mcp-server) for available settings.
+
+## Result limits
+
+A tool result is bounded so a broad query cannot materialize an unbounded
+amount of data in the server. Rows are serialized as they stream and the query
+stops at whichever bound is reached first.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_TOOL_RESULT_MAX_ROWS` | `50000` | Rows returned to a normal MCP call. |
+| `MCP_TOOL_RESULT_MAX_BYTES` | `25000000` | Serialized bytes returned to a normal MCP call. |
+
+These are separate from `CHAT_TOOL_RESULT_MAX_ROWS`/`_BYTES`, which are far
+tighter because they protect a model's context; an MCP client is not a model
+context and is not bounded by them.
+
+**Response shape when truncated.** A result within the limits is returned
+unchanged. One that exceeds them is returned as an object carrying the rows that
+fit, where an untruncated user-defined tool result is a bare list. Clients that
+consume these results should handle both shapes.
+
+A truncated result carries:
+
+| Field | Meaning |
+|-------|---------|
+| `truncated` | Always `true` |
+| `truncated_reasons` | Every bound that shaped the result, in the order applied — `row_limit`, `byte_limit`, or both. A result can be cut twice: once while streaming from the database, and again when the assembled response exceeds the byte budget |
+| `returned` | Rows actually emitted |
+| `total_rows` | The real total — **only** present when the query ran to completion |
+| `total_rows_at_least` | A lower bound, present instead of `total_rows` when the source stopped early and the true total is unknown |
+| `max_rows` / `max_bytes` | The bound that applied |
+
+Do not treat `total_rows_at_least` as a total. It is the number of rows that
+reached the response bound, not the number the query would have produced.
+
+Every response carrying data is bounded exactly by `MCP_TOOL_RESULT_MAX_BYTES`.
+The single exception is the message returned when not even one row fits: it is a
+fixed string, so a budget smaller than that message cannot be honoured. This
+only arises with budgets in the low hundreds of bytes.

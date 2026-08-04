@@ -174,8 +174,8 @@ async def test_user_defined_tool_listing_requires_tools_call_permission(mocker):
 async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     run_query = mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
-        return_value=[{"name": "node-1"}],
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
+        return_value=([{"name": "node-1"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
@@ -186,7 +186,10 @@ async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker
         gate_permission=Permission.CHAT_TOOLS_CALL,
     )
 
-    run_query.assert_awaited_once_with("MATCH (n) RETURN n LIMIT $limit", parameters={"limit": 3})
+    # Parameters are positional now, and the row bound travels with the call so
+    # the query stops at the source instead of being trimmed after the fact.
+    assert run_query.await_args.args[:2] == ("MATCH (n) RETURN n LIMIT $limit", {"limit": 3})
+    assert run_query.await_args.kwargs["max_rows"] > 0
     assert json.loads(result[0].text) == [{"name": "node-1"}]
 
 
@@ -199,7 +202,7 @@ async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
     # (backed by ._message); set it to mirror what the driver returns.
     err._message = "Expected parameter(s): cve_id, limit"
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         side_effect=err,
     )
     log = mocker.patch("reporting.services.mcp_runtime.logger")
@@ -223,8 +226,8 @@ async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
 async def test_chat_tool_call_applies_row_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
-        return_value=[{"name": "node-1"}, {"name": "node-2"}],
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
+        return_value=([{"name": "node-1"}, {"name": "node-2"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
@@ -239,7 +242,10 @@ async def test_chat_tool_call_applies_row_limit(mocker):
     assert json.loads(result[0].text) == {
         "results": [{"name": "node-1"}],
         "truncated": True,
-        "truncated_reason": "row_limit",
+        "truncated_reasons": ["row_limit"],
+        "returned": 1,
+        # The source ran to completion, so this total is real.
+        "total_rows": 2,
         "max_rows": 1,
     }
 
@@ -247,8 +253,8 @@ async def test_chat_tool_call_applies_row_limit(mocker):
 async def test_chat_tool_call_applies_byte_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
-        return_value=[{"name": "x" * 100}],
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
+        return_value=([{"name": "x" * 100}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
@@ -263,7 +269,7 @@ async def test_chat_tool_call_applies_byte_limit(mocker):
     assert json.loads(result[0].text) == {
         "error": "Tool result exceeded chat size limit",
         "truncated": True,
-        "truncated_reason": "byte_limit",
+        "truncated_reasons": ["byte_limit"],
         "max_bytes": 20,
     }
 
@@ -271,7 +277,7 @@ async def test_chat_tool_call_applies_byte_limit(mocker):
 async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
     rows = [{"v": "x" * 50} for _ in range(12)]
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
-    mocker.patch("reporting.services.mcp_runtime.reporting_neo4j.run_query", return_value=rows)
+    mocker.patch("reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed", return_value=(rows, False))
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
     result = await mcp_runtime.call_tool_for_user(
@@ -284,7 +290,7 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
 
     data = json.loads(result[0].text)
     # Graceful: keep as many whole rows as fit rather than discarding everything.
-    assert data["truncated_reason"] == "byte_limit"
+    assert data["truncated_reasons"] == ["byte_limit"]
     assert data["total_rows"] == 12
     assert 1 <= len(data["results"]) < 12
     assert data["returned"] == len(data["results"])
@@ -937,8 +943,8 @@ async def test_call_tool_for_chat_flags_not_available_for_chat_unsafe_builtin(mo
 async def test_call_tool_for_chat_returns_none_blocked_on_success(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query",
-        return_value=[{"name": "node-1"}],
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
+        return_value=([{"name": "node-1"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
@@ -1094,3 +1100,303 @@ async def test_bypass_confirmations_does_not_affect_interactive_path(mocker):
 
     assert outcome.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
     assert json.loads(outcome.text)["confirmation_required"] is True
+
+
+# --- Row cap on nested payloads ------------------------------------------------
+
+
+def test_row_cap_applies_to_a_nested_results_payload():
+    """The reviewer's reproduction: 50,001 rows under max_rows=50,000 came back whole.
+
+    graph__query returns {"results": [...]}, and only a top-level list counted as
+    rows, so the cap never applied to the tools most likely to return thousands.
+    The nesting is reached through the tool's declared ``collection_key``, which
+    is what graph__query passes.
+    """
+    payload = {"results": [{"i": i} for i in range(50_001)], "warnings": ["w"]}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=50_000, max_bytes=None, collection_key="results")
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["results"]) == 50_000
+    assert decoded["truncated"] is True
+    assert decoded["truncated_reasons"] == ["row_limit"]
+    # Siblings survive: dropping them would discard validator warnings at
+    # exactly the moment the caller is told something was cut.
+    assert decoded["warnings"] == ["w"]
+
+
+def test_row_cap_still_applies_to_a_top_level_list():
+    emitted = mcp_runtime._bounded_text_response([{"i": i} for i in range(50)], max_rows=10, max_bytes=None)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["results"]) == 10
+    assert decoded["truncated_reasons"] == ["row_limit"]
+
+
+def test_byte_shedding_keeps_a_nested_payloads_siblings():
+    payload = {"results": [{"i": i, "pad": "x" * 200} for i in range(200)], "warnings": ["w"]}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=5_000, collection_key="results")
+    decoded = json.loads(emitted[0].text)
+
+    assert decoded["truncated_reasons"] == ["byte_limit"]
+    assert decoded["warnings"] == ["w"]
+    assert 0 < len(decoded["results"]) < 200
+    assert len(emitted[0].text.encode()) <= 5_000
+
+
+# --- MCP limits apply to every builtin, not just graph__query ------------------
+
+
+def test_a_non_query_builtin_is_bounded_by_the_mcp_limits(mocker):
+    """Regression: only graph__query read the limits, and the final bound used
+    the caller's raw arguments -- None for a normal MCP call -- so list
+    builtins came back unbounded despite the documented contract."""
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 5)
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_BYTES", 1_000_000)
+    payload = {"reports": [{"i": i} for i in range(20)]}
+
+    limits = mcp_runtime._effective_limits(None, None)
+    emitted = mcp_runtime._bounded_text_response(
+        payload, max_rows=limits.max_rows, max_bytes=limits.max_bytes, collection_key="reports"
+    )
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["reports"]) == 5
+    assert decoded["truncated"] is True
+
+
+def test_a_builtin_declares_which_field_holds_its_rows():
+    from reporting.services.mcp_builtins import find_builtin
+
+    assert find_builtin("reports__list").collection_key == "reports"
+    assert find_builtin("toolsets__list_tools").collection_key == "tools"
+    # A tool that returns one record declares nothing, so nothing of it is
+    # treated as rows.
+    assert find_builtin("roles__get").collection_key is None
+
+
+def test_a_semantic_list_is_never_mistaken_for_rows():
+    """Regression: inferring "the single list field" picked permissions on a
+    role. Role updates are replace-semantics, so an agent reading a role and
+    writing it back would silently delete whatever was trimmed off."""
+    from reporting.services.mcp_builtins import find_builtin
+
+    role = {"role_id": "r", "name": "admin", "permissions": [f"p{i}" for i in range(41)]}
+    rows, key = mcp_runtime._payload_rows_and_key(role, find_builtin("roles__get").collection_key)
+
+    assert rows is None and key is None
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(role, max_rows=5, max_bytes=None, collection_key=None)[0].text
+    )
+    assert len(decoded["permissions"]) == 41
+    assert "truncated" not in decoded
+
+
+def test_every_builtin_returning_a_collection_declares_it():
+    """The declaration lives next to the tool so it cannot drift from the
+    handler, but nothing stops a new one being forgotten -- so check."""
+    import inspect
+    import re
+
+    from reporting.services import mcp_builtins
+
+    missing = []
+    for tool in mcp_builtins.list_builtin_tools():
+        handler = mcp_builtins.find_builtin(tool.name)
+        if handler is None or handler.collection_key:
+            continue
+        try:
+            source = inspect.getsource(handler.handler)
+        except (OSError, TypeError):
+            continue
+        returned = set(re.findall(r'return \{"(\w+)": \[', source))
+        if returned:
+            missing.append((tool.name, sorted(returned)))
+    assert missing == [], f"builtins return a collection without declaring it: {missing}"
+
+
+def test_a_chat_caller_keeps_its_own_tighter_limits(mocker):
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    limits = mcp_runtime._effective_limits(100, 200_000)
+    assert limits.max_rows == 100
+    assert limits.max_bytes == 200_000
+
+
+def test_a_caller_stating_no_limits_gets_the_mcp_contract(mocker):
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
+    limits = mcp_runtime._effective_limits(None, None)
+    # Not unbounded: a caller passing nothing is an MCP client, not a request
+    # to be unlimited.
+    assert limits.max_rows == 50_000
+    assert limits.max_bytes == 25_000_000
+
+
+# --- Truncation metadata survives a second bound ------------------------------
+
+
+def test_a_second_truncation_keeps_the_first_reason():
+    """Regression: the byte pass overwrote the source's reason, so a client saw
+    only byte_limit and never learned the source had stopped early too."""
+    payload = {
+        "results": [{"pad": "x" * 300} for _ in range(10)],
+        "truncated": True,
+        "truncated_reasons": ["row_limit"],
+        "total_rows_at_least": 10,
+    }
+
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["returned"] == len(decoded["results"])
+
+
+def test_a_total_is_never_claimed_when_the_source_stopped_early():
+    """The real total is unknown and larger; reporting the length of an already
+    truncated list as the total tells a client it has seen everything."""
+    payload = {
+        "results": [{"pad": "x" * 300} for _ in range(10)],
+        "truncated": True,
+        "truncated_reasons": ["row_limit"],
+    }
+
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
+
+    assert "total_rows" not in decoded
+    assert decoded["total_rows_at_least"] == 10
+
+
+def test_a_complete_source_still_reports_a_real_total():
+    payload = {"results": [{"pad": "x" * 300} for _ in range(10)]}
+
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
+
+    assert decoded["total_rows"] == 10
+    assert "total_rows_at_least" not in decoded
+    assert decoded["truncated_reasons"] == ["byte_limit"]
+
+
+def test_row_then_byte_truncation_in_one_pass_records_both():
+    payload = {"results": [{"pad": "x" * 300} for _ in range(50)]}
+
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=600, collection_key="results")[0].text
+    )
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["total_rows"] == 50  # the source was complete, so this is real
+
+
+def test_explicit_zero_limits_mean_unbounded_not_omitted(mocker):
+    """The streaming helper defines 0 as unbounded, so a caller disabling a
+    dimension must not have the MCP default put back in its place."""
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    limits = mcp_runtime._effective_limits(0, 0)
+    assert limits.max_rows == 0
+    assert limits.max_bytes == 0
+
+
+def test_no_data_bearing_response_exceeds_its_byte_budget():
+    """Regression: the sizing search measured a smaller envelope than the one
+    emitted, so responses could exceed the budget the search exists to enforce."""
+    over = []
+    for budget in range(200, 2000, 11):
+        for rows in (1, 5, 30):
+            for pad in (0, 60, 400):
+                payload = {"results": [{"i": i, "p": "x" * pad} for i in range(rows)], "warnings": ["w"]}
+                emitted = mcp_runtime._bounded_text_response(
+                    payload, max_rows=7, max_bytes=budget, collection_key="results"
+                )[0].text
+                if len(emitted.encode()) > budget and "error" not in json.loads(emitted):
+                    over.append((budget, len(emitted.encode())))
+    assert over == []
+
+
+def test_the_only_response_allowed_to_exceed_the_budget_is_the_empty_one():
+    """A fixed message cannot be shortened below its own length."""
+    payload = {"results": [{"p": "x" * 400}]}
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=100, collection_key="results")[
+        0
+    ].text
+    decoded = json.loads(emitted)
+    assert "error" in decoded
+    assert decoded["truncated_reasons"] == ["byte_limit"]
+
+
+def test_a_source_only_truncation_reports_the_full_contract():
+    """Regression: the stream marker omitted returned and total_rows_at_least,
+    so a source-truncated result did not match its own documentation."""
+    from reporting.services.result_limits import ResultLimits, stream_truncation
+
+    fields = stream_truncation("row_limit", [{"i": 0}, {"i": 1}, {"i": 2}], ResultLimits(max_rows=3)).fields()
+
+    assert fields["truncated"] is True
+    assert fields["truncated_reasons"] == ["row_limit"]
+    assert fields["returned"] == 3
+    assert fields["total_rows_at_least"] == 3
+    assert fields["max_rows"] == 3
+    assert "total_rows" not in fields
+
+
+def test_a_row_then_byte_cut_keeps_both_limits():
+    """The final marker was passed only max_bytes, dropping the row bound that
+    had already been applied."""
+    payload = {"results": [{"p": "x" * 300} for _ in range(50)]}
+
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=900, collection_key="results")[0].text
+    )
+
+    assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
+    assert decoded["max_rows"] == 10
+    assert decoded["max_bytes"] == 900
+
+
+def test_sizing_a_large_response_does_not_stall_the_event_loop():
+    """Regression: the bound was found by binary search over whole prefixes, so
+    a multi-megabyte payload was serialized about seventeen times -- six seconds
+    of synchronous CPU inside an async handler, blocking the worker."""
+    import time
+
+    from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
+
+    rows = [{"i": i, "pad": "x" * 500} for i in range(20_000)]
+    envelope = {"results": None, "truncated": True, "truncated_reasons": ["byte_limit"]}
+
+    def wrap(kept):
+        return {**envelope, "results": kept, "returned": len(kept)}
+
+    started = time.perf_counter()
+    keep = largest_prefix_within_bytes(rows, max_bytes=8_000_000, envelope=wrap, indent=2)
+    elapsed = time.perf_counter() - started
+
+    assert json_size_bytes(wrap(rows[:keep]), indent=2) <= 8_000_000  # the bound is a promise
+    assert keep > 0
+    # Generous, so this fails on a return to whole-prefix search rather than on
+    # a slow machine.
+    assert elapsed < 2.0
+
+
+def test_an_undeclared_collection_is_not_trimmed_by_name():
+    """No key stated means no rows found -- not a name that looks plausible.
+
+    This is the fix for the guess: a role's ``permissions`` list was treated as
+    rows and silently shortened, and role updates are replace-semantics, so a
+    get->update round trip wrote the trimmed list back. Returned whole or
+    refused whole; never shortened in a place the caller did not name.
+    """
+    payload = {"permissions": [f"p{i}" for i in range(50)], "name": "editor"}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=None)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["permissions"]) == 50
+    assert "truncated" not in decoded
