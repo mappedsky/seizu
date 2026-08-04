@@ -545,7 +545,13 @@ async def _call_tool_core(
             else serialized
         )
         return (
-            _bounded_text_response(bounded, max_rows=limits.max_rows, max_bytes=limits.max_bytes),
+            _bounded_text_response(
+                bounded,
+                max_rows=limits.max_rows,
+                max_bytes=limits.max_bytes,
+                # Built a few lines up, so the key is known rather than guessed.
+                collection_key=_USER_TOOL_ROWS_KEY,
+            ),
             None,
         )
     except neo4j.exceptions.Neo4jError as exc:
@@ -753,21 +759,27 @@ def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimi
     return ResultLimits.for_mcp()
 
 
-# Keys under which a tool result carries its rows. ``graph__query`` returns
-# ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
-# same shape, so treating only a top-level list as rows meant the row cap never
-# applied to the tools most likely to return thousands of them.
-_ROW_KEYS = ("results", "rows", "records", "items", "data")
+# The field the runtime puts rows in when it builds an envelope itself: a
+# user-defined tool's result, and the truncation envelope around it. Named once
+# so the builder and the limiter cannot disagree about it.
+#
+# This replaced a tuple of names to match against -- results, rows, records,
+# items, data -- of which only the first was ever produced here. The rest could
+# only ever have fired on a payload that happened to use the word, which is the
+# same accident that had `permissions` on a role treated as rows. Every caller
+# now states its key instead.
+_USER_TOOL_ROWS_KEY = "results"
 
 
 def _payload_rows_and_key(payload: Any, collection_key: str | None = None) -> tuple[list[Any] | None, str | None]:
     """The rows in a tool result, and the key holding them if it is a mapping.
 
-    ``collection_key`` is what the tool itself declares. Query-shaped results
-    keep the name-based match, because a user-defined tool's Cypher output is
-    built by the runtime and always uses those names. A built-in that declares
-    nothing is not row-bounded, which is the safe way to be wrong: inferring a
-    collection from the payload picked ``permissions`` on a role.
+    ``collection_key`` is stated by the caller -- a built-in declares it, and
+    the user-defined tool path builds its own envelope and so knows it outright.
+    Nothing is matched by name.
+
+    A payload whose key is not stated is not row-bounded: returned whole or
+    refused whole, never silently shortened in the wrong place.
     """
     if isinstance(payload, list):
         return payload, None
@@ -776,10 +788,6 @@ def _payload_rows_and_key(payload: Any, collection_key: str | None = None) -> tu
             value = payload.get(collection_key)
             if isinstance(value, list):
                 return value, collection_key
-        for key in _ROW_KEYS:
-            value = payload.get(key)
-            if isinstance(value, list):
-                return value, key
     return None, None
 
 
@@ -792,7 +800,7 @@ def _rebuild(payload: Any, key: str | None, rows: list[Any], marker: dict[str, A
     caller is being told something was cut.
     """
     if key is None:
-        return {"results": rows, **marker}
+        return {_USER_TOOL_ROWS_KEY: rows, **marker}
     return {**payload, key: rows, **marker}
 
 

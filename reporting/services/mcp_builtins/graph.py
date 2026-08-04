@@ -106,6 +106,7 @@ GROUP_DEF = BuiltinGroup(
             },
             required_permissions=[Permission.QUERY_EXECUTE.value],
             handler=_handle_query,
+            collection_key="results",
         ),
         BuiltinTool(
             name="graph__validate_query",

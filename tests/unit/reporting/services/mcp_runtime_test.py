@@ -1110,10 +1110,12 @@ def test_row_cap_applies_to_a_nested_results_payload():
 
     graph__query returns {"results": [...]}, and only a top-level list counted as
     rows, so the cap never applied to the tools most likely to return thousands.
+    The nesting is reached through the tool's declared ``collection_key``, which
+    is what graph__query passes.
     """
     payload = {"results": [{"i": i} for i in range(50_001)], "warnings": ["w"]}
 
-    emitted = mcp_runtime._bounded_text_response(payload, max_rows=50_000, max_bytes=None)
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=50_000, max_bytes=None, collection_key="results")
     decoded = json.loads(emitted[0].text)
 
     assert len(decoded["results"]) == 50_000
@@ -1135,7 +1137,7 @@ def test_row_cap_still_applies_to_a_top_level_list():
 def test_byte_shedding_keeps_a_nested_payloads_siblings():
     payload = {"results": [{"i": i, "pad": "x" * 200} for i in range(200)], "warnings": ["w"]}
 
-    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=5_000)
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=5_000, collection_key="results")
     decoded = json.loads(emitted[0].text)
 
     assert decoded["truncated_reasons"] == ["byte_limit"]
@@ -1245,7 +1247,9 @@ def test_a_second_truncation_keeps_the_first_reason():
         "total_rows_at_least": 10,
     }
 
-    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
 
     assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
     assert decoded["returned"] == len(decoded["results"])
@@ -1260,7 +1264,9 @@ def test_a_total_is_never_claimed_when_the_source_stopped_early():
         "truncated_reasons": ["row_limit"],
     }
 
-    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
 
     assert "total_rows" not in decoded
     assert decoded["total_rows_at_least"] == 10
@@ -1269,7 +1275,9 @@ def test_a_total_is_never_claimed_when_the_source_stopped_early():
 def test_a_complete_source_still_reports_a_real_total():
     payload = {"results": [{"pad": "x" * 300} for _ in range(10)]}
 
-    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600)[0].text)
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=600, collection_key="results")[0].text
+    )
 
     assert decoded["total_rows"] == 10
     assert "total_rows_at_least" not in decoded
@@ -1279,7 +1287,9 @@ def test_a_complete_source_still_reports_a_real_total():
 def test_row_then_byte_truncation_in_one_pass_records_both():
     payload = {"results": [{"pad": "x" * 300} for _ in range(50)]}
 
-    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=600)[0].text)
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=600, collection_key="results")[0].text
+    )
 
     assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
     assert decoded["total_rows"] == 50  # the source was complete, so this is real
@@ -1302,7 +1312,9 @@ def test_no_data_bearing_response_exceeds_its_byte_budget():
         for rows in (1, 5, 30):
             for pad in (0, 60, 400):
                 payload = {"results": [{"i": i, "p": "x" * pad} for i in range(rows)], "warnings": ["w"]}
-                emitted = mcp_runtime._bounded_text_response(payload, max_rows=7, max_bytes=budget)[0].text
+                emitted = mcp_runtime._bounded_text_response(
+                    payload, max_rows=7, max_bytes=budget, collection_key="results"
+                )[0].text
                 if len(emitted.encode()) > budget and "error" not in json.loads(emitted):
                     over.append((budget, len(emitted.encode())))
     assert over == []
@@ -1311,7 +1323,9 @@ def test_no_data_bearing_response_exceeds_its_byte_budget():
 def test_the_only_response_allowed_to_exceed_the_budget_is_the_empty_one():
     """A fixed message cannot be shortened below its own length."""
     payload = {"results": [{"p": "x" * 400}]}
-    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=100)[0].text
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=None, max_bytes=100, collection_key="results")[
+        0
+    ].text
     decoded = json.loads(emitted)
     assert "error" in decoded
     assert decoded["truncated_reasons"] == ["byte_limit"]
@@ -1337,7 +1351,9 @@ def test_a_row_then_byte_cut_keeps_both_limits():
     had already been applied."""
     payload = {"results": [{"p": "x" * 300} for _ in range(50)]}
 
-    decoded = json.loads(mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=900)[0].text)
+    decoded = json.loads(
+        mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=900, collection_key="results")[0].text
+    )
 
     assert decoded["truncated_reasons"] == ["row_limit", "byte_limit"]
     assert decoded["max_rows"] == 10
@@ -1367,3 +1383,20 @@ def test_sizing_a_large_response_does_not_stall_the_event_loop():
     # Generous, so this fails on a return to whole-prefix search rather than on
     # a slow machine.
     assert elapsed < 2.0
+
+
+def test_an_undeclared_collection_is_not_trimmed_by_name():
+    """No key stated means no rows found -- not a name that looks plausible.
+
+    This is the fix for the guess: a role's ``permissions`` list was treated as
+    rows and silently shortened, and role updates are replace-semantics, so a
+    get->update round trip wrote the trimmed list back. Returned whole or
+    refused whole; never shortened in a place the caller did not name.
+    """
+    payload = {"permissions": [f"p{i}" for i in range(50)], "name": "editor"}
+
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=10, max_bytes=None)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["permissions"]) == 50
+    assert "truncated" not in decoded
