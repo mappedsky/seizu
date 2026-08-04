@@ -2,7 +2,6 @@
 
 import json
 import logging
-from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -11,7 +10,6 @@ import neo4j.exceptions
 from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
 from pydantic import ValidationError
 
-from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
@@ -21,6 +19,7 @@ from reporting.services import action_confirmations, report_store, reporting_neo
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
+from reporting.services.result_limits import ResultLimits, reset_current_result_limits, set_current_result_limits
 
 logger = logging.getLogger(__name__)
 
@@ -466,11 +465,15 @@ async def _call_tool_core(
             # serialized before any limit applied -- fast, unbounded, and
             # reachable by any authenticated caller. A handler that reads this
             # can stop at the source instead.
-            token = _current_result_row_cap.set(result_max_rows)
+            token = set_current_result_limits(
+                ResultLimits(max_rows=result_max_rows, max_bytes=result_max_bytes)
+                if result_max_rows or result_max_bytes
+                else ResultLimits.for_mcp()
+            )
             try:
                 result = await builtin.handler(args, current_user)
             finally:
-                _current_result_row_cap.reset(token)
+                reset_current_result_limits(token)
             return (
                 _bounded_text_response(result, max_rows=result_max_rows, max_bytes=result_max_bytes),
                 None,
@@ -505,19 +508,30 @@ async def _call_tool_core(
         params_with_defaults = {p.name: p.default for p in target_tool.parameters}
         params_with_defaults.update(args)
 
-        results, truncated = await reporting_neo4j.run_query_bounded_with_retry(
+        # A chat caller states its bounds; anyone else gets the MCP contract,
+        # which is far looser. Inheriting the chat caps here silently truncated
+        # ordinary MCP calls at 100 rows and contradicted their documented
+        # behaviour.
+        limits = (
+            ResultLimits(max_rows=result_max_rows, max_bytes=result_max_bytes)
+            if result_max_rows or result_max_bytes
+            else ResultLimits.for_mcp()
+        )
+        serialized, truncated = await reporting_neo4j.run_query_streamed(
             target_tool.cypher,
             params_with_defaults,
-            max_rows=result_max_rows or settings.CHAT_TOOL_RESULT_MAX_ROWS,
+            max_rows=limits.max_rows,
+            max_bytes=limits.max_bytes,
+            serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
         )
-        serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
         # Keep the un-truncated shape a bare list, which is what MCP clients
         # consume; only a truncated result gains the envelope, and it is the same
         # envelope _bounded_text_response would have produced had it done the
         # trimming itself.
-        cap = result_max_rows or settings.CHAT_TOOL_RESULT_MAX_ROWS
         bounded: Any = (
-            _rebuild(serialized, None, serialized, _row_limit_marker(max_rows=cap)) if truncated else serialized
+            _rebuild(serialized, None, serialized, _row_limit_marker(max_rows=limits.max_rows or 0))
+            if truncated
+            else serialized
         )
         return (
             _bounded_text_response(bounded, max_rows=result_max_rows, max_bytes=result_max_bytes),
@@ -713,16 +727,6 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
 # ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
 # same shape, so treating only a top-level list as rows meant the row cap never
 # applied to the tools most likely to return thousands of them.
-# The row cap in force for the handler currently running. Handlers are called
-# before any limit is applied, so one that fetches from the graph needs the
-# bound at the source rather than after materializing everything.
-_current_result_row_cap: ContextVar[int | None] = ContextVar("_current_result_row_cap", default=None)
-
-
-def current_result_row_cap() -> int | None:
-    return _current_result_row_cap.get()
-
-
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
 

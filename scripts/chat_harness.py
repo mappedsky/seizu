@@ -147,7 +147,15 @@ def apply_arm(arm: str) -> str:
 
 
 def _same_value(applied: str, expected: str) -> bool:
+    """Whether a read-back setting matches what the arm asked for.
+
+    Settings are typed, so the string that comes back is a repr, not the input:
+    "2000" arrives as 2000, and a lowercase "true" arrives as "True". Comparing
+    strings alone rejects perfectly ordinary arms.
+    """
     if applied == expected:
+        return True
+    if applied.strip().lower() == expected.strip().lower():
         return True
     try:
         return float(applied) == float(expected)
@@ -292,12 +300,14 @@ def main() -> int:
                 print(json.dumps(row), flush=True)
     finally:
         OVERLAY.unlink(missing_ok=True)
-        subprocess.run(
-            ["docker", "compose", "up", "-d", "--force-recreate", "seizu"],
-            cwd=REPO,
-            capture_output=True,
-            check=False,
-        )
+        # Restore the stack to its own configuration, and say so loudly if that
+        # fails: leaving the service on the last experimental arm would make
+        # every later run -- by anyone, for any purpose -- quietly wrong.
+        try:
+            _compose("up", "-d", "--force-recreate", "seizu")
+        except HarnessError as exc:
+            print(f"WARNING: could not restore the baseline service: {exc}", file=sys.stderr)
+            raise
     summarize(rows)
     return 0
 

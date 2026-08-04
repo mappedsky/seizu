@@ -8,6 +8,7 @@ from reporting.routes.query import _serialize_neo4j_value
 from reporting.services import reporting_neo4j
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.query_validator import validate_query
+from reporting.services.result_limits import current_result_limits
 
 GROUP = "graph"
 
@@ -23,21 +24,20 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     validation = await validate_query(cypher)
     if validation.has_errors:
         return {"errors": validation.errors, "warnings": validation.warnings}
-    from reporting import settings
-    from reporting.services.mcp_runtime import current_result_row_cap
-
-    # Stream to the cap rather than fetching everything and trimming after. An
-    # unbounded MATCH is fast to issue and can materialize the graph in worker
-    # memory before any row or byte limit is consulted.
-    results, truncated = await reporting_neo4j.run_query_bounded_with_retry(
+    # Stream and serialize under the caller's bounds rather than fetching
+    # everything and trimming after. An unbounded MATCH is fast to issue and can
+    # materialize the graph in worker memory before any limit is consulted.
+    limits = current_result_limits()
+    serialized, truncated = await reporting_neo4j.run_query_streamed(
         cypher,
         None,
-        max_rows=current_result_row_cap() or settings.CHAT_TOOL_RESULT_MAX_ROWS,
+        max_rows=limits.max_rows,
+        max_bytes=limits.max_bytes,
+        serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
     )
-    serialized = [{key: _serialize_neo4j_value(value) for key, value in record.items()} for record in results]
     payload: dict[str, Any] = {"results": serialized, "warnings": validation.warnings}
     if truncated:
-        payload |= {"truncated": True, "truncated_reason": "row_limit"}
+        payload |= {"truncated": True, "truncated_reason": "result_limit"}
     return payload
 
 

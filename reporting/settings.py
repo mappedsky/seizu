@@ -741,6 +741,15 @@ CHAT_HISTORY_LIMIT = int_env("CHAT_HISTORY_LIMIT", 100)
 CHAT_TOOL_RESULT_MAX_ROWS = int_env("CHAT_TOOL_RESULT_MAX_ROWS", 100)
 # Maximum serialized bytes returned to chat from a single MCP tool call.
 CHAT_TOOL_RESULT_MAX_BYTES = int_env("CHAT_TOOL_RESULT_MAX_BYTES", 200_000)
+# Bounds for a normal (non-chat) MCP tool call. Separate from the chat caps
+# above, which exist to protect a model's context and are far tighter: an
+# external MCP client is not a model context and has never been limited by one.
+# These exist so the server has a finite bound at all -- a broad query is
+# otherwise materialized in full before anything can trim it -- and are set well
+# above what any chat turn permits. A result that hits them is returned
+# truncated with a marker rather than failing.
+MCP_TOOL_RESULT_MAX_ROWS = int_env("MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)

@@ -15,7 +15,7 @@ async def _call_graph_query(args: dict[str, object]) -> dict[str, object]:
             new=AsyncMock(return_value=ValidationResult()),
         ),
         patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed",
             new=AsyncMock(return_value=([{"value": 1}], False)),
         ),
     ):

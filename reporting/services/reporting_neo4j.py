@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal, cast
 
@@ -9,6 +10,7 @@ from neo4j import AsyncGraphDatabase, AsyncTransaction, Driver, GraphDatabase, Q
 
 from reporting import settings
 from reporting.schema.reporting_config import ScheduledQueryWatchScan
+from reporting.services.payload_bounds import json_size_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +232,63 @@ async def run_query_bounded_with_retry(
                     if len(records) > max_rows:
                         break
             return records[:max_rows], len(records) > max_rows
+        except neo4j.exceptions.ServiceUnavailable:
+            logger.debug("Unable to connect to neo4j, retrying...")
+            if attempt >= 5:
+                raise
+            attempt += 1
+
+
+async def run_query_streamed(
+    cypher: str,
+    parameters: dict | None,
+    *,
+    max_rows: int | None,
+    max_bytes: int | None,
+    serialize: Callable[[Record], Any],
+) -> tuple[list[Any], bool]:
+    """Stream, serializing each record, and stop at whichever bound comes first.
+
+    Serializing inside the loop is what makes the byte bound real. Counting rows
+    alone does not bound memory -- a hundred records of large maps, or a single
+    ``collect()`` aggregate, blow any budget -- and applying a byte cap after
+    materializing the result does not bound it either, because by then the whole
+    thing is already in the process.
+
+    A record that would not fit on its own is dropped rather than retained, so
+    one enormous row cannot sit in memory alongside everything already read.
+    That leaves the driver's own per-record allocation as the floor, which is
+    not something this layer can do anything about.
+
+    Returns the rows kept and whether anything was left behind.
+    """
+    attempt = 1
+    while True:
+        try:
+            rows: list[Any] = []
+            used = 0
+            truncated = False
+            driver = _get_async_neo4j_client()
+            async with driver.session() as session:
+                result = await session.run(
+                    Query(cypher, timeout=settings.NEO4J_QUERY_TIMEOUT),
+                    parameters=parameters,
+                )
+                async for record in result:
+                    if max_rows is not None and max_rows > 0 and len(rows) >= max_rows:
+                        truncated = True
+                        break
+                    row = serialize(record)
+                    if max_bytes is not None and max_bytes > 0:
+                        size = json_size_bytes(row)
+                        if used + size > max_bytes:
+                            # Closing the session here discards the rest rather
+                            # than reading it into memory to throw away.
+                            truncated = True
+                            break
+                        used += size
+                    rows.append(row)
+            return rows, truncated
         except neo4j.exceptions.ServiceUnavailable:
             logger.debug("Unable to connect to neo4j, retrying...")
             if attempt >= 5:

@@ -282,7 +282,7 @@ async def test_call_tool_query_success():
             return_value=ValidationResult(errors=[], warnings=[]),
         ),
         patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed",
             new_callable=AsyncMock,
             return_value=([{"n": 1}], False),
         ),
@@ -304,7 +304,7 @@ async def test_call_tool_query_execution_error():
             return_value=ValidationResult(errors=[], warnings=[]),
         ),
         patch(
-            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.run_query_streamed",
             new_callable=AsyncMock,
             side_effect=RuntimeError("neo4j down"),
         ),
@@ -525,7 +525,7 @@ async def test_call_tool_user_defined_success():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_streamed",
             new_callable=AsyncMock,
             return_value=([{"n": "value"}], False),
         ) as run_query,
@@ -553,7 +553,7 @@ async def test_call_tool_user_defined_coerces_decimal_parameter_defaults():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_streamed",
             new_callable=AsyncMock,
             return_value=([{"n": "value"}], False),
         ) as run_query,
@@ -575,7 +575,7 @@ async def test_call_tool_user_defined_execution_error():
             new=get_enabled_tool,
         ),
         patch(
-            "reporting.services.mcp_server.reporting_neo4j.run_query_bounded_with_retry",
+            "reporting.services.mcp_server.reporting_neo4j.run_query_streamed",
             new_callable=AsyncMock,
             side_effect=RuntimeError("db error"),
         ),

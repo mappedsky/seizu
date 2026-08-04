@@ -174,7 +174,7 @@ async def test_user_defined_tool_listing_requires_tools_call_permission(mocker):
 async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     run_query = mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         return_value=([{"name": "node-1"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
@@ -202,7 +202,7 @@ async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
     # (backed by ._message); set it to mirror what the driver returns.
     err._message = "Expected parameter(s): cve_id, limit"
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         side_effect=err,
     )
     log = mocker.patch("reporting.services.mcp_runtime.logger")
@@ -226,7 +226,7 @@ async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
 async def test_chat_tool_call_applies_row_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         return_value=([{"name": "node-1"}, {"name": "node-2"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
@@ -250,7 +250,7 @@ async def test_chat_tool_call_applies_row_limit(mocker):
 async def test_chat_tool_call_applies_byte_limit(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         return_value=([{"name": "x" * 100}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
@@ -274,9 +274,7 @@ async def test_chat_tool_call_applies_byte_limit(mocker):
 async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
     rows = [{"v": "x" * 50} for _ in range(12)]
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
-    mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry", return_value=(rows, False)
-    )
+    mocker.patch("reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed", return_value=(rows, False))
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))
 
     result = await mcp_runtime.call_tool_for_user(
@@ -942,7 +940,7 @@ async def test_call_tool_for_chat_flags_not_available_for_chat_unsafe_builtin(mo
 async def test_call_tool_for_chat_returns_none_blocked_on_success(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.get_enabled_tool", return_value=_tool())
     mocker.patch(
-        "reporting.services.mcp_runtime.reporting_neo4j.run_query_bounded_with_retry",
+        "reporting.services.mcp_runtime.reporting_neo4j.run_query_streamed",
         return_value=([{"name": "node-1"}], False),
     )
     current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value, Permission.TOOLS_CALL.value}))

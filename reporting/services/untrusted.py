@@ -44,3 +44,17 @@ def untrusted_text(text: str, tag: str = DEFAULT_TAG) -> str:
 
 def untrusted_instruction(tag: str = DEFAULT_TAG) -> str:
     return _UNTRUSTED_INSTRUCTION.format(tag=tag)
+
+
+def fenced_block(text: str, tag: str = DEFAULT_TAG) -> str:
+    """The boundary statement and the escaped block together.
+
+    The safe default, and the one callers should reach for. Escaping alone is
+    not a security control: a tag name is not an instruction, so a block that
+    arrives without the preamble is simply unexplained text that happens to sit
+    between angle brackets. Splitting the two made it possible to apply one and
+    forget the other, which is exactly what happened to the dependency context.
+    """
+    if not text:
+        return ""
+    return f"{untrusted_instruction(tag)}\n\n{untrusted_text(text, tag)}"

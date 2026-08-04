@@ -87,7 +87,7 @@ from reporting.services.chat_graph import (
 )
 from reporting.services.chat_messages import MessageTag, has_tag, message_text
 from reporting.services.mcp_runtime import ChatBlockReason
-from reporting.services.untrusted import untrusted_instruction, untrusted_text
+from reporting.services.untrusted import fenced_block, untrusted_instruction, untrusted_text
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +248,12 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
             f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
         )
     if step.get("retry_guidance"):
-        extra += f"\n\nA previous attempt was rejected: {step['retry_guidance']}. Address that this time."
+        # Fenced: the verifier wrote this, but it wrote it *about* an untrusted
+        # result and can carry that result's text into it. Like resume_from, it
+        # lands in a system prompt.
+        extra += "\n\nA previous attempt was rejected for this reason; address it this time.\n" + fenced_block(
+            str(step["retry_guidance"])
+        )
     if step.get("resume_from"):
         # Fenced even though a sub-agent wrote it. A summary is not a trust
         # boundary: it reports what graph and tool data said, so it can carry
@@ -921,12 +926,24 @@ def _fenced_within(text: str, *, budget: int) -> str:
     payload full of angle brackets grows several times over. Shrinking until it
     actually fits is the only way to keep the caller's budget a real bound.
     """
-    fenced = f"{untrusted_instruction()}\n\n" + untrusted_text(text)
-    while len(fenced) > budget and text:
-        overflow = len(fenced) - budget
-        text = text[: max(0, len(text) - max(overflow, 16))]
-        fenced = f"{untrusted_instruction()}\n\n" + untrusted_text(text)
-    return fenced if text else ""
+
+    def render(body: str) -> str:
+        return f"{untrusted_instruction()}\n\n" + untrusted_text(body)
+
+    if len(render(text)) <= budget:
+        return render(text)
+    # Binary search for the longest prefix that fits. Shrinking by the overflow
+    # discarded everything when escaping expanded the text several-fold -- a
+    # block of "<" grew four times over, so each step cut far more than it
+    # needed to and the result was an empty string rather than a short one.
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if len(render(text[:mid])) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return render(text[:low]) if low else ""
 
 
 def _dependency_context(step: dict[str, Any], plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
@@ -939,7 +956,12 @@ def _dependency_context(step: dict[str, Any], plan: list[dict[str, Any]], result
             blocks.append(
                 f"- Step {dep} ({goals.get(dep, '')}):\n" + untrusted_text(_truncate_text(result["output"], 2000))
             )
-    return "\n".join(blocks)
+    if not blocks:
+        return ""
+    # State the boundary once for the whole set. The tags alone say nothing: a
+    # worker that has never been told what they mean has no reason to treat the
+    # contents as data.
+    return f"{untrusted_instruction()}\n\n" + "\n".join(blocks)
 
 
 def _step_thresholds(
@@ -1841,11 +1863,28 @@ def _step_evidence(result: dict[str, Any], *, max_chars: int) -> str:
     return "\n".join(parts)
 
 
+def _step_summaries_for_display(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
+    """Step summaries rendered for a person, not for a model.
+
+    Deliberately not ``_synthesis_context``. That renders for model context,
+    where every untrusted artifact is fenced -- correct there, and unreadable
+    here: the user would be shown a security preamble, tags, and HTML-escaped
+    entities in the assistant bubble. The fence exists to stop a model acting on
+    embedded text; a rendered transcript cannot act on anything.
+    """
+    results_by_id = {result["step_id"]: result for result in results}
+    blocks = []
+    for step in plan:
+        output = (results_by_id.get(step["id"], {}) or {}).get("output") or "(no output)"
+        status = step.get("status", "")
+        blocks.append(f"### Step {step['id']} — {step['goal']} [{status}]\n{_truncate_text(output, 4000)}")
+    return "\n\n".join(blocks)
+
+
 def _synthesis_fallback(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     passed = sum(1 for step in plan if step.get("status") == "passed")
-    # This goes straight into the assistant bubble, so summaries only: the
-    # evidence blocks are raw tool JSON, which is model context and not an answer.
-    context = _synthesis_context(plan, results, include_evidence=False)
+    # Summaries only, and unfenced: this goes straight into the assistant bubble.
+    context = _step_summaries_for_display(plan, results)
     return (
         f"I ran a {len(plan)}-step plan ({passed} step(s) verified) but could not produce a"
         f" final summary. Here is what each step found:\n\n{context}"
