@@ -1139,3 +1139,52 @@ def test_byte_shedding_keeps_a_nested_payloads_siblings():
     assert decoded["warnings"] == ["w"]
     assert 0 < len(decoded["results"]) < 200
     assert len(emitted[0].text.encode()) <= 5_000
+
+
+# --- MCP limits apply to every builtin, not just graph__query ------------------
+
+
+def test_a_non_query_builtin_is_bounded_by_the_mcp_limits(mocker):
+    """Regression: only graph__query read the limits, and the final bound used
+    the caller's raw arguments -- None for a normal MCP call -- so list
+    builtins came back unbounded despite the documented contract."""
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 5)
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_BYTES", 1_000_000)
+    payload = {"reports": [{"i": i} for i in range(20)]}
+
+    limits = mcp_runtime._effective_limits(None, None)
+    emitted = mcp_runtime._bounded_text_response(payload, max_rows=limits.max_rows, max_bytes=limits.max_bytes)
+    decoded = json.loads(emitted[0].text)
+
+    assert len(decoded["reports"]) == 5
+    assert decoded["truncated"] is True
+
+
+def test_rows_are_found_in_a_builtins_own_envelope():
+    """Enumerating every collection key would rot as groups are added."""
+    for key in ("reports", "roles", "spaces", "toolsets", "workflows", "scheduled_queries"):
+        rows, found = mcp_runtime._payload_rows_and_key({key: [{"i": 1}], "next_cursor": None})
+        assert found == key, key
+        assert rows == [{"i": 1}]
+
+
+def test_an_ambiguous_payload_is_not_guessed_at():
+    rows, found = mcp_runtime._payload_rows_and_key({"a": [1], "b": [2]})
+    assert rows is None and found is None
+
+
+def test_a_chat_caller_keeps_its_own_tighter_limits(mocker):
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    limits = mcp_runtime._effective_limits(100, 200_000)
+    assert limits.max_rows == 100
+    assert limits.max_bytes == 200_000
+
+
+def test_a_caller_stating_no_limits_gets_the_mcp_contract(mocker):
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_ROWS", 50_000)
+    mocker.patch("reporting.settings.MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
+    limits = mcp_runtime._effective_limits(None, None)
+    # Not unbounded: a caller passing nothing is an MCP client, not a request
+    # to be unlimited.
+    assert limits.max_rows == 50_000
+    assert limits.max_bytes == 25_000_000

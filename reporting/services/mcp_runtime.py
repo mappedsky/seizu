@@ -465,17 +465,21 @@ async def _call_tool_core(
             # serialized before any limit applied -- fast, unbounded, and
             # reachable by any authenticated caller. A handler that reads this
             # can stop at the source instead.
-            token = set_current_result_limits(
-                ResultLimits(max_rows=result_max_rows, max_bytes=result_max_bytes)
-                if result_max_rows or result_max_bytes
-                else ResultLimits.for_mcp()
-            )
+            # One set of limits, used twice: as the source bound a handler can
+            # stream to, and as the bound on the response actually emitted.
+            # Publishing them only to the context var left the final call using
+            # the caller's raw arguments -- None for a normal MCP call -- so
+            # everything except graph__query came back unbounded, and even it
+            # was bounded by row count at the source rather than by the size of
+            # the response that was sent.
+            limits = _effective_limits(result_max_rows, result_max_bytes)
+            token = set_current_result_limits(limits)
             try:
                 result = await builtin.handler(args, current_user)
             finally:
                 reset_current_result_limits(token)
             return (
-                _bounded_text_response(result, max_rows=result_max_rows, max_bytes=result_max_bytes),
+                _bounded_text_response(result, max_rows=limits.max_rows, max_bytes=limits.max_bytes),
                 None,
             )
         except (ValidationError, ValueError) as exc:
@@ -512,12 +516,8 @@ async def _call_tool_core(
         # which is far looser. Inheriting the chat caps here silently truncated
         # ordinary MCP calls at 100 rows and contradicted their documented
         # behaviour.
-        limits = (
-            ResultLimits(max_rows=result_max_rows, max_bytes=result_max_bytes)
-            if result_max_rows or result_max_bytes
-            else ResultLimits.for_mcp()
-        )
-        serialized, truncated = await reporting_neo4j.run_query_streamed(
+        limits = _effective_limits(result_max_rows, result_max_bytes)
+        serialized, reason = await reporting_neo4j.run_query_streamed(
             target_tool.cypher,
             params_with_defaults,
             max_rows=limits.max_rows,
@@ -525,16 +525,14 @@ async def _call_tool_core(
             serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
         )
         # Keep the un-truncated shape a bare list, which is what MCP clients
-        # consume; only a truncated result gains the envelope, and it is the same
-        # envelope _bounded_text_response would have produced had it done the
-        # trimming itself.
+        # consume; only a truncated result gains the envelope. The marker names
+        # the bound that actually stopped it -- reporting a byte stop as a row
+        # limit points a client at the wrong remedy.
         bounded: Any = (
-            _rebuild(serialized, None, serialized, _row_limit_marker(max_rows=limits.max_rows or 0))
-            if truncated
-            else serialized
+            _rebuild(serialized, None, serialized, _stream_limit_marker(reason, limits)) if reason else serialized
         )
         return (
-            _bounded_text_response(bounded, max_rows=result_max_rows, max_bytes=result_max_bytes),
+            _bounded_text_response(bounded, max_rows=limits.max_rows, max_bytes=limits.max_bytes),
             None,
         )
     except neo4j.exceptions.Neo4jError as exc:
@@ -727,6 +725,24 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
 # ``{"results": [...], "warnings": [...]}``, and user-defined tools follow the
 # same shape, so treating only a top-level list as rows meant the row cap never
 # applied to the tools most likely to return thousands of them.
+def _effective_limits(max_rows: int | None, max_bytes: int | None) -> ResultLimits:
+    """What actually bounds this call.
+
+    A chat caller states its own, far tighter, bounds. Anyone else gets the MCP
+    contract rather than nothing: a caller passing no limits is an MCP client,
+    not a request to be unbounded.
+    """
+    if max_rows or max_bytes:
+        return ResultLimits(max_rows=max_rows, max_bytes=max_bytes)
+    return ResultLimits.for_mcp()
+
+
+def _stream_limit_marker(reason: str, limits: ResultLimits) -> dict[str, Any]:
+    if reason == "byte_limit":
+        return {"truncated": True, "truncated_reason": "byte_limit", "max_bytes": limits.max_bytes}
+    return {"truncated": True, "truncated_reason": "row_limit", "max_rows": limits.max_rows}
+
+
 _ROW_KEYS = ("results", "rows", "records", "items", "data")
 
 
@@ -744,6 +760,13 @@ def _payload_rows_and_key(payload: Any) -> tuple[list[Any] | None, str | None]:
             value = payload.get(key)
             if isinstance(value, list):
                 return value, key
+        # Built-ins return their own envelopes -- {"reports": [...]},
+        # {"roles": [...]}, and so on -- and enumerating every one would rot as
+        # groups are added. Where exactly one field is a list, that is the
+        # collection; where several are, do not guess.
+        lists = [(key, value) for key, value in payload.items() if isinstance(value, list)]
+        if len(lists) == 1:
+            return lists[0][1], lists[0][0]
     return None, None
 
 

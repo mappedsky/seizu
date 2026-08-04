@@ -246,7 +246,7 @@ async def run_query_streamed(
     max_rows: int | None,
     max_bytes: int | None,
     serialize: Callable[[Record], Any],
-) -> tuple[list[Any], bool]:
+) -> tuple[list[Any], str]:
     """Stream, serializing each record, and stop at whichever bound comes first.
 
     Serializing inside the loop is what makes the byte bound real. Counting rows
@@ -260,14 +260,21 @@ async def run_query_streamed(
     That leaves the driver's own per-record allocation as the floor, which is
     not something this layer can do anything about.
 
-    Returns the rows kept and whether anything was left behind.
+    Returns the rows kept and which bound stopped it: ``""`` when the result was
+    complete, else ``"row_limit"`` or ``"byte_limit"``. Naming the bound matters
+    downstream -- a client told a byte stop was a row limit is pointed at the
+    wrong remedy, and will page rather than narrow its projection.
+
+    These bounds protect *this process*: they stop an unbounded result being
+    read into memory. They are not the size of the response eventually emitted,
+    which is bounded exactly by the caller once the payload is assembled.
     """
     attempt = 1
     while True:
         try:
             rows: list[Any] = []
             used = 0
-            truncated = False
+            reason = ""
             driver = _get_async_neo4j_client()
             async with driver.session() as session:
                 result = await session.run(
@@ -276,7 +283,7 @@ async def run_query_streamed(
                 )
                 async for record in result:
                     if max_rows is not None and max_rows > 0 and len(rows) >= max_rows:
-                        truncated = True
+                        reason = "row_limit"
                         break
                     row = serialize(record)
                     if max_bytes is not None and max_bytes > 0:
@@ -284,11 +291,11 @@ async def run_query_streamed(
                         if used + size > max_bytes:
                             # Closing the session here discards the rest rather
                             # than reading it into memory to throw away.
-                            truncated = True
+                            reason = "byte_limit"
                             break
                         used += size
                     rows.append(row)
-            return rows, truncated
+            return rows, reason
         except neo4j.exceptions.ServiceUnavailable:
             logger.debug("Unable to connect to neo4j, retrying...")
             if attempt >= 5:

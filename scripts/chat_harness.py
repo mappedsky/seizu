@@ -155,8 +155,13 @@ def _same_value(applied: str, expected: str) -> bool:
     """
     if applied == expected:
         return True
-    if applied.strip().lower() == expected.strip().lower():
-        return True
+    # Booleans only. Comparing every string case-insensitively would accept a
+    # model identifier that differs in case from the one asked for, which is a
+    # different configuration wearing the right label.
+    booleans = {"true": True, "false": False}
+    left, right = booleans.get(applied.strip().lower()), booleans.get(expected.strip().lower())
+    if left is not None and right is not None:
+        return left is right
     try:
         return float(applied) == float(expected)
     except ValueError:

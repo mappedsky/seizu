@@ -1,4 +1,5 @@
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import neo4j.exceptions
@@ -313,3 +314,139 @@ async def test_fetch_graph_schema_concurrent_callers_introspect_once(mocker):
     assert all(result == {"labels": ["CVE"]} for result in results)
     # Parallel workers hitting a cold cache must not stampede the database.
     assert started == 1
+
+
+# --- run_query_streamed: the limiter that closes the memory path ---------------
+
+
+class _FakeRecord(dict):
+    """Enough of a Record for the serializer used by callers."""
+
+
+def _streaming_session(records, *, fail_first: bool = False):
+    """A driver whose session yields records one at a time."""
+    state = {"attempts": 0}
+
+    class _Result:
+        def __aiter__(self):
+            async def gen():
+                for record in records:
+                    yield record
+
+            return gen()
+
+    class _Session:
+        async def run(self, *_a, **_kw):
+            state["attempts"] += 1
+            if fail_first and state["attempts"] == 1:
+                raise neo4j.exceptions.ServiceUnavailable("flapping")
+            return _Result()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    driver = MagicMock()
+    driver.session = lambda: _Session()
+    return driver, state
+
+
+async def test_streamed_stops_at_the_row_limit(mocker):
+    rows = [_FakeRecord(i=i) for i in range(50)]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=10, max_bytes=None, serialize=dict
+    )
+
+    assert len(kept) == 10
+    assert reason == "row_limit"
+
+
+async def test_streamed_reports_no_reason_when_the_result_fits_exactly(mocker):
+    rows = [_FakeRecord(i=i) for i in range(10)]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=10, max_bytes=None, serialize=dict
+    )
+
+    # Exactly at the bound is complete, not truncated.
+    assert len(kept) == 10
+    assert reason == ""
+
+
+async def test_streamed_stops_at_the_byte_limit(mocker):
+    rows = [_FakeRecord(pad="x" * 100) for _ in range(50)]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=None, max_bytes=500, serialize=dict
+    )
+
+    assert reason == "byte_limit"
+    assert 0 < len(kept) < 50
+
+
+async def test_streamed_drops_a_first_row_that_cannot_fit(mocker):
+    """A single oversized record is not retained; the driver's own allocation
+    is the floor this layer cannot do anything about."""
+    rows = [_FakeRecord(pad="x" * 10_000), _FakeRecord(pad="y")]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=None, max_bytes=100, serialize=dict
+    )
+
+    assert kept == []
+    assert reason == "byte_limit"
+
+
+async def test_streamed_is_unbounded_when_limits_are_none_or_zero(mocker):
+    rows = [_FakeRecord(i=i) for i in range(25)]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=0, max_bytes=0, serialize=dict
+    )
+
+    assert len(kept) == 25
+    assert reason == ""
+
+
+async def test_streamed_retries_after_service_unavailable(mocker):
+    rows = [_FakeRecord(i=i) for i in range(3)]
+    driver, state = _streaming_session(rows, fail_first=True)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, reason = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=None, max_bytes=None, serialize=dict
+    )
+
+    # Retried, and the partial read from the failed attempt is not carried over.
+    assert state["attempts"] == 2
+    assert len(kept) == 3
+    assert reason == ""
+
+
+async def test_streamed_byte_accounting_is_a_source_bound_not_a_response_bound(mocker):
+    """The bound protects this process; the emitted response is bounded exactly
+    downstream, where the envelope and indentation are known."""
+    rows = [_FakeRecord() for _ in range(5)]
+    driver, _ = _streaming_session(rows)
+    mocker.patch("reporting.services.reporting_neo4j._get_async_neo4j_client", return_value=driver)
+
+    kept, _ = await reporting_neo4j.run_query_streamed(
+        "MATCH (n) RETURN n", None, max_rows=None, max_bytes=10, serialize=dict
+    )
+
+    # Row bodies alone fit the budget; the serialized list around them does not,
+    # which is why the caller re-bounds the assembled payload.
+    assert len(json.dumps(kept, indent=2).encode()) > 10

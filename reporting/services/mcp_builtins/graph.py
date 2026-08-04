@@ -28,7 +28,7 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
     # everything and trimming after. An unbounded MATCH is fast to issue and can
     # materialize the graph in worker memory before any limit is consulted.
     limits = current_result_limits()
-    serialized, truncated = await reporting_neo4j.run_query_streamed(
+    serialized, stopped_by = await reporting_neo4j.run_query_streamed(
         cypher,
         None,
         max_rows=limits.max_rows,
@@ -36,8 +36,8 @@ async def _handle_query(args: dict[str, Any], current_user: CurrentUser | None) 
         serialize=lambda record: {key: _serialize_neo4j_value(value) for key, value in record.items()},
     )
     payload: dict[str, Any] = {"results": serialized, "warnings": validation.warnings}
-    if truncated:
-        payload |= {"truncated": True, "truncated_reason": "result_limit"}
+    if stopped_by:
+        payload |= {"truncated": True, "truncated_reason": stopped_by}
     return payload
 
 
