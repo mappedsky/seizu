@@ -613,6 +613,20 @@ CHAT_LLM_DISCLOSE_SKILL_TOOLS = bool_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
 # -- and this works on providers with automatic prefix caching too, where no
 # such feature exists.
 CHAT_LLM_CACHE_DIAGNOSTICS = bool_env("CHAT_LLM_CACHE_DIAGNOSTICS", False)
+# Condense the oldest turns of a long conversation instead of dropping them.
+# Truncation lost what the conversation had said, and moved the boundary on
+# every turn -- the worst shape for a prompt cache, since the prefix changed each
+# time. Compaction cuts back past the budget in chunks so the condensed block
+# stays byte-identical for the many turns it takes to refill.
+CHAT_LLM_HISTORY_COMPACTION = bool_env("CHAT_LLM_HISTORY_COMPACTION", True)
+# How far back a compaction cuts, as a fraction of the history budget. Lower
+# compacts less often but keeps less history; at 1.0 it would compact on nearly
+# every turn, which is the behaviour this replaced.
+CHAT_LLM_HISTORY_COMPACTION_TARGET = float_env("CHAT_LLM_HISTORY_COMPACTION_TARGET", 0.5)
+# Ceiling on the condensed block itself. It grows with the conversation, and
+# something has to stop it; past this the oldest lines are shed, which is the one
+# deeper prefix rewrite this design accepts.
+CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS = int_env("CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS", 1_500)
 # ...but only while that list stays small enough to be worth it. Skills are
 # user-authored, so one can declare a great many tools -- at which point
 # disclosing them up front is just binding them all on every call, which is what

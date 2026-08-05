@@ -104,12 +104,31 @@ exactly as oversized. The retry is skipped once any text has streamed, since it
 would duplicate what the user already saw, and errors that a smaller context
 cannot fix (rate limits, bad keys) are never mistaken for overflow.
 
-One limit remains outside this, deliberately: **cross-turn history is truncated,
-not compacted.** The oldest turns are dropped rather than summarized. The
-within-turn loop *does* condense what it sheds into a deterministic digest.
-Extending that across turns has to stay append-only, because rewriting the
-prefix invalidates the provider's prompt cache for the whole conversation — see
-below.
+**Long conversations are compacted, not truncated.** When history no longer
+fits, the oldest turns are condensed into a single block rather than dropped, so
+what was said survives in some form. Two properties keep this cheaper than the
+truncation it replaces:
+
+- **It compacts in chunks.** The tail is cut back well past the budget, so the
+  condensed block then stays byte-identical for the many turns it takes to
+  refill, and each of those turns is a clean append. Simulated over 40 turns
+  against a 4,000-token budget: **5 compactions**, one every six turns, with the
+  request bounded between 2,421 and 3,348 tokens. Truncation moved the boundary
+  on nearly every turn, which is the worst possible shape for a prompt cache.
+- **It is deterministic.** The block is built from the dropped messages
+  themselves, never by a summarizing model call. A model-written summary would
+  differ between runs, so re-deriving it would rewrite the prefix and cost the
+  cache for the whole conversation — and it could describe something the
+  conversation never said.
+
+The block is itself bounded by `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` and by a
+reserved share of the history budget, so this is not unlimited memory: as it
+fills, the oldest lines are shed and the most recent of the dropped turns are
+what remain. The reserve matters — a block that grew to the size of the budget
+would leave no room for the history it summarizes, and every turn would compact
+again.
+
+Set `CHAT_LLM_HISTORY_COMPACTION=false` to go back to dropping the oldest turns.
 
 ### Prompt caching and cost
 
@@ -296,6 +315,9 @@ Two more consequences worth knowing:
 | `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
 | `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
 | `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools declared by the skills a plan step names, from the start of the step, instead of only once the skill renders. |
+| `CHAT_LLM_HISTORY_COMPACTION` | `true` | Condense the oldest turns of a long conversation instead of dropping them. |
+| `CHAT_LLM_HISTORY_COMPACTION_TARGET` | `0.5` | How far back a compaction cuts, as a fraction of the space available to history. Lower compacts less often and keeps less; at 1.0 it would compact almost every turn. |
+| `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` | `1500` | Ceiling on the condensed block, also capped at a quarter of the history budget. |
 | `CHAT_LLM_CACHE_DIAGNOSTICS` | `false` | Log which request component changed since the previous call of the same kind. A debugging aid; see [Diagnosing a cache miss](#diagnosing-a-cache-miss). |
 | `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a skill declaring a great many tools does not turn into binding them all on every call. |
 

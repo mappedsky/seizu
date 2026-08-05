@@ -8,11 +8,12 @@ from langchain_core.messages.modifier import RemoveMessage
 from mcp.types import Prompt, PromptArgument, Tool
 from pydantic import BaseModel
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
-from reporting.services import chat_graph
+from reporting.services import chat_context, chat_graph
 from reporting.services.chat_messages import MessageTag, has_tag
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
@@ -2677,7 +2678,14 @@ def test_llm_context_messages_applies_message_and_token_limits(mocker):
 
     context = chat_graph._llm_context_messages(messages)
 
-    assert [message.content for message in context] == ["67890", "abcde"]
+    # The newest turn is kept verbatim, and what no longer fits is condensed
+    # rather than dropped: a long conversation should not silently forget what
+    # it said.
+    assert context[-1].content == "abcde"
+    assert chat_graph._is_history_summary(context[0])
+    # The condensed block is itself bounded, so what it holds is the most recent
+    # of what was dropped -- older lines are shed rather than kept forever.
+    assert "67890" in context[0].content
 
 
 def test_trim_inner_loop_messages_ignores_reasoning_content_but_counts_tool_calls():
@@ -4021,3 +4029,135 @@ def test_declared_names_that_no_longer_exist_are_ignored(mocker):
     names = chat_graph.skill_declared_tool_names(None, [_tool("reports__list")], frozenset({"gone__tool"}))
 
     assert names == set()
+
+
+# ---------------------------------------------------------------------------
+# Cross-turn history compaction
+# ---------------------------------------------------------------------------
+
+
+def _turns(count: int, size: int = 400, start: int = 0) -> list[Any]:
+    """A conversation of alternating turns, each with a stable id."""
+    out: list[Any] = []
+    for index in range(start, start + count):
+        out.append(HumanMessage(content=f"Q{index} " + "q" * size, id=f"h{index}"))
+        out.append(AIMessage(content=f"A{index} " + "a" * size, id=f"a{index}"))
+    return out
+
+
+def _compact(messages, summary, budget, model=None):
+    return chat_graph._compact_history(model, list(messages), summary, budget)
+
+
+def test_what_no_longer_fits_is_condensed_rather_than_dropped():
+    """Truncation dropped the oldest turns outright and said nothing about them.
+
+    Condensing keeps a record of what was said, within a bound: the block itself
+    is capped, so the most recent of the dropped turns survive and older lines
+    are shed as it fills.
+    """
+    context = _turns(10)
+
+    out, summary = _compact(context, chat_graph.HistorySummary(), budget=600)
+
+    assert chat_graph._is_history_summary(out[0])
+    assert "User:" in out[0].content or "Assistant:" in out[0].content  # dropped turns, condensed
+    assert out[-1] is context[-1]  # the newest is verbatim
+    assert summary.covers_through_id  # and the boundary was recorded
+
+
+def test_compaction_cuts_back_past_the_budget_so_it_is_rare():
+    """Cutting exactly to the budget would re-compact on the very next turn,
+    rewriting the prefix each time -- the worst shape for a prompt cache."""
+    out, _ = _compact(_turns(10), chat_graph.HistorySummary(), budget=600)
+
+    retained = [m for m in out if not chat_graph._is_history_summary(m)]
+    tail_tokens = sum(chat_context.count_tokens(None, m.content) for m in retained)
+    assert tail_tokens <= 600 * settings.CHAT_LLM_HISTORY_COMPACTION_TARGET
+
+
+def test_the_condensed_block_is_byte_stable_until_the_next_compaction():
+    """The point of cutting back in chunks: between compactions every turn is a
+    clean append, so the cached prefix holds."""
+    context = _turns(10)
+    out, summary = _compact(context, chat_graph.HistorySummary(), budget=600)
+    first_text = out[0].content
+
+    # The conversation continues; the tail has not yet refilled.
+    grown = [*context, *_turns(1, start=99)]
+    out2, summary2 = _compact(grown, summary, budget=600)
+
+    assert out2[0].content == first_text  # byte-identical
+    assert summary2.covers_through_id == summary.covers_through_id
+    # ...and the new turn is simply appended after what was already there.
+    assert [m.content for m in out2[1:-2]] == [m.content for m in out[1:]]
+
+
+def test_condensing_is_deterministic():
+    """A model-written summary would differ between runs, so re-deriving it
+    would rewrite the prefix and cost the cache for the whole conversation."""
+    context = _turns(10)
+    first, _ = _compact(context, chat_graph.HistorySummary(), budget=600)
+    second, _ = _compact(context, chat_graph.HistorySummary(), budget=600)
+
+    assert first[0].content == second[0].content
+
+
+def test_the_summary_itself_is_bounded(mocker):
+    """It grows with the conversation, and something has to stop it."""
+    mocker.patch("reporting.settings.CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS", 120)
+
+    summary = chat_graph.HistorySummary()
+    context: list[Any] = []
+    for round_index in range(6):
+        context = [*context, *_turns(4, start=round_index * 4)]
+        _, summary = _compact(context, summary, budget=600)
+
+    assert chat_context.count_tokens(None, summary.text) <= 120
+    # The newest lines are the ones kept.
+    assert "Q23" in summary.text or "Q22" in summary.text
+
+
+def test_a_boundary_that_fell_out_of_the_window_does_not_lose_the_tail():
+    """History can be trimmed below the recorded boundary; the summary still
+    describes turns that happened, and the tail is measured from the start."""
+    stale = chat_graph.HistorySummary(text="User: something older", covers_through_id="a-message-long-gone")
+
+    out, _ = _compact(_turns(2), stale, budget=100_000)
+
+    assert chat_graph._is_history_summary(out[0])
+    assert [m.content for m in out[1:]] == [m.content for m in _turns(2)]
+
+
+def test_a_conversation_inside_the_budget_is_untouched():
+    context = _turns(2)
+
+    out, summary = _compact(context, chat_graph.HistorySummary(), budget=100_000)
+
+    assert out == context  # no summary message inserted at all
+    assert summary.covers_through_id == ""
+
+
+def test_compaction_can_be_turned_off(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_HISTORY_COMPACTION", False)
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_MAX_TOKENS", 200)
+
+    context = chat_graph._llm_context_messages(_turns(10), None)
+
+    assert not any(chat_graph._is_history_summary(m) for m in context)
+
+
+async def test_the_condensed_history_is_carried_to_the_next_turn(mocker):
+    """Recomputing the boundary from nothing every turn is the prefix churn
+    compaction exists to avoid."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_MAX_TOKENS", 300)
+    graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
+    config = {"configurable": {"thread_id": "thread-compaction", "current_user": _user()}}
+
+    async for _ in graph.astream({"messages": _turns(8)}, config, stream_mode="custom"):
+        pass
+
+    snapshot = await graph.aget_state(config)
+    stored = snapshot.values.get("history_summary") or {}
+    assert stored.get("text")
+    assert stored.get("covers_through_id")
