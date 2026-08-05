@@ -339,6 +339,9 @@ def session_memory_message(digest: str) -> HumanMessage:
     return HumanMessage(
         content=f"{SESSION_MEMORY_PREAMBLE}\n\n{digest}",
         id=f"msg_{uuid.uuid4().hex}",
+        # Tagged so cache-breakpoint placement can end the cached prefix just
+        # before it: this is the one part that always differs between turns.
+        additional_kwargs={chat_context.SESSION_MEMORY_KEY: True},
     )
 
 
@@ -1455,8 +1458,11 @@ async def _run_llm_tool_turn(
     markup_filter = _ToolMarkupFilter()
     try:
         invocation_kwargs = {"max_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        # Placed here, on the assembled request, for the same reason the window
+        # is checked here: it is the only scope holding the whole thing.
+        cached_system, cached_messages = chat_context.with_cache_breakpoints(model, system_prompt, messages)
         async for chunk in runnable.astream(
-            [SystemMessage(content=system_prompt), *messages],
+            [SystemMessage(content=cached_system), *cached_messages],
             config=config,
             **invocation_kwargs,
         ):

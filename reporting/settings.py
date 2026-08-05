@@ -585,6 +585,14 @@ CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_FALLB
 # never see, and a tokenizer resolved by name can differ from the one the
 # endpoint runs -- and under-counting is the direction that fails the call.
 CHAT_LLM_CONTEXT_SAFETY_MARGIN = float_env("CHAT_LLM_CONTEXT_SAFETY_MARGIN", 0.05)
+# Emit explicit prompt-cache breakpoints for providers that need them (Anthropic
+# caches nothing without them; measured at 0 cached tokens over a five-call turn,
+# against 6,513 read back on the next call once a breakpoint was placed).
+# Providers with automatic prefix caching are unaffected either way.
+CHAT_LLM_PROMPT_CACHE_ENABLED = bool_env("CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+# Anthropic will not cache a prefix shorter than this, so a smaller system
+# prompt is left unmarked rather than reshaped into blocks for nothing.
+CHAT_LLM_PROMPT_CACHE_MIN_TOKENS = int_env("CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 1_024)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.
 CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")

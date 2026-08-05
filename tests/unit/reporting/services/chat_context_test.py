@@ -215,3 +215,97 @@ def test_overflow_detection_survives_a_self_referential_cause():
     exc = ValueError("something else")
     exc.__cause__ = exc
     assert chat_context.is_context_overflow(exc) is False
+
+
+# --- Explicit cache breakpoints -------------------------------------------------
+
+
+def _human(text: str, session_memory: bool = False):
+    from langchain_core.messages import HumanMessage
+
+    kwargs = {chat_context.SESSION_MEMORY_KEY: True} if session_memory else {}
+    return HumanMessage(content=text, additional_kwargs=kwargs)
+
+
+def test_only_providers_that_need_breakpoints_get_them(mocker):
+    """Automatic prefix caches need a stable prefix and nothing else; rewriting
+    their messages into blocks would risk a transformer for no gain."""
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+
+    assert chat_context.supports_cache_breakpoints(_model("anthropic/claude-sonnet-4-6")) is True
+    assert chat_context.supports_cache_breakpoints(_model("bedrock/anthropic.claude-3")) is True
+    assert chat_context.supports_cache_breakpoints(_model("deepseek/deepseek-chat")) is False
+    assert chat_context.supports_cache_breakpoints(_model("openai/gpt-4o")) is False
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", False)
+    assert chat_context.supports_cache_breakpoints(_model("anthropic/claude-sonnet-4-6")) is False
+
+
+def test_a_non_anthropic_request_is_left_exactly_as_it_was(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    messages = [_human("one"), _human("two")]
+
+    system, out = chat_context.with_cache_breakpoints(_model("deepseek/deepseek-chat"), "sys", messages)
+
+    assert system == "sys"
+    assert out is messages
+
+
+def test_breakpoints_land_on_the_system_prompt_and_the_last_message(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 0)
+    mocker.patch("litellm.token_counter", return_value=5_000)
+
+    system, out = chat_context.with_cache_breakpoints(
+        _model("anthropic/claude-sonnet-4-6"), "sys", [_human("one"), _human("two")]
+    )
+
+    assert system == [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}]
+    assert out[0].content == "one"  # untouched
+    assert out[-1].content[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_the_cached_prefix_ends_before_the_session_digest(mocker):
+    """The digest differs every turn, so a prefix containing it can never be
+    read back; ending just before it is what makes history cacheable at all."""
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 0)
+    mocker.patch("litellm.token_counter", return_value=5_000)
+
+    messages = [_human("h1"), _human("a1"), _human("digest", session_memory=True), _human("latest")]
+    _, out = chat_context.with_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), "sys", messages)
+
+    assert isinstance(out[1].content, list)  # the message just before the digest
+    assert out[2].content == "digest"  # the digest itself is never a breakpoint
+    assert isinstance(out[3].content, list)  # and the rolling within-turn mark
+    # Four is the provider's limit; we stay well inside it.
+    assert sum(1 for m in out if isinstance(m.content, list)) <= 3
+
+
+def test_a_short_system_prompt_is_not_reshaped_for_nothing(mocker):
+    """Below the provider's minimum a prefix is not cached at all."""
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 1_024)
+    mocker.patch("litellm.token_counter", return_value=10)
+
+    system, _ = chat_context.with_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), "short", [_human("one")])
+
+    assert system == "short"
+
+
+def test_messages_without_plain_text_are_left_alone(mocker):
+    """An AI message mid-tool-call carries its payload in tool_calls, and
+    reshaping those into blocks risks more than a cache hit is worth."""
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 0)
+    mocker.patch("litellm.token_counter", return_value=5_000)
+
+    tool_call = AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c1"}])
+    _, out = chat_context.with_cache_breakpoints(
+        _model("anthropic/claude-sonnet-4-6"), "sys", [_human("one"), tool_call]
+    )
+
+    assert out[-1].content == ""
+    assert out[-1].tool_calls == tool_call.tool_calls

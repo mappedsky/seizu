@@ -132,12 +132,36 @@ request, that was the difference between **98% of input served from cache and
 of a follow-up turn is the newest exchange and the digest itself. A live
 two-turn conversation with session memory reports 93% and 74% cached.
 
-This ordering is the **provider-agnostic** half of caching, and it is the half
-that matters: automatic prefix caches (DeepSeek, OpenAI, Gemini) need nothing
-else, and explicit-breakpoint caches (Anthropic) cannot benefit from a
-breakpoint unless the prefix ahead of it is stable in the first place. Seizu
-does not yet emit Anthropic `cache_control` breakpoints, so on Anthropic the
-ordering is necessary but not yet sufficient.
+This ordering is the **provider-agnostic** half of caching, and it has to come
+first: automatic prefix caches (DeepSeek, OpenAI, Gemini) need nothing else, and
+an explicit-breakpoint cache cannot benefit from a breakpoint unless the prefix
+ahead of it is stable to begin with.
+
+**Explicit breakpoints** cover the other half. Anthropic caches nothing at all
+without them — measured at 0 cached tokens across a five-call turn — so when the
+model is an Anthropic one, Seizu marks up to three blocks with
+`cache_control`, in order of what they are worth:
+
+1. **The system prompt** — the largest stable block, and Anthropic orders tool
+   schemas ahead of it, so this one mark covers both.
+2. **The message before the session digest** — the digest differs every turn, so
+   a prefix containing it can never be read back.
+3. **The last message** — within a turn the tool loop calls repeatedly with a
+   growing list, so each call reads the previous prefix and writes only its
+   delta.
+
+Providers with automatic caching are left untouched: reshaping their messages
+into content blocks would risk a provider transformer for no gain. A system
+prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is left unmarked, since the
+provider will not cache a prefix that short. Set
+`CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
+
+Measured on a live two-turn Anthropic conversation: turn 1 writes 11,037 tokens
+to cache and reads none (cold, and cache writes carry a premium), turn 2 reads
+16,453 — 46% of its input — and writes only 1,751. There is headroom left: a
+tool list that changes mid-turn under progressive disclosure sits ahead of the
+system prompt in the cached prefix and invalidates it, which is the likeliest
+reason turn 1 gets no within-turn hits.
 
 Two more consequences worth knowing:
 
@@ -183,6 +207,8 @@ Two more consequences worth knowing:
 | `CHAT_LLM_CONTEXT_WINDOW_TOKENS` | `0` | Override the model's input window instead of reading it from litellm's model database. `0` derives it. |
 | `CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS` | `32768` | Window assumed for a model litellm cannot identify (typically self-hosted). Small on purpose. |
 | `CHAT_LLM_CONTEXT_SAFETY_MARGIN` | `0.05` | Fraction of the window held back when sizing a call, covering provider message framing and tokenizer differences we cannot observe. |
+| `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
+| `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
 
 ### Orchestrator
 

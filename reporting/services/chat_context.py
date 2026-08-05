@@ -194,6 +194,76 @@ def is_context_overflow(exc: BaseException) -> bool:
     return False
 
 
+# Anthropic caches nothing unless a content block is marked, and caches
+# everything up to and including the marked block. Four marks are allowed per
+# request; we use at most three.
+_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+SESSION_MEMORY_KEY = "seizu_session_memory"
+
+
+def supports_cache_breakpoints(model: Any) -> bool:
+    """Whether this model needs explicit cache markers to cache anything at all.
+
+    Automatic prefix caches (DeepSeek, OpenAI, Gemini) need only a stable
+    prefix and are left untouched -- marking their content would mean rewriting
+    every message into block form for no gain, and blocks carrying an unknown
+    key are exactly the sort of thing a provider transformer chokes on.
+    """
+    if not settings.CHAT_LLM_PROMPT_CACHE_ENABLED:
+        return False
+    name = model_name_of(model).lower()
+    return "anthropic" in name or "claude" in name
+
+
+def _marked(message: Any) -> Any:
+    """The same message with a cache breakpoint on its text, or unchanged.
+
+    Only plain-string content is converted: an AI message mid-tool-call carries
+    its payload in ``tool_calls`` rather than ``content``, and rewriting those
+    shapes into blocks risks more than a cache hit is worth.
+    """
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        return message
+    return message.model_copy(update={"content": [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]})
+
+
+def with_cache_breakpoints(model: Any, system_prompt: str, messages: list[Any]) -> tuple[Any, list[Any]]:
+    """Place cache breakpoints for a provider that requires them.
+
+    Three, in order of how much they are worth:
+
+    1. **The system prompt.** The largest stable block, and Anthropic orders
+       tool schemas ahead of it, so this one breakpoint covers both.
+    2. **The message before the session digest.** The digest changes every turn,
+       so a prefix that includes it can never be read back; ending the cached
+       prefix just before it is what makes the conversation itself cacheable
+       across turns.
+    3. **The last message.** Within a turn the tool loop calls repeatedly with a
+       growing list, so each call reads the previous prefix and writes only its
+       own delta.
+
+    Below ``CHAT_LLM_PROMPT_CACHE_MIN_TOKENS`` the provider will not cache a
+    prefix at all, so a short system prompt is left unmarked rather than
+    reshaped for nothing.
+    """
+    if not supports_cache_breakpoints(model) or not messages:
+        return system_prompt, messages
+    minimum = max(0, settings.CHAT_LLM_PROMPT_CACHE_MIN_TOKENS)
+    system_content: Any = system_prompt
+    if count_tokens(model, system_prompt) >= minimum:
+        system_content = [{"type": "text", "text": system_prompt, "cache_control": _CACHE_CONTROL}]
+
+    marks: set[int] = {len(messages) - 1}
+    for index, message in enumerate(messages):
+        if getattr(message, "additional_kwargs", None) and message.additional_kwargs.get(SESSION_MEMORY_KEY):
+            if index > 0:
+                marks.add(index - 1)
+            break
+    marked = [_marked(message) if index in marks else message for index, message in enumerate(messages)]
+    return system_content, marked
+
+
 def chars_for_tokens(model: Any, sample: str, tokens: int) -> int:
     """A character budget worth roughly ``tokens``, calibrated on ``sample``.
 
