@@ -171,17 +171,39 @@ fixing:
   tokens against an almost identical prefix the first had just written. The
   worker system prompt is now identical for every step of every turn, with
   everything step-specific in the user message.
-- *A tool list that grows mid-turn.* Anthropic orders tool schemas **ahead** of
-  the system prompt, so when a rendered skill unlocks tools (3 → 11 in a
-  measured turn) the prefix behind them is invalidated: the next call read 0,
-  and the one after — same tool list — read 4,853. This is inherent to
-  progressive disclosure and is left alone deliberately. Binding every tool up
-  front would cache better and cost far more per call, since the full chat tool
-  surface is an order of magnitude larger than what a turn actually unlocks.
-  The cost is bounded by how many times disclosure fires in a turn.
+- *A tool list that grew mid-turn.* Anthropic orders tool schemas **ahead** of
+  the system prompt, so when a rendered skill unlocked tools (3 → 11 in a
+  measured turn) the prefix behind them was invalidated: the next call read 0,
+  and the one after — same tool list — read 4,853. Fixed by honouring what
+  skills declare *up front*, below.
 
-Tool ordering is deterministic (the listing order, filtered), so the churn is
+Tool ordering is deterministic (the listing order, filtered), so the churn was
 genuine growth rather than instability.
+
+### Disclosing what skills declare
+
+A skill's `tools_required` is its author stating exactly which tools the
+workflow uses, so there is nothing to learn by waiting for a render before
+honouring it — and waiting is what churned the tool list mid-turn. Those tools
+are now disclosed from the start of a turn. After the change, a turn that
+previously went 3 → 11 tools held one tool list across all four of its calls,
+and every call after the first read the prefix the one before it wrote (2,605 →
+3,320 → 3,898).
+
+**Bounded, because skills are user-authored.** The union of everything the
+enabled skills declare can grow to cover the whole tool surface, at which point
+disclosing it up front is just binding every tool on every call — precisely what
+progressive disclosure exists to avoid. Above
+`CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` of tool schema the up-front
+disclosure is skipped and tools are disclosed on render as before. The bound is
+measured in schema tokens rather than tool count, since that is what occupies
+the prefix. For scale, in a measured deployment: 42 declared tools ≈ 5,300
+tokens, against ≈ 1,100 for a turn's typical 11 and ≈ 13,000 for the full 96.
+
+Declarations ride on the skill listing the turn already makes (via the prompt's
+`_meta`), so this adds no store read. Names of tools that no longer exist, or
+that the user cannot reach, simply drop out — the live listing is the authority.
+Set `CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
 
 Two more consequences worth knowing:
 
@@ -229,6 +251,8 @@ Two more consequences worth knowing:
 | `CHAT_LLM_CONTEXT_SAFETY_MARGIN` | `0.05` | Fraction of the window held back when sizing a call, covering provider message framing and tokenizer differences we cannot observe. |
 | `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
 | `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools enabled skills declare in `tools_required` from the start of a turn, instead of only once a skill renders. |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a large skill catalogue does not turn into binding every tool on every call. |
 
 ### Orchestrator
 

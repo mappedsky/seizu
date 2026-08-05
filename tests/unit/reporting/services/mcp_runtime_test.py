@@ -1400,3 +1400,21 @@ def test_an_undeclared_collection_is_not_trimmed_by_name():
 
     assert len(decoded["permissions"]) == 50
     assert "truncated" not in decoded
+
+
+def test_declared_tool_names_reads_the_listing_rather_than_the_store():
+    """One store read per turn covers every consumer, so the declaration rides
+    on the skill listing the turn already made."""
+    from mcp.types import Prompt
+
+    from reporting.services import mcp_runtime as rt
+
+    prompts = [
+        Prompt(name="s__a", description="d", _meta={rt.SKILL_TOOLS_META_KEY: ["reports__list", "reports__get"]}),
+        Prompt(name="s__b", description="d", _meta={rt.SKILL_TOOLS_META_KEY: ["reports__list", "graph__query"]}),
+        Prompt(name="s__c", description="d"),  # a skill declaring nothing
+        Prompt(name="s__d", description="d", _meta={rt.SKILL_TOOLS_META_KEY: "not a list"}),
+    ]
+
+    assert rt.declared_tool_names(prompts) == frozenset({"reports__list", "reports__get", "graph__query"})
+    assert rt.declared_tool_names([]) == frozenset()

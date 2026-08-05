@@ -3951,3 +3951,70 @@ async def test_an_overflow_after_streaming_is_not_retried(mocker):
 
     assert len(attempts) == 1
     assert "partial answer" in "".join(streamed)
+
+
+# ---------------------------------------------------------------------------
+# Disclosing what skills declare, up front but bounded
+# ---------------------------------------------------------------------------
+
+
+def _tool(name: str, description: str = "x") -> Tool:
+    return Tool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
+
+
+def test_skill_declared_tools_are_disclosed_up_front(mocker):
+    """A skill's tools_required is its author naming what the workflow uses, so
+    waiting for a render to honour it learns nothing and costs a cache prefix."""
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 10_000)
+    tools = [_tool("reports__list"), _tool("reports__get"), _tool("roles__delete")]
+
+    names = chat_graph.skill_declared_tool_names(None, tools, frozenset({"reports__list", "reports__get"}))
+
+    assert names == {"reports__list", "reports__get"}
+    assert "roles__delete" not in names  # nothing a skill did not ask for
+
+
+def test_an_oversized_declared_set_falls_back_to_disclosing_on_render(mocker):
+    """Skills are user-authored and unbounded: the union of what they declare
+    can cover the whole tool surface, and disclosing that up front is just
+    binding every tool on every call — what progressive disclosure exists to
+    avoid."""
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 50)
+    tools = [_tool(f"group__tool_{i}", "a long description " * 30) for i in range(40)]
+
+    names = chat_graph.skill_declared_tool_names(None, tools, frozenset(t.name for t in tools))
+
+    assert names == set()
+
+
+def test_the_bound_is_measured_in_schema_tokens_not_tool_count(mocker):
+    """A count would treat one enormous schema like one trivial one; what
+    occupies the prefix is the schema text."""
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 200)
+
+    small = [_tool("a__one"), _tool("a__two"), _tool("a__three")]
+    assert chat_graph.skill_declared_tool_names(None, small, frozenset(t.name for t in small))
+
+    one_huge = [_tool("a__one", "x" * 20_000)]
+    assert chat_graph.skill_declared_tool_names(None, one_huge, frozenset({"a__one"})) == set()
+
+
+def test_up_front_disclosure_can_be_turned_off(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", False)
+    tools = [_tool("reports__list")]
+
+    assert chat_graph.skill_declared_tool_names(None, tools, frozenset({"reports__list"})) == set()
+
+
+def test_declared_names_that_no_longer_exist_are_ignored(mocker):
+    """A skill can name a tool that has since been deleted or is out of scope
+    for this user; the live listing is the authority on what exists."""
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+    mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 10_000)
+
+    names = chat_graph.skill_declared_tool_names(None, [_tool("reports__list")], frozenset({"gone__tool"}))
+
+    assert names == set()

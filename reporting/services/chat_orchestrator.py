@@ -42,7 +42,15 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_budget, chat_context, chat_graph, episodic_memory, mcp_builtins, sandbox_session
+from reporting.services import (
+    chat_budget,
+    chat_context,
+    chat_graph,
+    episodic_memory,
+    mcp_builtins,
+    mcp_runtime,
+    sandbox_session,
+)
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -782,7 +790,7 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
         step["status"] = "ran"
 
     model = get_chat_model("worker", economy=bool(controller and controller.degraded))
-    tool_specs = await _worker_tool_specs(current_user)
+    tool_specs, skill_tools, declared_skill_tools = await _worker_tool_specs(current_user)
     # Progressive disclosure carries across steps: tools a skill disclosed in an
     # earlier super-step stay callable for the dependent steps that follow.
     progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
@@ -808,6 +816,8 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
                 disclosed_names=disclosed_names,
                 progressive=progressive,
                 writer=writer,
+                skill_tools=skill_tools,
+                declared_skill_tools=declared_skill_tools,
             )
             for step in batch
         )
@@ -928,10 +938,22 @@ def _merge_results(existing: list[dict[str, Any]], new: list[dict[str, Any]]) ->
     return list(by_id.values())
 
 
-async def _worker_tool_specs(current_user: CurrentUser | None) -> list[ChatToolSpec]:
+async def _worker_tool_specs(
+    current_user: CurrentUser | None,
+) -> tuple[list[ChatToolSpec], list[chat_graph.Tool], frozenset[str]]:
+    """The worker tool universe, plus what the skills declare they need.
+
+    Returns the raw tool listing and the declared names alongside the specs so
+    the caller can weigh the declared set before disclosing it, without a second
+    listing -- one store read per turn covers every consumer.
+    """
     skills = await _list_chat_prompts(current_user)
     tools = await _list_chat_tools(current_user)
-    return [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)]
+    return (
+        [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)],
+        tools,
+        mcp_runtime.declared_tool_names(skills),
+    )
 
 
 # Below this a context entry is more noise than referent, so stop rather than
@@ -1093,6 +1115,8 @@ async def _run_worker_step(
     disclosed_names: set[str] | None = None,
     progressive: bool | None = None,
     writer: Any = None,
+    skill_tools: list[chat_graph.Tool] | None = None,
+    declared_skill_tools: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
 
@@ -1109,7 +1133,16 @@ async def _run_worker_step(
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
+    skill_tools = list(skill_tools or [])
     _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive else frozenset()
+    # What the listed skills declare they need, honoured up front rather than on
+    # render -- the tool list heads the provider's cached prefix, so unlocking
+    # mid-turn invalidates everything behind it. Bounded: see
+    # chat_graph.skill_declared_tool_names.
+    skill_names = (
+        chat_graph.skill_declared_tool_names(model, skill_tools, declared_skill_tools) if progressive else set()
+    )
+    disclosed_names |= skill_names
     available_pool = (
         tool_specs
         if not progressive

@@ -2187,7 +2187,11 @@ async def test_every_step_of_a_batch_shares_one_sandbox_and_it_outlives_them(moc
 
     mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
     mocker.patch("reporting.services.chat_orchestrator._run_worker_step", side_effect=_worker)
-    mocker.patch("reporting.services.chat_orchestrator._worker_tool_specs", new_callable=AsyncMock, return_value=[])
+    mocker.patch(
+        "reporting.services.chat_orchestrator._worker_tool_specs",
+        new_callable=AsyncMock,
+        return_value=([], [], frozenset()),
+    )
     mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=object())
     closed = mocker.patch(
         "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",

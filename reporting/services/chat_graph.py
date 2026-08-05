@@ -556,15 +556,23 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # resumed/follow-up turn can call them directly (the in-turn disclosure set
     # is otherwise reset each turn — see ChatState.disclosed_tools).
     disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
+    # From the skills already listed above -- no second store read.
+    declared_names = mcp_runtime.declared_tool_names(skills) if progressive_disclosure else frozenset()
     if not progressive_disclosure:
         tools = await _list_chat_tools(current_user)
-    elif disclosed_tool_names or _always_disclosed_names:
+    elif disclosed_tool_names or _always_disclosed_names or declared_names:
         # Resolve the persisted names against the live store; names whose tool
         # no longer exists simply drop out.  Also fetch when always-disclosed
         # tools exist so they can appear in the capability context.
         tools = await _list_chat_tools(current_user)
 
-    always_disclosed_tools = [t for t in tools if t.name in _always_disclosed_names] if progressive_disclosure else []
+    # Kept out of ``disclosed_tool_names`` so what persists to the next turn
+    # stays the set this conversation actually unlocked. These are re-derived
+    # every turn from the live skills, so persisting them would only pin a
+    # stale copy.
+    skill_tool_names = skill_declared_tool_names(model, tools, declared_names) if progressive_disclosure else set()
+    available_names = disclosed_tool_names | set(_always_disclosed_names) | skill_tool_names
+    always_disclosed_tools = [t for t in tools if t.name in available_names] if progressive_disclosure else []
     capability_context = build_capability_context(
         skills,
         tools if not progressive_disclosure else None,
@@ -578,7 +586,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     if not progressive_disclosure:
         tool_specs = _mcp_tool_specs(tools)
     else:
-        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
+        tool_specs = _disclosed_tool_specs(tools, available_names)
     # Hand the same set to any sub-agent this turn spawns, so the sandbox works
     # from the conversation's disclosure rather than the whole catalogue. With
     # disclosure off there is nothing to inherit and the sub-agent keeps the
@@ -778,7 +786,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
+                available_names |= disclosed_tool_names
+                tool_specs = _disclosed_tool_specs(tools, available_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
@@ -2587,6 +2596,40 @@ def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> s
         if result.request.spec.kind == "skill" and result.blocked is None:
             disclosed.update(result.tools_required)
     return disclosed
+
+
+def skill_declared_tool_names(model: Any, tools: list[Tool], declared: frozenset[str]) -> set[str]:
+    """Skill-declared tools worth disclosing up front, or nothing if too many.
+
+    A skill's ``tools_required`` is its author naming exactly what the workflow
+    uses, so waiting for a render to honour it learns nothing -- and it costs:
+    the tool list heads the provider's cached prefix, so unlocking mid-turn
+    invalidates everything behind it.
+
+    The bound is the point of this function. Skills are user-authored and
+    unbounded, so the union of what they declare can grow to cover the whole
+    tool surface, and disclosing that up front is just binding every tool on
+    every call -- exactly what progressive disclosure exists to avoid. Weighed
+    against the real schemas rather than a tool count, because that is what
+    actually occupies the prefix.
+    """
+    if not settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS or not declared:
+        return set()
+    subset = [tool for tool in tools if tool.name in declared]
+    if not subset:
+        return set()
+    weight = chat_context.count_tokens(
+        model,
+        _json_dump([{"name": t.name, "description": t.description, "input_schema": t.inputSchema} for t in subset]),
+    )
+    if weight > max(0, settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS):
+        logger.info(
+            "skills declare %d tools (~%d tokens), over the up-front disclosure budget; disclosing on render instead",
+            len(subset),
+            weight,
+        )
+        return set()
+    return {tool.name for tool in subset}
 
 
 def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatToolSpec]:

@@ -572,6 +572,33 @@ def _text_content_to_string(content: list[TextContent]) -> str:
     return "\n\n".join(item.text for item in content if hasattr(item, "text"))
 
 
+SKILL_TOOLS_META_KEY = "seizu_tools_required"
+
+
+def declared_tool_names(prompts: list[Prompt]) -> frozenset[str]:
+    """Tools the listed skills declare they need, from the listing itself.
+
+    A skill's ``tools_required`` is its author stating exactly which tools the
+    workflow uses, so it is an authoritative disclosure list -- there is nothing
+    to learn by waiting for the skill to render before honouring it. Waiting
+    costs real money: the tool list heads the provider's cached prefix, so
+    unlocking tools mid-turn invalidates everything behind them (measured:
+    3 -> 11 tools made the next call read 0 of 4,853 cacheable tokens).
+
+    Read off the prompts the turn already listed rather than re-reading the
+    store, so this stays within the one-listing-per-turn rule -- and inherits
+    that listing's permission gating for free. This is a *disclosure* set, not
+    an authorization one: every call still passes the same RBAC checks.
+    """
+    names: set[str] = set()
+    for prompt in prompts:
+        meta = getattr(prompt, "meta", None)
+        required = meta.get(SKILL_TOOLS_META_KEY) if isinstance(meta, dict) else None
+        if isinstance(required, list):
+            names.update(str(name) for name in required)
+    return frozenset(names)
+
+
 async def list_prompts_for_user(
     current_user: CurrentUser | None,
     *,
@@ -593,6 +620,11 @@ async def list_prompts_for_user(
                     name=f"{skill.skillset_id}__{skill.skill_id}",
                     title=skill.name,
                     description=_skill_prompt_description(skill),
+                    # Carried on the listing so a caller can honour the author's
+                    # declaration without a second store read. The field is
+                    # aliased to `_meta`; passing `meta=` instead sets a shadowed
+                    # extra that `prompt.meta` never returns.
+                    _meta={SKILL_TOOLS_META_KEY: list(skill.tools_required or ())},
                     arguments=[
                         PromptArgument(
                             name=p.name,
