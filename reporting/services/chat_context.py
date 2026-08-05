@@ -22,6 +22,7 @@ million-token model does not silently multiply the cost of every call.
 import hashlib
 import logging
 import math
+from dataclasses import dataclass
 from typing import Any
 
 from reporting import settings
@@ -297,6 +298,98 @@ def with_cache_breakpoints(model: Any, system_prompt: str, messages: list[Any]) 
             break
     marked = [_marked(message) if index in marks else message for index, message in enumerate(messages)]
     return system_content, marked
+
+
+# Bounded, and hashes only -- never prompt content. Keyed by caller-supplied
+# label (phase + thread), so consecutive calls of the same kind are what get
+# compared. Process-local and best-effort: this is a debugging aid, not a ledger.
+_FINGERPRINTS: dict[str, "RequestFingerprint"] = {}
+_FINGERPRINT_MAX = 512
+
+
+def _digest(value: Any) -> str:
+    return hashlib.blake2b(str(value).encode(errors="replace"), digest_size=8).hexdigest()
+
+
+@dataclass(frozen=True)
+class RequestFingerprint:
+    """What a request was made of, as hashes -- enough to say what changed."""
+
+    model: str
+    system: str
+    tools: str
+    messages: tuple[str, ...]
+
+
+def fingerprint_request(model: Any, system: Any, tools: Any, messages: list[Any]) -> RequestFingerprint:
+    return RequestFingerprint(
+        model=model_name_of(model),
+        system=_digest(system),
+        tools=_digest(tools),
+        messages=tuple(_digest(getattr(m, "content", m)) for m in messages),
+    )
+
+
+def diagnose_cache_divergence(
+    key: str, model: Any, system: Any, tools: Any, messages: list[Any]
+) -> tuple[str, int] | None:
+    """Say which part of this request differs from the last one under ``key``.
+
+    Prompt caching matches the longest common *prefix*, so a cache miss is
+    always "something before this point changed" -- and the only thing the usage
+    numbers tell you is that it dropped to zero. This answers the question they
+    do not: *what* changed. The components are the same four the provider's own
+    diagnostics report (model, system, tools, messages), because those are the
+    four parts a request has.
+
+    Deliberately built rather than borrowed. Anthropic ships this as a beta, but
+    it needs a beta header that our LiteLLM version constructs itself from
+    feature detection and will not accept from a caller -- the body parameter
+    reaches the API without it and the request is rejected outright. This works
+    on every provider instead, including the ones with automatic prefix caching
+    where no such feature exists.
+
+    Returns the component and a rough count of the tokens sitting behind the
+    divergence, or ``None`` when nothing changed. Token order assumes the
+    provider puts tools ahead of the system prompt (Anthropic's layout); for
+    providers that order them the other way the count is approximate, and the
+    component name -- the actionable part -- is right regardless.
+    """
+    if not settings.CHAT_LLM_CACHE_DIAGNOSTICS:
+        return None
+    current = fingerprint_request(model, system, tools, messages)
+    previous = _FINGERPRINTS.get(key)
+    if len(_FINGERPRINTS) >= _FINGERPRINT_MAX:
+        _FINGERPRINTS.clear()
+    _FINGERPRINTS[key] = current
+    if previous is None:
+        return None
+
+    behind_everything = count_tokens(model, str(tools)) + count_tokens(model, str(system))
+    behind_everything += sum(count_tokens(model, str(getattr(m, "content", m))) for m in messages)
+    if previous.model != current.model:
+        return "model_changed", behind_everything
+    if previous.tools != current.tools:
+        return "tools_changed", behind_everything
+    if previous.system != current.system:
+        return "system_changed", behind_everything - count_tokens(model, str(tools))
+    for index, (was, now) in enumerate(zip(previous.messages, current.messages, strict=False)):
+        if was != now:
+            return "messages_changed", sum(count_tokens(model, str(getattr(m, "content", m))) for m in messages[index:])
+    if len(current.messages) < len(previous.messages):
+        # Truncation: the history was rewritten rather than appended to, which
+        # is the one message change that is not a plain extension.
+        return "messages_truncated", behind_everything
+    return None
+
+
+def log_cache_divergence(key: str, model: Any, system: Any, tools: Any, messages: list[Any]) -> None:
+    """Diagnose and log, for callers that only want the side effect."""
+    diagnosis = diagnose_cache_divergence(key, model, system, tools, messages)
+    if diagnosis is None:
+        return
+    reason, tokens = diagnosis
+    logger.warning("cache diagnostic [%s]: %s, ~%d tokens behind the divergence", key, reason, tokens)
 
 
 def chars_for_tokens(model: Any, sample: str, tokens: int) -> int:

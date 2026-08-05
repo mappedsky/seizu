@@ -180,6 +180,38 @@ fixing:
 Tool ordering is deterministic (the listing order, filtered), so the churn was
 genuine growth rather than instability.
 
+### Diagnosing a cache miss
+
+`usage.cache_read_input_tokens` tells you the cache missed; it never tells you
+*why*. Set `CHAT_LLM_CACHE_DIAGNOSTICS=true` and each LLM call is fingerprinted
+— model, system prompt, tools, and each message, as hashes — and compared with
+the previous call of the same kind. When the prefix moves, the log names the
+component and estimates the tokens behind it:
+
+```
+cache diagnostic [user:…:thread:…:worker:s1]: tools_changed, ~4000 tokens behind the divergence
+```
+
+The four components are the four parts a request has, so the answer is always
+one of `model_changed`, `system_changed`, `tools_changed`, `messages_changed` —
+plus `messages_truncated`, for history that was rewritten rather than appended
+to, which is what a sliding context window does. Only the earliest divergence is
+reported; later ones hide behind it, and fixing the first is what changes
+anything.
+
+Fingerprints are hashes only — never prompt content — bounded in number, and
+process-local. Keys combine the thread with the phase, so a worker step is
+compared against the previous worker step rather than against a synthesizer call
+that was never going to match.
+
+Anthropic ships an equivalent as a beta. It is unreachable from here: the beta
+header that authorises it is one LiteLLM builds itself from feature detection
+and will not accept from a caller, so the request parameter arrives without it
+and the API rejects the call outright. This works on every provider instead,
+including those with automatic prefix caching where no such feature exists.
+
+Leave it off in production: it token-counts every component of every call.
+
 ### Disclosing what skills declare
 
 A skill's `tools_required` is its author stating exactly which tools the
@@ -259,6 +291,7 @@ Two more consequences worth knowing:
 | `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
 | `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
 | `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools declared by the skills a plan step names, from the start of the step, instead of only once the skill renders. |
+| `CHAT_LLM_CACHE_DIAGNOSTICS` | `false` | Log which request component changed since the previous call of the same kind. A debugging aid; see [Diagnosing a cache miss](#diagnosing-a-cache-miss). |
 | `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a skill declaring a great many tools does not turn into binding them all on every call. |
 
 ### Orchestrator

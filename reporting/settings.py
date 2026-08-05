@@ -604,6 +604,15 @@ CHAT_LLM_PROMPT_CACHE_MIN_TOKENS = int_env("CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 1
 # The cost is a larger tool list up front, cached after the first call.
 # Set false to disclose only on render.
 CHAT_LLM_DISCLOSE_SKILL_TOOLS = bool_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+# Log which part of a request (model, system prompt, tools, messages) changed
+# since the previous call of the same kind, which is what a prompt-cache miss
+# never tells you on its own. Off by default: it is a debugging aid, and it
+# token-counts every component of every call. Anthropic ships an equivalent as a
+# beta, but its beta header is one our LiteLLM version builds from feature
+# detection and will not take from a caller, so the request is rejected outright
+# -- and this works on providers with automatic prefix caching too, where no
+# such feature exists.
+CHAT_LLM_CACHE_DIAGNOSTICS = bool_env("CHAT_LLM_CACHE_DIAGNOSTICS", False)
 # ...but only while that list stays small enough to be worth it. Skills are
 # user-authored, so one can declare a great many tools -- at which point
 # disclosing them up front is just binding them all on every call, which is what

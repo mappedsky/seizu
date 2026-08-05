@@ -1469,6 +1469,12 @@ async def _run_llm_tool_turn(
         # Placed here, on the assembled request, for the same reason the window
         # is checked here: it is the only scope holding the whole thing.
         cached_system, cached_messages = chat_context.with_cache_breakpoints(model, system_prompt, messages)
+        # Same scope, same reason: what a cache miss will not tell you is which
+        # part of the request moved. Keyed per phase and thread so consecutive
+        # calls of the same kind are what get compared.
+        chat_context.log_cache_divergence(
+            f"{_thread_id_from_config(config)}:{phase}", model, system_prompt, tool_schemas, messages
+        )
         async for chunk in runnable.astream(
             [SystemMessage(content=cached_system), *cached_messages],
             config=config,
@@ -3209,6 +3215,11 @@ def _bypass_confirmations_from_config(config: RunnableConfig) -> bool:
     if not isinstance(configurable, dict):
         return False
     return configurable.get("bypass_confirmations") is True
+
+
+def _thread_id_from_config(config: RunnableConfig) -> str:
+    configurable = config.get("configurable")
+    return str(configurable.get("thread_id") or "") if isinstance(configurable, dict) else ""
 
 
 def _headless_from_config(config: RunnableConfig) -> bool:

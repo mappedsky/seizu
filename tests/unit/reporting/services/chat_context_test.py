@@ -349,3 +349,96 @@ def test_a_non_anthropic_message_list_is_left_alone(mocker):
 
     assert chat_context.with_message_cache_breakpoints(_model("deepseek/deepseek-chat"), messages) is messages
     assert chat_context.with_message_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), []) == []
+
+
+# --- Cache divergence diagnostics ----------------------------------------------
+
+
+@pytest.fixture
+def _diagnostics_on(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_CACHE_DIAGNOSTICS", True)
+    mocker.patch("litellm.token_counter", side_effect=lambda model, text: max(1, len(text)))
+    chat_context._FINGERPRINTS.clear()
+    yield
+    chat_context._FINGERPRINTS.clear()
+
+
+def test_the_first_call_has_nothing_to_compare_against(_diagnostics_on):
+    assert chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("one")]) is None
+
+
+def test_an_unchanged_request_reports_no_divergence(_diagnostics_on):
+    args = (_model(), "sys", "tools", [_human("one")])
+    chat_context.diagnose_cache_divergence("k", *args)
+
+    assert chat_context.diagnose_cache_divergence("k", *args) is None
+
+
+def test_each_component_is_named_when_it_changes(_diagnostics_on):
+    """The four parts a request has, which are the four a cache miss can blame."""
+    base = (_model(), "sys", "tools", [_human("one"), _human("two")])
+
+    for key, changed, expected in (
+        ("model", (_model("other/model"), "sys", "tools", base[3]), "model_changed"),
+        ("system", (_model(), "sys CHANGED", "tools", base[3]), "system_changed"),
+        ("tools", (_model(), "sys", "tools CHANGED", base[3]), "tools_changed"),
+        ("messages", (_model(), "sys", "tools", [_human("one"), _human("DIFFERENT")]), "messages_changed"),
+    ):
+        chat_context.diagnose_cache_divergence(key, *base)
+        result = chat_context.diagnose_cache_divergence(key, *changed)
+        assert result is not None and result[0] == expected, key
+        assert result[1] > 0  # tokens behind the divergence
+
+
+def test_appending_to_the_conversation_is_not_a_divergence(_diagnostics_on):
+    """Growth is the normal shape of a tool loop and must not read as a miss."""
+    chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("one")])
+
+    grown = [_human("one"), _human("two"), _human("three")]
+    assert chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", grown) is None
+
+
+def test_truncating_history_is_reported(_diagnostics_on):
+    """Dropping the oldest turns rewrites the prefix rather than extending it,
+    which is exactly the sliding-window behaviour that costs a cache hit."""
+    chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("a"), _human("b"), _human("c")])
+
+    result = chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("a"), _human("b")])
+
+    assert result is not None and result[0] == "messages_truncated"
+
+
+def test_only_the_earliest_divergence_is_reported(_diagnostics_on):
+    """Later ones hide behind it; fixing the first is what changes anything."""
+    chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("one")])
+
+    result = chat_context.diagnose_cache_divergence("k", _model(), "sys CHANGED", "tools CHANGED", [_human("X")])
+
+    assert result is not None and result[0] == "tools_changed"  # tools precede the system prompt
+
+
+def test_separate_keys_do_not_compare_against_each_other(_diagnostics_on):
+    """A worker step and a synthesizer call have different prompts by design;
+    comparing them would report a divergence on every call."""
+    chat_context.diagnose_cache_divergence("worker", _model(), "worker sys", "tools", [_human("one")])
+
+    assert chat_context.diagnose_cache_divergence("synth", _model(), "synth sys", "tools", [_human("one")]) is None
+
+
+def test_nothing_is_recorded_while_diagnostics_are_off(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_CACHE_DIAGNOSTICS", False)
+    chat_context._FINGERPRINTS.clear()
+
+    assert chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("one")]) is None
+    assert chat_context._FINGERPRINTS == {}
+
+
+def test_fingerprints_are_hashes_and_bounded(_diagnostics_on, mocker):
+    """Never prompt content, and never unbounded: this runs per call."""
+    mocker.patch.object(chat_context, "_FINGERPRINT_MAX", 4)
+    for index in range(10):
+        chat_context.diagnose_cache_divergence(f"k{index}", _model(), f"secret-{index}", "tools", [_human("body")])
+
+    assert len(chat_context._FINGERPRINTS) <= 4
+    stored = next(iter(chat_context._FINGERPRINTS.values()))
+    assert "secret" not in stored.system

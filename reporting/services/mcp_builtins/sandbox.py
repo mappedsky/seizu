@@ -648,6 +648,11 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         """
         if not isinstance(normalized, list):
             return normalized
+        # The sub-agent's system prompt and tools are inside the list and the
+        # bound model, so the message sequence is the whole fingerprint here.
+        chat_context.log_cache_divergence(
+            f"sandbox:{chat_budget.current_budget_scope() or 'delegation'}", self._model, "", "", normalized
+        )
         return chat_context.with_message_cache_breakpoints(self._model, normalized)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
