@@ -2913,12 +2913,12 @@ def test_build_capability_context_progressive_disclosure_includes_always_disclos
         )
     ]
 
-    context = chat_graph.build_capability_context(skills, None, always_disclosed_tools=always_disclosed)
+    context = chat_graph.build_capability_context(skills, None, available_tools=always_disclosed)
 
     assert "progressive disclosure is enabled" in context
     assert "Available skills:" in context
     assert "investigation__triage" in context
-    assert "Always-available tools:" in context
+    assert "Tools available now:" in context
     assert "sandbox__delegate" in context
     assert "Available tools:" not in context
 
@@ -2932,16 +2932,16 @@ def test_build_capability_context_progressive_disclosure_no_skills_only_always_d
         )
     ]
 
-    context = chat_graph.build_capability_context([], None, always_disclosed_tools=always_disclosed)
+    context = chat_graph.build_capability_context([], None, available_tools=always_disclosed)
 
     assert "progressive disclosure is enabled" in context
-    assert "Always-available tools:" in context
+    assert "Tools available now:" in context
     assert "sandbox__delegate" in context
     assert "Available skills:" not in context
 
 
 def test_build_capability_context_progressive_disclosure_empty_returns_empty():
-    context = chat_graph.build_capability_context([], None, always_disclosed_tools=[])
+    context = chat_graph.build_capability_context([], None, available_tools=[])
     assert context == ""
 
 
@@ -3617,3 +3617,179 @@ async def test_chat_graph_detects_a_dishonest_stop_on_the_single_agent_path(mock
     assert {"kind": "finish_reason", "finish_reason": "length"} in chunks
     streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
     assert "hit its output limit" in streamed
+
+
+# ---------------------------------------------------------------------------
+# Sandbox and session memory across turns
+# ---------------------------------------------------------------------------
+
+
+def _memory_graph(mocker, model):
+    from langgraph.checkpoint.memory import MemorySaver
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    mocker.patch("reporting.services.chat_graph.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
+    mocker.patch("reporting.services.chat_graph.mcp_runtime.list_tools_for_user", return_value=[])
+    return chat_graph.build_chat_graph(MemorySaver())
+
+
+async def _drive(graph, thread_id: str, text: str) -> None:
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content=text)]},
+        {"configurable": {"thread_id": thread_id, "current_user": _user()}},
+        stream_mode="custom",
+    ):
+        pass
+
+
+async def test_a_turn_hands_its_sandbox_to_the_next_turn_of_the_same_thread(mocker):
+    """The follow-up turn resumes the sandbox rather than starting on empty disk.
+
+    Without this a turn that built on the previous answer re-ran its queries and
+    re-derived its findings, on top of doing its own work.
+    """
+    started: list[dict[str, Any]] = []
+    real_start = chat_graph.sandbox_session.start_sandbox_session
+
+    def _record_start(**kwargs):
+        started.append(kwargs)
+        return real_start(**kwargs)
+
+    mocker.patch("reporting.services.chat_graph.sandbox_session.start_sandbox_session", _record_start)
+    mocker.patch(
+        "reporting.services.chat_graph.sandbox_session.close_sandbox_session",
+        mocker.AsyncMock(return_value="sbx-1"),
+    )
+    graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
+
+    await _drive(graph, "thread-sandbox-carry", "first question")
+    await _drive(graph, "thread-sandbox-carry", "follow-up question")
+
+    assert started[0]["resume_sandbox_id"] == ""
+    assert started[1]["resume_sandbox_id"] == "sbx-1"
+
+
+async def test_a_turn_that_broke_does_not_leave_a_paused_sandbox(mocker):
+    """Nothing would store the resume id, so the sandbox has to be destroyed."""
+    closes: list[Any] = []
+
+    async def _close(**kwargs):
+        closes.append(kwargs)
+        return None
+
+    mocker.patch("reporting.services.chat_graph.sandbox_session.close_sandbox_session", _close)
+    mocker.patch(
+        "reporting.services.chat_graph.chat_agent_node",
+        mocker.AsyncMock(side_effect=RuntimeError("turn blew up")),
+    )
+
+    with pytest.raises(RuntimeError, match="turn blew up"):
+        await chat_graph._chat_agent_node_with_session({"messages": []}, {})
+
+    assert closes == [{"suspend": False}]
+
+
+async def test_earlier_turns_findings_reach_the_next_turns_prompt(mocker):
+    """The model deciding whether to delegate is the one that has to know."""
+    model = _ToolCallingFakeModel([AIMessageChunk(content="done")])
+    graph = _memory_graph(mocker, model)
+
+    async for _ in graph.astream(
+        {
+            # A real follow-up turn: the first exchange is in the history, so
+            # the turn number derived from it is 2.
+            "messages": [
+                HumanMessage(content="first question"),
+                AIMessage(content="first answer"),
+                HumanMessage(content="follow-up"),
+            ],
+            "sandbox_id": "sbx-1",
+            "session_memory": {
+                "turn": 1,
+                "episodes": [{"task": "count CVEs", "outcome": "There are 412 CVE nodes.", "turn": 1}],
+                "receipts": [
+                    {
+                        "path": "/tmp/seizu_results/graph__query_001.json",
+                        "source": "graph__query",
+                        "purpose": "every critical CVE",
+                        "sandbox_id": "sbx-1",
+                        "turn": 1,
+                        "rows": 412,
+                        "columns": ["cve_id"],
+                    }
+                ],
+            },
+        },
+        {"configurable": {"thread_id": "thread-digest", "current_user": _user()}},
+        stream_mode="custom",
+    ):
+        pass
+
+    system = next(m.content for m in model.inputs[0] if isinstance(m, SystemMessage))
+    assert "graph__query_001.json" in system
+    assert "412 CVE nodes" in system
+    # Fenced: it reports what graph data said, so it can carry that data's text.
+    assert "Security boundary" in system
+
+
+async def test_the_turns_memory_is_written_back_to_the_thread(mocker):
+    graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
+    config = {"configurable": {"thread_id": "thread-memory-writeback", "current_user": _user()}}
+
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content="hello")]},
+        config,
+        stream_mode="custom",
+    ):
+        pass
+
+    snapshot = await graph.aget_state(config)
+    # Written even when empty, so the next turn reads the current shape rather
+    # than re-parsing a form an older build wrote.
+    assert snapshot.values["session_memory"] == {"turn": 1, "episodes": [], "receipts": []}
+
+
+def test_a_headless_run_never_keeps_its_sandbox(mocker):
+    """A scheduled chat gets a new thread per run, so a suspended sandbox from
+    one run is never resumed by anything — one leaked sandbox per run."""
+    mocker.patch("reporting.settings.SANDBOX_SESSION_PERSIST", True)
+
+    assert chat_graph.sandbox_persistence_allowed({"configurable": {}}) is True
+    assert chat_graph.sandbox_persistence_allowed({"configurable": {"headless": True}}) is False
+
+    mocker.patch("reporting.settings.SANDBOX_SESSION_PERSIST", False)
+    assert chat_graph.sandbox_persistence_allowed({"configurable": {}}) is False
+
+
+def test_the_system_prompt_tells_the_model_to_reuse_before_re_fetching(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_SYSTEM_PROMPT", "")
+    prompt = chat_graph.build_system_prompt("openai")
+
+    assert "Reuse what this conversation has already gathered before fetching anything." in prompt
+    # And when re-fetching *is* right, so the instruction cannot be read as
+    # "answer from memory instead of doing the work you were asked to do".
+    assert "truncated or failed" in prompt
+    assert "may have changed since" in prompt
+
+
+def test_the_sandbox_note_says_earlier_turns_files_are_still_there(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_SYSTEM_PROMPT", "")
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", True)
+
+    prompt = chat_graph.build_system_prompt("openai")
+    assert "shared by this whole conversation" in prompt
+    assert "read that file instead of" in prompt
+
+    mocker.patch("reporting.settings.SANDBOX_ENABLED", False)
+    assert "shared by this whole conversation" not in chat_graph.build_system_prompt("openai")
+
+
+def test_the_capability_context_labels_tools_as_available_now(mocker):
+    """The list is always-on tools *plus* whatever earlier turns unlocked, so
+    "always available" would mislabel half of it."""
+    tools = [Tool(name="sandbox__delegate", description="Delegate", inputSchema={"type": "object"})]
+    context = chat_graph.build_capability_context([], None, available_tools=tools)
+
+    assert "Tools available now:" in context
+    assert "sandbox__delegate" in context

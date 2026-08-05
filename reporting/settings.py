@@ -638,6 +638,19 @@ CHAT_EPISODIC_RECALL_MAX_CHARS = int_env("CHAT_EPISODIC_RECALL_MAX_CHARS", 4_000
 # Entries retained before the oldest are shed. Bounds memory and keeps recall
 # relevant: recent sub-agents cover ground the next one is likeliest to repeat.
 CHAT_EPISODIC_MAX_ENTRIES = int_env("CHAT_EPISODIC_MAX_ENTRIES", 20)
+# The same carry one scope out: what earlier *turns* of the conversation already
+# established, held in the thread's checkpoint. Without it a follow-up turn
+# re-ran the previous turn's queries on top of its own work, because nothing
+# said they had been run. Entries are sub-agent task/outcome pairs; receipts are
+# the files earlier turns left in the (now persistent) sandbox, which is the
+# difference between reading data and fetching it again.
+CHAT_SESSION_MEMORY_MAX_ENTRIES = int_env("CHAT_SESSION_MEMORY_MAX_ENTRIES", 30)
+CHAT_SESSION_MEMORY_MAX_RECEIPTS = int_env("CHAT_SESSION_MEMORY_MAX_RECEIPTS", 40)
+# Budget for the same material in the *top-level* agent's prompt (planner,
+# worker, single-agent loop) rather than a sub-agent's. Smaller, because that
+# model needs to know the data exists in order not to plan a re-fetch, not to
+# work with it. Set 0 to disable the digest without disabling the carry.
+CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS = int_env("CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS", 2_000)
 # Corrective retries when a worker ends a turn without calling the sentinel that
 # submits its step result. A step ends on that explicit call, never on the model
 # simply going quiet, so a plain-text turn is a protocol violation the worker
@@ -816,9 +829,7 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # never reads the rows itself. Still finite -- write_file takes a string, so the
 # whole result materializes in the Seizu process before reaching the sandbox,
 # and an unbounded query would be a memory event here rather than there.
-# Lifetime of the sandbox shared by a step's delegations. Longer than
-# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox now
-# has to outlive a whole step; the provider would otherwise reap it mid-step.
+#
 # Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
 # preview_file, which returns files at or under this size whole and otherwise
 # only shape -- size, line count, JSON structure, columns -- plus the beginning,
@@ -836,7 +847,20 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # a result written out precisely to keep it out of context could be read
 # straight back into it. Set 0 for read_file if that trade is not wanted.
 SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
+
+# Lifetime of the sandbox shared by a turn's delegations. Longer than
+# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox has
+# to outlive a whole turn; the provider would otherwise reap it mid-turn.
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
+# Suspend the sandbox between turns instead of destroying it, and resume it on
+# the next turn of the same thread. What it buys: a follow-up turn finds the
+# data earlier turns fetched still on disk, so it reads files instead of
+# re-running their queries -- the dominant cost in a measured multi-turn run.
+# What it costs: untrusted code persists for the life of a conversation rather
+# than a turn, and a paused sandbox consumes provider-side storage until the
+# thread is deleted or the provider's retention reaps it. Set false to go back
+# to a sandbox per turn.
+SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 

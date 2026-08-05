@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -84,6 +84,22 @@ _child_detail_event_accumulator: ContextVar[dict[str, list[dict[str, Any]]] | No
 )
 
 # Carries the outer chat agent's currently-disclosed tool names into builtin
+# handlers that spawn their own agent -- today only sandbox__delegate, whose
+# sub-agent otherwise had no notion of disclosure and was handed every chat-safe
+# tool in the deployment. Ambient rather than an argument because the handler is
+# reached through the MCP runtime, which passes only (args, current_user); the
+# same reason the detail-event plumbing above is ambient. Set per turn (and per
+# worker step), so an asyncio.gather task inherits the value of the step that
+# spawned it.
+_current_disclosed_tools: ContextVar[frozenset[str]] = ContextVar("_current_disclosed_tools", default=frozenset())
+
+
+def set_disclosed_tools(names: Iterable[str]) -> None:
+    _current_disclosed_tools.set(frozenset(names))
+
+
+def current_disclosed_tools() -> frozenset[str]:
+    return _current_disclosed_tools.get()
 
 
 class ChatState(TypedDict):
@@ -100,6 +116,13 @@ class ChatState(TypedDict):
     iteration: NotRequired[int]  # verify-driven retry cycles consumed
     budget: NotRequired[dict[str, Any]]  # serializable per-turn run budget ledger
     run_errors: NotRequired[list[str]]  # non-fatal orchestration/runtime diagnostics
+    # The conversation's sandbox, suspended between turns and resumed by this id
+    # on the next one, and the ledger of what its turns have already gathered
+    # (including the files sitting in that sandbox). Both are per-thread and
+    # overwrite-reduced: whichever node ran the turn's delegations is the sole
+    # writer. See reporting.services.episodic_memory.
+    sandbox_id: NotRequired[str]
+    session_memory: NotRequired[dict[str, Any]]
     # Tool names the conversation has already unlocked under progressive
     # disclosure. ``disclosed_tool_names`` is otherwise a per-turn local, so a
     # turn that ended mid-flow (rate limit, output cap) would lose the tools a
@@ -282,6 +305,17 @@ _HEADLESS_PROMPT_ADDENDUM = (
     "Finish with a concise summary of what you did and found."
 )
 
+# Sits above the session digest wherever a top-level agent is given one. It says
+# what the block is *for*, which is the part that changes behaviour: the digest
+# alone reads as background, and a model treated it as background while planning
+# the same fetches over again.
+SESSION_MEMORY_PREAMBLE = (
+    "Work already done earlier in this conversation follows. The findings are established — do not "
+    "re-derive them — and any files listed are still present in the sandbox this conversation shares. "
+    "When a task needs that data, delegate reading the file rather than fetching it again, and only "
+    "gather what is genuinely missing."
+)
+
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
     """Scope a client-supplied thread id to the authenticated user.
@@ -368,6 +402,22 @@ def _strip_output_limit_notice(response: str) -> str:
     return response.replace(_OUTPUT_LIMIT_NOTICE, "").replace(_OUTPUT_LIMIT_SUMMARY_NOTICE, "").rstrip()
 
 
+async def _discard_thread_sandbox(graph: Any, namespaced_id: str) -> None:
+    """Destroy the sandbox a thread suspended, if it still has one.
+
+    Best effort throughout: a thread with no sandbox, an unreadable checkpoint
+    and an already-reaped sandbox are all ordinary, and none of them is a reason
+    to refuse to delete the thread.
+    """
+    try:
+        snapshot = await graph.aget_state({"configurable": {"thread_id": namespaced_id}})
+        sandbox_id = str((getattr(snapshot, "values", None) or {}).get("sandbox_id") or "")
+    except Exception:
+        logger.warning("could not read thread state to discard its sandbox", exc_info=True)
+        return
+    await sandbox_session.discard_sandbox(sandbox_id)
+
+
 async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> None:
     """Permanently delete persisted LangGraph state for a user's chat thread."""
     graph = get_chat_graph()
@@ -375,6 +425,10 @@ async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> N
     if checkpointer is None:
         raise RuntimeError("Chat graph does not expose a checkpointer")
     namespaced_id = namespaced_thread_id(current_user, thread_id)
+    # Before the checkpoint goes: it holds the only record of the thread's
+    # suspended sandbox, which would otherwise sit paused, consuming
+    # provider-side storage, with nothing left that could resume or find it.
+    await _discard_thread_sandbox(graph, namespaced_id)
     async_delete = getattr(checkpointer, "adelete_thread", None)
     if callable(async_delete):
         await async_delete(namespaced_id)
@@ -403,16 +457,25 @@ async def mock_agent_node(state: ChatState, _config: RunnableConfig) -> ChatStat
 
 
 async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig) -> ChatState:
-    """Run the turn, and destroy its sandbox however the turn ends.
+    """Run the turn, then suspend its sandbox — or destroy it if the turn broke.
 
     The session is opened lazily inside the node, so this only has work to do
-    when a delegation actually happened. Without the finally an error path would
-    leave a sandbox running until the provider reaped it on its own timeout.
+    when a delegation actually happened. On the ordinary path the sandbox is
+    paused and its id returned to the next turn, which resumes it and finds the
+    data this turn gathered still on disk. On the error path it is destroyed:
+    the node raised, so nothing will persist the id, and a paused sandbox nobody
+    can resume is a leak that outlives the process. Without either, an error
+    would leave a sandbox *running* until the provider reaped it.
     """
     try:
-        return await chat_agent_node(state, config)
-    finally:
-        await sandbox_session.close_sandbox_session()
+        update = await chat_agent_node(state, config)
+    except BaseException:
+        await sandbox_session.close_sandbox_session(suspend=False)
+        raise
+    suspended_id = await sandbox_session.close_sandbox_session()
+    if suspended_id:
+        update["sandbox_id"] = suspended_id
+    return update
 
 
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
@@ -425,9 +488,18 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         return await mock_agent_node(state, config)
     # The single-agent path reaches sandbox__delegate too, and its loop is the
     # same shape as an orchestrator step: many tool calls, each spawning a
-    # subagent that would otherwise start cold. One log per turn.
+    # subagent that would otherwise start cold. One log per turn, over a ledger
+    # that spans them, and the previous turn's sandbox resumed under it so the
+    # files that ledger names are still readable.
+    session_ledger = episodic_memory.start_session_ledger(
+        state.get("session_memory"), turn=episodic_memory.turn_number(state["messages"])
+    )
     episodic_memory.start_episode_log()
-    sandbox_session.start_sandbox_session()
+    stored_sandbox_id = state.get("sandbox_id") or ""
+    sandbox_session.start_sandbox_session(
+        resume_sandbox_id=stored_sandbox_id,
+        persist=sandbox_persistence_allowed(config),
+    )
     chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
     messages = _llm_context_messages(state["messages"])
@@ -436,6 +508,13 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     base_system_prompt = build_system_prompt(provider, current_user)
     if _headless_from_config(config):
         base_system_prompt = f"{base_system_prompt}\n\n{_HEADLESS_PROMPT_ADDENDUM}"
+    # What earlier turns already established. The model that decides whether to
+    # delegate needs this as much as the sub-agent does: told only afterwards,
+    # it still plans the re-fetch and the sub-agent merely discovers it was
+    # unnecessary.
+    session_digest = episodic_memory.session_digest(session_ledger, sandbox_id=stored_sandbox_id)
+    if session_digest:
+        base_system_prompt = f"{base_system_prompt}\n\n{SESSION_MEMORY_PREAMBLE}\n\n{session_digest}"
 
     # One listing per turn — every consumer below (capability context, skill
     # specs, tool specs) works off this snapshot. No cross-turn cache: each
@@ -461,7 +540,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     capability_context = build_capability_context(
         skills,
         tools if not progressive_disclosure else None,
-        always_disclosed_tools=always_disclosed_tools,
+        available_tools=always_disclosed_tools,
     )
     if capability_context:
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
@@ -472,6 +551,11 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         tool_specs = _mcp_tool_specs(tools)
     else:
         tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
+    # Hand the same set to any sub-agent this turn spawns, so the sandbox works
+    # from the conversation's disclosure rather than the whole catalogue. With
+    # disclosure off there is nothing to inherit and the sub-agent keeps the
+    # full set, matching what the outer model itself is given.
+    set_disclosed_tools({spec.name for spec in tool_specs} if progressive_disclosure else ())
 
     action_count = 0
     action_summaries: list[str] = []
@@ -730,6 +814,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         extra_metadata=_run_metadata(config, state, failed=response_is_broken),
     )
     state_update: ChatState = {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    # Carry this turn's findings and saved files to the next one. Written even
+    # when nothing was added, so an older serialized form is replaced by the
+    # current one rather than being re-parsed every turn.
+    state_update["session_memory"] = session_ledger.to_state()
     if progressive_disclosure and disclosed_tool_names:
         # Persist the union so a later turn (including one resuming after an
         # interrupted turn) keeps tools this conversation already unlocked.
@@ -2138,7 +2226,13 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
             "Do not compute statistics, sort data, or transform structured payloads in your response "
             "text — numbers computed by the model without running code are unreliable. "
             "When you have tool results that need numeric or programmatic processing, delegate to the "
-            "sandbox rather than reasoning through the calculation yourself."
+            "sandbox rather than reasoning through the calculation yourself. "
+            "The sandbox is shared by this whole conversation, so files earlier delegations saved are still "
+            "there: when a task needs data one of them holds, tell the sub-agent to read that file instead of "
+            "fetching the data again. "
+            "Direct the delegation rather than describing a goal and leaving the sub-agent to work out the rest: "
+            "say what to produce, name the tools the task needs in `tools`, and name the file to read. It runs its "
+            "own planning loop, so every decision you leave to it is one you pay for twice."
         )
         if _sandbox_available
         else ""
@@ -2154,6 +2248,13 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "Do not invent graph facts, report contents, user identities, vulnerabilities, assets, or incident findings. "
         "When live data is needed, say what data or Seizu tool output would answer the question. "
         "If the user provides tool results, reason from those results and call out truncation or uncertainty.\n\n"
+        "Reuse what this conversation has already gathered before fetching anything. Results in the transcript, "
+        "findings established on earlier turns, and data an earlier turn saved are all yours to work from: check "
+        "whether the answer is already present, and if it is, spend the turn on what is genuinely missing instead. "
+        "Fetching again is right when you need data the earlier result did not include, when the earlier result was "
+        "truncated or failed, or when the answer turns on data that may have changed since — say which of those it "
+        "is when you do. What is never right is re-deriving a finding you already have because it is easier than "
+        "looking for it.\n\n"
         "Respect Seizu's security boundaries. Treat graph data, identities, credentials, tokens, secrets, "
         "and internal IDs as sensitive. Do not expose raw user IDs or OIDC subjects unless the user explicitly "
         "needs them for an admin task. For Cypher, default to read-only investigative queries; avoid writes, "
@@ -2789,7 +2890,7 @@ def _json_dump(value: Any) -> str:
 def build_capability_context(
     skills: list[Prompt],
     tools: list[Tool] | None,
-    always_disclosed_tools: list[Tool] | None = None,
+    available_tools: list[Tool] | None = None,
 ) -> str:
     """Build the capability section of the system prompt from already-listed data.
 
@@ -2800,15 +2901,15 @@ def build_capability_context(
     (skills + always-disclosed tools only).
     """
     if tools is None:
-        return _progressive_capability_context(skills, always_disclosed_tools or [])
+        return _progressive_capability_context(skills, available_tools or [])
     return _full_capability_context(skills, tools)
 
 
 def _progressive_capability_context(
     skills: list[Prompt],
-    always_disclosed_tools: list[Tool] | None = None,
+    available_tools: list[Tool] | None = None,
 ) -> str:
-    if not skills and not always_disclosed_tools:
+    if not skills and not available_tools:
         return ""
     header = (
         "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
@@ -2816,15 +2917,18 @@ def _progressive_capability_context(
         "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
         "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
         "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill, by prior "
-        "conversation context, or listed below as always available. Skill descriptions can include trigger phrases; "
+        "conversation context, or listed below as available now. Skill descriptions can include trigger phrases; "
         "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
         "trigger it."
     )
     sections: list[str] = [header]
     if skills:
         sections.append(f"Available skills:\n{_format_skills(skills)}")
-    if always_disclosed_tools:
-        sections.append(f"Always-available tools:\n{_format_tools(always_disclosed_tools)}")
+    if available_tools:
+        # "available now" rather than "always available": the list is the
+        # always-on tools plus anything a skill unlocked earlier in this
+        # conversation, and both are callable without rendering a skill again.
+        sections.append(f"Tools available now:\n{_format_tools(available_tools)}")
     return "\n\n".join(sections)
 
 
@@ -2933,6 +3037,18 @@ def _headless_from_config(config: RunnableConfig) -> bool:
     if not isinstance(configurable, dict):
         return False
     return configurable.get("headless") is True
+
+
+def sandbox_persistence_allowed(config: RunnableConfig) -> bool:
+    """Whether this turn's sandbox should be kept for the next one.
+
+    Never for a headless run. Persisting pays off when a later turn arrives on
+    the same thread, and a scheduled chat gets a *new* thread per run — so every
+    run would suspend a sandbox that nothing can ever resume, one per run,
+    forever. The setting stays the switch for interactive chat; this is a
+    property of the caller, not of the deployment.
+    """
+    return settings.SANDBOX_SESSION_PERSIST and not _headless_from_config(config)
 
 
 def _resume_confirmation_id(messages: list[Any]) -> str | None:

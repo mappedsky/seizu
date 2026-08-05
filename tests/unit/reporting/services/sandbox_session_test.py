@@ -142,3 +142,114 @@ async def test_opening_after_close_is_refused_rather_than_orphaned(mocker):
     with pytest.raises(RuntimeError, match="closed"):
         await session.backend()
     assert opened == []
+
+
+def _fake_persistent_open_backend(calls: list[dict[str, Any]]) -> Any:
+    """An open_backend that records how it was opened and how it was closed.
+
+    Mirrors the real one closely enough to matter: it honours resume_sandbox_id
+    (so the id comes back unchanged) and evaluates suspend_on_exit on the way
+    out, which is where the suspend-or-kill decision actually lives.
+    """
+
+    @asynccontextmanager
+    async def _open(**kwargs: Any):
+        call: dict[str, Any] = {"kwargs": kwargs}
+        calls.append(call)
+        backend = MagicMock()
+        backend.sandbox_id = kwargs.get("resume_sandbox_id") or f"sbx-{len(calls)}"
+        try:
+            yield backend
+        finally:
+            suspend = kwargs.get("suspend_on_exit")
+            call["suspended"] = suspend() if callable(suspend) else bool(suspend)
+
+    return _open
+
+
+async def test_a_persistent_session_hands_back_the_id_to_resume(mocker):
+    """The whole point of suspending: the next turn opens the same disk."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(persist=True)
+    await session.backend()
+    resume_id = await sandbox_session.close_sandbox_session()
+
+    assert calls[0]["suspended"] is True
+    assert resume_id == "sbx-1"
+
+    # Next turn, same conversation.
+    sandbox_session.start_sandbox_session(resume_sandbox_id=resume_id, persist=True)
+    next_session = sandbox_session.current_sandbox_session()
+    assert next_session is not None
+    await next_session.backend()
+    assert calls[1]["kwargs"]["resume_sandbox_id"] == "sbx-1"
+    assert next_session.resumed is True
+    await sandbox_session.close_sandbox_session()
+
+
+async def test_a_turn_that_never_delegated_carries_no_id_forward(mocker):
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    sandbox_session.start_sandbox_session(persist=True)
+    # No sandbox was opened, so there is nothing to resume and nothing paused.
+    assert await sandbox_session.close_sandbox_session() is None
+    assert calls == []
+
+
+async def test_a_failed_turn_destroys_its_sandbox_rather_than_pausing_it(mocker):
+    """Nothing will store the id, so a paused sandbox would be unreachable."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(persist=True)
+    await session.backend()
+
+    assert await sandbox_session.close_sandbox_session(suspend=False) is None
+    assert calls[0]["suspended"] is False
+
+
+async def test_a_replacement_sandbox_is_not_reported_as_resumed(mocker):
+    """A resume that failed yields a different id, and the caller must be able
+    to tell -- every file an earlier turn recorded is gone with the old one."""
+
+    @asynccontextmanager
+    async def _open(**kwargs: Any):
+        backend = MagicMock()
+        backend.sandbox_id = "sbx-new"  # not the one that was asked for
+        yield backend
+
+    mocker.patch("reporting.services.sandbox_session.open_backend", _open)
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-old", persist=True)
+    await session.backend()
+
+    assert session.resumed is False
+    assert session.sandbox_id == "sbx-new"
+    assert await sandbox_session.close_sandbox_session() == "sbx-new"
+
+
+async def test_a_non_persistent_session_still_destroys_its_sandbox(mocker):
+    """The default outside a conversation turn: there is no thread to store an
+    id in, so a paused sandbox would leak."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(persist=False)
+    await session.backend()
+
+    assert await sandbox_session.close_sandbox_session() is None
+    assert calls[0]["suspended"] is False
+
+
+async def test_the_expected_id_is_the_resume_target_before_anything_opens(mocker):
+    """Prompts are built at the top of a turn, before any delegation."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-7", persist=True)
+    assert session.expected_sandbox_id == "sbx-7"
+    await session.backend()
+    assert session.expected_sandbox_id == "sbx-7"
+    await sandbox_session.close_sandbox_session()

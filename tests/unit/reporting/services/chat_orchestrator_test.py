@@ -541,29 +541,81 @@ def test_step_tool_specs_accepts_short_skill_id_and_reports_canonical():
     assert [s.name for s in specs] == ["github_security_investigations__github_org_security_overview"]
 
 
-async def test_worker_step_cannot_call_undisclosed_tool_under_progressive_disclosure(mocker):
-    # A bare tool step whose tool no skill has disclosed is not callable.
+async def test_a_tool_step_discloses_its_required_tool_instead_of_refusing_it(mocker):
+    """Previously this was refused. The refusal was wrong on both counts.
+
+    It gained nothing: progressive disclosure decides what a model is *shown*,
+    while RBAC (``chat_safe_only`` + ``chat:tools:call``) decides what it may
+    call, and the sandbox sub-agent -- reachable through the always-disclosed
+    ``sandbox__delegate`` -- already gets the whole chat-safe set regardless of
+    disclosure. And it cost real work: the planner reads the conversation's
+    session memory, where a tool an earlier turn used is recorded by name, so it
+    would require a tool the previous turn had just used successfully and the
+    step died before running.
+
+    Only the tool the plan explicitly requires is disclosed. Everything else
+    undisclosed stays out of the worker's list.
+    """
+    from langchain_core.messages import AIMessage
+
     sub_tool = chat_graph.ChatToolSpec(
         name="graph__query", kind="tool", description="run cypher", input_schema={"type": "object"}
     )
+    other = chat_graph.ChatToolSpec(
+        name="graph__schema", kind="tool", description="schema", input_schema={"type": "object"}
+    )
     step = _step("s1", action_kind="tool", required_action="graph__query", success_criteria="rows")
+
+    class _ScriptedToolModel:
+        def __init__(self, responses: list) -> None:
+            self.responses = responses
+            self.calls = 0
+            self.bound: list[Any] = []
+
+        def bind_tools(self, tools: Any) -> "_ScriptedToolModel":
+            self.bound.append(tools)
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            index = min(self.calls, len(self.responses) - 1)
+            self.calls += 1
+            yield self.responses[index]
+
+    model = _ScriptedToolModel(
+        [
+            AIMessage(content="", tool_calls=[{"name": "graph__query", "args": {}, "id": "c1"}]),
+            AIMessage(content="12 rows."),
+        ]
+    )
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        return [chat_graph.ToolCallResult(request=req, content='{"rows": 12}') for req in batch]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
 
     result = await chat_orchestrator._run_worker_step(
         step,
         plan=[step],
         results=[],
-        model=object(),  # never invoked: the contract fails before any model call
+        model=model,
         current_user=_user(),
         session_key="thread",
         config={"configurable": {}},
-        tool_specs=[sub_tool],
+        tool_specs=[sub_tool, other],
         disclosed_names=set(),
         progressive=True,
         writer=lambda event: None,
     )
 
-    assert result["output"] == ""
-    assert "not available" in result["execution_error"]
+    assert result.get("execution_error") in (None, "")
+    assert "graph__query" in result["tools_used"]
+    assert result["output"] == "12 rows."
+    # Carried forward, so dependent steps and later turns keep it.
+    assert result["disclosed_tools"] == ["graph__query"]
+    # ...and disclosure did not become a free-for-all: the tool the plan did not
+    # ask for is still absent from what the model was given.
+    bound_names = {getattr(tool, "name", tool.get("name") if isinstance(tool, dict) else "") for tool in model.bound[0]}
+    assert "graph__schema" not in bound_names
 
 
 async def test_worker_step_synthesizes_when_action_budget_exhausted(mocker):
@@ -2109,3 +2161,232 @@ async def test_closing_a_scope_drops_its_outstanding_reservations():
     assert controller.snapshot()["llm_calls"] == 0
     controller.open_scope("worker:s1", 600)
     await controller.reserve(estimated_input_tokens=500, estimated_output_tokens=0, scope="worker:s1")
+
+
+# --- Turn-level sandbox and session memory -------------------------------------
+
+
+async def test_every_step_of_a_batch_shares_one_sandbox_and_it_outlives_them(mocker):
+    """The sandbox belongs to the turn, not to a step.
+
+    Per-step sandboxes meant parallel steps could not share a file and nothing
+    reached the next turn, so a follow-up re-ran the previous turn's queries on
+    top of its own work.
+    """
+    seen: list[Any] = []
+
+    async def _worker(step: dict, **_kwargs: Any) -> dict:
+        session = chat_orchestrator.sandbox_session.current_sandbox_session()
+        seen.append(session)
+        assert session is not None
+        return {"step_id": step["id"], "goal": step["goal"], "output": "ok", "tools_used": []}
+
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    mocker.patch("reporting.services.chat_orchestrator._run_worker_step", side_effect=_worker)
+    mocker.patch("reporting.services.chat_orchestrator._worker_tool_specs", new_callable=AsyncMock, return_value=[])
+    mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=object())
+    closed = mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+        new_callable=AsyncMock,
+        return_value="sbx-9",
+    )
+
+    state = {
+        "messages": [HumanMessage(content="go")],
+        "plan": [
+            {"id": "s1", "goal": "a", "status": "pending", "depends_on": []},
+            {"id": "s2", "goal": "b", "status": "pending", "depends_on": []},
+        ],
+    }
+    update = await chat_orchestrator.dispatcher_node(state, {"configurable": {"current_user": _user()}})
+
+    assert len(seen) == 2 and seen[0] is seen[1]  # one session, both steps
+    assert closed.await_count == 1  # closed once, by the dispatcher
+    assert update["sandbox_id"] == "sbx-9"
+    assert update["session_memory"] == {"turn": 1, "episodes": [], "receipts": []}
+
+
+async def test_the_dispatcher_resumes_the_threads_sandbox(mocker):
+    started: list[dict[str, Any]] = []
+    real_start = chat_orchestrator.sandbox_session.start_sandbox_session
+
+    def _record_start(**kwargs: Any) -> Any:
+        started.append(kwargs)
+        return real_start(**kwargs)
+
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    mocker.patch("reporting.services.chat_orchestrator.sandbox_session.start_sandbox_session", _record_start)
+    mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+
+    await chat_orchestrator.dispatcher_node(
+        {"messages": [HumanMessage(content="go")], "plan": [], "sandbox_id": "sbx-prior"},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    assert started[0]["resume_sandbox_id"] == "sbx-prior"
+
+
+async def test_a_dispatcher_that_raised_destroys_its_sandbox(mocker):
+    """A paused sandbox whose id nobody stores outlives the process."""
+    closed = mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+    mocker.patch(
+        "reporting.services.chat_orchestrator._dispatch_batch",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("dispatch blew up"),
+    )
+
+    with pytest.raises(RuntimeError, match="dispatch blew up"):
+        await chat_orchestrator.dispatcher_node({"messages": [], "plan": []}, {})
+
+    closed.assert_awaited_once_with(suspend=False)
+
+
+def test_the_worker_prompt_carries_what_earlier_turns_established():
+    digest = "Established earlier: 412 CVE nodes."
+    prompt = chat_orchestrator._worker_system_prompt({"id": "s1", "goal": "g"}, digest)
+
+    assert digest in prompt
+    assert chat_graph.SESSION_MEMORY_PREAMBLE in prompt
+    # Absent by default, so a turn with no history pays nothing for it.
+    assert digest not in chat_orchestrator._worker_system_prompt({"id": "s1", "goal": "g"})
+
+
+# --- Disclosure of a tool the plan requires ------------------------------------
+
+
+def _undisclosed_tool_spec(name: str = "cve_analysis__get_recent_cves") -> Any:
+    return chat_graph.ChatToolSpec(
+        name=name,
+        kind="tool",
+        description="Recent CVEs",
+        input_schema={"type": "object"},
+    )
+
+
+async def test_a_tool_the_plan_requires_resolves_against_the_permitted_universe():
+    """Progressive disclosure decides what a model is shown, not what it may call.
+
+    Observed: the planner required `cve_analysis__get_recent_cves` — a tool the
+    *previous* turn had used successfully through a sandbox sub-agent, whose
+    pool is the whole chat-safe set rather than the disclosure subset — and the
+    step was blocked before running because no skill had disclosed it.
+    """
+    tool = _undisclosed_tool_spec()
+    step = _step("s1", action_kind="tool", required_action="cve_analysis__get_recent_cves")
+    specs, error = chat_orchestrator._step_tool_specs([tool], step)
+    assert error is None and [s.name for s in specs] == [tool.name]
+
+    # The disclosure-filtered pool does not contain it...
+    specs, error = chat_orchestrator._step_tool_specs([], step)
+    assert error is not None
+
+    # ...but it resolves against the full permitted universe, which is what the
+    # worker consults before deciding the step is impossible.
+    assert chat_orchestrator._required_action_spec([tool], step) is tool
+    assert chat_orchestrator._required_action_spec([], step) is None
+
+
+async def test_a_required_tool_that_does_not_exist_is_still_a_contract_error():
+    """The distinction that has to survive: undisclosed is fixable, absent is not."""
+    step = _step("s1", action_kind="tool", required_action="no_such__tool")
+    assert chat_orchestrator._required_action_spec([_undisclosed_tool_spec()], step) is None
+    _, error = chat_orchestrator._step_tool_specs([_undisclosed_tool_spec()], step)
+    assert error is not None and "no_such__tool" in error
+
+
+def test_required_action_spec_ignores_steps_that_require_nothing():
+    assert chat_orchestrator._required_action_spec([_undisclosed_tool_spec()], _step("s1")) is None
+    assert (
+        chat_orchestrator._required_action_spec([_undisclosed_tool_spec()], _step("s1", action_kind="answer")) is None
+    )
+    # A skill step never resolves to a tool spec, and vice versa.
+    skill_step = _step("s1", action_kind="skill", required_action="cve_analysis__get_recent_cves")
+    assert chat_orchestrator._required_action_spec([_undisclosed_tool_spec()], skill_step) is None
+
+
+async def test_the_planner_sees_tools_earlier_turns_unlocked(mocker):
+    """A tool a skill disclosed on a previous turn stays callable, so hiding it
+    from the planner hides a capability the conversation demonstrably has."""
+    from mcp.types import Tool
+
+    invoke = mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=ValueError("boom"),
+    )
+    mocker.patch("reporting.services.chat_orchestrator._list_chat_prompts", new_callable=AsyncMock, return_value=[])
+    mocker.patch(
+        "reporting.services.chat_orchestrator._list_chat_tools",
+        new_callable=AsyncMock,
+        return_value=[
+            Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", inputSchema={"type": "object"}),
+            Tool(name="never_disclosed__tool", description="Hidden", inputSchema={"type": "object"}),
+        ],
+    )
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    mocker.patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
+
+    await chat_orchestrator.planner_node(
+        {"messages": _prior_turn(), "disclosed_tools": ["cve_analysis__get_recent_cves"]},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    planner_system = invoke.await_args.args[1][0].content
+    assert "cve_analysis__get_recent_cves" in planner_system
+    # Undisclosed tools stay out: the point is to reflect what was unlocked, not
+    # to hand the planner the whole catalogue.
+    assert "never_disclosed__tool" not in planner_system
+
+
+def test_the_planner_is_told_to_plan_around_data_earlier_turns_saved():
+    prompt = chat_orchestrator._PLANNER_PROMPT
+    assert "do not add a step that re-fetches data" in prompt
+    # ...and told when a fresh fetch is still right, so it does not answer from
+    # stale memory instead of doing the work it was asked to do.
+    assert "genuinely missing, stale, or was truncated" in prompt
+
+
+async def test_a_worker_step_publishes_its_tools_to_its_sub_agents(mocker):
+    """A step's sub-agent may reach what the step may reach — no more.
+
+    Set per step, so a parallel step's disclosure never widens this one's.
+    """
+    from langchain_core.messages import AIMessage
+
+    seen: list[frozenset[str]] = []
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    other = chat_graph.ChatToolSpec(name="t__two", kind="tool", description="y", input_schema={"type": "object"})
+
+    class _PeekModel:
+        def bind_tools(self, _tools: Any) -> "_PeekModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            seen.append(chat_graph.current_disclosed_tools())
+            yield AIMessage(content="done")
+
+    await chat_orchestrator._run_worker_step(
+        _step("s1", action_kind="tool", required_action="t__one"),
+        plan=[],
+        results=[],
+        model=_PeekModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[spec, other],
+        disclosed_names=set(),
+        progressive=True,
+        writer=lambda _event: None,
+    )
+
+    assert "t__one" in seen[0]  # required by the step, so disclosed
+    assert "t__two" not in seen[0]  # nothing asked for it
+    chat_graph.set_disclosed_tools(())

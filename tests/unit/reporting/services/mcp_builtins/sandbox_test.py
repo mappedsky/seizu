@@ -58,6 +58,9 @@ def _make_fake_backend() -> MagicMock:
     backend.run_bash_streaming = AsyncMock(return_value="")
     backend.get_host = AsyncMock(return_value="host")
     backend.get_traffic_access_token = AsyncMock(return_value="")
+    # Assigned rather than left to MagicMock's auto-attributes: the protocol
+    # check reads members with getattr_static, which only sees what was set.
+    backend.sandbox_id = "sandbox-test"
     return backend
 
 
@@ -444,9 +447,15 @@ async def test_handler_persists_inner_tool_events_through_real_agent() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_build_seizu_tools_returns_all_permitted_tools() -> None:
-    # The sandbox inner agent receives all chat-safe tools regardless of what
-    # the outer model's progressive disclosure state happens to be.
+async def test_build_seizu_tools_binds_the_core_and_offers_the_rest_by_search() -> None:
+    """The inner agent used to be handed every chat-safe tool in the deployment.
+
+    Measured at 58 tools and ~3,800 tokens of schema re-sent on every inner LLM
+    call -- about a fifth of a delegation's spend -- to describe a catalogue a
+    delegation typically uses one or two of. It now gets the read-only graph
+    core plus whatever the conversation disclosed, and reaches the rest through
+    find_seizu_tools/call_seizu_tool. RBAC is unchanged either way.
+    """
     fake_tools = [
         Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
         Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
@@ -454,8 +463,83 @@ async def test_build_seizu_tools_returns_all_permitted_tools() -> None:
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
         tools = await _build_seizu_tools(_current_user())
 
-    assert len(tools) == 2
-    assert {t.name for t in tools} == {"graph__query", "reports__get"}
+    assert {t.name for t in tools} == {"graph__query", "find_seizu_tools", "call_seizu_tool"}
+
+
+async def test_build_seizu_tools_binds_what_the_conversation_disclosed() -> None:
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="roles__list", description="Roles", inputSchema={"type": "object", "properties": {}}),
+    ]
+    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
+        tools = await _build_seizu_tools(_current_user(), disclosed=frozenset({"reports__get"}))
+
+    assert {t.name for t in tools} == {"graph__query", "reports__get", "find_seizu_tools", "call_seizu_tool"}
+
+
+async def test_naming_tools_on_the_delegation_narrows_as_well_as_widens() -> None:
+    """The delegating model knows the task, so naming the tools directs the
+    sub-agent instead of leaving it to work out which one to use -- and keeps
+    the disclosed set it does not need out of its context."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_cve", description="CVE", inputSchema={"type": "object", "properties": {}}),
+    ]
+    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
+        tools = await _build_seizu_tools(
+            _current_user(),
+            disclosed=frozenset({"reports__get"}),
+            requested=["cve_analysis__get_cve"],
+        )
+
+    names = {t.name for t in tools}
+    assert "cve_analysis__get_cve" in names
+    assert "graph__query" in names  # the core is always there
+    assert "reports__get" not in names  # disclosed, but not what this task needs
+
+
+async def test_a_requested_tool_that_does_not_exist_is_ignored_not_fatal() -> None:
+    """A delegating model that guesses a name should not break the delegation;
+    the RBAC-filtered listing stays the authority on what exists."""
+    fake_tools = [Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})]
+    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
+        tools = await _build_seizu_tools(_current_user(), requested=["no_such__tool"])
+
+    assert "graph__query" in {t.name for t in tools}
+
+
+async def test_an_unbound_tool_is_findable_and_callable() -> None:
+    """Narrowing must cost a round trip, not a capability."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(
+            name="cve_analysis__get_recent_cves",
+            description="Recent CVEs by severity",
+            inputSchema={"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []},
+        ),
+    ]
+    with (
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", AsyncMock(return_value=_outcome('{"rows": 1}'))),
+    ):
+        tools = await _build_seizu_tools(_current_user())
+        by_name = {t.name: t for t in tools}
+
+        found = await by_name["find_seizu_tools"].coroutine(query="recent cves")
+        assert "cve_analysis__get_recent_cves" in found
+
+        called = await by_name["call_seizu_tool"].coroutine(
+            name="cve_analysis__get_recent_cves", arguments_json='{"limit": 5}'
+        )
+        assert called == '{"rows": 1}'
+
+        # A bound tool is not reachable this way; it is already in the list.
+        assert "unknown tool" in await by_name["call_seizu_tool"].coroutine(name="graph__query")
+        assert "not valid JSON" in await by_name["call_seizu_tool"].coroutine(
+            name="cve_analysis__get_recent_cves", arguments_json="{oops"
+        )
 
 
 async def test_build_seizu_tools_coerces_integer_params() -> None:
@@ -474,10 +558,9 @@ async def test_build_seizu_tools_coerces_integer_params() -> None:
         },
     )
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[int_tool])):
-        tools = await _build_seizu_tools(_current_user())
+        tools = await _build_seizu_tools(_current_user(), requested=["my_toolset__search"])
 
-    assert len(tools) == 1
-    schema_cls = tools[0].args_schema
+    schema_cls = next(t for t in tools if t.name == "my_toolset__search").args_schema
     assert schema_cls is not None
     # Pydantic should coerce the LLM's string "10" to int 10.
     instance = schema_cls(query="test", limit="10")
@@ -814,22 +897,51 @@ def _capture_open_backend(fake_backend: MagicMock, captured: dict[str, Any]) -> 
     return _ctx
 
 
-def _patch_async_sandbox(created: dict[str, Any]) -> Any:
-    """Patch the lazily-imported e2b AsyncSandbox and record create() kwargs."""
+def _patch_async_sandbox(
+    created: dict[str, Any],
+    *,
+    connected: dict[str, Any] | None = None,
+    killed: list[Any] | None = None,
+    paused: list[Any] | None = None,
+    connect_error: Exception | None = None,
+) -> Any:
+    """Patch the lazily-imported e2b AsyncSandbox and record what it was asked to do."""
+    connected = {} if connected is None else connected
+    killed = [] if killed is None else killed
+    paused = [] if paused is None else paused
 
     class _FakeSandbox:
+        sandbox_id = "sandbox-fake"
+
         async def __aenter__(self) -> "_FakeSandbox":
             return self
 
         async def __aexit__(self, *_a: Any) -> bool:
             return False
 
+        async def kill(self) -> bool:
+            killed.append(self)
+            return True
+
+        async def pause(self) -> bool:
+            paused.append(self)
+            return True
+
     async def _create(**kwargs: Any) -> "_FakeSandbox":
         created.update(kwargs)
         return _FakeSandbox()
 
+    async def _connect(sandbox_id: str, **kwargs: Any) -> "_FakeSandbox":
+        connected.update({"sandbox_id": sandbox_id, **kwargs})
+        if connect_error is not None:
+            raise connect_error
+        resumed = _FakeSandbox()
+        resumed.sandbox_id = sandbox_id
+        return resumed
+
     module = MagicMock()
     module.AsyncSandbox.create = AsyncMock(side_effect=_create)
+    module.AsyncSandbox.connect = AsyncMock(side_effect=_connect)
     return patch.dict("sys.modules", {"e2b_code_interpreter": module})
 
 
@@ -851,6 +963,62 @@ async def test_open_backend_ignores_template_when_self_hosted() -> None:
             pass
     assert "template" not in created
     assert created["domain"] == "sandbox.internal"
+
+
+async def test_open_backend_destroys_the_sandbox_by_default() -> None:
+    """The old `async with sandbox` did this; nothing may quietly stop doing it."""
+    killed: list[Any] = []
+    paused: list[Any] = []
+    with _patch_async_sandbox({}, killed=killed, paused=paused):
+        async with open_backend(api_key="k", domain=""):
+            pass
+    assert len(killed) == 1
+    assert paused == []
+
+
+async def test_open_backend_suspends_instead_of_killing_when_asked() -> None:
+    """Suspension is what lets the next turn find this turn's data still there."""
+    killed: list[Any] = []
+    paused: list[Any] = []
+    with _patch_async_sandbox({}, killed=killed, paused=paused):
+        async with open_backend(api_key="k", domain="", suspend_on_exit=True):
+            pass
+    assert len(paused) == 1
+    assert killed == []
+
+
+async def test_open_backend_decides_suspension_at_exit_when_given_a_callable() -> None:
+    """A turn only knows on the way out whether its sandbox is worth keeping."""
+    keep = True
+    killed: list[Any] = []
+    paused: list[Any] = []
+    with _patch_async_sandbox({}, killed=killed, paused=paused):
+        async with open_backend(api_key="k", domain="", suspend_on_exit=lambda: keep):
+            keep = False
+    assert killed and not paused
+
+
+async def test_open_backend_resumes_an_existing_sandbox() -> None:
+    connected: dict[str, Any] = {}
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created, connected=connected):
+        async with open_backend(api_key="k", domain="", timeout_seconds=1_800, resume_sandbox_id="sbx-1") as backend:
+            # Same id back: the caller compares these to decide whether files it
+            # remembers writing are still there.
+            assert backend.sandbox_id == "sbx-1"
+    assert connected["sandbox_id"] == "sbx-1"
+    assert connected["timeout"] == 1_800
+    assert created == {}  # nothing new was made
+
+
+async def test_a_sandbox_that_cannot_be_resumed_is_replaced_not_raised() -> None:
+    """Expiry and reaping are ordinary. A fresh sandbox with a different id is
+    the recovery, and the differing id is how callers learn the files are gone."""
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created, connect_error=RuntimeError("gone")):
+        async with open_backend(api_key="k", domain="", resume_sandbox_id="sbx-dead") as backend:
+            assert backend.sandbox_id != "sbx-dead"
+    assert created  # a replacement was created
 
 
 async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:
@@ -1067,7 +1235,7 @@ def _outcome(text: str) -> Any:
     return SimpleNamespace(blocked=None, text=text)
 
 
-async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "graph__query") -> Any:
+async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "graph__query", purpose: str = "") -> Any:
     mocker.patch(
         "reporting.services.mcp_runtime.list_tools_for_user",
         new=AsyncMock(
@@ -1088,7 +1256,7 @@ async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "gr
         "reporting.services.mcp_runtime.call_tool_for_chat",
         new=AsyncMock(return_value=_outcome(result)),
     )
-    tools = await _build_seizu_tools(_current_user(), backend)
+    tools = await _build_seizu_tools(_current_user(), backend, purpose=purpose)
     return tools[0]
 
 
@@ -1412,3 +1580,160 @@ async def test_preview_returns_a_small_file_whole() -> None:
     with patch("reporting.settings.SANDBOX_PREVIEW_MAX_BYTES", 2_000):
         tools = {t.name: t for t in _build_sandbox_tools(backend)}
         assert await tools["preview_file"].coroutine(path="/tmp/x") == "small contents"
+
+
+async def test_a_saved_result_is_recorded_for_later_turns(mocker) -> None:
+    """The receipt covers this delegation; the ledger entry is what survives it.
+
+    The file is still in the sandbox next turn, and without a record of it that
+    turn re-runs the query that produced it — which is the whole cost this path
+    exists to avoid.
+    """
+    from reporting.services import episodic_memory
+
+    ledger = episodic_memory.start_session_ledger(None)
+    backend = _make_fake_backend()
+    backend.sandbox_id = "sbx-1"
+    backend.write_file = AsyncMock(return_value="ok")
+    mocker.patch("reporting.settings.CHAT_TOOL_RESULT_MAX_ROWS", 100)
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 5_000_000)
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(5_000), purpose="find every critical CVE")
+
+    saved_to = json.loads(await tool.coroutine(query="q"))["saved_to"]
+
+    receipt = ledger.receipts[0]
+    assert receipt.path == saved_to
+    assert receipt.source == "graph__query"
+    assert receipt.purpose == "find every critical CVE"
+    assert receipt.rows == 5_000
+    # Bound to the sandbox it lives in: a later turn that could not resume this
+    # sandbox must not be told the file is there.
+    assert receipt.sandbox_id == "sbx-1"
+    assert ledger.render_receipts("sbx-2", 4_000) == ""
+    episodic_memory.clear_session_ledger()
+
+
+async def test_a_result_small_enough_to_return_records_nothing(mocker) -> None:
+    from reporting.services import episodic_memory
+
+    ledger = episodic_memory.start_session_ledger(None)
+    backend = _make_fake_backend()
+    tool = await _seizu_tool(backend, mocker, result=_rows_json(2))
+
+    await tool.coroutine(query="q")
+
+    assert ledger.receipts == []
+    episodic_memory.clear_session_ledger()
+
+
+async def test_a_reasoning_sub_agents_answer_is_read_as_text_not_stringified() -> None:
+    """A reasoning model returns content as blocks, not a string.
+
+    Stringifying it returned the repr of the whole list -- every thinking
+    fragment, quoted, with the actual answer at the end -- which went to the
+    caller and into the recall every later sub-agent reads, at many times the
+    tokens of the text it was meant to carry.
+    """
+    fake_backend = _make_fake_backend()
+    blocks = [
+        {"type": "thinking", "thinking": "weighing the options at some length"},
+        {"type": "text", "text": "There are 412 CVE nodes."},
+    ]
+
+    async def fake_ainvoke(_inputs: dict[str, Any]) -> dict[str, Any]:
+        message = MagicMock()
+        message.content = blocks
+        message.tool_calls = []
+        return {"messages": [message]}
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        result = await _handle_delegate({"task": "count them"}, _current_user())
+
+    assert result == {"result": "There are 412 CVE nodes."}
+
+
+async def test_a_later_turn_is_told_about_files_earlier_turns_saved() -> None:
+    """The cross-turn half of the carry: the file is still in the sandbox, and
+    a sub-agent that knows it is there reads it instead of re-fetching."""
+    from reporting.services import episodic_memory
+
+    ledger = episodic_memory.start_session_ledger(
+        {
+            "turn": 1,
+            "episodes": [{"task": "count CVEs", "outcome": "There are 412 CVE nodes.", "turn": 1}],
+            "receipts": [
+                {
+                    "path": "/tmp/seizu_results/graph__query_001.json",
+                    "source": "graph__query",
+                    "purpose": "every critical CVE",
+                    "sandbox_id": "sbx-1",
+                    "turn": 1,
+                    "rows": 412,
+                    "columns": ["cve_id"],
+                }
+            ],
+        }
+    )
+    assert ledger.turn == 2
+    episodic_memory.start_episode_log()
+
+    fake_backend = _make_fake_backend()
+    fake_backend.sandbox_id = "sbx-1"  # the resume succeeded
+    prompts: list[str] = []
+
+    async def fake_ainvoke(inputs: dict[str, Any]) -> dict[str, Any]:
+        prompts.append(inputs["messages"][0].content)
+        return _make_fake_agent_result("done")
+
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        await _handle_delegate({"task": "cross-check the criticals"}, _current_user())
+
+        # ...and the same delegation in a sandbox that could not be resumed.
+        prompts.clear()
+        fake_backend.sandbox_id = "sbx-replacement"
+        await _handle_delegate({"task": "cross-check the criticals"}, _current_user())
+
+    replacement_prompt = prompts[0]
+    assert "graph__query_001.json" not in replacement_prompt  # the file is gone with the sandbox
+    assert "412 CVE nodes" in replacement_prompt  # but what it established still holds
+    episodic_memory.clear_session_ledger()
+
+
+async def test_the_delegation_inherits_the_conversations_disclosure(mocker) -> None:
+    """The sub-agent works from what the conversation unlocked, not the catalogue.
+
+    Its pool being the whole chat-safe set is also how a tool name the outer
+    model had never been shown reached session memory and then the planner,
+    which required it and had the step refused.
+    """
+    from reporting.services import chat_graph
+
+    fake_backend = _make_fake_backend()
+    captured: dict[str, Any] = {}
+
+    async def _fake_build(current_user, backend=None, *, purpose="", disclosed=None, requested=None):
+        captured["disclosed"] = disclosed
+        captured["requested"] = requested
+        return []
+
+    async def fake_ainvoke(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return _make_fake_agent_result("done")
+
+    chat_graph.set_disclosed_tools({"github_security__org_overview"})
+    mocker.patch("reporting.services.mcp_builtins.sandbox._build_seizu_tools", _fake_build)
+    with ExitStack() as stack:
+        for item in _sandbox_patches(fake_backend, fake_ainvoke):
+            stack.enter_context(item)
+        await _handle_delegate(
+            {"task": "count them", "tools": ["cve_analysis__get_cve", "  "]},
+            _current_user(),
+        )
+
+    assert captured["disclosed"] == frozenset({"github_security__org_overview"})
+    # Blank entries dropped, so a sloppy list does not bind an empty name.
+    assert captured["requested"] == ["cve_analysis__get_cve"]
+    chat_graph.set_disclosed_tools(())

@@ -35,6 +35,12 @@ rather than inferred from the stream, so they are unaffected by any of that.
 Requires the dev stack running (``make up``) with ``CHAT_ENABLED=true`` and a
 real ``CHAT_LLM_PROVIDER``. Sessions are left in place for inspection.
 
+**Do not edit backend code while a run is in progress.** The dev ``seizu``
+service runs gunicorn with ``--reload``, so a save part-way through an arm means
+its samples were not all taken against the same build -- and the arm labels then
+describe a configuration rather than a build, which is exactly the kind of
+silently-invented result the read-back check above exists to prevent.
+
 Runs on the host rather than in a container -- it recreates the ``seizu``
 service between arms, which it could not do from inside that service -- and uses
 only the standard library so the host needs no project environment.
@@ -99,19 +105,39 @@ def _compose(*args: str, capture: bool = False, env: dict[str, str] | None = Non
     return result.stdout if capture else ""
 
 
+def _compose_file_chain() -> str:
+    """The checkout's own compose files, with the arm overlay appended.
+
+    Naming only ``docker-compose.yml`` here replaces whatever file chain the
+    checkout uses rather than adding to it. A ``.env`` that selects an overlay
+    -- ``COMPOSE_FILE=docker-compose.yml:docker-compose.neo4j-latest.yml``, for
+    instance -- would be dropped, so every arm silently recreated *those*
+    services too, under a different configuration, and the run failed on a
+    dependency that was still starting.
+    """
+    existing = os.environ.get("COMPOSE_FILE") or _dotenv_value("COMPOSE_FILE") or "docker-compose.yml"
+    return f"{existing}:{OVERLAY.name}"
+
+
+def _dotenv_value(key: str) -> str:
+    """Read one key out of the checkout's .env, which compose reads but we don't."""
+    env_file = REPO / ".env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text().splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == key:
+            return value.strip().strip("'\"")
+    return ""
+
+
 def apply_arm(arm: str) -> str:
     """Recreate the backend with this arm applied, and read the value back."""
     if arm == "baseline":
         OVERLAY.write_text("services:\n  seizu:\n    environment: []\n")
     else:
         OVERLAY.write_text(f"services:\n  seizu:\n    environment:\n      - {arm}\n")
-    _compose(
-        "up",
-        "-d",
-        "--force-recreate",
-        "seizu",
-        env={"COMPOSE_FILE": f"docker-compose.yml:{OVERLAY.name}"},
-    )
+    _compose("up", "-d", "--force-recreate", "seizu", env={"COMPOSE_FILE": _compose_file_chain()})
     for _ in range(60):
         try:
             urllib.request.urlopen(f"{API}/healthcheck", timeout=5)  # noqa: S310

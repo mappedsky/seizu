@@ -4,16 +4,17 @@
 
 The `sandbox__delegate` chat tool lets the chat agent hand off tasks requiring code execution or file operations to an isolated sandbox. The agent can run Python, execute shell commands, and read/write files — then returns a summary of what happened. Use it when a task involves data processing, scripting, or file manipulation that cannot be expressed as a Cypher query.
 
-Sandbox delegation is **chat-only**: the tool never appears in the MCP server's tool listing and cannot be called by external MCP clients. Each invocation creates a fresh, ephemeral sandbox that is destroyed after the task completes; the sandbox has no access to Seizu's internal services or credentials.
+Sandbox delegation is **chat-only**: the tool never appears in the MCP server's tool listing and cannot be called by external MCP clients. The sandbox is isolated from Seizu's internal services and credentials, and is shared by the delegations of a conversation rather than created per call — see [Getting data into the sandbox](#getting-data-into-the-sandbox) below for its lifecycle.
 
 ## Architecture
 
 ```
 Seizu chat agent
-  → sandbox__delegate(task="...", context="...")
-    → _open_backend()        # provider-specific lifecycle (create + destroy)
+  → sandbox__delegate(task="...", context="...", tools=["..."])
+    → sandbox_session        # the conversation's sandbox: resumed, then suspended again
       → SandboxBackend       # stable five-operation interface
         → create_react_agent with run_python / run_bash / read_file / write_file / list_files
+                              + the bound Seizu tools + find_seizu_tools / call_seizu_tool
     → result string
 ```
 
@@ -66,14 +67,48 @@ would otherwise have received, and where a result fits nothing changes at all.
 If the write fails, the truncated result is returned instead — exactly what
 would have happened without this path.
 
-**One sandbox per step, not per delegation.** A sandbox is opened lazily on a
-step's first `sandbox__delegate` call and destroyed when the step ends, so files
-written by one delegation are still there for the next. Each delegation used to
-open and destroy its own, which meant a result file — and the receipt pointing
-at it — was gone before anything could read it, and a turn making 31–79
-delegations paid that many sandbox creations. Parallel steps get separate
-sandboxes, so one step can never read another's files, and untrusted code
-persists only for the life of a single step.
+**One sandbox per conversation, not per delegation.** A sandbox is opened lazily
+on a turn's first `sandbox__delegate` call and shared by every delegation and
+every step of that turn, so files written by one are still there for the next.
+Each delegation used to open and destroy its own, which meant a result file —
+and the receipt pointing at it — was gone before anything could read it, and a
+turn making 31–79 delegations paid that many sandbox creations.
+
+At the end of the turn the sandbox is **suspended rather than destroyed**, and
+the next turn of the same thread resumes it by id. That is what makes a
+follow-up question cheap: the data the previous turn fetched is still on disk,
+and the session memory below tells the next turn what is there, so it reads
+files instead of re-running the queries that produced them. A turn that ends in
+an error destroys its sandbox instead — nothing would store the resume id, and a
+paused sandbox nobody can reach is a leak. Deleting the chat thread destroys the
+sandbox with it.
+
+Set `SANDBOX_SESSION_PERSIST=false` to go back to a sandbox per turn. The trade
+is explicit: persistence means untrusted code lives for the length of a
+conversation rather than a single turn (still bounded to one user's thread, and
+still holding no credentials), and a suspended sandbox consumes provider-side
+storage until the thread is deleted or the provider's retention reaps it.
+
+### Session memory
+
+Sub-agents get a **recall block** naming what earlier sub-agents in the same
+step found, what earlier *turns* of the conversation established, and the files
+already saved in the shared sandbox. The top-level agent — the planner, the
+worker, or the single-agent loop — gets a shorter **digest** of the same
+material, because it is the one that decides whether to delegate at all: told
+only afterwards, it has already planned the re-fetch.
+
+A file is only advertised for the sandbox it was written in. If a resume fails
+and the turn gets a replacement sandbox, every earlier receipt silently stops
+being offered, which is the correct answer rather than a special case — sending
+a sub-agent to read a file that is not there is worse than saying nothing. Both
+blocks are fenced as untrusted data: they carry what graph and tool output said,
+so they can carry text shaped like an instruction with it.
+
+Bounds are `CHAT_SESSION_MEMORY_MAX_ENTRIES`,
+`CHAT_SESSION_MEMORY_MAX_RECEIPTS` and `CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS`;
+the memory rides in the thread's LangGraph checkpoint, which is already
+namespaced per user.
 
 The agent reads such files with **`preview_file`**, which returns files at or
 under `SANDBOX_PREVIEW_MAX_BYTES` whole and, above that, only shape plus the
@@ -119,6 +154,33 @@ The sandbox is ephemeral and isolated from Seizu's data stores and credentials �
 
 The sandbox subagent can call read-only Seizu tools (and user-defined toolset tools) on the user's behalf, but never confirmation-gated mutating tools: those stay with the outer chat agent, where the user approves them interactively. The subagent runs to completion inside a single tool call and cannot drive the confirmation round-trip, so gated mutations are filtered out of its tool set and the runtime additionally refuses any gated tool reached without a confirmation context.
 
+**Which tools it is given.** The sub-agent is *bound* the read-only graph tools
+(`graph__query`, `graph__schema`, `graph__validate_query`, `graph__explain`),
+whatever the conversation has already disclosed, and whatever the delegating
+call named in `tools`. Naming `tools` narrows as well as widens: a caller that
+says what the task needs gets that plus the core, not the disclosed set on top.
+Anything else the user may reach is still reachable — `find_seizu_tools` and
+`call_seizu_tool` search it and run it, with the same result bounds and
+oversized-result handling as a bound tool — so this costs a round trip, never a
+capability.
+
+It used to be handed every chat-safe tool in the deployment. In a measured
+instance that was 58 tools and ~3,800 tokens of schema re-sent on *every* inner
+LLM call — about a fifth of a delegation's token spend, two thirds of it
+management CRUD (roles, spaces, report and toolset editing) that a
+data-processing sub-agent never uses. The bound set is now ~830–1,100 tokens.
+RBAC is unchanged either way: `chat_safe_only` plus the confirmation-gate
+exclusion decide what is reachable at all, and nothing here widens that.
+
+On the two-turn harness benchmark, four samples before and after (a before/after
+across builds rather than a within-run A/B, and bundling the cross-turn session
+memory and the disclosure fixes alongside the narrowing): median sandbox tokens
+181,021 → 48,039 with non-overlapping ranges, median total 202,562 → 80,554,
+median answer 1,233 → 2,339 characters, runs exhausting the token budget 4/4 →
+0/4, and failed plan steps 4/5 → 0/8. No sample needed `find_seizu_tools` at
+all — the core covered every delegation — so the round-trip cost of narrowing
+was, on this benchmark, never paid.
+
 Sandbox delegation requires the `sandbox:delegate` permission, which is granted to `seizu-editor` and above.
 
 ## Configuration
@@ -132,7 +194,8 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
 | `SANDBOX_PREVIEW_MAX_BYTES` | `2000` | Bytes of a file `preview_file` returns. Files at or under this come back whole; larger ones return shape (size, lines, JSON structure, columns) plus the beginning, so a result file cannot be read back into context. `0` restores `read_file`. |
-| `SANDBOX_SESSION_TIMEOUT_SECONDS` | `1800` | Lifetime of the sandbox shared by a step's delegations. |
+| `SANDBOX_SESSION_TIMEOUT_SECONDS` | `1800` | Lifetime of the sandbox shared by a turn's delegations. |
+| `SANDBOX_SESSION_PERSIST` | `true` | Suspend the sandbox between turns and resume it on the next turn of the same thread, so a follow-up turn reads the data earlier turns fetched instead of re-fetching it. `false` destroys it at the end of every turn. |
 | `SANDBOX_FILE_RESULT_MAX_ROWS` | `50000` | Row bound the sub-agent fetches to, so an oversized result can be detected and written to a file rather than silently truncated. Much higher than `CHAT_TOOL_RESULT_MAX_ROWS`, which protects a context window a file never enters. |
 | `SANDBOX_FILE_RESULT_MAX_BYTES` | `10000000` | Byte cap for the same. Finite because the result materializes in the Seizu process before reaching the sandbox. |
 | `SANDBOX_LLM_MODEL` | `""` | LiteLLM model ID for the inner sandbox agent. Empty → inherits `CHAT_LLM_MODEL`. Set a separate model when you want the sandbox subagent to use a cheaper or faster model than the outer chat agent. |

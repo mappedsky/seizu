@@ -81,7 +81,7 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_LLM_SYSTEM_PROMPT` | `""` | Full system prompt override. Empty uses Seizu's built-in security-dashboard prompt. |
-| `CHAT_LLM_PROGRESSIVE_DISCLOSURE` | `true` | Show the model skills first and let rendered skills disclose which tools to use; `false` presents all chat-safe tools and skills up front. |
+| `CHAT_LLM_PROGRESSIVE_DISCLOSURE` | `true` | Show the model skills first and let rendered skills disclose which tools to use; `false` presents all chat-safe tools and skills up front. Disclosure decides what the model is *shown* — RBAC decides what it may call — so it carries across turns, the planner sees what earlier turns unlocked, and a tool a plan explicitly requires is disclosed rather than refused. |
 | `CHAT_LLM_MAX_AUTO_ACTIONS` | `12` | Maximum tool/skill calls the agent executes in one assistant turn. |
 | `CHAT_LLM_MAX_PARALLEL_TOOL_CALLS` | `4` | Maximum tool calls run concurrently in one batch. |
 | `CHAT_LLM_MAX_CONTINUATIONS` | `2` | Auto-continuation attempts when a reply is cut off by the token limit; `0` disables (leaving the manual **Continue response** button). |
@@ -111,6 +111,9 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
 | `CHAT_EPISODIC_RECALL_MAX_CHARS` | `4000` | Results carried from earlier sandbox delegations into the next one's prompt, so each fresh sub-agent does not re-derive what the last one found; `0` disables. |
 | `CHAT_EPISODIC_MAX_ENTRIES` | `20` | Delegation results retained before the oldest are shed. |
+| `CHAT_SESSION_MEMORY_MAX_ENTRIES` | `30` | The same carry one scope out: sub-agent results kept across the *turns* of a conversation, so a follow-up turn does not re-run the previous turn's work. Stored in the thread's checkpoint. |
+| `CHAT_SESSION_MEMORY_MAX_RECEIPTS` | `40` | Files earlier turns left in the (persistent) sandbox that later turns are told about, so they read the data instead of fetching it again. See [Sandbox delegation](sandbox.md). |
+| `CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS` | `2000` | Budget for that material in the *top-level* agent's prompt (planner, worker, single-agent loop), which is where a re-fetch would otherwise be planned; `0` disables the digest without disabling the carry. |
 | `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `12.0` | Floor on a step's token ceiling, as a multiple of the planner's per-step estimate. The ceiling is normally a share of what the run has left. |
 | `CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE` | `1.0` | How far past its fair share a step may go before being stopped rather than only degraded and asked to converge. `1.0` makes the share a hard cut. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |

@@ -86,6 +86,18 @@ class SandboxBackend(Protocol):
         """
         ...
 
+    @property
+    def sandbox_id(self) -> str:
+        """Provider-side identifier, or ``""`` when the backend has no notion of one.
+
+        The handle a suspended sandbox is resumed by: a caller stores this and
+        passes it back as ``resume_sandbox_id``. Comparing it against the id that
+        was asked for is also how a caller learns whether it got the *same*
+        sandbox back or a replacement — which decides whether files it remembers
+        writing are still there.
+        """
+        ...
+
 
 class _E2BSandboxBackend:
     """SandboxBackend backed by an ``e2b_code_interpreter.AsyncSandbox``."""
@@ -169,6 +181,10 @@ class _E2BSandboxBackend:
                 return str(await value if asyncio.iscoroutine(value) else value)
         return ""
 
+    @property
+    def sandbox_id(self) -> str:
+        return str(getattr(self._sandbox, "sandbox_id", "") or "")
+
 
 @asynccontextmanager
 async def open_backend(
@@ -179,6 +195,8 @@ async def open_backend(
     timeout_seconds: int | None = None,
     template: str | None = None,
     allow_public_traffic: bool = False,
+    resume_sandbox_id: str | None = None,
+    suspend_on_exit: bool | Callable[[], bool] = False,
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -220,20 +238,34 @@ async def open_backend(
     header (via :meth:`SandboxBackend.get_traffic_access_token`); it is only set
     ``True`` as a fallback for CLIs that can't, where access is then gated by the
     service's own auth (a budget-capped virtual key) instead of the E2B token.
+
+    ``resume_sandbox_id`` reconnects to an existing sandbox — resuming it if it
+    was suspended — instead of creating one, so its filesystem is still there.  A
+    sandbox that has expired or been reaped is not an error: a fresh one is
+    created, and the caller can tell the two apart by comparing
+    :attr:`SandboxBackend.sandbox_id` against what it asked for.
+    ``suspend_on_exit`` pauses the sandbox instead of killing it, which is what
+    makes the id worth storing; without it the sandbox is destroyed on exit as
+    before.  Suspension is only ever a caller's explicit choice because a paused
+    sandbox keeps consuming provider-side storage until something reaps it — and
+    it may be a callable, evaluated at exit, for a caller that only learns on
+    the way out whether the sandbox is worth keeping (a turn that raised has
+    nowhere to store the resume id, so its sandbox has to go).
     """
     from e2b_code_interpreter import AsyncSandbox
 
     from reporting import settings as _settings
 
-    create_kwargs: dict[str, Any] = {}
+    api_kwargs: dict[str, Any] = {}
     if api_key:
-        create_kwargs["api_key"] = api_key
+        api_kwargs["api_key"] = api_key
     if domain:
         # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
         # to https://api.<domain>; disable client-side key-format validation
         # because non-E2B deployments issue tokens that don't match "e2b_*".
-        create_kwargs["domain"] = domain
-        create_kwargs["validate_api_key"] = False
+        api_kwargs["domain"] = domain
+        api_kwargs["validate_api_key"] = False
+    create_kwargs: dict[str, Any] = dict(api_kwargs)
     if template and not domain:
         create_kwargs["template"] = template
     elif template and domain:
@@ -246,6 +278,33 @@ async def open_backend(
         allow_internet if allow_internet is not None else _settings.SANDBOX_ALLOW_INTERNET
     )
     create_kwargs["network"] = {"allow_public_traffic": allow_public_traffic}
-    sandbox = await AsyncSandbox.create(**create_kwargs)
-    async with sandbox:
+
+    sandbox = None
+    if resume_sandbox_id:
+        try:
+            # connect() resumes a paused sandbox and re-arms its lifetime; a
+            # running one keeps the longer of the two timeouts.
+            sandbox = await AsyncSandbox.connect(resume_sandbox_id, timeout=timeout_seconds, **api_kwargs)
+        except Exception:
+            # Expired, reaped, or a provider that cannot resume. Falling through
+            # to create is the whole recovery: the caller compares sandbox_id and
+            # treats anything it remembered writing as gone.
+            logger.info("could not resume sandbox %s; creating a new one", resume_sandbox_id, exc_info=True)
+    if sandbox is None:
+        sandbox = await AsyncSandbox.create(**create_kwargs)
+
+    try:
         yield _E2BSandboxBackend(sandbox)
+    finally:
+        # Never `async with sandbox` — its __aexit__ kills unconditionally, and
+        # the point of suspend_on_exit is to survive.
+        if suspend_on_exit() if callable(suspend_on_exit) else suspend_on_exit:
+            try:
+                await sandbox.pause()
+            except Exception:
+                # A backend that cannot pause must not leave the sandbox running
+                # until the provider's timeout, so fall back to destroying it.
+                logger.warning("could not suspend sandbox %s; killing it", sandbox.sandbox_id, exc_info=True)
+                await sandbox.kill()
+        else:
+            await sandbox.kill()
