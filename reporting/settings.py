@@ -555,11 +555,31 @@ CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
 # (0 disables it); the loop also stops as soon as a continuation adds no new text.
 CHAT_LLM_MAX_CONTINUATIONS = int_env("CHAT_LLM_MAX_CONTINUATIONS", 2)
 CHAT_LLM_MAX_RESPONSE_CHARS = int_env("CHAT_LLM_MAX_RESPONSE_CHARS", 60_000)
-# Maximum prior messages/characters sent to the LLM. Checkpoints may retain
-# more messages for UI history; this separate cap controls model cost, latency,
-# and provider context pressure.
+# Maximum prior messages/tokens sent to the LLM. Checkpoints may retain more
+# messages for UI history; this separate cap controls model cost, latency, and
+# provider context pressure.
 CHAT_LLM_CONTEXT_MAX_MESSAGES = int_env("CHAT_LLM_CONTEXT_MAX_MESSAGES", 80)
-CHAT_LLM_CONTEXT_MAX_CHARS = int_env("CHAT_LLM_CONTEXT_MAX_CHARS", 120_000)
+# Tokens, counted with the provider's own tokenizer. This replaced a
+# 120,000-*character* cap: measured against real tool payloads the conversion is
+# 3.0 chars/token rather than the 4 the code assumed, so the old cap admitted
+# about a third more tokens than intended, and worst exactly when payloads were
+# largest (structured data tokenizes worse than prose). 40,000 is that cap's
+# measured token equivalent. 0 means "whatever the model's window allows".
+CHAT_LLM_CONTEXT_MAX_TOKENS = int_env("CHAT_LLM_CONTEXT_MAX_TOKENS", 40_000)
+# Share of the model's input window that history may occupy. The remainder is
+# for the system prompt, tool schemas, the session digest, this turn's tool
+# results and the reply. The effective history budget is the smaller of this and
+# CHAT_LLM_CONTEXT_MAX_TOKENS -- a ceiling, not a target, so pointing Seizu at a
+# million-token model does not silently multiply the cost of every call.
+CHAT_LLM_CONTEXT_WINDOW_SHARE = float_env("CHAT_LLM_CONTEXT_WINDOW_SHARE", 0.5)
+# Override the model's input window instead of taking it from litellm's model
+# database. 0 derives it, which is almost always right.
+CHAT_LLM_CONTEXT_WINDOW_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_TOKENS", 0)
+# Window assumed for a model litellm does not know -- typically self-hosted or
+# custom. Small on purpose: guessing low wastes part of a window, guessing high
+# fails the turn. Raise it (or set CHAT_LLM_CONTEXT_WINDOW_TOKENS) when running
+# a large-context model litellm cannot identify.
+CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS", 32_768)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.
 CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")

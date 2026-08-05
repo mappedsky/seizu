@@ -2662,9 +2662,11 @@ async def test_final_synthesis_retries_internal_action_transcript(mocker):
     assert fake_model.calls == 4
 
 
-def test_llm_context_messages_applies_message_and_character_limits(mocker):
+def test_llm_context_messages_applies_message_and_token_limits(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_MAX_MESSAGES", 3)
-    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_MAX_CHARS", 12)
+    # Tokens now, not characters: at the fallback ratio each 5-character message
+    # is 2 tokens, so 4 admits the last two.
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_MAX_TOKENS", 4)
     messages = [
         HumanMessage(content="older"),
         AIMessage(content="ignored by message cap"),
@@ -2698,8 +2700,8 @@ def test_trim_inner_loop_messages_ignores_reasoning_content_but_counts_tool_call
         messages[4],
     ]
 
-    retained = chat_graph._trim_inner_loop_messages(messages, max_chars=140)
-    retained_without_reasoning = chat_graph._trim_inner_loop_messages(without_reasoning, max_chars=140)
+    retained = chat_graph._trim_inner_loop_messages(messages, model=None, max_tokens=47)
+    retained_without_reasoning = chat_graph._trim_inner_loop_messages(without_reasoning, model=None, max_tokens=47)
 
     # The oldest exchange is shed but condensed, not deleted: the user turn, a
     # digest of what was dropped, then the most recent exchange intact.
@@ -2722,7 +2724,7 @@ def test_trim_inner_loop_condenses_dropped_evidence_instead_of_deleting_it():
             ToolMessage(content=f"FINDING_{index} " + "x" * 2000, tool_call_id=f"call_{index}", name=f"t__{index}")
         )
 
-    retained = chat_graph._trim_inner_loop_messages(messages, max_chars=9000)
+    retained = chat_graph._trim_inner_loop_messages(messages, model=None, max_tokens=3_000)
 
     digests = [m for m in retained if chat_graph._is_context_digest(m)]
     assert len(digests) == 1
@@ -2730,7 +2732,7 @@ def test_trim_inner_loop_condenses_dropped_evidence_instead_of_deleting_it():
     assert "FINDING_0" in digests[0].content
     assert "t__0" in digests[0].content
     # ...and the whole thing now fits the cap it was given.
-    assert sum(chat_graph._message_context_size(m) for m in retained) <= 9000
+    assert sum(chat_graph._message_context_tokens(None, m) for m in retained) <= 3_000
     # The user's turn stays at the head and the newest exchange stays intact.
     assert retained[0] is messages[0]
     assert retained[-2:] == messages[-2:]
@@ -2746,7 +2748,7 @@ def test_trim_inner_loop_merges_successive_digests_into_one():
             ToolMessage(content=f"FINDING_{index} " + "y" * 3000, tool_call_id=f"call_{index}", name=f"t__{index}")
         )
 
-    once = chat_graph._trim_inner_loop_messages(messages, max_chars=9000)
+    once = chat_graph._trim_inner_loop_messages(messages, model=None, max_tokens=3_000)
     # Simulate the loop continuing: two more exchanges, then trim again.
     grown = [
         *once,
@@ -2754,11 +2756,11 @@ def test_trim_inner_loop_merges_successive_digests_into_one():
         ToolMessage(content="LATE_FINDING " + "z" * 6000, tool_call_id="call_late", name="t__late"),
     ]
 
-    twice = chat_graph._trim_inner_loop_messages(grown, max_chars=9000)
+    twice = chat_graph._trim_inner_loop_messages(grown, model=None, max_tokens=3_000)
 
     digests = [m for m in twice if chat_graph._is_context_digest(m)]
     assert len(digests) == 1  # merged, not stacked
-    assert sum(chat_graph._message_context_size(m) for m in twice) <= 9000
+    assert sum(chat_graph._message_context_tokens(None, m) for m in twice) <= 3_000
 
 
 def test_trim_inner_loop_keeps_the_newest_exchange_at_any_cap():
@@ -2770,7 +2772,7 @@ def test_trim_inner_loop_keeps_the_newest_exchange_at_any_cap():
         ToolMessage(content="new " + "x" * 5000, tool_call_id="call_new", name="t__new"),
     ]
 
-    retained = chat_graph._trim_inner_loop_messages(messages, max_chars=100)
+    retained = chat_graph._trim_inner_loop_messages(messages, model=None, max_tokens=33)
 
     # Even at an impossible cap the newest exchange survives: it is what the next
     # call reasons about, and without it the loop cannot progress.
@@ -2778,9 +2780,9 @@ def test_trim_inner_loop_keeps_the_newest_exchange_at_any_cap():
 
 
 def test_budgeted_context_cap_shrinks_as_the_run_spends(mocker):
-    # CHAT_LLM_CONTEXT_MAX_CHARS bounds one call and CHAT_RUN_TOKEN_BUDGET bounds
-    # the run; nothing related them, so a long tool loop ran at full context
-    # until it hit a wall mid-turn instead of tightening as it went.
+    # The per-call history budget bounds one call and CHAT_RUN_TOKEN_BUDGET
+    # bounds the run; nothing related them, so a long tool loop ran at full
+    # context until it hit a wall mid-turn instead of tightening as it went.
     from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 
     mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
@@ -2788,29 +2790,29 @@ def test_budgeted_context_cap_shrinks_as_the_run_spends(mocker):
 
     fresh = BudgetController(initial_budget_ledger())
     config = {"configurable": {"budget_controller": fresh}}
-    # Fresh run: 96k normal tokens * 0.5 * 4 chars = 192k, above the base cap, so
-    # the configured per-call cap still applies.
-    assert chat_graph._budgeted_context_max_chars(config, base_max_chars=120_000) == 120_000
+    # Fresh run: half of 96k normal tokens is above the base cap, so the
+    # configured per-call cap still applies.
+    assert chat_graph._budgeted_context_max_tokens(config, base_max_tokens=40_000) == 40_000
 
     spent = BudgetController({**initial_budget_ledger(), "total_tokens": 90_000})
     spent_config = {"configurable": {"budget_controller": spent}}
-    # 120k - 24k reserve - 90k spent = 6k left; half of that, in chars.
-    assert chat_graph._budgeted_context_max_chars(spent_config, base_max_chars=120_000) == 12_000
+    # 120k - 24k reserve - 90k spent = 6k left; half of that.
+    assert chat_graph._budgeted_context_max_tokens(spent_config, base_max_tokens=40_000) == 3_000
 
     drained = BudgetController({**initial_budget_ledger(), "total_tokens": 119_000})
     drained_config = {"configurable": {"budget_controller": drained}}
     # Never squeeze below the floor, or the model loses its own turn.
-    assert chat_graph._budgeted_context_max_chars(drained_config, base_max_chars=120_000) == 8_000
+    assert chat_graph._budgeted_context_max_tokens(drained_config, base_max_tokens=40_000) == 2_500
 
 
 def test_budgeted_context_cap_is_inert_without_a_token_budget(mocker):
     from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 
-    assert chat_graph._budgeted_context_max_chars({"configurable": {}}, base_max_chars=120_000) == 120_000
+    assert chat_graph._budgeted_context_max_tokens({"configurable": {}}, base_max_tokens=40_000) == 40_000
     # Call-limit-only runs have no token ceiling to divide up.
     ledger = {**initial_budget_ledger(), "token_limit": 0, "enabled": True}
     config = {"configurable": {"budget_controller": BudgetController(ledger)}}
-    assert chat_graph._budgeted_context_max_chars(config, base_max_chars=120_000) == 120_000
+    assert chat_graph._budgeted_context_max_tokens(config, base_max_tokens=40_000) == 40_000
 
 
 def test_llm_context_messages_drops_broken_ai_output_but_keeps_good_context():

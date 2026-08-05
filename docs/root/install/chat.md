@@ -60,6 +60,42 @@ For multi-step requests, chat can route a turn through a plan → dispatch → v
 
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
+### Fitting the model's context window
+
+Context caps are **tokens**, counted with the provider's own tokenizer, and the
+model's window is read from litellm's model database rather than configured.
+
+Both halves of that mattered. Measured against real tool payloads the conversion
+is 3.0 characters per token, not the 4 the code assumed — structured graph data
+tokenizes worse than prose — so the old 120,000-*character* history cap admitted
+about a third more tokens than intended, and worst exactly when payloads were
+largest. And one fixed cap applied to every model is simultaneously unsafe and
+wasteful: ~40,000 tokens of history overflows a 32k model's entire window on
+history alone, and is 4% of a million-token model's.
+
+The window is a **ceiling, not a target**. `CHAT_LLM_CONTEXT_MAX_TOKENS` remains
+the "how much history is useful and affordable" knob and the window only clamps
+it down, so pointing Seizu at a large-context model does not silently multiply
+the cost of every call:
+
+| model | window | history budget |
+|---|---|---|
+| `deepseek/deepseek-v4-pro` | 1,000,000 | 40,000 (configured cap) |
+| `anthropic/claude-sonnet-4-5` | 200,000 | 40,000 (configured cap) |
+| `deepseek/deepseek-chat` | 131,072 | 40,000 (configured cap) |
+| unknown / self-hosted | 32,768 (assumed) | 16,384 (clamped by share) |
+
+Two limits remain outside this, deliberately:
+
+- **The whole prompt is not yet budgeted as one.** Only prior conversation is
+  bounded here; the system prompt, tool schemas, session digest and the current
+  turn's tool results are additions on top of it.
+- **Cross-turn history is truncated, not compacted.** The oldest turns are
+  dropped rather than summarized. The within-turn loop *does* condense what it
+  sheds into a deterministic digest. Extending that across turns has to stay
+  append-only, because rewriting the prefix invalidates the provider's prompt
+  cache for the whole conversation — see below.
+
 ### Prompt caching and cost
 
 An agent loop re-sends a growing prefix on every call, and providers serve most
@@ -111,7 +147,10 @@ Two consequences worth knowing:
 | `CHAT_LLM_MAX_CONTINUATIONS` | `2` | Auto-continuation attempts when a reply is cut off by the token limit; `0` disables (leaving the manual **Continue response** button). |
 | `CHAT_LLM_MAX_RESPONSE_CHARS` | `60000` | Hard ceiling on a stitched auto-continued response; `0` disables. |
 | `CHAT_LLM_CONTEXT_MAX_MESSAGES` | `80` | Maximum prior messages sent to the LLM (checkpoints may retain more for UI history). |
-| `CHAT_LLM_CONTEXT_MAX_CHARS` | `120000` | Maximum prior-message characters sent to the LLM. |
+| `CHAT_LLM_CONTEXT_MAX_TOKENS` | `40000` | Maximum prior-conversation **tokens** sent to the LLM, counted with the provider's tokenizer. `0` means "whatever the window allows". See [Fitting the model's context window](#fitting-the-models-context-window). |
+| `CHAT_LLM_CONTEXT_WINDOW_SHARE` | `0.5` | Share of the model's input window history may occupy; the rest is for the system prompt, tool schemas, this turn's tool results and the reply. The effective budget is the smaller of this and `CHAT_LLM_CONTEXT_MAX_TOKENS`. |
+| `CHAT_LLM_CONTEXT_WINDOW_TOKENS` | `0` | Override the model's input window instead of reading it from litellm's model database. `0` derives it. |
+| `CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS` | `32768` | Window assumed for a model litellm cannot identify (typically self-hosted). Small on purpose. |
 
 ### Orchestrator
 

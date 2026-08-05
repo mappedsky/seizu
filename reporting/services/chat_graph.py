@@ -39,6 +39,7 @@ from reporting.schema.confirmations import ActionConfirmation
 from reporting.services import (
     action_confirmations,
     chat_budget,
+    chat_context,
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
@@ -503,8 +504,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     )
     chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
-    messages = _llm_context_messages(state["messages"])
+    # Before the history trim: how much of it fits is a property of the model.
     model = get_chat_model()
+    messages = _llm_context_messages(state["messages"], model)
     writer = get_stream_writer()
     base_system_prompt = build_system_prompt(provider, current_user)
     if _headless_from_config(config):
@@ -736,7 +738,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         ]
         messages = _trim_inner_loop_messages(
             messages,
-            max_chars=_budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS),
+            model=model,
+            max_tokens=_budgeted_context_max_tokens(config, base_max_tokens=chat_context.history_token_budget(model)),
         )
         if blocked_results:
             response = _blocked_tool_call_response(blocked_results)
@@ -1251,7 +1254,7 @@ async def _resume_confirmed_tool_turn(
         f"{summary_note} Do not call additional tools in this resume turn.",
     )
     context = [
-        *_llm_context_messages(state["messages"]),
+        *_llm_context_messages(state["messages"], model),
         HumanMessage(
             content=f"Approved Seizu tool(s) ran with result(s):\n\n{_truncate_text(combined_results, 12000)}",
             id=f"msg_{uuid.uuid4().hex}",
@@ -1714,6 +1717,8 @@ _CONTEXT_DIGEST_HEADER = (
 )
 # Floor on a digest line's share, below which a result is cut into noise.
 _MIN_DIGEST_LINE_CHARS = 200
+# Floor on the digest's own share of a tight cap, in tokens.
+_MIN_DIGEST_TOKENS = 70
 
 
 def _is_context_digest(message: BaseMessage) -> bool:
@@ -1745,7 +1750,13 @@ def _digest_dropped_exchange(ai_message: AIMessage, tool_messages: list[ToolMess
     return lines
 
 
-def _context_digest_message(lines: list[str], *, max_chars: int) -> HumanMessage:
+def _context_digest_message(lines: list[str], *, model: Any, max_tokens: int) -> HumanMessage:
+    # Truncating a line is a character operation, so the token budget is
+    # converted using a ratio measured on these very lines rather than a
+    # constant -- the constant is wrong by a third on structured payloads and
+    # right on prose, and a digest of tool results is mostly the former.
+    joined = "\n".join(lines)
+    max_chars = chat_context.chars_for_tokens(model, joined, max_tokens)
     # Account for the joining newlines so every call keeps a line by construction:
     # truncating all of them beats losing one call's evidence outright, since a
     # missing line reads as "that call never happened".
@@ -1762,8 +1773,8 @@ def _context_digest_message(lines: list[str], *, max_chars: int) -> HumanMessage
     )
 
 
-def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) -> list[BaseMessage]:
-    """Cap the inner-turn message list by total character count, condensing what it sheds.
+def _trim_inner_loop_messages(messages: list[BaseMessage], *, model: Any, max_tokens: int) -> list[BaseMessage]:
+    """Cap the inner-turn message list by token count, condensing what it sheds.
 
     Tool results are bounded per call by ``CHAT_TOOL_RESULT_MAX_BYTES``, but
     nothing else stops the loop from accumulating up to
@@ -1779,18 +1790,18 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
     from the messages themselves — no summarization call, so no added latency,
     cost, or risk of inventing a finding that was never returned.
     """
-    if max_chars <= 0 or len(messages) <= 4:
+    if max_tokens <= 0 or len(messages) <= 4:
         return messages
-    total = sum(_message_context_size(m) for m in messages)
-    if total <= max_chars:
+    total = sum(_message_context_tokens(model, m) for m in messages)
+    if total <= max_tokens:
         return messages
 
     # Reserve room for the digest up front, so re-inserting it cannot push the
     # result back over the cap we were asked to hit.
     # Never let the reserve exceed half the cap: at small caps the per-line floor
     # would otherwise price the digest above the whole budget and trim everything.
-    digest_budget = min(max_chars // 2, max(_MIN_DIGEST_LINE_CHARS, max_chars // 5))
-    target = max(0, max_chars - digest_budget)
+    digest_budget = min(max_tokens // 2, max(_MIN_DIGEST_TOKENS, max_tokens // 5))
+    target = max(0, max_tokens - digest_budget)
 
     preserve_head = isinstance(messages[0], HumanMessage) and not _is_context_digest(messages[0])
     head: list[BaseMessage] = [messages[0]] if preserve_head else []
@@ -1809,7 +1820,7 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
         if sum(1 for message in body if isinstance(message, AIMessage)) <= 1:
             break
         first = body[0]
-        total -= _message_context_size(first)
+        total -= _message_context_tokens(model, first)
         body.pop(0)
         if _is_context_digest(first):
             # Re-absorb an earlier digest so successive trims merge into one
@@ -1821,63 +1832,72 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
         tool_messages: list[ToolMessage] = []
         while body and isinstance(body[0], ToolMessage):
             tool_dropped = body.pop(0)
-            total -= _message_context_size(tool_dropped)
+            total -= _message_context_tokens(model, tool_dropped)
             tool_messages.append(tool_dropped)
         fresh.extend(_digest_dropped_exchange(first, tool_messages))
 
     lines = [*carried, *fresh]
     if not lines:
         return [*head, *body]
-    return [*head, _context_digest_message(lines, max_chars=digest_budget), *body]
+    return [*head, _context_digest_message(lines, model=model, max_tokens=digest_budget), *body]
 
 
-# Rough chars-per-token, used only to relate two caps expressed in different
-# units. Never used to bill the budget — that uses real provider usage.
-_CHARS_PER_TOKEN = 4
 # Never squeeze context below this: past it the model loses the thread of its own
 # turn and the loop stops making progress at all.
-_MIN_CONTEXT_MAX_CHARS = 8_000
+_MIN_CONTEXT_MAX_TOKENS = 2_500
 # Ceiling on the share of the remaining allowance one call may plan to spend, so
 # a single context-heavy call cannot consume everything the run has left.
 _CONTEXT_BUDGET_SHARE = 0.5
 
 
-def _budgeted_context_max_chars(config: RunnableConfig, *, base_max_chars: int) -> int:
+def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
     """Fit the per-call context cap inside what the run can still afford.
 
-    ``CHAT_LLM_CONTEXT_MAX_CHARS`` bounds one call and ``CHAT_RUN_TOKEN_BUDGET``
-    bounds the whole run, and nothing related them: at the defaults, four calls
-    at the per-call cap exhaust the entire run budget. A long tool loop therefore
-    ran at full context until it hit a wall mid-turn, rather than tightening as
-    it went. Sizing each call against the remaining allowance makes the loop
-    degrade smoothly, and pairs with the digest in ``_trim_inner_loop_messages``
-    so tightening condenses evidence instead of discarding it.
+    Three limits meet here and they answer different questions: the model's
+    window says what will *load*, ``CHAT_LLM_CONTEXT_MAX_TOKENS`` says how much
+    history is useful, and ``CHAT_RUN_TOKEN_BUDGET`` says what the run can pay
+    for. Nothing related the last two: at the defaults, four calls at the
+    per-call cap exhausted the entire run budget, so a long tool loop ran at full
+    context until it hit a wall mid-turn rather than tightening as it went.
+    Sizing each call against the remaining allowance makes the loop degrade
+    smoothly, and pairs with the digest in ``_trim_inner_loop_messages`` so
+    tightening condenses evidence instead of discarding it.
     """
     controller = budget_controller_from_config(config)
     if controller is None or not controller.enabled:
-        return base_max_chars
+        return base_max_tokens
     remaining = controller.remaining_normal_tokens
     if remaining is None:
-        return base_max_chars
-    affordable = int(remaining * _CONTEXT_BUDGET_SHARE) * _CHARS_PER_TOKEN
-    return max(_MIN_CONTEXT_MAX_CHARS, min(base_max_chars, affordable))
+        return base_max_tokens
+    affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
+    return max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
 
 
-def _message_context_size(message: BaseMessage) -> int:
-    size = len(message_text(getattr(message, "content", "")))
+def _message_context_text(message: BaseMessage) -> str:
+    """Everything about a message that occupies context, as one string.
+
+    Tool calls and tool-call ids are part of what is sent to the provider, so a
+    size that counted only the text under-reported exactly the messages a tool
+    loop accumulates most of.
+    """
+    parts = [message_text(getattr(message, "content", ""))]
     if isinstance(message, AIMessage):
         if message.tool_calls:
-            size += len(_json_dump(message.tool_calls))
+            parts.append(_json_dump(message.tool_calls))
         if message.invalid_tool_calls:
-            size += len(_json_dump(message.invalid_tool_calls))
+            parts.append(_json_dump(message.invalid_tool_calls))
         raw_tool_calls = message.additional_kwargs.get("tool_calls")
         if raw_tool_calls:
-            size += len(_json_dump(raw_tool_calls))
+            parts.append(_json_dump(raw_tool_calls))
     if isinstance(message, ToolMessage):
-        size += len(message.tool_call_id)
+        parts.append(message.tool_call_id)
         if message.name:
-            size += len(message.name)
-    return size
+            parts.append(message.name)
+    return "\n".join(part for part in parts if part)
+
+
+def _message_context_tokens(model: Any, message: BaseMessage) -> int:
+    return chat_context.count_tokens(model, _message_context_text(message))
 
 
 _PROVIDER_TOOL_NAME_MAX_LEN = 64
@@ -3123,7 +3143,21 @@ def _last_user_request(messages: list[Any]) -> str:
     return ""
 
 
-def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
+def _llm_context_messages(messages: list[Any], model: Any = None) -> list[BaseMessage]:
+    """Prior turns of the conversation, bounded to what this model will take.
+
+    The bound is ``chat_context.history_token_budget``: the smaller of what is
+    configured and the share of the model's own input window history may
+    occupy. It used to be a fixed character count that no model was consulted
+    about -- ~40,000 tokens once measured, which overflows a 32k window on
+    history alone and uses 4% of a million-token one.
+
+    This still *truncates* rather than compacts: the oldest turns are dropped,
+    not summarized. The within-turn loop condenses what it sheds
+    (``_trim_inner_loop_messages``); doing the same across turns is a larger
+    change, and one that has to stay append-only to avoid invalidating the
+    provider's prompt cache on every turn.
+    """
     filtered = drop_tagged(messages, MessageTag.EPHEMERAL, MessageTag.BROKEN)
     context: list[BaseMessage] = []
     for message in filtered:
@@ -3136,18 +3170,21 @@ def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
     if max_messages > 0:
         context = context[-max_messages:]
 
-    max_chars = settings.CHAT_LLM_CONTEXT_MAX_CHARS
-    if max_chars <= 0:
+    max_tokens = chat_context.history_token_budget(model)
+    if max_tokens <= 0:
         return context
 
     retained: list[BaseMessage] = []
-    total_chars = 0
+    total_tokens = 0
     for message in reversed(context):
-        text_len = len(message_text(message.content))
-        if retained and total_chars + text_len > max_chars:
+        tokens = chat_context.count_tokens(model, message_text(message.content))
+        # Always keep the most recent turn, however large: a call with no
+        # conversation at all cannot answer a follow-up, and the alternative to
+        # an oversized last turn is not a smaller one, it is none.
+        if retained and total_tokens + tokens > max_tokens:
             break
         retained.append(message)
-        total_chars += text_len
+        total_tokens += tokens
     return list(reversed(retained))
 
 

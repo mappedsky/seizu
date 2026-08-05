@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_budget, chat_graph, episodic_memory, mcp_builtins, sandbox_session
+from reporting.services import chat_budget, chat_context, chat_graph, episodic_memory, mcp_builtins, sandbox_session
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -54,7 +54,7 @@ from reporting.services.chat_graph import (
     _append_output_limit_notice,
     _auto_continue_answer,
     _blocked_tool_call_response,
-    _budgeted_context_max_chars,
+    _budgeted_context_max_tokens,
     _chat_provider,
     _child_detail_event_accumulator,
     _client_thread_id_from_config,
@@ -1380,10 +1380,10 @@ async def _run_worker_step(
         ]
         # Sized against what the run can still afford, then tightened further
         # when this step or the run as a whole is already degraded.
-        context_limit = _budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS)
+        context_limit = _budgeted_context_max_tokens(config, base_max_tokens=chat_context.history_token_budget(model))
         if (controller is not None and controller.degraded) or step_degraded:
-            context_limit = max(8_000, context_limit // 4)
-        messages = _trim_inner_loop_messages(messages, max_chars=context_limit)
+            context_limit = max(2_500, context_limit // 4)
+        messages = _trim_inner_loop_messages(messages, model=model, max_tokens=context_limit)
         for result in batch_results:
             tools_used.append(result.request.name)
             if result.blocked is not None:
