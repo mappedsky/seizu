@@ -50,6 +50,7 @@ from reporting.services.chat_budget import (
     budget_controller_from_config,
     estimate_tokens,
     usage_cost_usd,
+    usage_from_message,
 )
 from reporting.services.chat_messages import (
     CONTINUATION_MARKDOC,
@@ -1403,7 +1404,7 @@ async def _run_llm_tool_turn(
         reservation = await controller.reserve(
             estimated_input_tokens=estimated_input,
             estimated_output_tokens=max(1, estimated_output),
-            estimated_cost_usd=usage_cost_usd(model, estimated_input, max(1, estimated_output)),
+            estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max(1, estimated_output)),
             allow_reserve=allow_reserve,
             phase=phase,
         )
@@ -1468,14 +1469,19 @@ async def _run_llm_tool_turn(
         writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
 
     merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
-    usage = getattr(merged, "usage_metadata", None)
-    usage_estimated = not isinstance(usage, dict) or not usage.get("total_tokens")
-    input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
-    output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
+    usage = usage_from_message(merged)
+    usage_estimated = not usage.reported
+    input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
     if usage_estimated:
         input_tokens = estimated_input
         output_tokens = estimate_tokens(model, "", [AIMessage(content=merged_text)], [])
-    cost_usd = usage_cost_usd(model, input_tokens, output_tokens)
+    cost_usd = usage_cost_usd(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
+    )
     if controller is not None and reservation is not None:
         await controller.commit(
             reservation,
@@ -1483,6 +1489,8 @@ async def _run_llm_tool_turn(
             output_tokens=output_tokens,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
         )
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
     leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
@@ -2588,7 +2596,7 @@ async def _invoke_structured_output(
                 reservation = await controller.reserve(
                     estimated_input_tokens=estimated_input,
                     estimated_output_tokens=max_output_tokens,
-                    estimated_cost_usd=usage_cost_usd(model, estimated_input, max_output_tokens),
+                    estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max_output_tokens),
                     allow_reserve=allow_reserve,
                     phase=phase,
                 )
@@ -2600,7 +2608,10 @@ async def _invoke_structured_output(
                     reservation,
                     input_tokens=estimated_input,
                     output_tokens=output_tokens,
-                    cost_usd=usage_cost_usd(model, estimated_input, output_tokens),
+                    # No usage reported on this path at all, so the cost is a
+                    # projection like the reservation was -- at the full rate it
+                    # would overstate every structured call of a cached run.
+                    cost_usd=controller.project_cost_usd(model, estimated_input, output_tokens),
                     usage_estimated=True,
                 )
             _structured_output_native_ok[id(model)] = True

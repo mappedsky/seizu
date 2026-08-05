@@ -60,6 +60,30 @@ For multi-step requests, chat can route a turn through a plan → dispatch → v
 
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
+### Prompt caching and cost
+
+An agent loop re-sends a growing prefix on every call, and providers serve most
+of it from their prompt cache at a fraction of the input price. The ledger reads
+that accounting back out of the response (`input_token_details.cache_read` /
+`cache_creation`) and prices each portion at its own rate.
+
+This is worth a lot. A measured DeepSeek call re-sending a 4,016-token prefix
+reported 3,968 of those tokens as cache reads: priced as fresh input it was
+charged at $0.001794, and its real cost was $0.000083 — **21.7× overstated**. An
+uncached call prices identically either way.
+
+Two consequences worth knowing:
+
+- **Reservations are projected, not assumed.** A reservation decides whether a
+  call is *allowed*, so overpricing it does not merely misreport — it refuses
+  work that would have fit. Each is priced using the cache hit rate the run has
+  actually observed so far. The first call of a run has no history and is a
+  cache miss by definition, so it is projected at the full rate.
+- **Tokens are still counted whole.** `CHAT_RUN_TOKEN_BUDGET` counts a cached
+  token like any other: it still occupies the context window and still costs
+  something. Only the price differs. `cache_read_tokens` appears in the run
+  ledger (and per phase) so the saving is visible.
+
 ## Configuration
 
 ### Core
@@ -105,7 +129,7 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_RUN_TOKEN_BUDGET` | `400000` | Per-run token budget; `0` disables this dimension. Includes sandbox sub-agent spend, which is typically 70-85% of a delegating turn — lower it if the sandbox is disabled or rarely used. |
-| `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. |
+| `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. Cache-aware: input the provider served from its prompt cache is priced at the cache rate, and a reservation is projected using the hit rate the run has actually observed. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |

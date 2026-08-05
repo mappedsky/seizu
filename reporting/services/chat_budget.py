@@ -47,6 +47,12 @@ def initial_budget_ledger() -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        # Subsets of input_tokens the provider served from (or wrote to) its
+        # prompt cache. Recorded so the saving is visible in the run ledger and
+        # so cost projections can be based on what this run actually got rather
+        # than on an assumption.
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
         "cost_usd": 0.0,
         "llm_calls": 0,
         "max_llm_calls": max(0, settings.CHAT_RUN_MAX_LLM_CALLS),
@@ -143,6 +149,35 @@ class BudgetController:
         return dict(self._ledger)
 
     @property
+    def observed_cache_read_ratio(self) -> float:
+        """Share of this run's input tokens the provider has served from cache.
+
+        Derived from what this run has actually been billed for, not assumed:
+        the first call of a run has no history and is a cache miss by
+        definition, so it is projected at the full rate, and every call after it
+        is projected on the evidence of the ones before.
+        """
+        input_tokens = int(self._ledger.get("input_tokens") or 0)
+        if input_tokens <= 0:
+            return 0.0
+        cached = int(self._ledger.get("cache_read_tokens") or 0)
+        return min(1.0, max(0.0, cached / input_tokens))
+
+    def project_cost_usd(self, model: Any, input_tokens: int, output_tokens: int) -> float:
+        """What a call of this size is likely to cost, given the run so far.
+
+        Reservations decide whether work is *allowed*, so pricing every input
+        token at the full rate does not merely misreport -- it refuses work that
+        would have fit. An agent loop re-sends a growing prefix on every call
+        and a provider serves nearly all of it from cache (a measured DeepSeek
+        turn: 3,968 of 4,016 input tokens, at a tenth of the price), so charging
+        the estimate at the uncached rate can exhaust a cost budget the better
+        part of an order of magnitude early.
+        """
+        cached = int(max(0, input_tokens) * self.observed_cache_read_ratio)
+        return usage_cost_usd(model, input_tokens, output_tokens, cache_read_tokens=cached)
+
+    @property
     def enabled(self) -> bool:
         return bool(self._ledger.get("enabled"))
 
@@ -225,12 +260,20 @@ class BudgetController:
         output_tokens: int,
         cost_usd: float,
         usage_estimated: bool,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ) -> None:
         async with self._lock:
             self._reservations.pop(reservation.reservation_id, None)
             self._ledger["input_tokens"] += max(0, input_tokens)
             self._ledger["output_tokens"] += max(0, output_tokens)
             self._ledger["total_tokens"] = self._ledger["input_tokens"] + self._ledger["output_tokens"]
+            self._ledger["cache_read_tokens"] = int(self._ledger.get("cache_read_tokens") or 0) + max(
+                0, cache_read_tokens
+            )
+            self._ledger["cache_creation_tokens"] = int(self._ledger.get("cache_creation_tokens") or 0) + max(
+                0, cache_creation_tokens
+            )
             self._ledger["cost_usd"] += max(0.0, cost_usd)
             self._ledger["llm_calls"] += 1
             phases = dict(self._ledger.get("phases") or {})
@@ -238,6 +281,9 @@ class BudgetController:
             phase_usage["input_tokens"] = int(phase_usage.get("input_tokens") or 0) + max(0, input_tokens)
             phase_usage["output_tokens"] = int(phase_usage.get("output_tokens") or 0) + max(0, output_tokens)
             phase_usage["total_tokens"] = int(phase_usage["input_tokens"]) + int(phase_usage["output_tokens"])
+            phase_usage["cache_read_tokens"] = int(phase_usage.get("cache_read_tokens") or 0) + max(
+                0, cache_read_tokens
+            )
             phase_usage["cost_usd"] = float(phase_usage.get("cost_usd") or 0.0) + max(0.0, cost_usd)
             phase_usage["llm_calls"] = int(phase_usage.get("llm_calls") or 0) + 1
             phases[reservation.phase] = phase_usage
@@ -401,7 +447,66 @@ def estimate_tokens(model: Any, system_prompt: str, messages: list[BaseMessage],
         return max(1, math.ceil(len(text) / 4))
 
 
-def usage_cost_usd(model: Any, input_tokens: int, output_tokens: int) -> float:
+@dataclass(frozen=True)
+class LlmUsage:
+    """One call's token usage, including the parts the provider served from cache."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    # Subsets of input_tokens, not additions to it -- LangChain reports
+    # input_tokens as the sum of every input token type, and litellm prices
+    # `prompt_tokens` the same way, subtracting the cached portions and charging
+    # each at its own rate.
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def reported(self) -> bool:
+        return bool(self.input_tokens or self.output_tokens)
+
+
+def usage_from_message(message: Any) -> LlmUsage:
+    """Read a LangChain response's usage, cache details included.
+
+    ``input_token_details`` is where a provider's cache accounting surfaces
+    (``cache_read`` on a hit, ``cache_creation`` on a write). Reading only
+    ``input_tokens`` and pricing all of it at the full rate overstates the cost
+    of an agent loop by most of its input: a measured DeepSeek call re-sending
+    a 4,016-token prefix reported 3,968 of them as ``cache_read``, billed at a
+    tenth of the rate we were charging ourselves for.
+    """
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return LlmUsage()
+    details = usage.get("input_token_details")
+    details = details if isinstance(details, dict) else {}
+    return LlmUsage(
+        input_tokens=int(usage.get("input_tokens") or 0),
+        output_tokens=int(usage.get("output_tokens") or 0),
+        cache_read_tokens=int(details.get("cache_read") or 0),
+        cache_creation_tokens=int(details.get("cache_creation") or 0),
+    )
+
+
+def usage_cost_usd(
+    model: Any,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Price one call. ``input_tokens`` is the total, cached portions included.
+
+    litellm subtracts ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    from ``prompt_tokens`` and charges each at its own rate, so passing the
+    details alongside the total is all that is needed -- and passing no details
+    prices every input token at the full rate, which is what this used to do.
+    """
     model_name = str(getattr(model, "model_name", None) or getattr(model, "model", "") or "")
     if not model_name:
         return 0.0
@@ -412,6 +517,8 @@ def usage_cost_usd(model: Any, input_tokens: int, output_tokens: int) -> float:
             model=model_name,
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,
+            cache_read_input_tokens=min(max(0, cache_read_tokens), max(0, input_tokens)),
+            cache_creation_input_tokens=min(max(0, cache_creation_tokens), max(0, input_tokens)),
         )
         return float(input_cost + output_cost)
     except Exception:

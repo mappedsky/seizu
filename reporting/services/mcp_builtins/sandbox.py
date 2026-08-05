@@ -660,7 +660,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # the token dimension disabled) authorizes every sandbox call at
             # zero, so concurrent calls can overshoot the ceiling before any of
             # them records what it spent.
-            estimated_cost_usd=chat_budget.usage_cost_usd(self._model, estimated_input, estimated_output),
+            estimated_cost_usd=controller.project_cost_usd(self._model, estimated_input, estimated_output),
             # Scope, so this counts against the delegating step's ceiling. A
             # step's own counter cannot see this spend -- it happens below the
             # outer loop -- so without the scope a step could spend hundreds of
@@ -684,10 +684,9 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
                 # synchronous because awaiting a lock while being cancelled can
                 # itself be interrupted.
                 controller.discard(reservation)
-        usage = getattr(response, "usage_metadata", None) or {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        estimated = not (input_tokens or output_tokens)
+        usage = chat_budget.usage_from_message(response)
+        input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
+        estimated = not usage.reported
         if estimated:
             # No provider usage: bill the estimate rather than nothing, so an
             # unreported call still moves the ledger.
@@ -697,8 +696,19 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             reservation,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            cost_usd=chat_budget.usage_cost_usd(self._model, input_tokens, output_tokens),
+            # The sub-agent loop is where cached input dominates: it re-sends a
+            # growing prefix on every call, and the provider serves nearly all
+            # of it from cache after the first.
+            cost_usd=chat_budget.usage_cost_usd(
+                self._model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+            ),
             usage_estimated=estimated,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
         )
         return response
 
