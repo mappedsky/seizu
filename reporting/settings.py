@@ -580,6 +580,11 @@ CHAT_LLM_CONTEXT_WINDOW_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_TOKENS", 0)
 # fails the turn. Raise it (or set CHAT_LLM_CONTEXT_WINDOW_TOKENS) when running
 # a large-context model litellm cannot identify.
 CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS", 32_768)
+# Fraction of the window held back when sizing a call. Our count is an
+# under-estimate by construction -- providers frame each message with tokens we
+# never see, and a tokenizer resolved by name can differ from the one the
+# endpoint runs -- and under-counting is the direction that fails the call.
+CHAT_LLM_CONTEXT_SAFETY_MARGIN = float_env("CHAT_LLM_CONTEXT_SAFETY_MARGIN", 0.05)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.
 CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")

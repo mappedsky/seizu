@@ -129,3 +129,89 @@ def test_a_character_budget_is_calibrated_on_the_text_it_will_cut(mocker):
     assert chat_context.chars_for_tokens(_model(), "x" * 300, tokens=0) == 0
     # No sample to measure: the fallback ratio, not a crash.
     assert chat_context.chars_for_tokens(_model(), "", tokens=10) == 30
+
+
+# --- The whole request, not just history ---------------------------------------
+
+
+def test_the_allowance_subtracts_everything_the_call_must_carry(mocker):
+    """History was the only thing ever bounded, while the system prompt, tool
+    schemas and the reply grew independently on top of it."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 10_000)
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_SAFETY_MARGIN", 0.0)
+    mocker.patch("litellm.token_counter", side_effect=lambda model, text: len(text))
+
+    allowance = chat_context.message_allowance_tokens(
+        _model(),
+        system_prompt="s" * 1_000,
+        tool_schemas="t" * 2_000,
+        max_output_tokens=4_000,
+        message_count=0,
+    )
+
+    assert allowance == 10_000 - 1_000 - 2_000 - 4_000
+
+
+def test_the_allowance_holds_back_a_margin_and_per_message_framing(mocker):
+    """Our count is an under-estimate by construction, and under-counting is the
+    direction that fails the call."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 10_000)
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_SAFETY_MARGIN", 0.05)
+    mocker.patch("litellm.token_counter", side_effect=lambda model, text: len(text))
+
+    allowance = chat_context.message_allowance_tokens(
+        _model(), system_prompt="", tool_schemas="", max_output_tokens=0, message_count=10
+    )
+
+    assert allowance == 10_000 - 500 - (10 * chat_context._PER_MESSAGE_FRAMING_TOKENS)
+
+
+def test_an_allowance_cannot_go_negative(mocker):
+    """The fixed parts alone can exceed the window; callers must get 0, not a
+    negative budget that reads as 'unbounded' further down."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 1_000)
+    mocker.patch("litellm.token_counter", side_effect=lambda model, text: len(text))
+
+    assert (
+        chat_context.message_allowance_tokens(_model(), system_prompt="s" * 5_000, tool_schemas="", max_output_tokens=0)
+        == 0
+    )
+
+
+# --- Recognising a context overflow --------------------------------------------
+
+
+def test_a_context_overflow_is_recognised_through_a_wrapper():
+    """The error reaches us through langchain_litellm, which may have wrapped
+    it, and providers word it differently."""
+    for message in (
+        "This model's maximum context length is 8192 tokens",
+        "context_length_exceeded",
+        "prompt is too long: 250000 tokens > 200000",
+        "Please reduce the length of the messages",
+    ):
+        assert chat_context.is_context_overflow(ValueError(message)), message
+
+    wrapped = RuntimeError("litellm call failed")
+    wrapped.__cause__ = ValueError("maximum context length exceeded")
+    assert chat_context.is_context_overflow(wrapped) is True
+
+
+def test_a_context_overflow_is_recognised_by_type(mocker):
+    from litellm import ContextWindowExceededError
+
+    exc = ContextWindowExceededError(message="too big", model="m", llm_provider="p")
+    assert chat_context.is_context_overflow(exc) is True
+
+
+def test_other_failures_are_not_mistaken_for_overflow():
+    """Retrying a smaller context cannot fix a rate limit or a bad key, and
+    treating them as overflow would silently discard conversation."""
+    for message in ("rate limit exceeded", "invalid api key", "connection reset by peer", "the tool call was invalid"):
+        assert chat_context.is_context_overflow(ValueError(message)) is False
+
+
+def test_overflow_detection_survives_a_self_referential_cause():
+    exc = ValueError("something else")
+    exc.__cause__ = exc
+    assert chat_context.is_context_overflow(exc) is False

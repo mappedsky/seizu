@@ -85,16 +85,31 @@ the cost of every call:
 | `deepseek/deepseek-chat` | 131,072 | 40,000 (configured cap) |
 | unknown / self-hosted | 32,768 (assumed) | 16,384 (clamped by share) |
 
-Two limits remain outside this, deliberately:
+**The whole request is budgeted, not just history.** Immediately before each
+call, the conversation is trimmed to `window − system prompt − tool schemas −
+reply − safety margin`. That check lives at the single point where the whole
+request exists in one scope, so it covers every LLM call — the chat loop,
+orchestrator workers, synthesis and continuations alike. What is shed is
+condensed into a digest rather than dropped. `CHAT_LLM_CONTEXT_SAFETY_MARGIN`
+(5%) plus a per-message framing allowance covers what we cannot see: providers
+frame each message with tokens we never count, and a tokenizer resolved by name
+can differ from the one the endpoint runs. Both make our count an
+under-estimate, and under-counting is the direction that fails a call.
 
-- **The whole prompt is not yet budgeted as one.** Only prior conversation is
-  bounded here; the system prompt, tool schemas, session digest and the current
-  turn's tool results are additions on top of it.
-- **Cross-turn history is truncated, not compacted.** The oldest turns are
-  dropped rather than summarized. The within-turn loop *does* condense what it
-  sheds into a deterministic digest. Extending that across turns has to stay
-  append-only, because rewriting the prefix invalidates the provider's prompt
-  cache for the whole conversation — see below.
+**An overflow is recovered, not fatal.** If a provider rejects a call for
+exceeding its window anyway, the turn is retried once with the conversation
+halved *relative to what was actually sent* — an overflow means our estimate of
+the window was wrong, so halving our own allowance could leave the request
+exactly as oversized. The retry is skipped once any text has streamed, since it
+would duplicate what the user already saw, and errors that a smaller context
+cannot fix (rate limits, bad keys) are never mistaken for overflow.
+
+One limit remains outside this, deliberately: **cross-turn history is truncated,
+not compacted.** The oldest turns are dropped rather than summarized. The
+within-turn loop *does* condense what it sheds into a deterministic digest.
+Extending that across turns has to stay append-only, because rewriting the
+prefix invalidates the provider's prompt cache for the whole conversation — see
+below.
 
 ### Prompt caching and cost
 
@@ -151,6 +166,7 @@ Two consequences worth knowing:
 | `CHAT_LLM_CONTEXT_WINDOW_SHARE` | `0.5` | Share of the model's input window history may occupy; the rest is for the system prompt, tool schemas, this turn's tool results and the reply. The effective budget is the smaller of this and `CHAT_LLM_CONTEXT_MAX_TOKENS`. |
 | `CHAT_LLM_CONTEXT_WINDOW_TOKENS` | `0` | Override the model's input window instead of reading it from litellm's model database. `0` derives it. |
 | `CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS` | `32768` | Window assumed for a model litellm cannot identify (typically self-hosted). Small on purpose. |
+| `CHAT_LLM_CONTEXT_SAFETY_MARGIN` | `0.05` | Fraction of the window held back when sizing a call, covering provider message framing and tokenizer differences we cannot observe. |
 
 ### Orchestrator
 

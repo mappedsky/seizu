@@ -3795,3 +3795,150 @@ def test_the_capability_context_labels_tools_as_available_now(mocker):
 
     assert "Tools available now:" in context
     assert "sandbox__delegate" in context
+
+
+# ---------------------------------------------------------------------------
+# Fitting the whole request to the model's window
+# ---------------------------------------------------------------------------
+
+
+def _long_tool_exchange(index: int, size: int = 4_000) -> list[Any]:
+    return [
+        AIMessage(content="", tool_calls=[_tool_call(f"t__{index}", {}, f"call_{index}")]),
+        ToolMessage(content=f"FINDING_{index} " + "x" * size, tool_call_id=f"call_{index}", name=f"t__{index}"),
+    ]
+
+
+async def test_a_turn_is_trimmed_to_what_the_model_will_actually_take(mocker):
+    """Callers bound the conversation for cost; this bounds the request the
+    provider receives. Only here does the system prompt and the tool schemas
+    count against the window alongside the messages."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 2_000)
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 500)
+    seen: list[list[Any]] = []
+
+    class _CapturingModel:
+        model_name = "test/model"
+
+        def bind_tools(self, _tools: Any) -> "_CapturingModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            seen.append(list(input))
+            yield AIMessageChunk(content="ok")
+
+    messages: list[Any] = [HumanMessage(content="audit the org")]
+    for index in range(8):
+        messages.extend(_long_tool_exchange(index))
+
+    await chat_graph._run_llm_tool_turn(_CapturingModel(), "system", messages, [], {})
+
+    sent = seen[0][1:]  # drop the SystemMessage
+    assert len(sent) < len(messages)
+    # Condensed, not merely dropped: the evidence survives as a digest.
+    assert any(chat_graph._is_context_digest(m) for m in sent)
+
+
+async def test_a_context_overflow_is_retried_once_with_less_context(mocker):
+    """A window we sized wrong is recoverable; failing the turn over it is not."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 100_000)
+    attempts: list[int] = []
+
+    class _OverflowThenOkModel:
+        model_name = "test/model"
+
+        def bind_tools(self, _tools: Any) -> "_OverflowThenOkModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            attempts.append(len(input))
+            if len(attempts) == 1:
+                raise ValueError("This model's maximum context length is 8192 tokens")
+            yield AIMessageChunk(content="recovered")
+
+    messages: list[Any] = [HumanMessage(content="audit the org")]
+    for index in range(8):
+        messages.extend(_long_tool_exchange(index))
+
+    result = await chat_graph._run_llm_tool_turn(_OverflowThenOkModel(), "system", messages, [], {})
+
+    assert chat_graph.message_text(result.message.content) == "recovered"
+    assert len(attempts) == 2
+    assert attempts[1] < attempts[0]  # the retry carried less
+
+
+async def test_the_overflow_retry_happens_at_most_once(mocker):
+    """A model that rejects everything must surface the error, not recurse."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 100_000)
+    attempts: list[int] = []
+
+    class _AlwaysOverflowModel:
+        model_name = "test/model"
+
+        def bind_tools(self, _tools: Any) -> "_AlwaysOverflowModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            attempts.append(len(input))
+            raise ValueError("context_length_exceeded")
+            yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    messages: list[Any] = [HumanMessage(content="q"), *_long_tool_exchange(0), *_long_tool_exchange(1)]
+
+    with pytest.raises(ValueError, match="context_length_exceeded"):
+        await chat_graph._run_llm_tool_turn(_AlwaysOverflowModel(), "system", messages, [], {})
+
+    assert len(attempts) == 2
+
+
+async def test_a_non_context_failure_is_not_retried(mocker):
+    """Retrying a smaller context cannot fix a rate limit, and silently
+    discarding conversation to 'handle' one would be worse than the error."""
+    attempts: list[int] = []
+
+    class _RateLimitedModel:
+        model_name = "test/model"
+
+        def bind_tools(self, _tools: Any) -> "_RateLimitedModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            attempts.append(len(input))
+            raise ValueError("rate limit exceeded")
+            yield  # pragma: no cover
+
+    with pytest.raises(ValueError, match="rate limit"):
+        await chat_graph._run_llm_tool_turn(_RateLimitedModel(), "system", [HumanMessage(content="q")], [], {})
+
+    assert len(attempts) == 1
+
+
+async def test_an_overflow_after_streaming_is_not_retried(mocker):
+    """Retrying after a partial stream would duplicate what the user already saw."""
+    mocker.patch("reporting.settings.CHAT_LLM_CONTEXT_WINDOW_TOKENS", 100_000)
+    attempts: list[int] = []
+    streamed: list[str] = []
+
+    class _FailsMidStreamModel:
+        model_name = "test/model"
+
+        def bind_tools(self, _tools: Any) -> "_FailsMidStreamModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            attempts.append(len(input))
+            yield AIMessageChunk(content="partial answer")
+            raise ValueError("maximum context length exceeded")
+
+    with pytest.raises(ValueError, match="maximum context"):
+        await chat_graph._run_llm_tool_turn(
+            _FailsMidStreamModel(),
+            "system",
+            [HumanMessage(content="q")],
+            [],
+            {},
+            lambda event: streamed.append(event.get("content", "")),
+        )
+
+    assert len(attempts) == 1
+    assert "partial answer" in "".join(streamed)

@@ -123,6 +123,77 @@ def history_token_budget(model: Any) -> int:
     return min(configured, allowed)
 
 
+# Providers frame each message with role/delimiter tokens we never see, and a
+# tokenizer chosen by name can differ slightly from the one the endpoint runs.
+# Both make our count an under-estimate, which is the direction that fails a
+# call, so a margin comes off the window before anything is allowed to use it.
+_PER_MESSAGE_FRAMING_TOKENS = 4
+
+
+def message_allowance_tokens(
+    model: Any,
+    *,
+    system_prompt: str,
+    tool_schemas: Any,
+    max_output_tokens: int,
+    message_count: int = 0,
+) -> int:
+    """Tokens the conversation may occupy in one call, after the fixed parts.
+
+    History was the only thing ever bounded, while the system prompt, tool
+    schemas and the reply grew independently on top of it -- so "fits the model"
+    was true of a part rather than of the request. This subtracts what the call
+    must carry from the window and returns what is left for messages.
+    """
+    window = context_window_tokens(model)
+    margin = min(max(settings.CHAT_LLM_CONTEXT_SAFETY_MARGIN, 0.0), 0.5)
+    fixed = count_tokens(model, system_prompt)
+    if tool_schemas:
+        fixed += count_tokens(model, str(tool_schemas))
+    fixed += max(0, message_count) * _PER_MESSAGE_FRAMING_TOKENS
+    available = window - fixed - max(0, max_output_tokens) - int(window * margin)
+    return max(0, available)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """Whether a provider rejected a call for exceeding its context window.
+
+    Matched on the exception chain by type where litellm gives us one, and by
+    message otherwise -- the error reaches us through langchain_litellm, which
+    may have wrapped it, and providers word it differently ("context length",
+    "prompt is too long", "maximum context").
+    """
+    overflow_type: type[BaseException] | None = None
+    try:
+        from litellm import ContextWindowExceededError
+
+        overflow_type = ContextWindowExceededError
+    except Exception:
+        overflow_type = None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if overflow_type is not None and isinstance(current, overflow_type):
+            return True
+        text = str(current).lower()
+        if any(
+            phrase in text
+            for phrase in (
+                "context length",
+                "context_length_exceeded",
+                "maximum context",
+                "context window",
+                "prompt is too long",
+                "too many tokens",
+                "reduce the length of the messages",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def chars_for_tokens(model: Any, sample: str, tokens: int) -> int:
     """A character budget worth roughly ``tokens``, calibrated on ``sample``.
 

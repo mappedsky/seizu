@@ -1381,6 +1381,7 @@ async def _run_llm_tool_turn(
     allow_reserve: bool = False,
     phase: str = "worker",
     max_output_tokens: int | None = None,
+    _context_retry: bool = False,
 ) -> LLMTurnResult:
     """Run one LLM turn, streaming text deltas via *writer* as they arrive.
 
@@ -1400,8 +1401,14 @@ async def _run_llm_tool_turn(
         runnable = bind_tools(tool_schemas)
 
     controller = budget_controller_from_config(config)
-    estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     estimated_output = max_output_tokens if max_output_tokens is not None else settings.CHAT_LLM_MAX_TOKENS
+    # The one place the whole request exists in one scope, and therefore the only
+    # place it can be checked as a whole. Every caller's own cap bounds part of
+    # it; this bounds the request the provider will actually receive.
+    messages = _fit_messages_to_window(
+        model, system_prompt, messages, tool_schemas, max_output_tokens=max(1, estimated_output)
+    )
+    estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     reservation = None
     if controller is not None:
         reservation = await controller.reserve(
@@ -1459,9 +1466,43 @@ async def _run_llm_tool_turn(
                         writer({"kind": "token", "content": safe})
                         streamed += safe
             merged = chunk if merged is None else merged + chunk
-    except Exception:
+    except Exception as exc:
         if controller is not None and reservation is not None:
             await controller.release(reservation)
+        # A window we sized wrong is recoverable; failing the turn over it is
+        # not. Only before any text has shipped -- a provider rejects an
+        # oversized request up front, so this is the ordinary case, and retrying
+        # after a partial stream would duplicate what the user already saw.
+        if not _context_retry and not streamed and chat_context.is_context_overflow(exc):
+            # Tightened against what was actually sent, not against what we
+            # believed the window to be: an overflow *is* that belief being
+            # wrong, so halving our own allowance can leave the request exactly
+            # as oversized as it already was. Halving the real size always makes
+            # the retry meaningfully smaller.
+            sent_tokens = sum(_message_context_tokens(model, message) for message in messages)
+            tightened = _trim_inner_loop_messages(
+                messages,
+                model=model,
+                max_tokens=max(_MIN_CONTEXT_MAX_TOKENS, sent_tokens // 2),
+            )
+            logger.warning(
+                "context window exceeded at ~%d tokens over %d messages; retrying once with %d messages",
+                sent_tokens,
+                len(messages),
+                len(tightened),
+            )
+            return await _run_llm_tool_turn(
+                model,
+                system_prompt,
+                tightened,
+                tools,
+                config,
+                writer,
+                allow_reserve=allow_reserve,
+                phase=phase,
+                max_output_tokens=max_output_tokens,
+                _context_retry=True,
+            )
         raise
     if stream_text and writer is not None:
         tail = markup_filter.flush()
@@ -1894,6 +1935,41 @@ def _message_context_text(message: BaseMessage) -> str:
         if message.name:
             parts.append(message.name)
     return "\n".join(part for part in parts if part)
+
+
+def _fit_messages_to_window(
+    model: Any,
+    system_prompt: str,
+    messages: list[BaseMessage],
+    tool_schemas: list[dict[str, Any]],
+    *,
+    max_output_tokens: int,
+) -> list[BaseMessage]:
+    """Trim the conversation so the *whole* request fits the model's window.
+
+    The per-call caps elsewhere are about cost and usefulness and bound only the
+    conversation. This is the hard constraint: window minus the system prompt,
+    the tool schemas, the reply and a safety margin is what the messages may
+    occupy, and anything over it is condensed rather than dropped.
+    """
+    allowance = chat_context.message_allowance_tokens(
+        model,
+        system_prompt=system_prompt,
+        tool_schemas=tool_schemas,
+        max_output_tokens=max_output_tokens,
+        message_count=len(messages),
+    )
+    if allowance <= 0:
+        # The fixed parts alone do not fit. Trimming messages cannot fix that,
+        # and emptying them guarantees a useless call, so leave it to the
+        # provider and the overflow retry above.
+        logger.warning(
+            "system prompt and tools alone exceed the context window for %s", chat_context.model_name_of(model)
+        )
+        return messages
+    if sum(_message_context_tokens(model, message) for message in messages) <= allowance:
+        return messages
+    return _trim_inner_loop_messages(messages, model=model, max_tokens=allowance)
 
 
 def _message_context_tokens(model: Any, message: BaseMessage) -> int:
