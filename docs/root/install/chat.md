@@ -123,7 +123,23 @@ reported 3,968 of those tokens as cache reads: priced as fresh input it was
 charged at $0.001794, and its real cost was $0.000083 — **21.7× overstated**. An
 uncached call prices identically either way.
 
-Two consequences worth knowing:
+**Volatile content goes last.** Prompt caching matches the longest common
+*prefix*, so anything that changes between turns invalidates everything after
+it. The session digest grows every turn, and it used to sit in the system
+prompt — the very first thing sent. Measured against an otherwise identical
+request, that was the difference between **98% of input served from cache and
+0%**. It is now carried as the last message instead, so the only uncached part
+of a follow-up turn is the newest exchange and the digest itself. A live
+two-turn conversation with session memory reports 93% and 74% cached.
+
+This ordering is the **provider-agnostic** half of caching, and it is the half
+that matters: automatic prefix caches (DeepSeek, OpenAI, Gemini) need nothing
+else, and explicit-breakpoint caches (Anthropic) cannot benefit from a
+breakpoint unless the prefix ahead of it is stable in the first place. Seizu
+does not yet emit Anthropic `cache_control` breakpoints, so on Anthropic the
+ordering is necessary but not yet sufficient.
+
+Two more consequences worth knowing:
 
 - **Reservations are projected, not assumed.** A reservation decides whether a
   call is *allowed*, so overpricing it does not merely misreport — it refuses

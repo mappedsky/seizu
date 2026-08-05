@@ -3728,11 +3728,20 @@ async def test_earlier_turns_findings_reach_the_next_turns_prompt(mocker):
     ):
         pass
 
-    system = next(m.content for m in model.inputs[0] if isinstance(m, SystemMessage))
-    assert "graph__query_001.json" in system
-    assert "412 CVE nodes" in system
+    sent = model.inputs[0]
+    system = next(m.content for m in sent if isinstance(m, SystemMessage))
+    trailing = sent[-1].content
+
+    assert "graph__query_001.json" in trailing
+    assert "412 CVE nodes" in trailing
     # Fenced: it reports what graph data said, so it can carry that data's text.
-    assert "Security boundary" in system
+    assert "Security boundary" in trailing
+    # And emphatically NOT in the system prompt. It changes every turn, and the
+    # system prompt is the first thing sent, so putting it there invalidated the
+    # provider's cache for the entire request -- measured at 0% cached against
+    # 98% for an otherwise identical prefix.
+    assert "graph__query_001.json" not in system
+    assert "412 CVE nodes" not in system
 
 
 async def test_the_turns_memory_is_written_back_to_the_thread(mocker):

@@ -2249,14 +2249,50 @@ async def test_a_dispatcher_that_raised_destroys_its_sandbox(mocker):
     closed.assert_awaited_once_with(suspend=False)
 
 
-def test_the_worker_prompt_carries_what_earlier_turns_established():
-    digest = "Established earlier: 412 CVE nodes."
-    prompt = chat_orchestrator._worker_system_prompt({"id": "s1", "goal": "g"}, digest)
+async def test_the_worker_carries_what_earlier_turns_established_as_a_trailing_message(mocker):
+    """Carried last, not in the system prompt: the digest changes every turn, and
+    a changing prefix costs the provider's cache for everything after it."""
+    from langchain_core.messages import AIMessage, SystemMessage
 
-    assert digest in prompt
-    assert chat_graph.SESSION_MEMORY_PREAMBLE in prompt
-    # Absent by default, so a turn with no history pays nothing for it.
-    assert digest not in chat_orchestrator._worker_system_prompt({"id": "s1", "goal": "g"})
+    from reporting.services import episodic_memory
+
+    ledger = episodic_memory.start_session_ledger(
+        {
+            "turn": 1,
+            "episodes": [{"task": "count CVEs", "outcome": "There are 412 CVE nodes.", "turn": 1}],
+            "receipts": [],
+        }
+    )
+    assert ledger.turn == 2
+    seen: list[list[Any]] = []
+
+    class _CapturingModel:
+        def bind_tools(self, _tools: Any) -> "_CapturingModel":
+            return self
+
+        async def astream(self, input: Any, config: Any = None, **_kwargs: Any):
+            seen.append(list(input))
+            yield AIMessage(content="done")
+
+    await chat_orchestrator._run_worker_step(
+        _step("s1"),
+        plan=[],
+        results=[],
+        model=_CapturingModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[],
+        writer=lambda _event: None,
+    )
+
+    sent = seen[0]
+    system = next(m.content for m in sent if isinstance(m, SystemMessage))
+    assert "412 CVE nodes" in str(sent[-1].content)
+    assert "412 CVE nodes" not in system
+    # Nothing to carry means nothing is sent: a first turn pays nothing for it.
+    assert chat_graph.SESSION_MEMORY_PREAMBLE not in chat_orchestrator._worker_system_prompt({"id": "s1", "goal": "g"})
+    episodic_memory.clear_session_ledger()
 
 
 # --- Disclosure of a tool the plan requires ------------------------------------

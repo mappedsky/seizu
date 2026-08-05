@@ -236,13 +236,8 @@ _SYNTHESIZER_PROMPT = (
 )
 
 
-def _worker_system_prompt(step: dict[str, Any], session_digest: str = "") -> str:
+def _worker_system_prompt(step: dict[str, Any]) -> str:
     base = chat_graph.build_system_prompt()
-    if session_digest:
-        # The worker decides whether to delegate, so it is the one that has to
-        # know the data is already on disk; telling only the sub-agent leaves
-        # the re-fetch already planned by the time anyone knows better.
-        base = f"{base}\n\n{chat_graph.SESSION_MEMORY_PREAMBLE}\n\n{session_digest}"
     criteria = step.get("success_criteria") or ""
     extra = f"\n\nYou are a sub-agent completing exactly ONE step of a larger plan. Step goal: {step.get('goal', '')}."
     if criteria:
@@ -517,8 +512,6 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         ),
         sandbox_id=str(state.get("sandbox_id") or ""),
     )
-    if planner_digest:
-        planner_system = f"{planner_system}\n\n{chat_graph.SESSION_MEMORY_PREAMBLE}\n\n{planner_digest}"
 
     run_errors: list[str] = []
     try:
@@ -537,6 +530,8 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
                             ),
                         )
                     ),
+                    # Last, for the same reason the chat loop carries it last.
+                    *([chat_graph.session_memory_message(planner_digest)] if planner_digest else []),
                 ],
                 config,
                 role="planner",
@@ -1178,18 +1173,23 @@ async def _run_worker_step(
     # step (each gather task has its own context copy), so a parallel step's
     # disclosure never widens this one's.
     chat_graph.set_disclosed_tools(active_names if progressive else {spec.name for spec in tool_specs})
+    system_prompt = _worker_system_prompt(step)
+    # The worker decides whether to delegate, so it is the one that has to know
+    # the data is already on disk; telling only the sub-agent leaves the
+    # re-fetch already planned by the time anyone knows better. Last, not in the
+    # system prompt: it changes every turn, and a changing prefix costs the
+    # provider's cache for everything after it.
     session = sandbox_session.current_sandbox_session()
-    system_prompt = _worker_system_prompt(
-        step,
-        episodic_memory.session_digest(
-            episodic_memory.current_session_ledger(),
-            sandbox_id=session.expected_sandbox_id if session is not None else "",
-        ),
+    worker_digest = episodic_memory.session_digest(
+        episodic_memory.current_session_ledger(),
+        sandbox_id=session.expected_sandbox_id if session is not None else "",
     )
 
     messages: list[BaseMessage] = [
         HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results), conversation_context))
     ]
+    if worker_digest:
+        messages.append(chat_graph.session_memory_message(worker_digest))
 
     _emit(
         writer,

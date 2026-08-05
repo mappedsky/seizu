@@ -319,6 +319,29 @@ SESSION_MEMORY_PREAMBLE = (
 )
 
 
+def session_memory_message(digest: str) -> HumanMessage:
+    """Carry the session digest as the *last* message, never in the system prompt.
+
+    Prompt caching matches the longest common prefix, so anything that changes
+    between turns invalidates everything after it. The digest grows every turn,
+    and it used to sit in the system prompt -- the very first thing sent --
+    which measured at **zero** cached input on a provider that otherwise
+    returned 98% of it cached for an identical prefix. Putting the one part that
+    always changes at the very end leaves everything before it cacheable, so the
+    uncached remainder is the newest exchange and the digest itself.
+
+    That ordering is the provider-agnostic half of caching: automatic prefix
+    caches (DeepSeek, OpenAI, Gemini) need nothing else, and explicit-breakpoint
+    caches (Anthropic) need a stable prefix before a breakpoint is worth
+    placing. Trailing placement also reads naturally -- established facts
+    immediately before the model answers.
+    """
+    return HumanMessage(
+        content=f"{SESSION_MEMORY_PREAMBLE}\n\n{digest}",
+        id=f"msg_{uuid.uuid4().hex}",
+    )
+
+
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
     """Scope a client-supplied thread id to the authenticated user.
 
@@ -514,10 +537,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # What earlier turns already established. The model that decides whether to
     # delegate needs this as much as the sub-agent does: told only afterwards,
     # it still plans the re-fetch and the sub-agent merely discovers it was
-    # unnecessary.
+    # unnecessary. Carried as a trailing message rather than in the system
+    # prompt -- see session_memory_message.
     session_digest = episodic_memory.session_digest(session_ledger, sandbox_id=stored_sandbox_id)
-    if session_digest:
-        base_system_prompt = f"{base_system_prompt}\n\n{SESSION_MEMORY_PREAMBLE}\n\n{session_digest}"
 
     # One listing per turn — every consumer below (capability context, skill
     # specs, tool specs) works off this snapshot. No cross-turn cache: each
@@ -559,6 +581,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # disclosure off there is nothing to inherit and the sub-agent keeps the
     # full set, matching what the outer model itself is given.
     set_disclosed_tools({spec.name for spec in tool_specs} if progressive_disclosure else ())
+
+    if session_digest:
+        messages = [*messages, session_memory_message(session_digest)]
 
     action_count = 0
     action_summaries: list[str] = []
