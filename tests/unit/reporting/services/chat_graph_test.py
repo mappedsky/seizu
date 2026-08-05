@@ -3962,9 +3962,12 @@ def _tool(name: str, description: str = "x") -> Tool:
     return Tool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
 
 
-def test_skill_declared_tools_are_disclosed_up_front(mocker):
+def test_skill_declared_tools_are_disclosed_when_a_step_names_the_skill(mocker):
     """A skill's tools_required is its author naming what the workflow uses, so
-    waiting for a render to honour it learns nothing and costs a cache prefix."""
+    waiting for a render to honour it learns nothing and costs a cache prefix.
+
+    The caller scopes *which* skills; this only weighs the result.
+    """
     mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
     mocker.patch("reporting.settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 10_000)
     tools = [_tool("reports__list"), _tool("reports__get"), _tool("roles__delete")]

@@ -557,21 +557,20 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # is otherwise reset each turn — see ChatState.disclosed_tools).
     disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
     # From the skills already listed above -- no second store read.
-    declared_names = mcp_runtime.declared_tool_names(skills) if progressive_disclosure else frozenset()
+    # No up-front skill-tool disclosure here: this path has no signal for *which*
+    # skills a turn will use, and the union of every enabled skill's declaration
+    # is the catalogue rather than the need -- 1 bound tool (343 tokens) became
+    # 43 (4,666) on a turn that may never render a skill at all. The orchestrated
+    # path has that signal, because the plan names the skill.
     if not progressive_disclosure:
         tools = await _list_chat_tools(current_user)
-    elif disclosed_tool_names or _always_disclosed_names or declared_names:
+    elif disclosed_tool_names or _always_disclosed_names:
         # Resolve the persisted names against the live store; names whose tool
         # no longer exists simply drop out.  Also fetch when always-disclosed
         # tools exist so they can appear in the capability context.
         tools = await _list_chat_tools(current_user)
 
-    # Kept out of ``disclosed_tool_names`` so what persists to the next turn
-    # stays the set this conversation actually unlocked. These are re-derived
-    # every turn from the live skills, so persisting them would only pin a
-    # stale copy.
-    skill_tool_names = skill_declared_tool_names(model, tools, declared_names) if progressive_disclosure else set()
-    available_names = disclosed_tool_names | set(_always_disclosed_names) | skill_tool_names
+    available_names = disclosed_tool_names | set(_always_disclosed_names)
     always_disclosed_tools = [t for t in tools if t.name in available_names] if progressive_disclosure else []
     capability_context = build_capability_context(
         skills,

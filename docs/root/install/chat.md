@@ -185,20 +185,27 @@ genuine growth rather than instability.
 A skill's `tools_required` is its author stating exactly which tools the
 workflow uses, so there is nothing to learn by waiting for a render before
 honouring it — and waiting is what churned the tool list mid-turn. Those tools
-are now disclosed from the start of a turn. After the change, a turn that
-previously went 3 → 11 tools held one tool list across all four of its calls,
-and every call after the first read the prefix the one before it wrote (2,605 →
-3,320 → 3,898).
+are disclosed from the start of a step. After the change, a turn that previously
+went 3 → 11 tools held one tool list across all four of its calls, and every
+call after the first read the prefix the one before it wrote (2,605 → 3,320 →
+3,898).
 
-**Bounded, because skills are user-authored.** The union of everything the
-enabled skills declare can grow to cover the whole tool surface, at which point
-disclosing it up front is just binding every tool on every call — precisely what
-progressive disclosure exists to avoid. Above
-`CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` of tool schema the up-front
-disclosure is skipped and tools are disclosed on render as before. The bound is
-measured in schema tokens rather than tool count, since that is what occupies
-the prefix. For scale, in a measured deployment: 42 declared tools ≈ 5,300
-tokens, against ≈ 1,100 for a turn's typical 11 and ≈ 13,000 for the full 96.
+**Scoped to the skills a step names**, not to the catalogue. The plan is the
+signal: a skill step names its skill in `required_action`, and any step may name
+skills in `suggested_tools`. Unioning *every* enabled skill's declaration would
+describe what the deployment can do rather than what the step needs — on a
+measured deployment that took a turn from 1 bound tool (343 tokens) to 43
+(4,666), most of them belonging to workflows the turn would never touch, and a
+CVE question would carry all 23 skill-authoring tools. The single-agent path has
+no such signal (nothing names a skill before the model picks one), so it keeps
+disclosing on render.
+
+**Bounded as well as scoped**, because skills are user-authored: a single skill
+can declare a great many tools. Above `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS`
+of tool schema the up-front disclosure is skipped and tools are disclosed on
+render as before. The bound is measured in schema tokens rather than tool count,
+since that is what occupies the prefix — one enormous schema is not one trivial
+one.
 
 Declarations ride on the skill listing the turn already makes (via the prompt's
 `_meta`), so this adds no store read. Names of tools that no longer exist, or
@@ -251,8 +258,8 @@ Two more consequences worth knowing:
 | `CHAT_LLM_CONTEXT_SAFETY_MARGIN` | `0.05` | Fraction of the window held back when sizing a call, covering provider message framing and tokenizer differences we cannot observe. |
 | `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
 | `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
-| `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools enabled skills declare in `tools_required` from the start of a turn, instead of only once a skill renders. |
-| `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a large skill catalogue does not turn into binding every tool on every call. |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools declared by the skills a plan step names, from the start of the step, instead of only once the skill renders. |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a skill declaring a great many tools does not turn into binding them all on every call. |
 
 ### Orchestrator
 

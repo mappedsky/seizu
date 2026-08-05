@@ -593,22 +593,24 @@ CHAT_LLM_PROMPT_CACHE_ENABLED = bool_env("CHAT_LLM_PROMPT_CACHE_ENABLED", True)
 # Anthropic will not cache a prefix shorter than this, so a smaller system
 # prompt is left unmarked rather than reshaped into blocks for nothing.
 CHAT_LLM_PROMPT_CACHE_MIN_TOKENS = int_env("CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 1_024)
-# Disclose the tools that enabled skills declare in tools_required from the
-# start of a turn, instead of only once a skill renders. The declaration is the
-# skill author naming exactly what the workflow uses, so there is nothing to
-# learn by waiting -- and waiting churns the tool list mid-turn, which is the
-# head of the provider's cached prefix and invalidates everything behind it.
+# Disclose the tools declared by the skills a plan step names, from the start of
+# the step, instead of only once the skill renders. The declaration is the skill
+# author naming exactly what the workflow uses, so there is nothing to learn by
+# waiting -- and waiting churns the tool list mid-turn, which is the head of the
+# provider's cached prefix and invalidates everything behind it. Scoped to the
+# skills the step names: unioning every enabled skill's declaration describes
+# the catalogue rather than the need, and took a measured turn from 1 bound tool
+# to 43.
 # The cost is a larger tool list up front, cached after the first call.
 # Set false to disclose only on render.
 CHAT_LLM_DISCLOSE_SKILL_TOOLS = bool_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
 # ...but only while that list stays small enough to be worth it. Skills are
-# user-authored and unbounded, so the union of everything they declare can grow
-# to cover the whole tool surface -- at which point disclosing it up front is
-# just binding every tool on every call, which is what progressive disclosure
-# exists to avoid. Above this many tokens of tool schema, fall back to
-# disclosing on render. For scale: a measured deployment had 42 declared tools
-# at ~5,300 tokens, against ~1,100 for a turn's typical 11 and ~13,000 for the
-# full 96.
+# user-authored, so one can declare a great many tools -- at which point
+# disclosing them up front is just binding them all on every call, which is what
+# progressive disclosure exists to avoid. Above this many tokens of tool schema,
+# fall back to disclosing on render. For scale: a measured deployment had 42
+# tools across all its skills at ~5,300 tokens, against ~1,100 for a turn's
+# typical 11 and ~13,000 for the full 96.
 CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS = int_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 6_000)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.

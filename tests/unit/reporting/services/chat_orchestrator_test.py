@@ -2190,7 +2190,7 @@ async def test_every_step_of_a_batch_shares_one_sandbox_and_it_outlives_them(moc
     mocker.patch(
         "reporting.services.chat_orchestrator._worker_tool_specs",
         new_callable=AsyncMock,
-        return_value=([], [], frozenset()),
+        return_value=([], [], []),
     )
     mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=object())
     closed = mocker.patch(
@@ -2462,3 +2462,49 @@ def test_every_step_shares_one_worker_system_prompt():
         ):
             if fragment:
                 assert fragment in message
+
+
+def test_disclosure_follows_the_skills_a_step_names(mocker):
+    """Not the catalogue: every enabled skill's declaration unioned together is
+    what the deployment can do, not what this step needs. On one deployment that
+    took a turn from 1 bound tool (343 tokens) to 43 (4,666), most belonging to
+    workflows the turn would never touch.
+    """
+    from mcp.types import Prompt
+
+    from reporting.services import mcp_runtime
+
+    prompts = [
+        Prompt(
+            name="cve__assess", description="d", _meta={mcp_runtime.SKILL_TOOLS_META_KEY: ["cve__get", "cve__list"]}
+        ),
+        Prompt(
+            name="authoring__write", description="d", _meta={mcp_runtime.SKILL_TOOLS_META_KEY: ["skillsets__create"]}
+        ),
+    ]
+    specs = [
+        chat_graph.ChatToolSpec(name="cve__assess", kind="skill", description="d", input_schema={}),
+        chat_graph.ChatToolSpec(name="authoring__write", kind="skill", description="d", input_schema={}),
+    ]
+
+    named = chat_orchestrator._step_declared_tool_names(
+        _step("s1", action_kind="skill", required_action="cve__assess"), specs, prompts
+    )
+    assert named == frozenset({"cve__get", "cve__list"})
+    assert "skillsets__create" not in named  # a skill this step never named
+
+    # suggested_tools names skills too.
+    suggested = chat_orchestrator._step_declared_tool_names(
+        _step("s2", suggested_tools=["authoring__write"]), specs, prompts
+    )
+    assert suggested == frozenset({"skillsets__create"})
+
+    # A step naming no skill discloses nothing up front.
+    assert chat_orchestrator._step_declared_tool_names(_step("s3"), specs, prompts) == frozenset()
+    # ...including one that names a plain tool rather than a skill.
+    assert (
+        chat_orchestrator._step_declared_tool_names(
+            _step("s4", action_kind="tool", required_action="graph__query"), specs, prompts
+        )
+        == frozenset()
+    )

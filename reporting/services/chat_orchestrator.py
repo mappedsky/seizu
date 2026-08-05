@@ -790,7 +790,7 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
         step["status"] = "ran"
 
     model = get_chat_model("worker", economy=bool(controller and controller.degraded))
-    tool_specs, skill_tools, declared_skill_tools = await _worker_tool_specs(current_user)
+    tool_specs, skill_tools, skill_prompts = await _worker_tool_specs(current_user)
     # Progressive disclosure carries across steps: tools a skill disclosed in an
     # earlier super-step stay callable for the dependent steps that follow.
     progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
@@ -817,7 +817,7 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
                 progressive=progressive,
                 writer=writer,
                 skill_tools=skill_tools,
-                declared_skill_tools=declared_skill_tools,
+                skill_prompts=skill_prompts,
             )
             for step in batch
         )
@@ -940,20 +940,16 @@ def _merge_results(existing: list[dict[str, Any]], new: list[dict[str, Any]]) ->
 
 async def _worker_tool_specs(
     current_user: CurrentUser | None,
-) -> tuple[list[ChatToolSpec], list[chat_graph.Tool], frozenset[str]]:
-    """The worker tool universe, plus what the skills declare they need.
+) -> tuple[list[ChatToolSpec], list[chat_graph.Tool], list[chat_graph.Prompt]]:
+    """The worker tool universe, plus the raw listings it was built from.
 
-    Returns the raw tool listing and the declared names alongside the specs so
-    the caller can weigh the declared set before disclosing it, without a second
-    listing -- one store read per turn covers every consumer.
+    The listings come back so a step can scope disclosure to the skills it names
+    and weigh the result, without a second read -- one store read per turn
+    covers every consumer.
     """
     skills = await _list_chat_prompts(current_user)
     tools = await _list_chat_tools(current_user)
-    return (
-        [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)],
-        tools,
-        mcp_runtime.declared_tool_names(skills),
-    )
+    return [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)], tools, skills
 
 
 # Below this a context entry is more noise than referent, so stop rather than
@@ -1116,7 +1112,7 @@ async def _run_worker_step(
     progressive: bool | None = None,
     writer: Any = None,
     skill_tools: list[chat_graph.Tool] | None = None,
-    declared_skill_tools: frozenset[str] = frozenset(),
+    skill_prompts: list[chat_graph.Prompt] | None = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
 
@@ -1134,13 +1130,18 @@ async def _run_worker_step(
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
     skill_tools = list(skill_tools or [])
+    skill_prompts = list(skill_prompts or [])
     _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive else frozenset()
     # What the listed skills declare they need, honoured up front rather than on
     # render -- the tool list heads the provider's cached prefix, so unlocking
     # mid-turn invalidates everything behind it. Bounded: see
     # chat_graph.skill_declared_tool_names.
     skill_names = (
-        chat_graph.skill_declared_tool_names(model, skill_tools, declared_skill_tools) if progressive else set()
+        chat_graph.skill_declared_tool_names(
+            model, skill_tools, _step_declared_tool_names(step, tool_specs, skill_prompts)
+        )
+        if progressive
+        else set()
     )
     disclosed_names |= skill_names
     available_pool = (
@@ -1587,6 +1588,35 @@ def _match_action_spec(tool_specs: list[ChatToolSpec], action_kind: str, require
     if len(suffix) == 1:
         return suffix[0]
     return None
+
+
+def _step_declared_tool_names(
+    step: dict[str, Any], tool_specs: list[ChatToolSpec], skill_prompts: list[chat_graph.Prompt]
+) -> frozenset[str]:
+    """Tools declared by the skills *this step names*, not by the whole catalogue.
+
+    The plan is the signal: a skill step names its skill in ``required_action``,
+    and any step may name skills in ``suggested_tools``. Honouring those
+    declarations up front keeps the tool list stable through the step -- it
+    heads the provider's cached prefix, and unlocking mid-step invalidates
+    everything behind it.
+
+    Scoped deliberately. Every enabled skill's declaration unioned together is
+    the catalogue rather than the need: on one deployment that turned a
+    single-agent turn from 1 bound tool into 43, most of them belonging to
+    workflows the turn would never touch.
+    """
+    named: set[str] = set()
+    candidates = [str(step.get("required_action") or ""), *(str(t) for t in step.get("suggested_tools") or [])]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        spec = _match_action_spec(tool_specs, "skill", candidate)
+        if spec is not None:
+            named.add(spec.name)
+    if not named:
+        return frozenset()
+    return mcp_runtime.declared_tool_names(skill_prompts, only=named)
 
 
 def _required_action_spec(tool_specs: list[ChatToolSpec], step: dict[str, Any]) -> ChatToolSpec | None:
