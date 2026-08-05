@@ -218,14 +218,49 @@ def supports_cache_breakpoints(model: Any) -> bool:
 def _marked(message: Any) -> Any:
     """The same message with a cache breakpoint on its text, or unchanged.
 
-    Only plain-string content is converted: an AI message mid-tool-call carries
-    its payload in ``tool_calls`` rather than ``content``, and rewriting those
-    shapes into blocks risks more than a cache hit is worth.
+    Handles both shapes a message reaches us in: plain string content, and
+    content already rewritten into blocks (the sandbox sub-agent normalizes tool
+    results into text blocks before the call, so a string-only version silently
+    marked nothing on the very path that carries most of a turn's tokens).
+
+    An AI message mid-tool-call carries its payload in ``tool_calls`` rather
+    than ``content``, and rewriting those shapes risks more than a cache hit is
+    worth, so it is left alone.
     """
     content = getattr(message, "content", None)
-    if not isinstance(content, str) or not content.strip():
-        return message
-    return message.model_copy(update={"content": [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]})
+    if isinstance(content, str):
+        if not content.strip():
+            return message
+        return message.model_copy(
+            update={"content": [{"type": "text", "text": content, "cache_control": _CACHE_CONTROL}]}
+        )
+    if isinstance(content, list) and content:
+        blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+        for block in reversed(blocks):
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["cache_control"] = _CACHE_CONTROL
+                return message.model_copy(update={"content": blocks})
+    return message
+
+
+def with_message_cache_breakpoints(model: Any, messages: list[Any]) -> list[Any]:
+    """Roll a cache breakpoint along a growing message list.
+
+    For a loop that owns its whole request as one list -- the sandbox
+    sub-agent's ``create_react_agent``, which carries the system prompt as the
+    first message rather than as a separate argument. Marking the last message
+    each call means the next one reads everything before it and writes only its
+    own delta, which is the shape a tool loop has.
+
+    This path was left out when breakpoints were first added, and it is not a
+    minor one: measured on a real turn, the sub-agent was 200,761 of 246,210
+    input tokens and read *none* of them, while the outer loop that did have
+    breakpoints read 48%.
+    """
+    if not supports_cache_breakpoints(model) or not messages:
+        return messages
+    last = len(messages) - 1
+    return [_marked(message) if index == last else message for index, message in enumerate(messages)]
 
 
 def with_cache_breakpoints(model: Any, system_prompt: str, messages: list[Any]) -> tuple[Any, list[Any]]:

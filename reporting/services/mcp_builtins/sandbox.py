@@ -43,7 +43,7 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, episodic_memory, sandbox_session
+from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -636,10 +636,22 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         return _ToolMessageNormalizingModel(self._model.bind_tools(tools, **kwargs))
 
     def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
-        return self._model.invoke(self._normalize(input), config, **kwargs)
+        return self._model.invoke(self._cacheable(self._normalize(input)), config, **kwargs)
+
+    def _cacheable(self, normalized: Any) -> Any:
+        """Roll a cache breakpoint along the sub-agent's growing message list.
+
+        Every inner call re-sends the whole conversation so far, which is the
+        shape prompt caching exists for -- but this path never saw a breakpoint,
+        and on a provider that caches nothing without one it read zero. It is
+        where the tokens are: 200,761 of a measured turn's 246,210.
+        """
+        if not isinstance(normalized, list):
+            return normalized
+        return chat_context.with_message_cache_breakpoints(self._model, normalized)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
-        normalized = self._normalize(input)
+        normalized = self._cacheable(self._normalize(input))
         controller = chat_budget.current_budget_controller()
         if controller is None:
             return await self._model.ainvoke(normalized, config=config, **kwargs)

@@ -254,14 +254,30 @@ def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
         if line.startswith("LEDGER"):
             budget = json.loads(line[len("LEDGER") :])
             phases = budget.get("phases") or {}
+            input_tokens = budget.get("input_tokens", 0)
+            cache_read = budget.get("cache_read_tokens", 0)
             return {
                 "total_tokens": budget.get("total_tokens", 0),
                 "mode": budget.get("mode", ""),
                 "sandbox_tokens": sum(
                     v.get("total_tokens", 0) for k, v in phases.items() if k.endswith("sandbox_subagent")
                 ),
+                # Prompt caching is most of what a turn's *cost* now depends on,
+                # and it is invisible in a token total: cached input is billed at
+                # a fraction of fresh input, so two runs with identical token
+                # counts can differ severalfold in spend.
+                "cache_read_tokens": cache_read,
+                "cache_hit_pct": round(cache_read / input_tokens * 100) if input_tokens else 0,
+                "cost_usd": round(float(budget.get("cost_usd", 0.0)), 4),
             }
-    return {"total_tokens": 0, "mode": "?", "sandbox_tokens": 0}
+    return {
+        "total_tokens": 0,
+        "mode": "?",
+        "sandbox_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_hit_pct": 0,
+        "cost_usd": 0.0,
+    }
 
 
 def run_sample(arm: str, index: int, user_id: str, out_dir: Path) -> dict[str, Any]:
@@ -284,11 +300,15 @@ def summarize(rows: list[dict[str, Any]]) -> None:
     arms: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         arms.setdefault(row["arm"], []).append(row)
-    keys = ("answer_chars", "queries", "inner_calls", "delegations", "total_tokens")
+    keys = ("answer_chars", "queries", "delegations", "total_tokens", "cache_hit_pct", "cost_usd")
     print(f"\n{'arm':38} {'n':>2}  " + "  ".join(f"{k:>22}" for k in keys))
     for arm, samples in arms.items():
         cells = []
         for key in keys:
+            if key == "cost_usd":
+                costs = sorted(float(s[key]) for s in samples)
+                cells.append(f"${statistics.median(costs):.3f} [{costs[0]:.3f}-{costs[-1]:.3f}]".rjust(22))
+                continue
             values = sorted(int(s[key]) for s in samples)
             cells.append(f"{int(statistics.median(values))} [{values[0]}-{values[-1]}]".rjust(22))
         print(f"{arm[:38]:38} {len(samples):>2}  " + "  ".join(cells))

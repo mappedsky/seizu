@@ -309,3 +309,43 @@ def test_messages_without_plain_text_are_left_alone(mocker):
 
     assert out[-1].content == ""
     assert out[-1].tool_calls == tool_call.tool_calls
+
+
+def test_a_message_list_gets_a_rolling_breakpoint_on_its_last_entry(mocker):
+    """The sandbox sub-agent owns its whole request as one list, so it needs a
+    mark rolled along the end rather than a system/messages split. Leaving this
+    path out cost the most: measured on one turn, the sub-agent was 200,761 of
+    246,210 input tokens and read none of them."""
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    messages = [_human("system-ish"), _human("one"), _human("two")]
+
+    out = chat_context.with_message_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), messages)
+
+    assert out[0].content == "system-ish"
+    assert out[1].content == "one"
+    assert out[-1].content[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_content_already_in_block_form_is_marked_in_place(mocker):
+    """The sub-agent normalizes tool results into text blocks before the call,
+    so a string-only implementation silently marked nothing on that path."""
+    from langchain_core.messages import ToolMessage
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    blocks = [{"type": "text", "text": "tool output"}]
+    messages = [_human("q"), ToolMessage(content=blocks, tool_call_id="c1")]
+
+    out = chat_context.with_message_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), messages)
+
+    assert out[-1].content[-1]["cache_control"] == {"type": "ephemeral"}
+    assert out[-1].content[-1]["text"] == "tool output"
+    # The original list is not mutated in place.
+    assert blocks[-1] == {"type": "text", "text": "tool output"}
+
+
+def test_a_non_anthropic_message_list_is_left_alone(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    messages = [_human("one")]
+
+    assert chat_context.with_message_cache_breakpoints(_model("deepseek/deepseek-chat"), messages) is messages
+    assert chat_context.with_message_cache_breakpoints(_model("anthropic/claude-sonnet-4-6"), []) == []

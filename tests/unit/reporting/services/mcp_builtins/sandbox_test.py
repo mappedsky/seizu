@@ -1737,3 +1737,27 @@ async def test_the_delegation_inherits_the_conversations_disclosure(mocker) -> N
     # Blank entries dropped, so a sloppy list does not bind an empty name.
     assert captured["requested"] == ["cve_analysis__get_cve"]
     chat_graph.set_disclosed_tools(())
+
+
+async def test_the_sub_agent_call_carries_a_cache_breakpoint(mocker) -> None:
+    """This path was left out when breakpoints were added, and it is where the
+    tokens are: 200,761 of a measured turn's 246,210, read at 0%."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from reporting.services.mcp_builtins.sandbox import _ToolMessageNormalizingModel
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+    seen: list[Any] = []
+
+    class _Inner:
+        model_name = "anthropic/claude-sonnet-4-6"
+
+        async def ainvoke(self, messages, config=None, **kwargs):
+            seen.append(messages)
+            return AIMessage(content="ok")
+
+    wrapper = _ToolMessageNormalizingModel(_Inner())
+    await wrapper.ainvoke([HumanMessage(content="system"), HumanMessage(content="latest")])
+
+    assert seen[0][0].content == "system"  # untouched
+    assert seen[0][-1].content[0]["cache_control"] == {"type": "ephemeral"}
