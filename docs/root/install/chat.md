@@ -200,9 +200,14 @@ reported; later ones hide behind it, and fixing the first is what changes
 anything.
 
 Fingerprints are hashes only — never prompt content — bounded in number, and
-process-local. Keys combine the thread with the phase, so a worker step is
-compared against the previous worker step rather than against a synthesizer call
-that was never going to match.
+process-local. Comparisons are scoped twice over, because comparing the wrong
+pair produces a divergence on every call and buries the real one: by key (thread
+plus phase, and per delegation for the sandbox sub-agent, whose every delegation
+opens with the same system prompt) and by *lineage*, the opening message. A plan
+reuses step ids between turns, so without the lineage check turn 2's `worker:s2`
+was diffed against turn 1's unrelated `worker:s2`. The trade is that a request
+whose opening message changed reads as a new lineage rather than a divergence —
+between turns, that is exactly what it is.
 
 Anthropic ships an equivalent as a beta. It is unreachable from here: the beta
 header that authorises it is one LiteLLM builds itself from feature detection

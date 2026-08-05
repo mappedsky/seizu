@@ -383,6 +383,8 @@ def test_each_component_is_named_when_it_changes(_diagnostics_on):
         ("system", (_model(), "sys CHANGED", "tools", base[3]), "system_changed"),
         ("tools", (_model(), "sys", "tools CHANGED", base[3]), "tools_changed"),
         ("messages", (_model(), "sys", "tools", [_human("one"), _human("DIFFERENT")]), "messages_changed"),
+        # ...the opening message is the lineage anchor, so a change there is a
+        # new lineage rather than a divergence; see the lineage test below.
     ):
         chat_context.diagnose_cache_divergence(key, *base)
         result = chat_context.diagnose_cache_divergence(key, *changed)
@@ -412,7 +414,7 @@ def test_only_the_earliest_divergence_is_reported(_diagnostics_on):
     """Later ones hide behind it; fixing the first is what changes anything."""
     chat_context.diagnose_cache_divergence("k", _model(), "sys", "tools", [_human("one")])
 
-    result = chat_context.diagnose_cache_divergence("k", _model(), "sys CHANGED", "tools CHANGED", [_human("X")])
+    result = chat_context.diagnose_cache_divergence("k", _model(), "sys CHANGED", "tools CHANGED", [_human("one")])
 
     assert result is not None and result[0] == "tools_changed"  # tools precede the system prompt
 
@@ -423,6 +425,26 @@ def test_separate_keys_do_not_compare_against_each_other(_diagnostics_on):
     chat_context.diagnose_cache_divergence("worker", _model(), "worker sys", "tools", [_human("one")])
 
     assert chat_context.diagnose_cache_divergence("synth", _model(), "synth sys", "tools", [_human("one")]) is None
+
+
+def test_a_fresh_lineage_is_not_reported_as_a_divergence(_diagnostics_on):
+    """A plan reuses step ids across turns and each delegation starts a new
+    message list, so the key alone compared things that were never going to
+    match -- reporting a divergence on every first call, which is noise in the
+    one place a reader is looking for signal."""
+    chat_context.diagnose_cache_divergence("worker:s2", _model(), "sys", "tools", [_human("turn 1 goal")])
+
+    # Same key, unrelated conversation: recorded, not reported.
+    assert (
+        chat_context.diagnose_cache_divergence("worker:s2", _model(), "sys", "tools", [_human("turn 2 goal")]) is None
+    )
+    # The earlier lineage is untouched by it.
+    # ...and the new lineage is then tracked on its own terms.
+    grown = [_human("turn 2 goal"), _human("tool result")]
+    assert chat_context.diagnose_cache_divergence("worker:s2", _model(), "sys", "tools", grown) is None
+    diverged = [_human("turn 2 goal"), _human("DIFFERENT")]
+    result = chat_context.diagnose_cache_divergence("worker:s2", _model(), "sys", "tools", diverged)
+    assert result is not None and result[0] == "messages_changed"
 
 
 def test_nothing_is_recorded_while_diagnostics_are_off(mocker):

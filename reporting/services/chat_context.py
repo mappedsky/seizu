@@ -358,10 +358,22 @@ def diagnose_cache_divergence(
     if not settings.CHAT_LLM_CACHE_DIAGNOSTICS:
         return None
     current = fingerprint_request(model, system, tools, messages)
-    previous = _FINGERPRINTS.get(key)
+    # Scoped to a lineage -- the opening message -- as well as to the caller's
+    # key. A phase label alone compares things that were never going to match: a
+    # plan reuses step ids across turns, so turn 2's "worker:s2" was diffed
+    # against turn 1's unrelated "worker:s2" and reported a divergence on every
+    # first call, which is noise in the one place a reader is looking for signal.
+    # The cost is that a request whose *opening* message changed reads as a new
+    # lineage rather than a divergence; between turns that is exactly what it is,
+    # and callers whose opening message is constant (the sandbox sub-agent, whose
+    # first message is its system prompt) pass a key precise enough to separate
+    # their own instances.
+    lineage = _digest(current.messages[:1])
+    scoped_key = f"{key}:{lineage}"
+    previous = _FINGERPRINTS.get(scoped_key)
     if len(_FINGERPRINTS) >= _FINGERPRINT_MAX:
         _FINGERPRINTS.clear()
-    _FINGERPRINTS[key] = current
+    _FINGERPRINTS[scoped_key] = current
     if previous is None:
         return None
 
