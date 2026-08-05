@@ -236,50 +236,22 @@ _SYNTHESIZER_PROMPT = (
 )
 
 
-def _worker_system_prompt(step: dict[str, Any]) -> str:
-    base = chat_graph.build_system_prompt()
-    criteria = step.get("success_criteria") or ""
-    extra = f"\n\nYou are a sub-agent completing exactly ONE step of a larger plan. Step goal: {step.get('goal', '')}."
-    if criteria:
-        extra += f" Success criteria: {criteria}."
-    action_kind = step.get("action_kind") or "auto"
-    required_action = step.get("required_action") or ""
-    required_arguments = step.get("required_arguments") or {}
-    if action_kind in ("skill", "tool") and required_action:
-        extra += (
-            f" This step has a required {action_kind} action: `{required_action}`. You must call that exact"
-            " structured action before returning a step result."
-        )
-        if required_arguments:
-            extra += f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
-    elif action_kind == "answer":
-        # The sentinel is the one exception: it is the protocol for ending a
-        # step, not a data-gathering action, and it is the only tool bound here.
-        extra += (
-            " This is an answer-only step: gather no data and call no tool other than"
-            f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
-        )
-    if step.get("retry_guidance"):
-        # Fenced: the verifier wrote this, but it wrote it *about* an untrusted
-        # result and can carry that result's text into it. Like resume_from, it
-        # lands in a system prompt.
-        extra += "\n\nA previous attempt was rejected for this reason; address it this time.\n" + fenced_within(
-            str(step["retry_guidance"]), 2000
-        )
-    if step.get("resume_from"):
-        # Fenced even though a sub-agent wrote it. A summary is not a trust
-        # boundary: it reports what graph and tool data said, so it can carry
-        # that data's text along with it. This one is the sharpest case, because
-        # it lands in a *system* prompt, where an instruction that survived the
-        # round trip would read with the authority of the system.
-        extra += (
-            "\n\nA previous attempt ran out of budget before finishing and established the following."
-            " Continue from it: do not re-gather what is already here, and fold it into your result so"
-            " nothing it found is lost.\n" + fenced_within(str(step["resume_from"]), 4000)
-        )
-    extra += (
-        " Use the available tools/skills to accomplish the goal, then return a"
-        " concise factual result for this step only. Do not list internal action"
+def _worker_system_prompt() -> str:
+    """The sub-agent contract, identical for every step of every turn.
+
+    Deliberately carries nothing about *which* step this is. It used to embed
+    the goal, success criteria and required action, which made the system
+    prompt differ per step -- and a system prompt is the head of the cached
+    prefix, so no step could ever read another's. Measured on two steps of one
+    turn: the second step read 0 of its 2,963 input tokens where the first had
+    already written an almost identical prefix. What varies now lives in the
+    user message, where it costs one step's tokens instead of everyone's.
+    """
+    return (
+        f"{chat_graph.build_system_prompt()}"
+        "\n\nYou are a sub-agent completing exactly ONE step of a larger plan."
+        " Use the available tools/skills to accomplish the step you are given, then return a"
+        " concise factual result for that step only. Do not list internal action"
         " transcripts, tool names, arguments, or raw JSON unless the step goal"
         " explicitly requires raw data. Do not attempt other steps or restate"
         " the whole conversation."
@@ -292,7 +264,51 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
         " never pass an announcement or preamble (e.g. 'All data collected, now"
         " delivering the summary') — pass the complete findings themselves."
     )
-    return f"{base}{extra}"
+
+
+def _step_contract(step: dict[str, Any]) -> str:
+    """What makes this step this step, for the user message rather than the system prompt.
+
+    Fencing still applies to everything that came from outside: the verifier's
+    retry guidance and a previous attempt's summary both report what untrusted
+    data said, and can carry that data's text with them.
+    """
+    parts: list[str] = []
+    criteria = step.get("success_criteria") or ""
+    if criteria:
+        parts.append(f"Success criteria: {criteria}.")
+    action_kind = step.get("action_kind") or "auto"
+    required_action = step.get("required_action") or ""
+    required_arguments = step.get("required_arguments") or {}
+    if action_kind in ("skill", "tool") and required_action:
+        contract = (
+            f"This step has a required {action_kind} action: `{required_action}`. You must call that exact"
+            " structured action before returning a step result."
+        )
+        if required_arguments:
+            contract += (
+                f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
+            )
+        parts.append(contract)
+    elif action_kind == "answer":
+        # The sentinel is the one exception: it is the protocol for ending a
+        # step, not a data-gathering action, and it is the only tool bound here.
+        parts.append(
+            "This is an answer-only step: gather no data and call no tool other than"
+            f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
+        )
+    if step.get("retry_guidance"):
+        parts.append(
+            "A previous attempt was rejected for this reason; address it this time.\n"
+            + fenced_within(str(step["retry_guidance"]), 2000)
+        )
+    if step.get("resume_from"):
+        parts.append(
+            "A previous attempt ran out of budget before finishing and established the following."
+            " Continue from it: do not re-gather what is already here, and fold it into your result so"
+            " nothing it found is lost.\n" + fenced_within(str(step["resume_from"]), 4000)
+        )
+    return "\n\n".join(parts)
 
 
 def _planner_user_message(user_text: str, conversation_context: str) -> str:
@@ -306,6 +322,9 @@ def _planner_user_message(user_text: str, conversation_context: str) -> str:
 
 def _worker_user_message(step: dict[str, Any], dependency_context: str, conversation_context: str = "") -> str:
     parts = [f"Complete this step: {step.get('goal', '')}"]
+    contract = _step_contract(step)
+    if contract:
+        parts.append(f"\n{contract}")
     if conversation_context:
         parts.append(
             "\nEarlier conversation, provided only so you can resolve references in the step goal."
@@ -1173,7 +1192,7 @@ async def _run_worker_step(
     # step (each gather task has its own context copy), so a parallel step's
     # disclosure never widens this one's.
     chat_graph.set_disclosed_tools(active_names if progressive else {spec.name for spec in tool_specs})
-    system_prompt = _worker_system_prompt(step)
+    system_prompt = _worker_system_prompt()
     # The worker decides whether to delegate, so it is the one that has to know
     # the data is already on disk; telling only the sub-agent leaves the
     # re-fetch already planned by the time anyone knows better. Last, not in the

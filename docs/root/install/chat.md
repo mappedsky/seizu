@@ -156,12 +156,32 @@ prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is left unmarked, since the
 provider will not cache a prefix that short. Set
 `CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
 
-Measured on a live two-turn Anthropic conversation: turn 1 writes 11,037 tokens
-to cache and reads none (cold, and cache writes carry a premium), turn 2 reads
-16,453 — 46% of its input — and writes only 1,751. There is headroom left: a
-tool list that changes mid-turn under progressive disclosure sits ahead of the
-system prompt in the cached prefix and invalidates it, which is the likeliest
-reason turn 1 gets no within-turn hits.
+Measured on a live two-turn Anthropic conversation: turn 1 writes ~11,000 tokens
+to cache and reads none (cold, and cache writes carry a 1.25× premium); turn 2
+reads 16,467 — 56% of its input — and writes 1,801.
+
+**What the prefix is made of matters more than the breakpoints.** Instrumenting
+a real turn showed two separate causes of lost hits, only one of which was worth
+fixing:
+
+- *A per-step system prompt.* The orchestrator's worker prompt embedded the
+  step's goal, success criteria and required action, so every step had a
+  different system prompt — the head of the cached prefix — and no step could
+  read another's. Two steps of one turn: the second read 0 of its 2,963 input
+  tokens against an almost identical prefix the first had just written. The
+  worker system prompt is now identical for every step of every turn, with
+  everything step-specific in the user message.
+- *A tool list that grows mid-turn.* Anthropic orders tool schemas **ahead** of
+  the system prompt, so when a rendered skill unlocks tools (3 → 11 in a
+  measured turn) the prefix behind them is invalidated: the next call read 0,
+  and the one after — same tool list — read 4,853. This is inherent to
+  progressive disclosure and is left alone deliberately. Binding every tool up
+  front would cache better and cost far more per call, since the full chat tool
+  surface is an order of magnitude larger than what a turn actually unlocks.
+  The cost is bounded by how many times disclosure fires in a turn.
+
+Tool ordering is deterministic (the listing order, filtered), so the churn is
+genuine growth rather than instability.
 
 Two more consequences worth knowing:
 
