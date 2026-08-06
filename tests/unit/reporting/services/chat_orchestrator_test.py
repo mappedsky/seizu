@@ -2238,10 +2238,12 @@ async def test_the_dispatcher_resumes_the_threads_sandbox(mocker):
     assert started[0]["resume_sandbox_id"] == "sbx-prior"
 
 
-async def test_a_dispatcher_that_raised_destroys_its_sandbox(mocker):
-    """A paused sandbox whose id nobody stores outlives the process."""
-    closed = mocker.patch(
-        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+async def test_a_dispatcher_that_raised_hands_its_sandbox_to_the_abandon_path(mocker):
+    """A failed step must not cost the conversation everything earlier steps put
+    on its disk, so the keep-or-destroy decision is made on whether the thread
+    already knows the id."""
+    abandoned = mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.abandon_sandbox_session",
         new_callable=AsyncMock,
         return_value=None,
     )
@@ -2254,7 +2256,7 @@ async def test_a_dispatcher_that_raised_destroys_its_sandbox(mocker):
     with pytest.raises(RuntimeError, match="dispatch blew up"):
         await chat_orchestrator.dispatcher_node({"messages": [], "plan": []}, {})
 
-    closed.assert_awaited_once_with(suspend=False)
+    abandoned.assert_awaited_once()
 
 
 async def test_the_worker_carries_what_earlier_turns_established_as_a_trailing_message(mocker):

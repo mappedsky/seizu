@@ -702,9 +702,9 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     try:
         update = await _dispatch_batch(state, config)
     except BaseException:
-        # The node raised, so nothing will store a resume id; a paused sandbox
-        # nobody can resume outlives the process.
-        await sandbox_session.close_sandbox_session(suspend=False)
+        # Keep a sandbox the thread already knows about: a failed step must not
+        # cost the conversation everything earlier steps put on its disk.
+        await sandbox_session.abandon_sandbox_session()
         raise
     suspended_id = await sandbox_session.close_sandbox_session()
     update["session_memory"] = ledger.to_state()

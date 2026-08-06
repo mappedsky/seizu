@@ -253,3 +253,68 @@ async def test_the_expected_id_is_the_resume_target_before_anything_opens(mocker
     await session.backend()
     assert session.expected_sandbox_id == "sbx-7"
     await sandbox_session.close_sandbox_session()
+
+
+async def test_a_failed_turn_keeps_a_sandbox_the_thread_already_knows_about(mocker):
+    """A single broken turn must not empty a twenty-turn session's disk.
+
+    The id was written to the checkpoint by an earlier successful turn, so
+    failing changes nothing about whether it can be found again -- destroying it
+    would throw away every earlier turn's accumulated work to prevent a leak
+    that cannot happen.
+    """
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-1", persist=True)
+    await session.backend()
+    assert session.resumed is True
+
+    resume_id = await sandbox_session.abandon_sandbox_session()
+
+    assert calls[0]["suspended"] is True
+    assert resume_id == "sbx-1"
+
+
+async def test_a_failed_turn_destroys_a_sandbox_it_created_itself(mocker):
+    """The opposite case: it raised before anything could store the id, so
+    pausing would strand a sandbox nobody can ever find again."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.start_sandbox_session(persist=True)
+    await session.backend()
+    assert session.resumed is False
+
+    assert await sandbox_session.abandon_sandbox_session() is None
+    assert calls[0]["suspended"] is False
+
+
+async def test_a_failed_turn_whose_resume_failed_destroys_the_replacement(mocker):
+    """The replacement's id is nowhere either -- the checkpoint still names the
+    sandbox that had already gone."""
+
+    @asynccontextmanager
+    async def _open(**kwargs: Any):
+        backend = MagicMock()
+        backend.sandbox_id = "sbx-replacement"
+        try:
+            yield backend
+        finally:
+            suspend = kwargs.get("suspend_on_exit")
+            kwargs["_suspended"] = suspend() if callable(suspend) else bool(suspend)
+            opened.append(kwargs)
+
+    opened: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _open)
+
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-gone", persist=True)
+    await session.backend()
+
+    assert await sandbox_session.abandon_sandbox_session() is None
+    assert opened[0]["_suspended"] is False
+
+
+async def test_abandoning_without_a_session_is_a_no_op():
+    await sandbox_session.close_sandbox_session()
+    assert await sandbox_session.abandon_sandbox_session() is None

@@ -488,20 +488,20 @@ async def mock_agent_node(state: ChatState, _config: RunnableConfig) -> ChatStat
 
 
 async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig) -> ChatState:
-    """Run the turn, then suspend its sandbox — or destroy it if the turn broke.
+    """Run the turn, then suspend its sandbox.
 
     The session is opened lazily inside the node, so this only has work to do
     when a delegation actually happened. On the ordinary path the sandbox is
     paused and its id returned to the next turn, which resumes it and finds the
-    data this turn gathered still on disk. On the error path it is destroyed:
-    the node raised, so nothing will persist the id, and a paused sandbox nobody
-    can resume is a leak that outlives the process. Without either, an error
-    would leave a sandbox *running* until the provider reaped it.
+    data this turn gathered still on disk. A turn that raised keeps its sandbox
+    if the thread already knows the id and destroys it otherwise -- see
+    ``abandon_sandbox_session``. Without either, an error would leave a sandbox
+    *running* until the provider reaped it.
     """
     try:
         update = await chat_agent_node(state, config)
     except BaseException:
-        await sandbox_session.close_sandbox_session(suspend=False)
+        await sandbox_session.abandon_sandbox_session()
         raise
     suspended_id = await sandbox_session.close_sandbox_session()
     if suspended_id:

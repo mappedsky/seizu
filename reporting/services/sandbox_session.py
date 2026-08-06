@@ -197,6 +197,26 @@ async def close_sandbox_session(*, suspend: bool = True) -> str | None:
     return await session.aclose(suspend=suspend)
 
 
+async def abandon_sandbox_session() -> str | None:
+    """Close the session after a turn that failed.
+
+    Keep a sandbox the thread already knows about; destroy one it does not.
+
+    The distinction is the whole point. A turn that *resumed* a sandbox is
+    working in one whose id a previous successful turn already wrote to the
+    checkpoint, so failing changes nothing about its recoverability -- and
+    destroying it would throw away every earlier turn's accumulated work because
+    one turn raised. A single broken turn should not empty a twenty-turn
+    session's disk. A turn that *created* its sandbox is the opposite case: it
+    raised before anything could store the id, so pausing it would strand a
+    sandbox nobody can ever find again.
+    """
+    session = _current_sandbox_session.get()
+    if session is None:
+        return None
+    return await close_sandbox_session(suspend=session.resumed)
+
+
 async def discard_sandbox(sandbox_id: str) -> None:
     """Destroy a suspended sandbox nobody will resume (best effort).
 
@@ -217,4 +237,7 @@ async def discard_sandbox(sandbox_id: str) -> None:
             kwargs["validate_api_key"] = False
         await AsyncSandbox.kill(sandbox_id, **kwargs)
     except Exception:
-        logger.info("could not discard sandbox %s", sandbox_id, exc_info=True)
+        # Warning, not info: the id is about to stop being recorded anywhere,
+        # so this line is the only thing that can lead an operator to the
+        # orphaned sandbox.
+        logger.warning("could not discard sandbox %s; it may be orphaned", sandbox_id, exc_info=True)

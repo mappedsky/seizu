@@ -3680,15 +3680,13 @@ async def test_a_turn_hands_its_sandbox_to_the_next_turn_of_the_same_thread(mock
     assert started[1]["resume_sandbox_id"] == "sbx-1"
 
 
-async def test_a_turn_that_broke_does_not_leave_a_paused_sandbox(mocker):
-    """Nothing would store the resume id, so the sandbox has to be destroyed."""
-    closes: list[Any] = []
-
-    async def _close(**kwargs):
-        closes.append(kwargs)
-        return None
-
-    mocker.patch("reporting.services.chat_graph.sandbox_session.close_sandbox_session", _close)
+async def test_a_turn_that_broke_hands_its_sandbox_to_the_abandon_path(mocker):
+    """Which keeps a sandbox the thread already knows about and destroys one it
+    does not -- a single broken turn must not empty a long session's disk."""
+    abandoned = mocker.patch(
+        "reporting.services.chat_graph.sandbox_session.abandon_sandbox_session",
+        mocker.AsyncMock(return_value=None),
+    )
     mocker.patch(
         "reporting.services.chat_graph.chat_agent_node",
         mocker.AsyncMock(side_effect=RuntimeError("turn blew up")),
@@ -3697,7 +3695,7 @@ async def test_a_turn_that_broke_does_not_leave_a_paused_sandbox(mocker):
     with pytest.raises(RuntimeError, match="turn blew up"):
         await chat_graph._chat_agent_node_with_session({"messages": []}, {})
 
-    assert closes == [{"suspend": False}]
+    abandoned.assert_awaited_once()
 
 
 async def test_earlier_turns_findings_reach_the_next_turns_prompt(mocker):
