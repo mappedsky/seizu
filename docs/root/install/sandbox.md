@@ -14,7 +14,7 @@ Seizu chat agent
     → sandbox_session        # the conversation's sandbox: resumed, then suspended again
       → SandboxBackend       # stable five-operation interface
         → create_react_agent with run_python / run_bash / read_file / write_file / list_files
-                              + the bound Seizu tools + find_seizu_tools / call_seizu_tool
+                              + the bound Seizu tools + the discovery tools (see below)
     → result string
 ```
 
@@ -43,100 +43,61 @@ than `SANDBOX_MAX_OUTPUT_BYTES` — is instead written to a file under
 column names, and two sample rows, plus a note that the full data is in the
 file. The agent then processes it with `run_python`.
 
-This matters because the sandbox exists to handle data *as data*. Without the
-file path, the only route from a query to `run_python` runs through the model:
-it has to read every row out of its own context and re-emit them as a Python
-literal, so the data crosses the model twice and it hand-serializes in between.
-Results also stop being silently capped at `CHAT_TOOL_RESULT_MAX_ROWS`, which
-protects a context window; the sub-agent fetches to `SANDBOX_FILE_RESULT_MAX_ROWS`
-and `SANDBOX_FILE_RESULT_MAX_BYTES` instead, and either bound decides whether what
-comes back is returned or filed. Both are needed: because the fetch deliberately
-exceeds both, the row cap is the only thing keeping an inline result small in row
-terms, and triggering on bytes alone let multi-thousand-row results return in
-full — measured at 880 inner calls and a 581-character answer, against 124 and a
-complete one.
-
-**Routing is decided by size, never by the agent.** An earlier version exposed a
-`save_to_path` argument and let the agent choose. Given the choice it wrote
-every result to a file — including schema lookups it needed to read — read none
-of them back, and re-ran the queries instead, at over four times the sandbox
-token spend. Because the trigger is size, a file now appears only where the
-alternative was a truncated result, so the file is strictly more than the agent
-would otherwise have received, and where a result fits nothing changes at all.
-
-If the write fails, the truncated result is returned instead — exactly what
-would have happened without this path.
+Routing is decided by **size**, never by the agent. The sub-agent fetches to
+`SANDBOX_FILE_RESULT_MAX_ROWS` and `SANDBOX_FILE_RESULT_MAX_BYTES` rather than
+the context-protecting `CHAT_TOOL_RESULT_MAX_ROWS`, and either bound decides
+whether a result is returned inline or filed. If the write fails, the truncated
+result is returned instead. See [SBX-002](../dev/decisions/sandbox.md) for why
+the agent is not given the choice.
 
 **One sandbox per conversation, not per delegation.** A sandbox is opened lazily
 on a turn's first `sandbox__delegate` call and shared by every delegation and
-every step of that turn, so files written by one are still there for the next.
-Each delegation used to open and destroy its own, which meant a result file —
-and the receipt pointing at it — was gone before anything could read it, and a
-turn making 31–79 delegations paid that many sandbox creations.
+every step of that turn. At the end of the turn it is **suspended rather than
+destroyed**, and the next turn of the same thread resumes it by id, so a
+follow-up question reads files the previous turn wrote instead of re-running the
+queries behind them.
 
-At the end of the turn the sandbox is **suspended rather than destroyed**, and
-the next turn of the same thread resumes it by id. That is what makes a
-follow-up question cheap: the data the previous turn fetched is still on disk,
-and the session memory below tells the next turn what is there, so it reads
-files instead of re-running the queries that produced them. A turn that ends in
-an error keeps the sandbox when the thread already knows its id, and destroys it
-only when that turn created it: a resumed sandbox's id is already in the
-checkpoint, so failing changes nothing about finding it again, while destroying
-it would cost a long conversation everything earlier turns put on disk. A
-sandbox the failing turn created has its id nowhere, so pausing it would strand
-it. Deleting the chat thread destroys the sandbox with it, and never fails the
-deletion if the provider call fails; an orphan is logged with its id.
+Suspension keeps **only the filesystem** (`pause(keep_memory=False)`). A resumed
+sandbox cold-boots rather than restoring a memory snapshot: untrusted processes
+do not outlive the turn, though their data does. Set
+`SANDBOX_SESSION_PERSIST=false` to return to a sandbox per turn.
 
-Suspension keeps **only the filesystem** (`pause(keep_memory=False)`), which is
-all this needs: the saved results and the receipts pointing at them live on
-disk, and nothing depends on a process surviving a turn. A resumed sandbox
-therefore cold-boots rather than restoring a memory snapshot — marginally slower
-to wake, and untrusted processes do not outlive the turn even though the data
-does. Persistence does mean untrusted *data* lives for the length of a
-conversation rather than a single turn, still bounded to one user's thread and
-still holding no credentials.
+Deleting the chat thread destroys its sandbox, and never fails the deletion if
+the provider call fails — an orphan is logged with its id. Lifecycle rationale
+(turn-level scope, resume failures, error paths) is in
+[SBX-005 through SBX-007](../dev/decisions/sandbox.md).
 
-**Known gap: nothing reaps an abandoned sandbox.** Cleanup happens when a thread
-is deleted, so a conversation a user simply stops replying to leaves a suspended
-sandbox until the provider's own retention reclaims it, and a deployment with
-many chat users accumulates those. A TTL or a sweep over the provider's sandbox
-list is planned separately; until it lands, either watch that growth or set
-`SANDBOX_SESSION_PERSIST=false`, which returns to a sandbox per turn.
+```{warning}
+**Nothing reaps an abandoned sandbox.** Cleanup happens on thread deletion, so a
+conversation a user simply stops replying to leaves a suspended sandbox until
+the provider's own retention reclaims it, and a deployment with many chat users
+accumulates those. `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox,
+not a paused one. Until a TTL or sweep lands, watch that growth or set
+`SANDBOX_SESSION_PERSIST=false`.
+```
 
 ### Session memory
 
 Sub-agents get a **recall block** naming what earlier sub-agents in the same
-step found, what earlier *turns* of the conversation established, and the files
-already saved in the shared sandbox. The top-level agent — the planner, the
-worker, or the single-agent loop — gets a shorter **digest** of the same
-material, because it is the one that decides whether to delegate at all: told
-only afterwards, it has already planned the re-fetch.
-
-A file is only advertised for the sandbox it was written in. If a resume fails
-and the turn gets a replacement sandbox, every earlier receipt silently stops
-being offered, which is the correct answer rather than a special case — sending
-a sub-agent to read a file that is not there is worse than saying nothing. Both
-blocks are fenced as untrusted data: they carry what graph and tool output said,
-so they can carry text shaped like an instruction with it.
+step found, what earlier *turns* established, and the files already saved in the
+shared sandbox. The top-level agent gets a shorter **digest** of the same
+material. A file is only advertised for the sandbox it was written in, so a
+replacement sandbox stops offering receipts for files that no longer exist. Both
+blocks are fenced as untrusted data. See
+[SBX-008](../dev/decisions/sandbox.md).
 
 Bounds are `CHAT_SESSION_MEMORY_MAX_ENTRIES`,
 `CHAT_SESSION_MEMORY_MAX_RECEIPTS` and `CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS`;
 the memory rides in the thread's LangGraph checkpoint, which is already
 namespaced per user.
 
-The agent reads such files with **`preview_file`**, which returns files at or
+The agent reads saved files with **`preview_file`**, which returns files at or
 under `SANDBOX_PREVIEW_MAX_BYTES` whole and, above that, only shape plus the
-beginning. That keeps a file written to stay out of context from being pulled
-straight back into it; `run_python` is how the full contents get used. This is a
-design choice rather than a measured improvement — a four-sample comparison found
-no difference against `read_file` — so set `SANDBOX_PREVIEW_MAX_BYTES=0` if you
-prefer whole-file reads.
-
-`read_file` is deliberately not a way around this. Asked for a file larger than
-`SANDBOX_MAX_OUTPUT_BYTES` it returns the beginning together with the file's real
-size and an explicit statement that this is not the whole file, rather than a
-bare `[truncated]` marker that an agent can read past — reading a 500KB result
-file should not quietly yield a tenth of it.
+beginning; `run_python` is how the full contents get used. A four-sample
+comparison found no measurable difference against plain `read_file`, so set
+`SANDBOX_PREVIEW_MAX_BYTES=0` if you prefer whole-file reads. Above
+`SANDBOX_MAX_OUTPUT_BYTES`, `read_file` returns the beginning together with the
+file's real size and an explicit statement that this is not the whole file.
 
 ### Adding a new backend
 
@@ -173,27 +134,22 @@ The sandbox subagent can call read-only Seizu tools (and user-defined toolset to
 whatever the conversation has already disclosed, and whatever the delegating
 call named in `tools`. Naming `tools` narrows as well as widens: a caller that
 says what the task needs gets that plus the core, not the disclosed set on top.
-Anything else the user may reach is still reachable — `find_seizu_tools` and
-`call_seizu_tool` search it and run it, with the same result bounds and
-oversized-result handling as a bound tool — so this costs a round trip, never a
-capability.
 
-It used to be handed every chat-safe tool in the deployment. In a measured
-instance that was 58 tools and ~3,800 tokens of schema re-sent on *every* inner
-LLM call — about a fifth of a delegation's token spend, two thirds of it
-management CRUD (roles, spaces, report and toolset editing) that a
-data-processing sub-agent never uses. The bound set is now ~830–1,100 tokens.
-RBAC is unchanged either way: `chat_safe_only` plus the confirmation-gate
-exclusion decide what is reachable at all, and nothing here widens that.
+**How it reaches anything else** is decided by `CHAT_LLM_PROGRESSIVE_DISCLOSURE`
+— the same setting that governs the planner:
 
-On the two-turn harness benchmark, four samples before and after (a before/after
-across builds rather than a within-run A/B, and bundling the cross-turn session
-memory and the disclosure fixes alongside the narrowing): median sandbox tokens
-181,021 → 48,039 with non-overlapping ranges, median total 202,562 → 80,554,
-median answer 1,233 → 2,339 characters, runs exhausting the token budget 4/4 →
-0/4, and failed plan steps 4/5 → 0/8. No sample needed `find_seizu_tools` at
-all — the core covered every delegation — so the round-trip cost of narrowing
-was, on this benchmark, never paid.
+| `CHAT_LLM_PROGRESSIVE_DISCLOSURE` | Discovery tools | What `call_seizu_tool` may run |
+|---|---|---|
+| `false` | `find_seizu_tools`, `call_seizu_tool` | any tool the user may reach |
+| `true` (default) | `find_seizu_skills`, `load_seizu_skill`, `call_seizu_tool` | only what a loaded skill declared |
+
+With disclosure on, a skill's `tools_required` is what unlocks a tool, so **how
+much the sub-agent can reach depends on how your skills are authored**. A skill
+that declares no tools unlocks none; a deployment with no skills at all leaves
+the sub-agent with its bound tools only, and the delegating model naming `tools`
+becomes the route. A declaration naming a tool the user cannot reach unlocks
+nothing — RBAC answers that, not the skill. Rationale and measured coverage:
+[SBX-003 and SBX-004](../dev/decisions/sandbox.md).
 
 Sandbox delegation requires the `sandbox:delegate` permission, which is granted to `seizu-editor` and above.
 

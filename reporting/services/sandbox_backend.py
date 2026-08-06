@@ -251,25 +251,18 @@ async def open_backend(
     service's own auth (a budget-capped virtual key) instead of the E2B token.
 
     ``resume_sandbox_id`` reconnects to an existing sandbox — resuming it if it
-    was suspended — instead of creating one, so its filesystem is still there.  A
-    sandbox that has expired or been reaped is not an error: a fresh one is
-    created, and the caller can tell the two apart by comparing
-    :attr:`SandboxBackend.sandbox_id` against what it asked for.  Only *terminal*
-    failures are treated that way.  A timeout, a rate limit or an auth failure
-    propagates instead, because replacing on those would leave the old sandbox
-    paused and alive while its id is overwritten by the replacement's — alive,
-    paid for, and permanently unreachable.
+    was suspended — instead of creating one.  Only *terminal* failures yield a
+    fresh sandbox (the caller detects that by comparing
+    :attr:`SandboxBackend.sandbox_id` against what it asked for); a timeout,
+    rate limit or auth failure propagates.  ``on_teardown`` reports whether the
+    sandbox was actually left suspended, since a failed pause becomes a kill.
+    ``suspend_on_exit`` pauses instead of killing, and may be a callable
+    evaluated at exit for a caller that only learns on the way out whether the
+    sandbox is worth keeping.
 
-    ``on_teardown`` is called with whether the sandbox was left suspended, so a
-    caller storing the id for later can tell that a failed pause turned into a
-    kill and the id is now dead.
-    ``suspend_on_exit`` pauses the sandbox instead of killing it, which is what
-    makes the id worth storing; without it the sandbox is destroyed on exit as
-    before.  Suspension is only ever a caller's explicit choice because a paused
-    sandbox keeps consuming provider-side storage until something reaps it — and
-    it may be a callable, evaluated at exit, for a caller that only learns on
-    the way out whether the sandbox is worth keeping (a turn that raised has
-    nowhere to store the resume id, so its sandbox has to go).
+    Read SBX-006 and SBX-007 in ``docs/root/dev/decisions/sandbox.md`` before
+    changing any of that — each rule exists because the obvious alternative
+    strands a paid-for sandbox or discards a conversation's work.
     """
     from e2b_code_interpreter import AsyncSandbox
 

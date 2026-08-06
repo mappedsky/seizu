@@ -710,7 +710,7 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     update["session_memory"] = ledger.to_state()
     if teardown.opened:
         # Written even when empty, to clear an id the teardown just killed;
-        # omitting the key would leave the dead one in place.
+        # omitting the key would leave the dead one in place. SBX-006.
         update["sandbox_id"] = teardown.suspended_id
     return update
 
@@ -1228,6 +1228,7 @@ async def _run_worker_step(
     # step (each gather task has its own context copy), so a parallel step's
     # disclosure never widens this one's.
     chat_graph.set_disclosed_tools(active_names if progressive else {spec.name for spec in tool_specs})
+    chat_graph.set_available_skills(skill_prompts if progressive else ())
     system_prompt = _worker_system_prompt()
     # The worker decides whether to delegate, so it is the one that has to know
     # the data is already on disk; telling only the sub-agent leaves the

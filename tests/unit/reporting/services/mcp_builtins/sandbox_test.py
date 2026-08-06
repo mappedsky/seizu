@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
-from mcp.types import Tool
+from mcp.types import Prompt, Tool
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
-from reporting.services import chat_budget, episodic_memory
+from reporting.services import chat_budget, episodic_memory, mcp_runtime
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.sandbox import (
@@ -23,6 +23,7 @@ from reporting.services.mcp_builtins.sandbox import (
     _build_seizu_tools,
     _get_sandbox_model,
     _handle_delegate,
+    _subagent_prompt,
     _ToolMessageNormalizingModel,
     _wrap_with_detail_events,
 )
@@ -447,6 +448,25 @@ async def test_handler_persists_inner_tool_events_through_real_agent() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _disclosure(enabled: bool) -> Any:
+    """Progressive disclosure decides how the sub-agent reaches unbound tools.
+
+    Off, it searches tools directly; on, only through a skill that declares
+    them. Every discovery assertion below has to say which mode it means.
+    """
+    return patch("reporting.settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE", enabled)
+
+
+def _skill(name: str, description: str, tools_required: list[str]) -> Prompt:
+    return Prompt(
+        name=name,
+        title=name,
+        description=description,
+        _meta={mcp_runtime.SKILL_TOOLS_META_KEY: tools_required},
+        arguments=[],
+    )
+
+
 async def test_build_seizu_tools_binds_the_core_and_offers_the_rest_by_search() -> None:
     """The inner agent used to be handed every chat-safe tool in the deployment.
 
@@ -460,7 +480,10 @@ async def test_build_seizu_tools_binds_the_core_and_offers_the_rest_by_search() 
         Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
         Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
     ]
-    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
+    with (
+        _disclosure(False),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
         tools = await _build_seizu_tools(_current_user())
 
     assert {t.name for t in tools} == {"graph__query", "find_seizu_tools", "call_seizu_tool"}
@@ -472,7 +495,10 @@ async def test_build_seizu_tools_binds_what_the_conversation_disclosed() -> None
         Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
         Tool(name="roles__list", description="Roles", inputSchema={"type": "object", "properties": {}}),
     ]
-    with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
+    with (
+        _disclosure(False),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
         tools = await _build_seizu_tools(_current_user(), disclosed=frozenset({"reports__get"}))
 
     assert {t.name for t in tools} == {"graph__query", "reports__get", "find_seizu_tools", "call_seizu_tool"}
@@ -521,6 +547,7 @@ async def test_an_unbound_tool_is_findable_and_callable() -> None:
         ),
     ]
     with (
+        _disclosure(False),
         patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
         patch("reporting.services.mcp_runtime.call_tool_for_chat", AsyncMock(return_value=_outcome('{"rows": 1}'))),
     ):
@@ -540,6 +567,133 @@ async def test_an_unbound_tool_is_findable_and_callable() -> None:
         assert "not valid JSON" in await by_name["call_seizu_tool"].coroutine(
             name="cve_analysis__get_recent_cves", arguments_json="{oops"
         )
+
+
+async def test_under_progressive_disclosure_the_subagent_searches_skills_not_tools() -> None:
+    """Free-text tool search reaches anything RBAC permits by string match.
+
+    That is the disclosure model the setting exists to switch off, so with it on
+    the sub-agent gets the same skill-mediated route the planner has.
+    """
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="CVEs", inputSchema={"type": "object"}),
+    ]
+    skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), skills_available=skills)
+
+    names = {t.name for t in tools}
+    assert names == {"graph__query", "find_seizu_skills", "load_seizu_skill", "call_seizu_tool"}
+    assert "find_seizu_tools" not in names
+
+
+async def test_a_skill_unlocks_the_tools_its_author_declared() -> None:
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", inputSchema={"type": "object"}),
+    ]
+    skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
+    rendered = mcp_runtime.ChatActionOutcome(
+        text="Step 1: list the CVEs.", blocked=None, tools_required=("cve_analysis__get_recent_cves",)
+    )
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.render_prompt_for_chat", AsyncMock(return_value=rendered)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", AsyncMock(return_value=_outcome('{"rows": 1}'))),
+    ):
+        by_name = {t.name: t for t in await _build_seizu_tools(_current_user(), skills_available=skills)}
+
+        # Locked until the skill that uses it is loaded.
+        before = await by_name["call_seizu_tool"].coroutine(name="cve_analysis__get_recent_cves")
+        assert "no skill you have loaded uses it" in before
+
+        found = await by_name["find_seizu_skills"].coroutine(query="cve triage")
+        assert "cve__triage" in found
+
+        loaded = await by_name["load_seizu_skill"].coroutine(name="cve__triage")
+        assert "Step 1: list the CVEs." in loaded
+        assert "cve_analysis__get_recent_cves" in loaded
+
+        after = await by_name["call_seizu_tool"].coroutine(
+            name="cve_analysis__get_recent_cves", arguments_json='{"limit": 5}'
+        )
+        assert after == '{"rows": 1}'
+
+
+async def test_a_skill_that_declares_no_tools_says_so() -> None:
+    """Otherwise the sub-agent discovers the gap one failed call at a time."""
+    fake_tools = [Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})]
+    fake_tools.append(Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}))
+    skills = [_skill("cve__severity", "Severity breakdown", [])]
+    rendered = mcp_runtime.ChatActionOutcome(text="Compute the distribution.", blocked=None, tools_required=())
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.render_prompt_for_chat", AsyncMock(return_value=rendered)),
+    ):
+        by_name = {t.name: t for t in await _build_seizu_tools(_current_user(), skills_available=skills)}
+        loaded = await by_name["load_seizu_skill"].coroutine(name="cve__severity")
+
+    assert "Compute the distribution." in loaded
+    assert "unlocked no additional tools" in loaded
+
+
+async def test_a_skill_declaration_cannot_widen_rbac() -> None:
+    """tools_required is a disclosure request; the RBAC-filtered listing answers it."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+    ]
+    skills = [_skill("admin__audit", "Audit roles", ["roles__delete"])]
+    rendered = mcp_runtime.ChatActionOutcome(text="Audit.", blocked=None, tools_required=("roles__delete",))
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.render_prompt_for_chat", AsyncMock(return_value=rendered)),
+    ):
+        by_name = {t.name: t for t in await _build_seizu_tools(_current_user(), skills_available=skills)}
+        await by_name["load_seizu_skill"].coroutine(name="admin__audit")
+        blocked = await by_name["call_seizu_tool"].coroutine(name="roles__delete")
+
+    # Not reachable for this user, so the declaration unlocked nothing.
+    assert "unknown tool" in blocked
+
+
+async def test_with_no_skills_the_subagent_gets_no_discovery_tools_at_all() -> None:
+    """A deployment that has authored no skills gets the bound set and nothing else.
+
+    Two discovery tools that can never find anything are pure schema cost, and
+    the delegating model naming tools stays the route in that case.
+    """
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+    ]
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), skills_available=[])
+
+    assert {t.name for t in tools} == {"graph__query"}
+
+
+async def test_the_subagent_is_told_the_discovery_route_it_actually_has() -> None:
+    """A prompt naming find_seizu_tools when only skill discovery is bound sends
+    the sub-agent after a tool that is not there."""
+    assert "find_seizu_tools" in _subagent_prompt({"graph__query", "find_seizu_tools", "call_seizu_tool"})
+    skills_prompt = _subagent_prompt({"graph__query", "find_seizu_skills", "load_seizu_skill", "call_seizu_tool"})
+    assert "find_seizu_skills" in skills_prompt
+    assert "find_seizu_tools" not in skills_prompt
+    bare = _subagent_prompt({"graph__query"})
+    assert "find_seizu_tools" not in bare
+    assert "find_seizu_skills" not in bare
+    assert "graph__query with Cypher" in bare
 
 
 async def test_build_seizu_tools_coerces_integer_params() -> None:

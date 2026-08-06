@@ -627,13 +627,11 @@ CHAT_LLM_HISTORY_COMPACTION_TARGET = float_env("CHAT_LLM_HISTORY_COMPACTION_TARG
 # something has to stop it; past this the oldest lines are shed, which is the one
 # deeper prefix rewrite this design accepts.
 CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS = int_env("CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS", 1_500)
-# ...but only while that list stays small enough to be worth it. Skills are
-# user-authored, so one can declare a great many tools -- at which point
-# disclosing them up front is just binding them all on every call, which is what
-# progressive disclosure exists to avoid. Above this many tokens of tool schema,
-# fall back to disclosing on render. For scale: a measured deployment had 42
-# tools across all its skills at ~5,300 tokens, against ~1,100 for a turn's
-# typical 11 and ~13,000 for the full 96.
+# ...but only while that list stays small enough to be worth it: skills are
+# user-authored, and disclosing a large declaration up front is just binding
+# every tool on every call. Above this many tokens of tool schema, fall back to
+# disclosing on render. Scale and rationale: CTX-006 in
+# docs/root/dev/decisions/chat-context.md.
 CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS = int_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 6_000)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.
@@ -641,6 +639,8 @@ CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")
 # When true, the model sees available skills first and lets rendered skills
 # disclose which tools to use. When false, the model sees both chat-safe tools
 # and skills up front, matching the normal MCP list-tools/list-prompts shape.
+# Also decides how a sandbox sub-agent reaches tools outside its bound set
+# (SBX-004). Not an authorization boundary -- AGT-002.
 CHAT_LLM_PROGRESSIVE_DISCLOSURE = bool_env("CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
 # Maximum model-requested structured skill/tool calls the chat agent will execute
 # during one assistant turn. This bounds progressive skill rendering plus
@@ -906,21 +906,10 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # and an unbounded query would be a memory event here rather than there.
 #
 # Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
-# preview_file, which returns files at or under this size whole and otherwise
-# only shape -- size, line count, JSON structure, columns -- plus the beginning,
-# so a result written to a file to keep it out of context cannot be read
-# straight back into it. At 0 it gets read_file, which returns up to
-# SANDBOX_MAX_OUTPUT_BYTES.
-#
-# On by default as a design choice, with no measured effect either way. A
-# four-sample comparison found the arms indistinguishable: median answer 925
-# characters with it against 929 without, median queries 26 against 25. An
-# earlier three-sample run appeared to favour it and did not replicate.
-#
-# It is kept because it is the only setting consistent with routing oversized
-# results to files at all: read_file returns up to SANDBOX_MAX_OUTPUT_BYTES, so
-# a result written out precisely to keep it out of context could be read
-# straight back into it. Set 0 for read_file if that trade is not wanted.
+# preview_file (files at or under this size whole; larger ones shape plus the
+# beginning). At 0 it gets read_file, capped at SANDBOX_MAX_OUTPUT_BYTES.
+# On by default as a design choice with no measured effect either way -- see
+# SBX-002 in docs/root/dev/decisions/sandbox.md.
 SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
 
 # Lifetime of the sandbox shared by a turn's delegations. Longer than
@@ -928,21 +917,12 @@ SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
 # to outlive a whole turn; the provider would otherwise reap it mid-turn.
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
 # Suspend the sandbox between turns instead of destroying it, and resume it on
-# the next turn of the same thread. What it buys: a follow-up turn finds the
-# data earlier turns fetched still on disk, so it reads files instead of
-# re-running their queries.
+# the next turn of the same thread, so a follow-up turn reads files earlier
+# turns wrote instead of re-running their queries. Pausing keeps only the
+# filesystem (keep_memory=False), so untrusted processes do not outlive a turn.
 #
-# Pausing keeps only the filesystem (keep_memory=False), which is all this
-# needs -- the saved results and the receipts pointing at them are on disk, and
-# nothing depends on a process surviving -- so untrusted processes do not
-# outlive the turn even though the data does.
-#
-# Known gap, accepted deliberately: **nothing reaps an abandoned sandbox**.
-# Cleanup happens when a thread is deleted, so a conversation a user simply
-# stops replying to leaves a suspended sandbox until the provider's own
-# retention reclaims it, and a deployment with many chat users accumulates
-# those. A TTL/sweep is planned separately; until it lands, either watch that
-# growth or set this false.
+# Known gap, accepted deliberately: nothing reaps an abandoned sandbox -- see
+# SBX-005 in docs/root/dev/decisions/sandbox.md. Set false to opt out.
 SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)

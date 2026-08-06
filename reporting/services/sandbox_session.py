@@ -1,33 +1,21 @@
 """One sandbox for a conversation, instead of one per delegation or per turn.
 
-``sandbox__delegate`` opened its own sandbox and destroyed it on return, so the
-filesystem was wiped between delegations. Nothing an inner agent saved survived
-to the next one: an oversized tool result written to a file, together with the
-receipt telling the agent where to find it, was gone before anything could read
-it. The result-file mechanism was built on storage that did not outlive a single
-use, and a measured turn made between 31 and 79 delegations -- that many sandbox
-creations, and that many times starting from an empty disk.
+A session is opened lazily on the first delegation, shared by every delegation
+and step of the turn, then **suspended** at the end of the turn and resumed by
+id on the next one — so the data an earlier turn gathered is still on disk and
+:mod:`reporting.services.episodic_memory` carries the receipts that say what is
+there. A turn that never delegates pays nothing.
 
-Sharing one sandbox across a *step* fixed that within a turn and left the same
-hole between turns. A follow-up question that builds on the previous answer
-arrived at an empty disk, so the turn re-ran the queries the last turn had
-already run and re-derived what it had already derived, on top of its own work.
-So a session is now **suspended** at the end of a turn rather than destroyed,
-and resumed by id on the next one: the data an earlier turn gathered is still on
-disk, and :mod:`reporting.services.episodic_memory` carries the receipts that
-say what is there.
+Persistence widens the blast radius deliberately: untrusted code's output lives
+across the turns of one conversation, bounded to a single thread of a single
+user (the resume id lives in that thread's already user-namespaced checkpoint)
+and holding no credentials. ``SANDBOX_SESSION_PERSIST`` turns it off.
 
-A session is opened lazily on the first delegation and suspended when the turn
-ends, so a turn that never delegates pays nothing and one that delegates
-repeatedly pays once.
-
-**Isolation.** The per-call teardown was an isolation property even if an
-incidental one, and persistence widens it further: untrusted code now persists
-across the turns of one conversation. It stays bounded to a single thread of a
-single user -- the resume id lives in that thread's checkpoint, which is already
-namespaced per user -- and it holds no credentials. But it is a deliberate
-widening of the blast radius, not a side effect, and ``SANDBOX_SESSION_PERSIST``
-turns it off.
+The scope (turn-level, not step-level), the resume-failure rules, and why error
+paths abandon rather than destroy are **SBX-005 through SBX-007** in
+``docs/root/dev/decisions/sandbox.md``. Read those before changing the
+lifecycle: each rule is there because the obvious alternative loses either a
+conversation's accumulated work or a paid-for sandbox.
 """
 
 import asyncio

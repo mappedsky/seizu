@@ -65,14 +65,6 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 Context caps are **tokens**, counted with the provider's own tokenizer, and the
 model's window is read from litellm's model database rather than configured.
 
-Both halves of that mattered. Measured against real tool payloads the conversion
-is 3.0 characters per token, not the 4 the code assumed — structured graph data
-tokenizes worse than prose — so the old 120,000-*character* history cap admitted
-about a third more tokens than intended, and worst exactly when payloads were
-largest. And one fixed cap applied to every model is simultaneously unsafe and
-wasteful: ~40,000 tokens of history overflows a 32k model's entire window on
-history alone, and is 4% of a million-token model's.
-
 The window is a **ceiling, not a target**. `CHAT_LLM_CONTEXT_MAX_TOKENS` remains
 the "how much history is useful and affordable" knob and the window only clamps
 it down, so pointing Seizu at a large-context model does not silently multiply
@@ -85,119 +77,73 @@ the cost of every call:
 | `deepseek/deepseek-chat` | 131,072 | 40,000 (configured cap) |
 | unknown / self-hosted | 32,768 (assumed) | 16,384 (clamped by share) |
 
-**The whole request is budgeted, not just history.** Immediately before each
-call, the conversation is trimmed to `window − system prompt − tool schemas −
-reply − safety margin`. That check lives at the single point where the whole
-request exists in one scope, so it covers every LLM call — the chat loop,
-orchestrator workers, synthesis and continuations alike. What is shed is
-condensed into a digest rather than dropped. `CHAT_LLM_CONTEXT_SAFETY_MARGIN`
-(5%) plus a per-message framing allowance covers what we cannot see: providers
-frame each message with tokens we never count, and a tokenizer resolved by name
-can differ from the one the endpoint runs. Both make our count an
-under-estimate, and under-counting is the direction that fails a call.
-
-**An overflow is recovered, not fatal.** If a provider rejects a call for
-exceeding its window anyway, the turn is retried once with the conversation
-halved *relative to what was actually sent* — an overflow means our estimate of
-the window was wrong, so halving our own allowance could leave the request
-exactly as oversized. The retry is skipped once any text has streamed, since it
-would duplicate what the user already saw, and errors that a smaller context
-cannot fix (rate limits, bad keys) are never mistaken for overflow.
+**The whole request is budgeted, not just history.** Before each call the
+conversation is trimmed to `window − system prompt − tool schemas − reply −
+safety margin`, covering every LLM call: the chat loop, orchestrator workers,
+synthesis and continuations alike. `CHAT_LLM_CONTEXT_SAFETY_MARGIN` (5%) plus a
+per-message framing allowance covers tokens we cannot see — providers frame each
+message, and a tokenizer resolved by name can differ from the one the endpoint
+runs. If a provider rejects a call anyway, the turn is retried once with a
+halved conversation; a retry is skipped once text has streamed.
 
 **Long conversations are compacted, not truncated.** When history no longer
-fits, the oldest turns are condensed into a single block rather than dropped, so
-what was said survives in some form. Two properties keep this cheaper than the
-truncation it replaces:
+fits, the oldest turns are condensed into a single block rather than dropped.
+The block is deterministic (never a model call) and is rebuilt in chunks, so it
+stays byte-identical for many turns at a stretch — which is what keeps a long
+conversation cacheable. Simulated over 40 turns against a 4,000-token budget:
+5 compactions, request bounded 2,421–3,348 tokens.
 
-- **It compacts in chunks.** The tail is cut back well past the budget, so the
-  condensed block then stays byte-identical for the many turns it takes to
-  refill, and each of those turns is a clean append. Simulated over 40 turns
-  against a 4,000-token budget: **5 compactions**, one every six turns, with the
-  request bounded between 2,421 and 3,348 tokens. Truncation moved the boundary
-  on nearly every turn, which is the worst possible shape for a prompt cache.
-- **It is deterministic.** The block is built from the dropped messages
-  themselves, never by a summarizing model call. A model-written summary would
-  differ between runs, so re-deriving it would rewrite the prefix and cost the
-  cache for the whole conversation — and it could describe something the
-  conversation never said.
+The block is bounded by `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` and by a reserved
+share of the history budget, so this is **not unlimited memory**: as it fills,
+the oldest lines are shed. Set `CHAT_LLM_HISTORY_COMPACTION=false` to go back to
+dropping the oldest turns.
 
-The block is itself bounded by `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` and by a
-reserved share of the history budget, so this is not unlimited memory: as it
-fills, the oldest lines are shed and the most recent of the dropped turns are
-what remain. The reserve matters — a block that grew to the size of the budget
-would leave no room for the history it summarizes, and every turn would compact
-again.
-
-Set `CHAT_LLM_HISTORY_COMPACTION=false` to go back to dropping the oldest turns.
+```{note}
+Why tokens rather than characters, why the retry halves what was *sent*, why the
+block is deterministic and reserved, and the measurements behind each — see
+[CTX-001 through CTX-003](../dev/decisions/chat-context.md).
+```
 
 ### Prompt caching and cost
 
 An agent loop re-sends a growing prefix on every call, and providers serve most
 of it from their prompt cache at a fraction of the input price. The ledger reads
 that accounting back out of the response (`input_token_details.cache_read` /
-`cache_creation`) and prices each portion at its own rate.
+`cache_creation`) and prices each portion at its own rate — a measured DeepSeek
+call re-sending a 4,016-token prefix reported 3,968 as cache reads, making the
+naive price **21.7× overstated**.
 
-This is worth a lot. A measured DeepSeek call re-sending a 4,016-token prefix
-reported 3,968 of those tokens as cache reads: priced as fresh input it was
-charged at $0.001794, and its real cost was $0.000083 — **21.7× overstated**. An
-uncached call prices identically either way.
+Two things make Seizu's requests cacheable, and both are automatic:
 
-**Volatile content goes last.** Prompt caching matches the longest common
-*prefix*, so anything that changes between turns invalidates everything after
-it. The session digest grows every turn, and it used to sit in the system
-prompt — the very first thing sent. Measured against an otherwise identical
-request, that was the difference between **98% of input served from cache and
-0%**. It is now carried as the last message instead, so the only uncached part
-of a follow-up turn is the newest exchange and the digest itself. A live
-two-turn conversation with session memory reports 93% and 74% cached.
-
-This ordering is the **provider-agnostic** half of caching, and it has to come
-first: automatic prefix caches (DeepSeek, OpenAI, Gemini) need nothing else, and
-an explicit-breakpoint cache cannot benefit from a breakpoint unless the prefix
-ahead of it is stable to begin with.
-
-**Explicit breakpoints** cover the other half. Anthropic caches nothing at all
-without them — measured at 0 cached tokens across a five-call turn — so when the
-model is an Anthropic one, Seizu marks up to three blocks with
-`cache_control`, in order of what they are worth:
-
-1. **The system prompt** — the largest stable block, and Anthropic orders tool
-   schemas ahead of it, so this one mark covers both.
-2. **The message before the session digest** — the digest differs every turn, so
-   a prefix containing it can never be read back.
-3. **The last message** — within a turn the tool loop calls repeatedly with a
-   growing list, so each call reads the previous prefix and writes only its
-   delta.
-
-Providers with automatic caching are left untouched: reshaping their messages
-into content blocks would risk a provider transformer for no gain. A system
-prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is left unmarked, since the
-provider will not cache a prefix that short. Set
-`CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
+- **Volatile content goes last.** Prompt caching matches the longest common
+  *prefix*, so the session digest is carried as the final message rather than in
+  the system prompt. This is the provider-agnostic half — automatic prefix
+  caches (DeepSeek, OpenAI, Gemini) need nothing else.
+- **Explicit breakpoints** for Anthropic, which caches nothing without them.
+  Seizu marks up to three blocks with `cache_control`: the system prompt (tool
+  schemas are ordered ahead of it, so one mark covers both), the message before
+  the session digest, and the last message. Providers with automatic caching are
+  left untouched. A system prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is
+  left unmarked. Set `CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
 
 Measured on a live two-turn Anthropic conversation: turn 1 writes ~11,000 tokens
-to cache and reads none (cold, and cache writes carry a 1.25× premium); turn 2
-reads 16,467 — 56% of its input — and writes 1,801.
+and reads none (cold; writes carry a 1.25× premium); turn 2 reads 16,467 — 56%
+of its input — and writes 1,801.
 
-**What the prefix is made of matters more than the breakpoints.** Instrumenting
-a real turn showed two separate causes of lost hits, only one of which was worth
-fixing:
+Two consequences worth knowing when reading the ledger:
 
-- *A per-step system prompt.* The orchestrator's worker prompt embedded the
-  step's goal, success criteria and required action, so every step had a
-  different system prompt — the head of the cached prefix — and no step could
-  read another's. Two steps of one turn: the second read 0 of its 2,963 input
-  tokens against an almost identical prefix the first had just written. The
-  worker system prompt is now identical for every step of every turn, with
-  everything step-specific in the user message.
-- *A tool list that grew mid-turn.* Anthropic orders tool schemas **ahead** of
-  the system prompt, so when a rendered skill unlocked tools (3 → 11 in a
-  measured turn) the prefix behind them was invalidated: the next call read 0,
-  and the one after — same tool list — read 4,853. Fixed by honouring what
-  skills declare *up front*, below.
+- **Reservations use the uncached price**, because a cache hit is never
+  guaranteed. Committed cost stays exact, so the ledger self-corrects the moment
+  a call returns.
+- **Tokens are counted whole.** `CHAT_RUN_TOKEN_BUDGET` counts a cached token
+  like any other — it still occupies the context window. Only the price
+  differs. `cache_read_tokens` appears in the run ledger and per phase.
 
-Tool ordering is deterministic (the listing order, filtered), so the churn was
-genuine growth rather than instability.
+```{note}
+The measurements behind the ordering and the breakpoints, and why reservations
+are not discounted by the observed hit rate, are
+[CTX-004, CTX-005 and CTX-008](../dev/decisions/chat-context.md).
+```
 
 ### Diagnosing a cache miss
 
@@ -211,77 +157,40 @@ component and estimates the tokens behind it:
 cache diagnostic [user:…:thread:…:worker:s1]: tools_changed, ~4000 tokens behind the divergence
 ```
 
-The four components are the four parts a request has, so the answer is always
-one of `model_changed`, `system_changed`, `tools_changed`, `messages_changed` —
-plus `messages_truncated`, for history that was rewritten rather than appended
-to, which is what a sliding context window does. Only the earliest divergence is
-reported; later ones hide behind it, and fixing the first is what changes
-anything.
+The answer is always one of `model_changed`, `system_changed`, `tools_changed`,
+`messages_changed`, or `messages_truncated` (history rewritten rather than
+appended to). Only the earliest divergence is reported; later ones hide behind
+it. Fingerprints are hashes only — never prompt content — bounded in number, and
+process-local.
 
-Fingerprints are hashes only — never prompt content — bounded in number, and
-process-local. Comparisons are scoped twice over, because comparing the wrong
-pair produces a divergence on every call and buries the real one: by key (thread
-plus phase, and per delegation for the sandbox sub-agent, whose every delegation
-opens with the same system prompt) and by *lineage*, the opening message. A plan
-reuses step ids between turns, so without the lineage check turn 2's `worker:s2`
-was diffed against turn 1's unrelated `worker:s2`. The trade is that a request
-whose opening message changed reads as a new lineage rather than a divergence —
-between turns, that is exactly what it is.
-
-Anthropic ships an equivalent as a beta. It is unreachable from here: the beta
-header that authorises it is one LiteLLM builds itself from feature detection
-and will not accept from a caller, so the request parameter arrives without it
-and the API rejects the call outright. This works on every provider instead,
-including those with automatic prefix caching where no such feature exists.
-
-Leave it off in production: it token-counts every component of every call.
+**Leave it off in production:** it token-counts every component of every call.
+Why this exists rather than Anthropic's own beta, and how comparisons are
+scoped, is [CTX-007](../dev/decisions/chat-context.md).
 
 ### Disclosing what skills declare
 
 A skill's `tools_required` is its author stating exactly which tools the
-workflow uses, so there is nothing to learn by waiting for a render before
-honouring it — and waiting is what churned the tool list mid-turn. Those tools
-are disclosed from the start of a step. After the change, a turn that previously
-went 3 → 11 tools held one tool list across all four of its calls, and every
-call after the first read the prefix the one before it wrote (2,605 → 3,320 →
-3,898).
+workflow uses, so those tools are disclosed from the start of a step rather than
+when the skill renders — a tool list that grows mid-turn invalidates the cached
+prefix behind it.
 
-**Scoped to the skills a step names**, not to the catalogue. The plan is the
-signal: a skill step names its skill in `required_action`, and any step may name
-skills in `suggested_tools`. Unioning *every* enabled skill's declaration would
-describe what the deployment can do rather than what the step needs — on a
-measured deployment that took a turn from 1 bound tool (343 tokens) to 43
-(4,666), most of them belonging to workflows the turn would never touch, and a
-CVE question would carry all 23 skill-authoring tools. The single-agent path has
-no such signal (nothing names a skill before the model picks one), so it keeps
-disclosing on render.
+The disclosure is **scoped** to the skills a step names (`required_action` /
+`suggested_tools`) rather than to every enabled skill, and **bounded** by
+`CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` of tool schema, above which tools are
+disclosed on render as before. The bound is in schema tokens rather than tool
+count, since that is what occupies the prefix. The single-agent path has no
+signal for which skills a turn will use, so it always discloses on render.
 
-**Bounded as well as scoped**, because skills are user-authored: a single skill
-can declare a great many tools. Above `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS`
-of tool schema the up-front disclosure is skipped and tools are disclosed on
-render as before. The bound is measured in schema tokens rather than tool count,
-since that is what occupies the prefix — one enormous schema is not one trivial
-one.
+Declarations ride on the skill listing the turn already makes, so this adds no
+store read. Names of tools that no longer exist, or that the user cannot reach,
+drop out — the live listing is the authority. Set
+`CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
 
-Declarations ride on the skill listing the turn already makes (via the prompt's
-`_meta`), so this adds no store read. Names of tools that no longer exist, or
-that the user cannot reach, simply drop out — the live listing is the authority.
-Set `CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
-
-Two more consequences worth knowing:
-
-- **Reservations use the uncached price.** A reservation decides whether a call
-  is *allowed*, and a cache hit is never guaranteed — a ceiling that assumes one
-  is not a ceiling. Discounting by the run's observed hit rate was worse still:
-  that ratio spans every model and phase, so a cache-heavy sandbox phase
-  discounted a cold planner call on another model, measured at 6.6× under-
-  reserved. Committed cost stays exact, billed from the provider's own cache
-  accounting, so the ledger self-corrects the moment a call returns and the
-  over-reservation only applies to calls still in flight.
-- **Tokens are still counted whole.** `CHAT_RUN_TOKEN_BUDGET` counts a cached
-  token like any other: it still occupies the context window and still costs
-  something. Only the price differs. `cache_read_tokens` appears in the run
-  ledger (and per phase) so the saving is visible.
+```{note}
+The measured cost of getting this wrong — a per-step system prompt, and a
+catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
+[CTX-006](../dev/decisions/chat-context.md).
+```
 
 ## Configuration
 

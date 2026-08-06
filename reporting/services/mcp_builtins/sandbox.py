@@ -274,11 +274,9 @@ def _bound_tool_names(
 ) -> set[str]:
     """Which of the reachable tools get bound as typed tools for this delegation.
 
-    ``requested`` narrows as well as widens: an explicit list means the caller
-    knows what the task needs, so the sub-agent gets that and the core rather
-    than the whole disclosed set on top. An unknown name is simply ignored --
-    the RBAC-filtered ``reachable`` list is the authority on what exists, and a
-    delegating model that guesses a name should not break the delegation.
+    ``requested`` narrows as well as widens; an unknown name is ignored, since
+    the RBAC-filtered ``reachable`` list is the authority on what exists. See
+    SBX-003 in docs/root/dev/decisions/sandbox.md.
     """
     names = {tool.name for tool in reachable}
     bound = {name for name in _CORE_TOOL_NAMES if name in names}
@@ -307,10 +305,8 @@ def _record_receipt(
 ) -> None:
     """Tell the conversation's ledger that this data is now on disk.
 
-    The receipt the sub-agent gets covers the rest of *this* delegation. The
-    ledger entry is what survives the turn: the file is still in the sandbox
-    next turn, and without a record of it the next turn re-runs the query that
-    produced it — which is the cost this whole path exists to avoid.
+    The receipt covers the rest of *this* delegation; the ledger entry is what
+    survives the turn. See SBX-008 in docs/root/dev/decisions/sandbox.md.
     """
     ledger = episodic_memory.current_session_ledger()
     if ledger is None:
@@ -332,60 +328,29 @@ async def _build_seizu_tools(
     purpose: str = "",
     disclosed: frozenset[str] | None = None,
     requested: list[str] | None = None,
+    skills_available: list[Any] | None = None,
 ) -> list[Any]:
     """Build LangChain StructuredTools wrapping the Seizu MCP tools the sandbox
     inner agent may call.
 
     RBAC is the boundary: ``chat_safe_only=True`` + ``CHAT_TOOLS_CALL`` decide
     what this user may reach at all, and nothing below widens that.
+    Confirmation-gated mutating tools are excluded — the sub-agent cannot drive
+    the interactive confirmation round-trip, so those stay with the outer agent.
 
-    What is *bound* is narrower, because binding is not free. The inner agent
-    used to be handed every chat-safe tool in the deployment -- 58 of them in a
-    measured instance, ~3,800 tokens of schema re-sent on every inner LLM call,
-    about a fifth of a delegation's spend, to describe a catalogue of which a
-    delegation typically uses one or two. Two thirds of it was management CRUD
-    (roles, spaces, report and toolset editing) that a data-processing sub-agent
-    never wants. It also leaked: a name the sub-agent saw reached the session
-    memory the planner reads, which then required a tool the worker had not
-    disclosed and the step was refused.
-
-    So the bound set is ``_CORE_TOOL_NAMES`` (the read-only graph tools every
-    delegation may need) plus whatever the conversation has already disclosed
-    (``disclosed``) plus whatever the delegating model explicitly asked for
-    (``requested``). Naming ``requested`` also *narrows*: a caller that says
-    which tools the task needs gets those and the core, not the disclosed set as
-    well -- that is how the outer model directs a delegation instead of leaving
-    the sub-agent to work it out.
-
-    Everything else stays reachable through ``find_seizu_tools`` /
-    ``call_seizu_tool``, so narrowing costs a round trip rather than a
-    capability.
-
-    Confirmation-gated mutating tools are excluded (``exclude_confirmation_gated``):
-    the sandbox subagent runs to completion inside one outer tool call and cannot
-    drive the interactive, session-scoped confirmation round-trip, so gated
-    mutations stay with the outer chat agent where the user can approve them. The
-    runtime also fail-closes if such a tool were somehow reached here.
+    What is *bound* is narrower: ``_CORE_TOOL_NAMES`` + ``disclosed`` +
+    ``requested``, where ``requested`` narrows as well as widens. How the
+    sub-agent reaches anything else follows ``CHAT_LLM_PROGRESSIVE_DISCLOSURE``
+    — tool search when off, skill search and render when on.
 
     Given a ``backend``, a result too large to return is written into the
-    sandbox filesystem and replaced by a receipt describing it. The sandbox is
-    for handling data *as data*, but the only route from a query to
-    ``run_python`` otherwise runs through the model: it must read the rows out
-    of its own context and re-emit them as a Python literal, crossing the model
-    twice and hand-serializing in between.
+    sandbox filesystem, replaced by a receipt, and recorded in the session
+    ledger under ``purpose`` so a later turn is told the data already exists.
 
-    The trigger is size and never the model's choice, which is the correction of
-    an earlier attempt that exposed the path as an argument for the agent to
-    set. Given the option it wrote everything to files, read none of them back,
-    and re-queried instead. Routing on size means a file appears only where the
-    result would otherwise have been truncated, so the file is strictly more
-    than the agent would have received — and where a result does fit, nothing
-    changes at all.
-
-    Each such file is also recorded in the conversation's session ledger under
-    ``purpose`` (the delegated task that caused the fetch), so a *later turn*
-    can be told the data already exists rather than fetching it again. The
-    sandbox survives between turns, so the file it names is still readable.
+    Read SBX-002, SBX-003 and SBX-004 in
+    ``docs/root/dev/decisions/sandbox.md`` before changing what is bound, how
+    discovery works, or what triggers a result file. Each was arrived at by
+    measurement and the obvious alternative is the one that was rejected.
     """
     from pydantic import Field, create_model
 
@@ -441,21 +406,9 @@ async def _build_seizu_tools(
             return f"[blocked: {outcome.blocked}]"
         text = outcome.text or "(no output)"
 
-        # The trigger is size, not the model's choice. An earlier version
-        # offered the agent a save_to_path argument and let it decide; it
-        # then used it for all 233 calls of a measured run -- including
-        # schema lookups it needed to read -- read none of the files back,
-        # and re-queried instead, at 4.4x the sandbox spend. Routing on size
-        # removes the decision: a file appears only where the alternative
-        # was a truncated result, so reading it is strictly better than what
-        # the agent would otherwise have had.
-        # Either bound, because the fetch above deliberately exceeds both.
-        # Triggering on bytes alone was tried and was much worse: with the
-        # fetch raised to the file bounds, the row cap is the only thing
-        # keeping an inline result small in row terms, so dropping it let
-        # multi-thousand-row results return in full. A measured turn went
-        # from 124 inner calls and a complete answer to 880 calls, 791 of
-        # them queries, and a 581-character answer with both steps failing.
+        # Size decides, not the model, and both bounds are load-bearing --
+        # see SBX-002 in docs/root/dev/decisions/sandbox.md. Neither the
+        # trigger nor the row cap survives being "simplified".
         rows = _result_rows(text)
         oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
             rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
@@ -509,20 +462,183 @@ async def _build_seizu_tools(
 
     bound_names = {tool.name for tool in seizu_tools}
     undiscovered = [tool for tool in reachable if tool.name not in bound_names]
-    if undiscovered:
+    if not undiscovered:
+        return result
+    if not _settings_progressive_disclosure():
         result.extend(_discovery_tools(undiscovered, _invoke))
+        return result
+    skills = list(skills_available if skills_available is not None else _turn_skills())
+    if skills:
+        result.extend(_skill_discovery_tools(current_user, skills, undiscovered, _invoke))
     return result
+
+
+def _settings_progressive_disclosure() -> bool:
+    from reporting import settings as _settings
+
+    return bool(_settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE)
+
+
+def _turn_skills() -> tuple[Any, ...]:
+    """The turn's skill listing, set by whichever chat path spawned this delegation.
+
+    Ambient rather than an argument for the same reason the disclosure set is:
+    the listing belongs to the turn, and re-reading it per delegation would
+    break the one-listing-per-turn rule. Empty outside a chat turn, which
+    simply leaves the sub-agent with its bound tools.
+    """
+    from reporting.services.chat_graph import current_available_skills
+
+    return current_available_skills()
+
+
+def _skill_discovery_tools(
+    current_user: CurrentUser,
+    skills: list[Any],
+    undiscovered: list[Any],
+    invoke: Any,
+) -> list[Any]:
+    """Skill-mediated access to the tools that were not bound for this delegation.
+
+    The progressive-disclosure counterpart to ``_discovery_tools``: the
+    sub-agent searches *skills*, loads one, and may then call the tools its
+    author declared. Nothing here widens RBAC -- ``undiscovered`` is already the
+    chat-safe, gate-excluded set, so a declaration naming anything outside it
+    unlocks nothing.
+
+    Deliberately more limiting than free-text tool search; see SBX-004 in
+    docs/root/dev/decisions/sandbox.md.
+    """
+    by_name = {tool.name: tool for tool in undiscovered}
+    skills_by_name = {skill.name: skill for skill in skills}
+    # Grows as skills are loaded. A set rather than a rebind so the closures
+    # below share one view, and so a skill loaded for one sub-task keeps its
+    # tools callable for the rest of the delegation.
+    unlocked: set[str] = set()
+
+    async def find_seizu_skills(query: str) -> str:
+        """Search Seizu skills for a workflow that covers what you need.
+
+        Returns matching skill names and what they do. Load one with
+        load_seizu_skill to get its instructions and unlock the tools it uses.
+        """
+        terms = [term for term in query.lower().split() if term]
+        scored: list[tuple[int, Any]] = []
+        for skill in skills:
+            haystack = f"{skill.name} {getattr(skill, 'title', '') or ''} {skill.description or ''}".lower()
+            hits = sum(1 for term in terms if term in haystack)
+            if hits or not terms:
+                scored.append((hits, skill))
+        scored.sort(key=lambda item: (-item[0], item[1].name))
+        if not scored:
+            return (
+                f"No skills match {query!r}. Work with the tools you already have, "
+                "and say what you could not determine rather than assuming the data does not exist."
+            )
+        lines = [
+            json.dumps(
+                {
+                    "name": skill.name,
+                    "description": _truncate((skill.description or "").strip(), _FIND_TOOLS_DESC_MAX),
+                    "arguments": [
+                        {"name": argument.name, "required": bool(argument.required)}
+                        for argument in (skill.arguments or [])
+                    ],
+                },
+                default=str,
+            )
+            for _, skill in scored[:_FIND_TOOLS_LIMIT]
+        ]
+        return "\n".join(lines)
+
+    async def load_seizu_skill(name: str, arguments_json: str = "{}") -> str:
+        """Load a skill found with find_seizu_skills, by name.
+
+        Returns the skill's instructions and unlocks the tools it uses, which
+        you then run with call_seizu_tool. arguments_json is a JSON object of
+        the skill's arguments, e.g. {"severity": "CRITICAL"}.
+        """
+        from reporting.services import mcp_runtime as _rt
+
+        if name not in skills_by_name:
+            return f"[unknown skill {name!r}. Use find_seizu_skills to see what is available.]"
+        try:
+            arguments = json.loads(arguments_json or "{}")
+        except ValueError as exc:
+            return f"[arguments_json is not valid JSON: {exc}]"
+        if not isinstance(arguments, dict):
+            return '[arguments_json must be a JSON object, e.g. {"severity": "CRITICAL"}]'
+        outcome = await _rt.render_prompt_for_chat(
+            current_user,
+            name,
+            {key: str(value) for key, value in arguments.items()},
+            gate_permission=Permission.CHAT_SKILLS_CALL,
+        )
+        if outcome.blocked:
+            return f"[blocked: {outcome.blocked}]"
+        # Declared names that are not reachable are dropped rather than
+        # reported: the skill author's list is a disclosure request, and RBAC
+        # already decided the answer.
+        newly = {tool_name for tool_name in outcome.tools_required if tool_name in by_name}
+        unlocked.update(newly)
+        body = outcome.text or "(skill returned no instructions)"
+        if not newly:
+            # Said plainly rather than left silent: a skill whose author
+            # declared no tools still reads as though it has some, and the
+            # sub-agent would otherwise discover the gap one failed
+            # call_seizu_tool at a time. Measured on one deployment, 1 of 10
+            # skills declares nothing.
+            return (
+                f"{body}\n\n[This skill unlocked no additional tools. Follow it with the tools you "
+                "already have — graph__query with Cypher is the general-purpose route.]"
+            )
+        available = ", ".join(sorted(newly))
+        return f"{body}\n\n[Tools now callable with call_seizu_tool: {available}]"
+
+    async def call_seizu_tool(name: str, arguments_json: str = "{}") -> str:
+        """Call a tool unlocked by a skill you loaded, by name.
+
+        arguments_json is a JSON object of the tool's arguments, e.g.
+        {"limit": 10}. Tools already in your tool list should be called
+        directly instead; this is for the ones a loaded skill unlocked.
+        """
+        if name not in unlocked:
+            if name in by_name:
+                return (
+                    f"[{name!r} exists but no skill you have loaded uses it. Load the skill that "
+                    "covers this workflow with find_seizu_skills, or work with the tools you have.]"
+                )
+            return (
+                f"[unknown tool {name!r}. Call it directly if it is already in your tool list, "
+                "or use find_seizu_skills to find a skill that provides what you need.]"
+            )
+        try:
+            arguments = json.loads(arguments_json or "{}")
+        except ValueError as exc:
+            return f"[arguments_json is not valid JSON: {exc}]"
+        if not isinstance(arguments, dict):
+            return '[arguments_json must be a JSON object, e.g. {"limit": 10}]'
+        return await invoke(name, arguments)
+
+    return [
+        StructuredTool.from_function(
+            coroutine=find_seizu_skills, name="find_seizu_skills", description=find_seizu_skills.__doc__ or ""
+        ),
+        StructuredTool.from_function(
+            coroutine=load_seizu_skill, name="load_seizu_skill", description=load_seizu_skill.__doc__ or ""
+        ),
+        StructuredTool.from_function(
+            coroutine=call_seizu_tool, name="call_seizu_tool", description=call_seizu_tool.__doc__ or ""
+        ),
+    ]
 
 
 def _discovery_tools(undiscovered: list[Any], invoke: Any) -> list[Any]:
     """Search-and-call access to the tools that were not bound for this delegation.
 
-    This is what makes narrowing safe rather than a capability cut: a sub-agent
-    that turns out to need something outside its bound set pays one round trip
-    to find it instead of failing. It is not a privilege escalation -- the list
-    is the same RBAC-filtered, confirmation-gate-excluded set the sub-agent
-    could already reach; only the cost of *seeing* it changed, from every schema
-    on every call to one search when it is needed.
+    The non-progressive-disclosure route: one round trip to find a tool instead
+    of failing, over the same RBAC-filtered set the sub-agent could already
+    reach. See SBX-004 in docs/root/dev/decisions/sandbox.md.
     """
     by_name = {tool.name: tool for tool in undiscovered}
 
@@ -906,9 +1022,7 @@ What the data looks like:
 - The sandbox is shared with the rest of this conversation, including earlier turns. Files \
   listed to you as already saved are really there: read one instead of fetching its data \
   again. If a listed file turns out to be missing, fetch what you need and say so.
-- Your tool list is the tools this task was expected to need, not everything Seizu has. If \
-  none of them provides the data, search with find_seizu_tools and run what you find with \
-  call_seizu_tool. Do that rather than concluding the data does not exist.
+__DISCOVERY__
 
 How to work:
 - Query once, save what you get, and compute over it. Repeating a query to see more of it \
@@ -917,6 +1031,42 @@ How to work:
 - Prefer a purpose-built tool over raw Cypher when one covers the question.
 - Return the findings and the numbers behind them. Do not return transcripts, row dumps, \
   or a description of what you tried."""
+
+
+_DISCOVERY_PLACEHOLDER = "__DISCOVERY__"
+
+# What the sub-agent is told about reaching beyond its bound tools. Has to match
+# what it was actually given: a prompt naming find_seizu_tools when only skill
+# discovery is bound spends turns calling a tool that is not there.
+_DISCOVERY_CLAUSE_TOOLS = """\
+- Your tool list is the tools this task was expected to need, not everything Seizu has. If \
+  none of them provides the data, search with find_seizu_tools and run what you find with \
+  call_seizu_tool. Do that rather than concluding the data does not exist."""
+
+_DISCOVERY_CLAUSE_SKILLS = """\
+- Your tool list is the tools this task was expected to need, not everything Seizu has. If \
+  none of them provides the data, search with find_seizu_skills for a skill covering the \
+  workflow, load it with load_seizu_skill, and run the tools it unlocks with call_seizu_tool. \
+  Do that rather than concluding the data does not exist.
+- If no skill covers it, graph__query with Cypher is the general-purpose route. Say what you \
+  could not determine; do not guess at numbers."""
+
+_DISCOVERY_CLAUSE_NONE = """\
+- Your tool list is the tools this task was expected to need. If none of them provides the \
+  data, use graph__query with Cypher, and say what you could not determine rather than \
+  guessing at numbers."""
+
+
+def _subagent_prompt(tool_names: set[str]) -> str:
+    """The sub-agent system prompt, describing the discovery route it actually has."""
+    if "find_seizu_tools" in tool_names:
+        discovery = _DISCOVERY_CLAUSE_TOOLS
+    elif "find_seizu_skills" in tool_names:
+        discovery = _DISCOVERY_CLAUSE_SKILLS
+    else:
+        discovery = _DISCOVERY_CLAUSE_NONE
+    # replace(), not format(): the prompt contains literal JSON braces.
+    return _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, discovery)
 
 
 def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
@@ -994,7 +1144,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     budget_scope = chat_budget.current_budget_scope()
     remaining = budget_controller.scope_remaining(budget_scope) if budget_controller else None
     wrap_up = bool(budget_controller and budget_controller.scope_soft_limit_reached(budget_scope))
-    system_prompt = _SUBAGENT_PROMPT + _budget_note(remaining, wrap_up=wrap_up)
+    budget_note = _budget_note(remaining, wrap_up=wrap_up)
 
     base_prompt = task
     if context:
@@ -1028,6 +1178,11 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
                     current_user, backend, purpose=task, disclosed=disclosed, requested=requested_tools
                 ),
             ]
+        # After the tools exist, because which discovery route the prompt should
+        # describe is decided by what actually got bound -- skills under
+        # progressive disclosure, tool search without it, and neither when the
+        # bound set already covers everything reachable.
+        system_prompt = _subagent_prompt({tool.name for tool in tools}) + budget_note
         tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
         model = _get_sandbox_model()
         agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)

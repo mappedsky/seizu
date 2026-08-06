@@ -2438,6 +2438,45 @@ async def test_a_worker_step_publishes_its_tools_to_its_sub_agents(mocker):
     chat_graph.set_disclosed_tools(())
 
 
+async def test_a_worker_step_publishes_the_turns_skills_to_its_sub_agents(mocker):
+    """Under progressive disclosure a sandbox sub-agent discovers capability
+    through skills, so it needs the listing the turn already made -- re-listing
+    per delegation would break the one-listing-per-turn rule."""
+    from langchain_core.messages import AIMessage
+    from mcp.types import Prompt
+
+    seen: list[tuple[Any, ...]] = []
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    prompt = Prompt(name="cve__triage", title="Triage", description="Triage CVEs", arguments=[])
+
+    class _PeekModel:
+        def bind_tools(self, _tools: Any) -> "_PeekModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            seen.append(chat_graph.current_available_skills())
+            yield AIMessage(content="done")
+
+    await chat_orchestrator._run_worker_step(
+        _step("s1", action_kind="tool", required_action="t__one"),
+        plan=[],
+        results=[],
+        model=_PeekModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[spec],
+        disclosed_names=set(),
+        progressive=True,
+        writer=lambda _event: None,
+        skill_prompts=[prompt],
+    )
+
+    assert [p.name for p in seen[0]] == ["cve__triage"]
+    chat_graph.set_disclosed_tools(())
+    chat_graph.set_available_skills(())
+
+
 def test_every_step_shares_one_worker_system_prompt():
     """A system prompt is the head of the cached prefix, so a per-step one meant
     no step could ever read another's. Measured on two steps of a single turn:

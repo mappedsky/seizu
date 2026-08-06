@@ -105,6 +105,21 @@ def current_disclosed_tools() -> frozenset[str]:
     return _current_disclosed_tools.get()
 
 
+# The turn's skill listing, carried the same way and for the same reason: a
+# sandbox sub-agent discovers capability through skills under progressive
+# disclosure, and re-listing them per delegation would break the
+# one-listing-per-turn rule that keeps a turn's store reads bounded.
+_current_available_skills: ContextVar[tuple[Any, ...]] = ContextVar("_current_available_skills", default=())
+
+
+def set_available_skills(skills: Iterable[Any]) -> None:
+    _current_available_skills.set(tuple(skills))
+
+
+def current_available_skills() -> tuple[Any, ...]:
+    return _current_available_skills.get()
+
+
 class ChatState(TypedDict):
     messages: Annotated[list[Any], add_messages]
     # Orchestration state (plan -> dispatch -> verify). All optional so the
@@ -506,10 +521,9 @@ async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig
         raise
     teardown = await sandbox_session.close_sandbox_session()
     if teardown.opened:
-        # Written even when empty: a sandbox that was opened and not suspended
-        # leaves the thread naming something dead, and omitting the key keeps
-        # that stale value rather than clearing it. A turn that opened nothing
-        # leaves the stored id alone.
+        # Written even when empty -- omitting the key keeps a dead id rather
+        # than clearing it, and the digest then advertises receipts under it.
+        # A turn that opened nothing leaves the stored id alone. SBX-006.
         update["sandbox_id"] = teardown.suspended_id
     return update
 
@@ -600,6 +614,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # disclosure off there is nothing to inherit and the sub-agent keeps the
     # full set, matching what the outer model itself is given.
     set_disclosed_tools({spec.name for spec in tool_specs} if progressive_disclosure else ())
+    # With disclosure off the sub-agent searches tools directly and never needs
+    # these; with it on they are its only route to anything unbound.
+    set_available_skills(skills if progressive_disclosure else ())
 
     if session_digest:
         messages = [*messages, session_memory_message(session_digest)]
