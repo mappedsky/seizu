@@ -64,11 +64,27 @@ REPO = Path(__file__).resolve().parent.parent
 OVERLAY = REPO / "chat-harness-arm.yml"
 API = "http://localhost:8080"
 
-SETUP_TURN = "Give me a security overview of the most critical vulnerabilities in the graph"
-FOLLOW_UP_TURN = (
+# A conversation, not a list of unrelated questions: each turn refers back, so
+# the history actually has to be carried. Cycled when more turns are asked for
+# than there are prompts, which is how a run long enough to trigger history
+# compaction is built without inventing forty distinct security questions.
+CONVERSATION = [
+    "Give me a security overview of the most critical vulnerabilities in the graph",
     "Now cross-check that against the actual CVE data in the graph and tell me "
-    "which of those findings are actually reachable from the internet"
-)
+    "which of those findings are actually reachable from the internet",
+    "Which repositories are most exposed by those, and why?",
+    "Summarise what we have established so far in five bullet points",
+    "Of everything discussed, what would you fix first and what would you defer?",
+    "Which of the findings so far depend on data that might be stale?",
+    "Group the findings by the team that would own the fix",
+    "What have we not looked at yet that you would expect to matter?",
+]
+
+
+def conversation_turns(count: int) -> list[str]:
+    """The first *count* prompts, cycling once the written ones run out."""
+    return [CONVERSATION[index % len(CONVERSATION)] for index in range(max(1, count))]
+
 
 _ARM_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[^\s]*$")
 
@@ -233,7 +249,14 @@ def stream_metrics(sse: str) -> dict[str, Any]:
 
 
 def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
-    """The persisted budget for the turn -- the only trustworthy token source."""
+    """Every turn's persisted budget -- the only trustworthy token source.
+
+    Summed across the conversation rather than read off the last turn: what a
+    long session costs is the whole thing, and a per-turn figure hides the fact
+    that early turns are cheap and later ones carry the accumulated history.
+    ``history_summary`` comes back too, because its presence is the direct
+    evidence that compaction engaged at all.
+    """
     script = (
         "import asyncio, json\n"
         "from reporting.services import chat_graph\n"
@@ -242,55 +265,85 @@ def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
         "    graph = chat_graph.get_chat_graph()\n"
         f"    key = 'user:{user_id}:thread:{thread_id}'\n"
         "    state = await graph.aget_state({'configurable': {'thread_id': key}})\n"
+        "    values = getattr(state, 'values', {}) or {}\n"
         "    budgets = [\n"
-        "        b for m in (getattr(state, 'values', {}) or {}).get('messages', [])\n"
+        "        b for m in values.get('messages', [])\n"
         "        if (b := (getattr(m, 'response_metadata', {}) or {}).get('seizu_budget'))\n"
         "    ]\n"
-        "    print('LEDGER' + json.dumps(budgets[-1] if budgets else {}))\n"
+        "    summary = (values.get('history_summary') or {}).get('text') or ''\n"
+        "    print('LEDGER' + json.dumps({'budgets': budgets, 'summary_chars': len(summary)}))\n"
         "asyncio.run(main())"
     )
     out = _compose("exec", "-T", "seizu", "uv", "run", "--frozen", "--no-sync", "python", "-c", script, capture=True)
     for line in out.splitlines():
-        if line.startswith("LEDGER"):
-            budget = json.loads(line[len("LEDGER") :])
-            phases = budget.get("phases") or {}
-            input_tokens = budget.get("input_tokens", 0)
-            cache_read = budget.get("cache_read_tokens", 0)
-            return {
-                "total_tokens": budget.get("total_tokens", 0),
-                "mode": budget.get("mode", ""),
-                "sandbox_tokens": sum(
-                    v.get("total_tokens", 0) for k, v in phases.items() if k.endswith("sandbox_subagent")
-                ),
-                # Prompt caching is most of what a turn's *cost* now depends on,
-                # and it is invisible in a token total: cached input is billed at
-                # a fraction of fresh input, so two runs with identical token
-                # counts can differ severalfold in spend.
-                "cache_read_tokens": cache_read,
-                "cache_hit_pct": round(cache_read / input_tokens * 100) if input_tokens else 0,
-                "cost_usd": round(float(budget.get("cost_usd", 0.0)), 4),
-            }
+        if not line.startswith("LEDGER"):
+            continue
+        payload = json.loads(line[len("LEDGER") :])
+        budgets = payload.get("budgets") or []
+        if not budgets:
+            break
+
+        def total(key: str) -> int:
+            return sum(int(b.get(key) or 0) for b in budgets)
+
+        input_tokens = total("input_tokens")
+        cache_read = total("cache_read_tokens")
+        return {
+            "total_tokens": total("total_tokens"),
+            "llm_calls": total("llm_calls"),
+            # The last turn's mode: whether the conversation ended able to spend.
+            "mode": budgets[-1].get("mode", ""),
+            "sandbox_tokens": sum(
+                v.get("total_tokens", 0)
+                for b in budgets
+                for k, v in (b.get("phases") or {}).items()
+                if k.endswith("sandbox_subagent")
+            ),
+            # Prompt caching is most of what a conversation's *cost* depends on,
+            # and it is invisible in a token total: cached input is billed at a
+            # fraction of fresh input, so two runs with identical token counts
+            # can differ severalfold in spend.
+            "cache_read_tokens": cache_read,
+            "cache_hit_pct": round(cache_read / input_tokens * 100) if input_tokens else 0,
+            "cost_usd": round(sum(float(b.get("cost_usd") or 0.0) for b in budgets), 4),
+            # Non-zero means history compaction engaged.
+            "summary_chars": int(payload.get("summary_chars") or 0),
+        }
     return {
         "total_tokens": 0,
+        "llm_calls": 0,
         "mode": "?",
         "sandbox_tokens": 0,
         "cache_read_tokens": 0,
         "cache_hit_pct": 0,
         "cost_usd": 0.0,
+        "summary_chars": 0,
     }
 
 
-def run_sample(arm: str, index: int, user_id: str, out_dir: Path) -> dict[str, Any]:
+def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2) -> dict[str, Any]:
     session = json.loads(_post("/api/v1/chat/sessions", {"title": f"harness {arm} #{index}"}))
     thread_id = session["thread_id"]
     started = time.time()
-    _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": SETUP_TURN}, stream=True)
-    sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": FOLLOW_UP_TURN}, stream=True)
+    prompts = conversation_turns(turns)
+    sse = ""
+    for turn, prompt in enumerate(prompts, start=1):
+        sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": prompt}, stream=True)
+        print(f"    turn {turn}/{len(prompts)} done ({int(time.time() - started)}s)", flush=True)
     # Hash the arm rather than embedding it: an ordinary value such as
     # "openai/gpt-4" carries a path separator and would write outside out_dir.
     slug = "baseline" if arm == "baseline" else hashlib.sha256(arm.encode()).hexdigest()[:10]
+    # The last turn's stream: the deepest context the conversation reached, and
+    # the one a context change is most likely to show up in.
     (out_dir / f"{slug}_{index}.sse").write_text(sse)
-    row = {"arm": arm, "slug": slug, "sample": index, "thread": thread_id, "seconds": int(time.time() - started)}
+    row = {
+        "arm": arm,
+        "slug": slug,
+        "sample": index,
+        "thread": thread_id,
+        "turns": len(prompts),
+        "seconds": int(time.time() - started),
+    }
     row.update(stream_metrics(sse))
     row.update(ledger(thread_id, user_id))
     return row
@@ -300,7 +353,7 @@ def summarize(rows: list[dict[str, Any]]) -> None:
     arms: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         arms.setdefault(row["arm"], []).append(row)
-    keys = ("answer_chars", "queries", "delegations", "total_tokens", "cache_hit_pct", "cost_usd")
+    keys = ("answer_chars", "total_tokens", "llm_calls", "cache_hit_pct", "cost_usd", "summary_chars")
     print(f"\n{'arm':38} {'n':>2}  " + "  ".join(f"{k:>22}" for k in keys))
     for arm, samples in arms.items():
         cells = []
@@ -324,6 +377,12 @@ def summarize(rows: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=4)
+    parser.add_argument(
+        "--turns",
+        type=int,
+        default=2,
+        help="Turns per conversation. Long runs are how history compaction is reached at all.",
+    )
     parser.add_argument("--arms", nargs="+", required=True, help='"baseline" or KEY=VALUE')
     parser.add_argument("--user-id", required=True, help="Seizu user id whose threads to read budgets from")
     parser.add_argument("--out", default="chat-harness-results")
@@ -344,7 +403,7 @@ def main() -> int:
             applied = apply_arm(arm)
             print(f"ARM {arm} applied={applied}", flush=True)
             for index in range(1, args.samples + 1):
-                row = run_sample(arm, index, args.user_id, out_dir)
+                row = run_sample(arm, index, args.user_id, out_dir, turns=args.turns)
                 rows.append(row)
                 with results.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")

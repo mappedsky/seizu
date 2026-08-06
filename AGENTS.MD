@@ -52,11 +52,16 @@ make auth_enable / auth_disable
 make sqlmodel_enable / sqlmodel_disable
 make build_cartography_worker     # build the cartography sync-worker image
 make cartography_contract_test    # verify registry flags against the pinned CLI
-make chat_harness USER_ID=<id> ARMS="baseline KEY=VALUE" [SAMPLES=4]
+make chat_harness USER_ID=<id> ARMS="baseline KEY=VALUE" [SAMPLES=4] [TURNS=2]
 ```
 
-**Measuring chat agent settings:** `scripts/chat_harness.py` runs the same two-turn
-conversation N times per arm and reports medians and ranges. Use it rather than
+**Measuring chat agent settings:** `scripts/chat_harness.py` runs the same
+conversation N times per arm (`TURNS` sets its length; the prompts refer back to
+each other, so history genuinely has to be carried) and reports medians and
+ranges. Tokens, cost and cache hit rate are summed across *every* turn, not read
+off the last one, and `summary_chars` is non-zero when history compaction
+engaged — reaching it at all needs a long run or a small
+`CHAT_LLM_CONTEXT_MAX_TOKENS`. Use it rather than
 comparing single runs — answer quality on an *unchanged* configuration has been
 observed to vary several-fold, and single-run comparisons of this system have
 repeatedly shown "clean separations" that vanished under more samples. Four
