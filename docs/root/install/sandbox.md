@@ -87,17 +87,21 @@ sandbox the failing turn created has its id nowhere, so pausing it would strand
 it. Deleting the chat thread destroys the sandbox with it, and never fails the
 deletion if the provider call fails; an orphan is logged with its id.
 
-`SANDBOX_SESSION_PERSIST` is **off by default**, because nothing reaps an
-abandoned sandbox. Cleanup happens when a thread is deleted; a conversation a
-user simply stops replying to leaves a suspended sandbox until the provider's
-own retention reclaims it, and a deployment with many chat users accumulates
-those indefinitely. Turn it on once you have a TTL or a sweep over the
-provider's sandbox list — or if you accept that cost knowingly.
+Suspension keeps **only the filesystem** (`pause(keep_memory=False)`), which is
+all this needs: the saved results and the receipts pointing at them live on
+disk, and nothing depends on a process surviving a turn. A resumed sandbox
+therefore cold-boots rather than restoring a memory snapshot — marginally slower
+to wake, and untrusted processes do not outlive the turn even though the data
+does. Persistence does mean untrusted *data* lives for the length of a
+conversation rather than a single turn, still bounded to one user's thread and
+still holding no credentials.
 
-The other trade is explicit too: persistence means untrusted *data* lives for the
-length of a conversation rather than a single turn, still bounded to one user's
-thread and still holding no credentials. Suspension keeps only the filesystem
-(`pause(keep_memory=False)`), so untrusted processes do not survive the turn.
+**Known gap: nothing reaps an abandoned sandbox.** Cleanup happens when a thread
+is deleted, so a conversation a user simply stops replying to leaves a suspended
+sandbox until the provider's own retention reclaims it, and a deployment with
+many chat users accumulates those. A TTL or a sweep over the provider's sandbox
+list is planned separately; until it lands, either watch that growth or set
+`SANDBOX_SESSION_PERSIST=false`, which returns to a sandbox per turn.
 
 ### Session memory
 

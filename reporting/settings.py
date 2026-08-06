@@ -932,14 +932,18 @@ SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_8
 # data earlier turns fetched still on disk, so it reads files instead of
 # re-running their queries.
 #
-# Off by default, because **nothing reaps an abandoned one**. Cleanup happens
-# when a thread is deleted; a conversation a user simply stops replying to
-# leaves a suspended sandbox until the provider's own retention reclaims it, and
-# a deployment with many chat users accumulates those indefinitely. Turn it on
-# once you have a TTL or a sweep over the provider's sandbox list -- or if you
-# accept that cost knowingly. Pausing keeps only the filesystem, so untrusted
-# processes do not survive the turn, but the storage does.
-SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", False)
+# Pausing keeps only the filesystem (keep_memory=False), which is all this
+# needs -- the saved results and the receipts pointing at them are on disk, and
+# nothing depends on a process surviving -- so untrusted processes do not
+# outlive the turn even though the data does.
+#
+# Known gap, accepted deliberately: **nothing reaps an abandoned sandbox**.
+# Cleanup happens when a thread is deleted, so a conversation a user simply
+# stops replying to leaves a suspended sandbox until the provider's own
+# retention reclaims it, and a deployment with many chat users accumulates
+# those. A TTL/sweep is planned separately; until it lands, either watch that
+# growth or set this false.
+SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 
