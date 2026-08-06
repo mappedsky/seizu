@@ -34,12 +34,30 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from reporting import settings
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SandboxTeardown:
+    """What closing a session leaves behind, and what the thread should record.
+
+    Three outcomes, and they are not interchangeable. A suspended sandbox gives
+    the thread an id to resume. A sandbox that was opened and *not* suspended
+    leaves the thread's stored id naming something dead, so it has to be
+    cleared -- omitting the key does not clear it, because the reducer
+    overwrites rather than merges. And a turn that never opened one must leave
+    the stored id alone, or a turn that simply did not delegate would throw away
+    the conversation's sandbox.
+    """
+
+    opened: bool = False
+    suspended_id: str = ""
 
 
 class SandboxSession:
@@ -150,7 +168,7 @@ class SandboxSession:
         """
         self._suspended = suspended
 
-    async def aclose(self, *, suspend: bool = True) -> str | None:
+    async def aclose(self, *, suspend: bool = True) -> SandboxTeardown:
         """Tear the session down; return the id to resume, if it was suspended.
 
         ``suspend=False`` destroys the sandbox even on a persistent session. The
@@ -166,7 +184,7 @@ class SandboxSession:
             stack, self._stack, self._backend = self._stack, None, None
             sandbox_id = self._sandbox_id
         if stack is None:
-            return None
+            return SandboxTeardown(opened=False)
         try:
             await stack.aclose()
         except Exception:
@@ -175,10 +193,10 @@ class SandboxSession:
             # resume id: whether the suspend took effect is exactly what just
             # became unknown, and a bad id costs the next turn a failed resume.
             logger.warning("sandbox session teardown failed", exc_info=True)
-            return None
+            return SandboxTeardown(opened=True)
         # ``_suspended``, not the intent: a pause that failed fell back to a
         # kill, and returning that id would checkpoint a dead sandbox.
-        return sandbox_id if self._suspended and sandbox_id else None
+        return SandboxTeardown(opened=True, suspended_id=sandbox_id if self._suspended and sandbox_id else "")
 
 
 _current_sandbox_session: ContextVar[SandboxSession | None] = ContextVar("_current_sandbox_session", default=None)
@@ -204,16 +222,16 @@ def current_sandbox_session() -> SandboxSession | None:
     return _current_sandbox_session.get()
 
 
-async def close_sandbox_session(*, suspend: bool = True) -> str | None:
-    """Close the ambient session; return the sandbox id the next turn resumes."""
+async def close_sandbox_session(*, suspend: bool = True) -> SandboxTeardown:
+    """Close the ambient session; report what the thread should record."""
     session = _current_sandbox_session.get()
     _current_sandbox_session.set(None)
     if session is None:
-        return None
+        return SandboxTeardown(opened=False)
     return await session.aclose(suspend=suspend)
 
 
-async def abandon_sandbox_session() -> str | None:
+async def abandon_sandbox_session() -> SandboxTeardown:
     """Close the session after a turn that failed.
 
     Keep a sandbox the thread already knows about; destroy one it does not.
@@ -229,7 +247,7 @@ async def abandon_sandbox_session() -> str | None:
     """
     session = _current_sandbox_session.get()
     if session is None:
-        return None
+        return SandboxTeardown(opened=False)
     return await close_sandbox_session(suspend=session.resumed)
 
 

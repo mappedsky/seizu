@@ -2196,7 +2196,7 @@ async def test_every_step_of_a_batch_shares_one_sandbox_and_it_outlives_them(moc
     closed = mocker.patch(
         "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
         new_callable=AsyncMock,
-        return_value="sbx-9",
+        return_value=chat_orchestrator.sandbox_session.SandboxTeardown(opened=True, suspended_id="sbx-9"),
     )
 
     state = {
@@ -2227,7 +2227,7 @@ async def test_the_dispatcher_resumes_the_threads_sandbox(mocker):
     mocker.patch(
         "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
         new_callable=AsyncMock,
-        return_value=None,
+        return_value=chat_orchestrator.sandbox_session.SandboxTeardown(opened=False),
     )
 
     await chat_orchestrator.dispatcher_node(
@@ -2510,3 +2510,37 @@ def test_disclosure_follows_the_skills_a_step_names(mocker):
         )
         == frozenset()
     )
+
+
+async def test_the_dispatcher_clears_an_id_whose_sandbox_was_killed(mocker):
+    """Omitting the key would leave the reducer's existing value in place, so a
+    later turn keeps retrying a dead resume."""
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+        new_callable=AsyncMock,
+        return_value=chat_orchestrator.sandbox_session.SandboxTeardown(opened=True, suspended_id=""),
+    )
+
+    update = await chat_orchestrator.dispatcher_node(
+        {"messages": [HumanMessage(content="go")], "plan": [], "sandbox_id": "sbx-dead"},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    assert update["sandbox_id"] == ""
+
+
+async def test_the_dispatcher_leaves_the_id_alone_when_it_opened_nothing(mocker):
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    mocker.patch(
+        "reporting.services.chat_orchestrator.sandbox_session.close_sandbox_session",
+        new_callable=AsyncMock,
+        return_value=chat_orchestrator.sandbox_session.SandboxTeardown(opened=False),
+    )
+
+    update = await chat_orchestrator.dispatcher_node(
+        {"messages": [HumanMessage(content="go")], "plan": [], "sandbox_id": "sbx-kept"},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    assert "sandbox_id" not in update

@@ -13,7 +13,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
-from reporting.services import chat_context, chat_graph
+from reporting.services import chat_context, chat_graph, sandbox_session
 from reporting.services.chat_messages import MessageTag, has_tag
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
@@ -3664,7 +3664,7 @@ async def test_a_turn_hands_its_sandbox_to_the_next_turn_of_the_same_thread(mock
     mocker.patch("reporting.services.chat_graph.sandbox_session.start_sandbox_session", _record_start)
     mocker.patch(
         "reporting.services.chat_graph.sandbox_session.close_sandbox_session",
-        mocker.AsyncMock(return_value="sbx-1"),
+        mocker.AsyncMock(return_value=sandbox_session.SandboxTeardown(opened=True, suspended_id="sbx-1")),
     )
     graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
 
@@ -4206,3 +4206,45 @@ def test_a_reserve_too_small_for_the_fence_drops_the_block_rather_than_leaking()
     assert not any(chat_graph._is_history_summary(m) for m in out)
     # The text is still recorded, so a later turn with room can render it.
     assert summary.text
+
+
+async def test_a_killed_sandbox_is_cleared_from_the_thread(mocker):
+    """At the checkpoint, not just at the return value. Omitting the key leaves
+    the reducer's existing value in place, so a thread whose sandbox was killed
+    kept naming it: later turns retried a dead resume, and the session digest
+    advertised files under an id that no longer existed."""
+    mocker.patch(
+        "reporting.services.chat_graph.sandbox_session.close_sandbox_session",
+        mocker.AsyncMock(return_value=sandbox_session.SandboxTeardown(opened=True, suspended_id="")),
+    )
+    graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
+    config = {"configurable": {"thread_id": "thread-dead-sandbox", "current_user": _user()}}
+
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content="hello")], "sandbox_id": "sbx-dead"},
+        config,
+        stream_mode="custom",
+    ):
+        pass
+
+    assert (await graph.aget_state(config)).values["sandbox_id"] == ""
+
+
+async def test_a_turn_that_opened_no_sandbox_keeps_the_stored_id(mocker):
+    """The distinction that makes clearing safe: a turn that simply did not
+    delegate must not throw away the conversation's sandbox."""
+    mocker.patch(
+        "reporting.services.chat_graph.sandbox_session.close_sandbox_session",
+        mocker.AsyncMock(return_value=sandbox_session.SandboxTeardown(opened=False)),
+    )
+    graph = _memory_graph(mocker, _ToolCallingFakeModel([AIMessageChunk(content="done")]))
+    config = {"configurable": {"thread_id": "thread-untouched-sandbox", "current_user": _user()}}
+
+    async for _ in graph.astream(
+        {"messages": [HumanMessage(content="hello")], "sandbox_id": "sbx-kept"},
+        config,
+        stream_mode="custom",
+    ):
+        pass
+
+    assert (await graph.aget_state(config)).values["sandbox_id"] == "sbx-kept"

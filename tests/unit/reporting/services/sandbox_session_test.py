@@ -178,13 +178,13 @@ async def test_a_persistent_session_hands_back_the_id_to_resume(mocker):
 
     session = sandbox_session.start_sandbox_session(persist=True)
     await session.backend()
-    resume_id = await sandbox_session.close_sandbox_session()
+    teardown = await sandbox_session.close_sandbox_session()
 
     assert calls[0]["suspended"] is True
-    assert resume_id == "sbx-1"
+    assert (teardown.opened, teardown.suspended_id) == (True, "sbx-1")
 
     # Next turn, same conversation.
-    sandbox_session.start_sandbox_session(resume_sandbox_id=resume_id, persist=True)
+    sandbox_session.start_sandbox_session(resume_sandbox_id=teardown.suspended_id, persist=True)
     next_session = sandbox_session.current_sandbox_session()
     assert next_session is not None
     await next_session.backend()
@@ -198,8 +198,10 @@ async def test_a_turn_that_never_delegated_carries_no_id_forward(mocker):
     mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
 
     sandbox_session.start_sandbox_session(persist=True)
-    # No sandbox was opened, so there is nothing to resume and nothing paused.
-    assert await sandbox_session.close_sandbox_session() is None
+    # No sandbox was opened, so there is nothing to resume and nothing paused --
+    # and nothing for the thread to record, which must leave any stored id alone.
+    teardown = await sandbox_session.close_sandbox_session()
+    assert (teardown.opened, teardown.suspended_id) == (False, "")
     assert calls == []
 
 
@@ -211,7 +213,8 @@ async def test_a_failed_turn_destroys_its_sandbox_rather_than_pausing_it(mocker)
     session = sandbox_session.start_sandbox_session(persist=True)
     await session.backend()
 
-    assert await sandbox_session.close_sandbox_session(suspend=False) is None
+    teardown = await sandbox_session.close_sandbox_session(suspend=False)
+    assert (teardown.opened, teardown.suspended_id) == (True, "")
     assert calls[0]["suspended"] is False
 
 
@@ -234,7 +237,7 @@ async def test_a_replacement_sandbox_is_not_reported_as_resumed(mocker):
 
     assert session.resumed is False
     assert session.sandbox_id == "sbx-new"
-    assert await sandbox_session.close_sandbox_session() == "sbx-new"
+    assert (await sandbox_session.close_sandbox_session()).suspended_id == "sbx-new"
 
 
 async def test_a_non_persistent_session_still_destroys_its_sandbox(mocker):
@@ -246,7 +249,8 @@ async def test_a_non_persistent_session_still_destroys_its_sandbox(mocker):
     session = sandbox_session.start_sandbox_session(persist=False)
     await session.backend()
 
-    assert await sandbox_session.close_sandbox_session() is None
+    teardown = await sandbox_session.close_sandbox_session()
+    assert (teardown.opened, teardown.suspended_id) == (True, "")
     assert calls[0]["suspended"] is False
 
 
@@ -277,10 +281,10 @@ async def test_a_failed_turn_keeps_a_sandbox_the_thread_already_knows_about(mock
     await session.backend()
     assert session.resumed is True
 
-    resume_id = await sandbox_session.abandon_sandbox_session()
+    teardown = await sandbox_session.abandon_sandbox_session()
 
     assert calls[0]["suspended"] is True
-    assert resume_id == "sbx-1"
+    assert (teardown.opened, teardown.suspended_id) == (True, "sbx-1")
 
 
 async def test_a_failed_turn_destroys_a_sandbox_it_created_itself(mocker):
@@ -293,7 +297,8 @@ async def test_a_failed_turn_destroys_a_sandbox_it_created_itself(mocker):
     await session.backend()
     assert session.resumed is False
 
-    assert await sandbox_session.abandon_sandbox_session() is None
+    teardown = await sandbox_session.abandon_sandbox_session()
+    assert (teardown.opened, teardown.suspended_id) == (True, "")
     assert calls[0]["suspended"] is False
 
 
@@ -321,13 +326,14 @@ async def test_a_failed_turn_whose_resume_failed_destroys_the_replacement(mocker
     session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-gone", persist=True)
     await session.backend()
 
-    assert await sandbox_session.abandon_sandbox_session() is None
+    teardown = await sandbox_session.abandon_sandbox_session()
+    assert (teardown.opened, teardown.suspended_id) == (True, "")
     assert opened[0]["_suspended"] is False
 
 
 async def test_abandoning_without_a_session_is_a_no_op():
     await sandbox_session.close_sandbox_session()
-    assert await sandbox_session.abandon_sandbox_session() is None
+    assert (await sandbox_session.abandon_sandbox_session()).opened is False
 
 
 async def test_a_pause_that_failed_does_not_hand_back_the_dead_id(mocker):
@@ -350,4 +356,30 @@ async def test_a_pause_that_failed_does_not_hand_back_the_dead_id(mocker):
     session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-1", persist=True)
     await session.backend()
 
-    assert await sandbox_session.close_sandbox_session() is None
+    assert (await sandbox_session.close_sandbox_session()).suspended_id == ""
+
+
+async def test_a_killed_sandbox_reports_that_the_thread_must_clear_its_id(mocker):
+    """Omitting the key does not clear it: the reducer overwrites rather than
+    merges, so a caller that only writes non-empty ids leaves the thread naming
+    a dead sandbox -- and its receipts advertising files under that id."""
+
+    @asynccontextmanager
+    async def _open(**kwargs: Any):
+        backend = MagicMock()
+        backend.sandbox_id = "sbx-1"
+        try:
+            yield backend
+        finally:
+            on_teardown = kwargs.get("on_teardown")
+            if on_teardown is not None:
+                on_teardown(False)  # pause failed; killed instead
+
+    mocker.patch("reporting.services.sandbox_session.open_backend", _open)
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-1", persist=True)
+    await session.backend()
+
+    teardown = await sandbox_session.close_sandbox_session()
+
+    assert teardown.opened is True  # so the caller writes the key...
+    assert teardown.suspended_id == ""  # ...with an empty value, clearing it

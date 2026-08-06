@@ -706,10 +706,12 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
         # cost the conversation everything earlier steps put on its disk.
         await sandbox_session.abandon_sandbox_session()
         raise
-    suspended_id = await sandbox_session.close_sandbox_session()
+    teardown = await sandbox_session.close_sandbox_session()
     update["session_memory"] = ledger.to_state()
-    if suspended_id:
-        update["sandbox_id"] = suspended_id
+    if teardown.opened:
+        # Written even when empty, to clear an id the teardown just killed;
+        # omitting the key would leave the dead one in place.
+        update["sandbox_id"] = teardown.suspended_id
     return update
 
 

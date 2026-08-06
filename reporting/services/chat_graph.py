@@ -504,9 +504,13 @@ async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig
     except BaseException:
         await sandbox_session.abandon_sandbox_session()
         raise
-    suspended_id = await sandbox_session.close_sandbox_session()
-    if suspended_id:
-        update["sandbox_id"] = suspended_id
+    teardown = await sandbox_session.close_sandbox_session()
+    if teardown.opened:
+        # Written even when empty: a sandbox that was opened and not suspended
+        # leaves the thread naming something dead, and omitting the key keeps
+        # that stale value rather than clearing it. A turn that opened nothing
+        # leaves the stored id alone.
+        update["sandbox_id"] = teardown.suspended_id
     return update
 
 
