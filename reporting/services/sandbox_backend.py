@@ -186,6 +186,16 @@ class _E2BSandboxBackend:
         return str(getattr(self._sandbox, "sandbox_id", "") or "")
 
 
+def _terminal_resume_errors() -> tuple[type[BaseException], ...]:
+    """Exceptions that mean the sandbox is gone rather than briefly unreachable."""
+    try:
+        from e2b import NotFoundException, SandboxNotFoundException
+
+        return (SandboxNotFoundException, NotFoundException)
+    except Exception:  # pragma: no cover - SDK without those names
+        return ()
+
+
 @asynccontextmanager
 async def open_backend(
     *,
@@ -197,6 +207,7 @@ async def open_backend(
     allow_public_traffic: bool = False,
     resume_sandbox_id: str | None = None,
     suspend_on_exit: bool | Callable[[], bool] = False,
+    on_teardown: Callable[[bool], None] | None = None,
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -243,7 +254,15 @@ async def open_backend(
     was suspended — instead of creating one, so its filesystem is still there.  A
     sandbox that has expired or been reaped is not an error: a fresh one is
     created, and the caller can tell the two apart by comparing
-    :attr:`SandboxBackend.sandbox_id` against what it asked for.
+    :attr:`SandboxBackend.sandbox_id` against what it asked for.  Only *terminal*
+    failures are treated that way.  A timeout, a rate limit or an auth failure
+    propagates instead, because replacing on those would leave the old sandbox
+    paused and alive while its id is overwritten by the replacement's — alive,
+    paid for, and permanently unreachable.
+
+    ``on_teardown`` is called with whether the sandbox was left suspended, so a
+    caller storing the id for later can tell that a failed pause turned into a
+    kill and the id is now dead.
     ``suspend_on_exit`` pauses the sandbox instead of killing it, which is what
     makes the id worth storing; without it the sandbox is destroyed on exit as
     before.  Suspension is only ever a caller's explicit choice because a paused
@@ -285,14 +304,15 @@ async def open_backend(
             # connect() resumes a paused sandbox and re-arms its lifetime; a
             # running one keeps the longer of the two timeouts.
             sandbox = await AsyncSandbox.connect(resume_sandbox_id, timeout=timeout_seconds, **api_kwargs)
-        except Exception:
-            # Expired, reaped, or a provider that cannot resume. Falling through
-            # to create is the whole recovery: the caller compares sandbox_id and
-            # treats anything it remembered writing as gone.
-            logger.info("could not resume sandbox %s; creating a new one", resume_sandbox_id, exc_info=True)
+        except _terminal_resume_errors() as exc:
+            # Gone for good: expired, reaped, or never existed. Falling through
+            # to create is the whole recovery, and the caller compares
+            # sandbox_id and treats anything it remembered writing as gone.
+            logger.info("sandbox %s is gone (%s); creating a new one", resume_sandbox_id, type(exc).__name__)
     if sandbox is None:
         sandbox = await AsyncSandbox.create(**create_kwargs)
 
+    suspended = False
     try:
         yield _E2BSandboxBackend(sandbox)
     finally:
@@ -300,11 +320,20 @@ async def open_backend(
         # the point of suspend_on_exit is to survive.
         if suspend_on_exit() if callable(suspend_on_exit) else suspend_on_exit:
             try:
-                await sandbox.pause()
+                # Filesystem only. The default keeps a full memory snapshot,
+                # which preserves untrusted *processes* across turns and pays
+                # provider-side storage for them; nothing here needs more than
+                # the disk that carries the data between turns.
+                await sandbox.pause(keep_memory=False)
+                suspended = True
             except Exception:
                 # A backend that cannot pause must not leave the sandbox running
-                # until the provider's timeout, so fall back to destroying it.
+                # until the provider's timeout, so fall back to destroying it --
+                # and say so, because the caller is about to decide whether the
+                # id is worth storing and this one is now dead.
                 logger.warning("could not suspend sandbox %s; killing it", sandbox.sandbox_id, exc_info=True)
                 await sandbox.kill()
         else:
             await sandbox.kill()
+        if on_teardown is not None:
+            on_teardown(suspended)

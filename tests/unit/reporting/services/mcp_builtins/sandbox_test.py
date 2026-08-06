@@ -923,8 +923,8 @@ def _patch_async_sandbox(
             killed.append(self)
             return True
 
-        async def pause(self) -> bool:
-            paused.append(self)
+        async def pause(self, keep_memory: bool = True) -> bool:
+            paused.append({"sandbox": self, "keep_memory": keep_memory})
             return True
 
     async def _create(**kwargs: Any) -> "_FakeSandbox":
@@ -1014,11 +1014,63 @@ async def test_open_backend_resumes_an_existing_sandbox() -> None:
 async def test_a_sandbox_that_cannot_be_resumed_is_replaced_not_raised() -> None:
     """Expiry and reaping are ordinary. A fresh sandbox with a different id is
     the recovery, and the differing id is how callers learn the files are gone."""
+    from e2b import SandboxNotFoundException
+
     created: dict[str, Any] = {}
-    with _patch_async_sandbox(created, connect_error=RuntimeError("gone")):
+    with _patch_async_sandbox(created, connect_error=SandboxNotFoundException("gone")):
         async with open_backend(api_key="k", domain="", resume_sandbox_id="sbx-dead") as backend:
             assert backend.sandbox_id != "sbx-dead"
     assert created  # a replacement was created
+
+
+async def test_a_transient_resume_failure_is_not_treated_as_a_dead_sandbox() -> None:
+    """Replacing on a timeout or rate limit leaves the old sandbox paused and
+    alive while its id is overwritten by the replacement's -- alive, paid for,
+    and permanently unreachable. Only "it is gone" may replace."""
+    from e2b import RateLimitException
+
+    created: dict[str, Any] = {}
+    with _patch_async_sandbox(created, connect_error=RateLimitException("slow down")):
+        with pytest.raises(RateLimitException):
+            async with open_backend(api_key="k", domain="", resume_sandbox_id="sbx-live"):
+                pass
+    assert not created  # nothing was created to overwrite it with
+
+
+async def test_suspending_keeps_only_the_filesystem() -> None:
+    """A memory snapshot would carry untrusted processes across turns and pay
+    provider storage for them; only the disk carries data between turns."""
+    paused: list[Any] = []
+    with _patch_async_sandbox({}, paused=paused):
+        async with open_backend(api_key="k", domain="", suspend_on_exit=True):
+            pass
+    assert paused and paused[0]["keep_memory"] is False
+
+
+async def test_teardown_reports_whether_the_sandbox_was_really_suspended() -> None:
+    """A pause can fail and fall back to a kill, and the caller storing the id
+    has to know the difference."""
+    outcomes: list[bool] = []
+
+    class _UnpausableSandbox:
+        sandbox_id = "sbx-1"
+        killed = False
+
+        async def pause(self, keep_memory: bool = True) -> bool:
+            raise RuntimeError("provider refused")
+
+        async def kill(self) -> bool:
+            type(self).killed = True
+            return True
+
+    module = MagicMock()
+    module.AsyncSandbox.create = AsyncMock(return_value=_UnpausableSandbox())
+    with patch.dict("sys.modules", {"e2b_code_interpreter": module}):
+        async with open_backend(api_key="k", domain="", suspend_on_exit=True, on_teardown=outcomes.append):
+            pass
+
+    assert outcomes == [False]
+    assert _UnpausableSandbox.killed is True
 
 
 async def test_open_backend_defaults_unchanged_for_delegate_path() -> None:

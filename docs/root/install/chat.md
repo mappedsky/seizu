@@ -270,11 +270,14 @@ Set `CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
 
 Two more consequences worth knowing:
 
-- **Reservations are projected, not assumed.** A reservation decides whether a
-  call is *allowed*, so overpricing it does not merely misreport — it refuses
-  work that would have fit. Each is priced using the cache hit rate the run has
-  actually observed so far. The first call of a run has no history and is a
-  cache miss by definition, so it is projected at the full rate.
+- **Reservations use the uncached price.** A reservation decides whether a call
+  is *allowed*, and a cache hit is never guaranteed — a ceiling that assumes one
+  is not a ceiling. Discounting by the run's observed hit rate was worse still:
+  that ratio spans every model and phase, so a cache-heavy sandbox phase
+  discounted a cold planner call on another model, measured at 6.6× under-
+  reserved. Committed cost stays exact, billed from the provider's own cache
+  accounting, so the ledger self-corrects the moment a call returns and the
+  over-reservation only applies to calls still in flight.
 - **Tokens are still counted whole.** `CHAT_RUN_TOKEN_BUDGET` counts a cached
   token like any other: it still occupies the context window and still costs
   something. Only the price differs. `cache_read_tokens` appears in the run

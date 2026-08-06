@@ -930,12 +930,16 @@ SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_8
 # Suspend the sandbox between turns instead of destroying it, and resume it on
 # the next turn of the same thread. What it buys: a follow-up turn finds the
 # data earlier turns fetched still on disk, so it reads files instead of
-# re-running their queries -- the dominant cost in a measured multi-turn run.
-# What it costs: untrusted code persists for the life of a conversation rather
-# than a turn, and a paused sandbox consumes provider-side storage until the
-# thread is deleted or the provider's retention reaps it. Set false to go back
-# to a sandbox per turn.
-SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
+# re-running their queries.
+#
+# Off by default, because **nothing reaps an abandoned one**. Cleanup happens
+# when a thread is deleted; a conversation a user simply stops replying to
+# leaves a suspended sandbox until the provider's own retention reclaims it, and
+# a deployment with many chat users accumulates those indefinitely. Turn it on
+# once you have a TTL or a sweep over the provider's sandbox list -- or if you
+# accept that cost knowingly. Pausing keeps only the filesystem, so untrusted
+# processes do not survive the turn, but the storage does.
+SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", False)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 

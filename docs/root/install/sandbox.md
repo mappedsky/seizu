@@ -79,15 +79,25 @@ the next turn of the same thread resumes it by id. That is what makes a
 follow-up question cheap: the data the previous turn fetched is still on disk,
 and the session memory below tells the next turn what is there, so it reads
 files instead of re-running the queries that produced them. A turn that ends in
-an error destroys its sandbox instead — nothing would store the resume id, and a
-paused sandbox nobody can reach is a leak. Deleting the chat thread destroys the
-sandbox with it.
+an error keeps the sandbox when the thread already knows its id, and destroys it
+only when that turn created it: a resumed sandbox's id is already in the
+checkpoint, so failing changes nothing about finding it again, while destroying
+it would cost a long conversation everything earlier turns put on disk. A
+sandbox the failing turn created has its id nowhere, so pausing it would strand
+it. Deleting the chat thread destroys the sandbox with it, and never fails the
+deletion if the provider call fails; an orphan is logged with its id.
 
-Set `SANDBOX_SESSION_PERSIST=false` to go back to a sandbox per turn. The trade
-is explicit: persistence means untrusted code lives for the length of a
-conversation rather than a single turn (still bounded to one user's thread, and
-still holding no credentials), and a suspended sandbox consumes provider-side
-storage until the thread is deleted or the provider's retention reaps it.
+`SANDBOX_SESSION_PERSIST` is **off by default**, because nothing reaps an
+abandoned sandbox. Cleanup happens when a thread is deleted; a conversation a
+user simply stops replying to leaves a suspended sandbox until the provider's
+own retention reclaims it, and a deployment with many chat users accumulates
+those indefinitely. Turn it on once you have a TTL or a sweep over the
+provider's sandbox list — or if you accept that cost knowingly.
+
+The other trade is explicit too: persistence means untrusted *data* lives for the
+length of a conversation rather than a single turn, still bounded to one user's
+thread and still holding no credentials. Suspension keeps only the filesystem
+(`pause(keep_memory=False)`), so untrusted processes do not survive the turn.
 
 ### Session memory
 

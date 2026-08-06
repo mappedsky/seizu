@@ -152,10 +152,8 @@ class BudgetController:
     def observed_cache_read_ratio(self) -> float:
         """Share of this run's input tokens the provider has served from cache.
 
-        Derived from what this run has actually been billed for, not assumed:
-        the first call of a run has no history and is a cache miss by
-        definition, so it is projected at the full rate, and every call after it
-        is projected on the evidence of the ones before.
+        Reporting only. It is deliberately *not* used to discount reservations:
+        see ``project_cost_usd``.
         """
         input_tokens = int(self._ledger.get("input_tokens") or 0)
         if input_tokens <= 0:
@@ -164,18 +162,21 @@ class BudgetController:
         return min(1.0, max(0.0, cached / input_tokens))
 
     def project_cost_usd(self, model: Any, input_tokens: int, output_tokens: int) -> float:
-        """What a call of this size is likely to cost, given the run so far.
+        """What to *reserve* for a call of this size: the uncached price.
 
-        Reservations decide whether work is *allowed*, so pricing every input
-        token at the full rate does not merely misreport -- it refuses work that
-        would have fit. An agent loop re-sends a growing prefix on every call
-        and a provider serves nearly all of it from cache (a measured DeepSeek
-        turn: 3,968 of 4,016 input tokens, at a tenth of the price), so charging
-        the estimate at the uncached rate can exhaust a cost budget the better
-        part of an order of magnitude early.
+        This deliberately does not discount by the run's observed cache rate,
+        which is what it used to do. Two things were wrong with that. The ratio
+        is a property of the whole run, so a cache-heavy sandbox phase discounted
+        a cold planner call on a different model -- reproduced at 6.6x under-
+        reserved. And more fundamentally a cache hit is never guaranteed: a
+        ceiling that assumes one is not a ceiling. Reserving the price the call
+        would cost if nothing hit is the only figure that cannot be overrun.
+
+        Committed cost stays exact -- it is billed from the provider's own cache
+        accounting -- so the ledger self-corrects the moment a call returns, and
+        the over-reservation only ever applies to calls still in flight.
         """
-        cached = int(max(0, input_tokens) * self.observed_cache_read_ratio)
-        return usage_cost_usd(model, input_tokens, output_tokens, cache_read_tokens=cached)
+        return usage_cost_usd(model, input_tokens, output_tokens)
 
     @property
     def enabled(self) -> bool:

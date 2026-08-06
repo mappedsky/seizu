@@ -364,51 +364,40 @@ async def test_the_ledger_records_what_was_served_from_cache():
     assert controller.observed_cache_read_ratio == pytest.approx(3968 / 4016)
 
 
-async def test_a_reservation_is_priced_on_the_runs_observed_cache_rate():
-    """Reservations decide whether work is allowed, so pricing every input
-    token at the uncached rate does not merely misreport -- it refuses work
-    that would have fit."""
+async def test_a_reservation_reserves_the_uncached_price(_unused=None):
+    """A reservation decides whether a call is *allowed*, so it must assume the
+    worst it could cost. A cache hit is never guaranteed, and a ceiling that
+    assumes one is not a ceiling."""
     controller = BudgetController(_ledger(token_limit=0))
     model = _model()
-
-    # First call of a run: no history, and a cache miss by definition.
-    assert controller.observed_cache_read_ratio == 0.0
-    assert controller.project_cost_usd(model, 4000, 100) == pytest.approx(usage_cost_usd(model, 4000, 100))
 
     reservation = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
     await controller.commit(
         reservation, input_tokens=4000, output_tokens=50, cost_usd=0.0, usage_estimated=False, cache_read_tokens=3600
     )
 
-    # Now projected on the evidence: 90% of input has been coming back cached.
+    # The run has been 90% cached, and the reservation still prices the full rate.
     assert controller.observed_cache_read_ratio == pytest.approx(0.9)
-    projected = controller.project_cost_usd(model, 4000, 100)
-    assert projected == pytest.approx(usage_cost_usd(model, 4000, 100, cache_read_tokens=3600))
-    assert projected < usage_cost_usd(model, 4000, 100)
+    assert controller.project_cost_usd(model, 4000, 100) == pytest.approx(usage_cost_usd(model, 4000, 100))
 
 
-async def test_a_cost_budget_is_not_exhausted_early_by_cached_input(mocker):
-    """The behavioural consequence: with the cached rate a tenth of the
-    uncached one, charging estimates at full price stops a run the better part
-    of an order of magnitude before its real spend."""
-    ledger = _ledger(token_limit=0)
-    ledger["cost_limit_usd"] = 0.02
-    ledger["reserve_cost_usd"] = 0.0
-    controller = BudgetController(ledger)
-    model = _model()
+async def test_one_phases_cache_rate_cannot_discount_another_phases_call():
+    """The ratio is a property of the whole run, so a cache-heavy sandbox phase
+    used to discount a cold planner call on a different model -- reproduced at
+    6.6x under-reserved."""
+    controller = BudgetController(_ledger(token_limit=0))
+    cheap, expensive = _model("deepseek/deepseek-chat"), _model("anthropic/claude-sonnet-4-5")
 
-    # Seed the run with one heavily-cached call.
-    first = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
+    reservation = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
     await controller.commit(
-        first, input_tokens=100_000, output_tokens=100, cost_usd=0.001, usage_estimated=False, cache_read_tokens=99_000
+        reservation,
+        input_tokens=100_000,
+        output_tokens=10,
+        cost_usd=0.0,
+        usage_estimated=False,
+        cache_read_tokens=99_000,
     )
 
-    # A call this size priced at the uncached rate would blow the remaining
-    # budget; priced on what the run is actually seeing, it fits.
-    assert usage_cost_usd(model, 100_000, 100) > 0.02
-    assert controller.project_cost_usd(model, 100_000, 100) < 0.02
-    await controller.reserve(
-        estimated_input_tokens=100_000,
-        estimated_output_tokens=100,
-        estimated_cost_usd=controller.project_cost_usd(model, 100_000, 100),
-    )
+    cold = controller.project_cost_usd(expensive, 100_000, 1_000)
+    assert cold == pytest.approx(usage_cost_usd(expensive, 100_000, 1_000))
+    assert cold > usage_cost_usd(cheap, 100_000, 1_000)

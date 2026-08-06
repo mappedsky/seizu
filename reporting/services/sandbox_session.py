@@ -60,6 +60,9 @@ class SandboxSession:
         # Decided at close, not at open: whether the sandbox is worth keeping
         # depends on how the turn ended.
         self._suspend = True
+        # Set on teardown: what actually happened, which is not always what was
+        # asked for.
+        self._suspended = False
 
     async def backend(self) -> SandboxBackend:
         """The session's sandbox, opening it on first use.
@@ -93,6 +96,7 @@ class SandboxSession:
                         timeout_seconds=settings.SANDBOX_SESSION_TIMEOUT_SECONDS,
                         resume_sandbox_id=self._resume_sandbox_id or None,
                         suspend_on_exit=self._suspend_on_exit,
+                        on_teardown=self._record_teardown,
                     )
                 )
                 # Publish all three together, so the stack can never belong to a
@@ -100,6 +104,7 @@ class SandboxSession:
                 # never describes a sandbox that is not the open one.
                 self._stack, self._backend = stack, backend
                 self._sandbox_id = getattr(backend, "sandbox_id", "") or ""
+                self._suspended = False
             return self._backend
 
     @property
@@ -136,6 +141,15 @@ class SandboxSession:
     def _suspend_on_exit(self) -> bool:
         return self._persist and self._suspend
 
+    def _record_teardown(self, suspended: bool) -> None:
+        """Whether the sandbox was actually left suspended.
+
+        A pause can fail, and the fallback is to kill -- so intent is not
+        outcome. Without this the session returned the id of a sandbox it had
+        just destroyed, and the next turn paid a failed resume for it.
+        """
+        self._suspended = suspended
+
     async def aclose(self, *, suspend: bool = True) -> str | None:
         """Tear the session down; return the id to resume, if it was suspended.
 
@@ -162,7 +176,9 @@ class SandboxSession:
             # became unknown, and a bad id costs the next turn a failed resume.
             logger.warning("sandbox session teardown failed", exc_info=True)
             return None
-        return sandbox_id if self._suspend_on_exit() and sandbox_id else None
+        # ``_suspended``, not the intent: a pause that failed fell back to a
+        # kill, and returning that id would checkpoint a dead sandbox.
+        return sandbox_id if self._suspended and sandbox_id else None
 
 
 _current_sandbox_session: ContextVar[SandboxSession | None] = ContextVar("_current_sandbox_session", default=None)

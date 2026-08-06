@@ -163,6 +163,10 @@ def _fake_persistent_open_backend(calls: list[dict[str, Any]]) -> Any:
         finally:
             suspend = kwargs.get("suspend_on_exit")
             call["suspended"] = suspend() if callable(suspend) else bool(suspend)
+            # The real one reports what actually happened, not what was asked.
+            on_teardown = kwargs.get("on_teardown")
+            if on_teardown is not None:
+                on_teardown(call["suspended"])
 
     return _open
 
@@ -220,6 +224,9 @@ async def test_a_replacement_sandbox_is_not_reported_as_resumed(mocker):
         backend = MagicMock()
         backend.sandbox_id = "sbx-new"  # not the one that was asked for
         yield backend
+        on_teardown = kwargs.get("on_teardown")
+        if on_teardown is not None:
+            on_teardown(True)
 
     mocker.patch("reporting.services.sandbox_session.open_backend", _open)
     session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-old", persist=True)
@@ -304,6 +311,9 @@ async def test_a_failed_turn_whose_resume_failed_destroys_the_replacement(mocker
             suspend = kwargs.get("suspend_on_exit")
             kwargs["_suspended"] = suspend() if callable(suspend) else bool(suspend)
             opened.append(kwargs)
+            on_teardown = kwargs.get("on_teardown")
+            if on_teardown is not None:
+                on_teardown(kwargs["_suspended"])
 
     opened: list[dict[str, Any]] = []
     mocker.patch("reporting.services.sandbox_session.open_backend", _open)
@@ -318,3 +328,26 @@ async def test_a_failed_turn_whose_resume_failed_destroys_the_replacement(mocker
 async def test_abandoning_without_a_session_is_a_no_op():
     await sandbox_session.close_sandbox_session()
     assert await sandbox_session.abandon_sandbox_session() is None
+
+
+async def test_a_pause_that_failed_does_not_hand_back_the_dead_id(mocker):
+    """Intent is not outcome: a failed pause falls back to a kill, and returning
+    that id would checkpoint a sandbox that no longer exists -- costing the next
+    turn a failed resume and stranding the data it thought it had."""
+
+    @asynccontextmanager
+    async def _open(**kwargs: Any):
+        backend = MagicMock()
+        backend.sandbox_id = "sbx-1"
+        try:
+            yield backend
+        finally:
+            on_teardown = kwargs.get("on_teardown")
+            if on_teardown is not None:
+                on_teardown(False)  # pause failed; the backend killed it instead
+
+    mocker.patch("reporting.services.sandbox_session.open_backend", _open)
+    session = sandbox_session.start_sandbox_session(resume_sandbox_id="sbx-1", persist=True)
+    await session.backend()
+
+    assert await sandbox_session.close_sandbox_session() is None
