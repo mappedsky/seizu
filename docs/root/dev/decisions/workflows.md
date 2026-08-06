@@ -1,0 +1,136 @@
+# Workflow decisions (`WF`)
+
+Decisions behind the Temporal pipelines, the cartography sync worker, and CVE
+dependency remediation. For configuration, see
+[temporal workflows](../../install/temporal-workflows.md) and
+[cartography sync](../../install/cartography-sync.md).
+
+Primary code: `reporting/temporal_workflows/`, `cartography_sync/`,
+`reporting/services/sandbox_remediation.py`,
+`reporting/services/sandbox_agent.py`, `reporting/services/github_checks.py`.
+
+## WF-001 — Workflows are deterministic; all I/O lives in activities
+
+**Applies to:** `reporting/temporal_workflows/`
+
+Workflow code uses dataclasses and pure helpers from `shared.py` only.
+Everything that touches the world belongs in `activities.py`, and AI sessions go
+through `headless_chat.run_headless_chat`.
+
+**Why:** Temporal replays workflow code. Non-determinism there is not a bug you
+find in testing.
+
+## WF-002 — Code-defined workflows are top-level activity types
+
+**Applies to:** `WORKFLOW_REGISTRY`, `workflows.normalized_stages`
+
+Each registered workflow is its own activity type, and the activity starts it as
+an awaited child workflow. The former `workflow`/`temporal` dispatcher module is
+removed; stored activities using the old `type: workflow` sub-type are migrated
+on read, and new saves reject it.
+
+**Why:** a dispatcher module meant the activity type said nothing about what
+would run, so neither validation nor the UI could reason about it.
+
+## WF-003 — The cartography registry is the security boundary
+
+**Applies to:** `cartography_sync/registry.py`
+
+Per-module typed flag allowlists, fixed credential env-var names and paths,
+argv-list exec (**never** a shell), and a scrubbed subprocess env.
+
+**The activity re-validates params, re-enforces `CARTOGRAPHY_ENABLED_MODULES`,
+and rebuilds argv worker-side.** That is what makes a forged Temporal payload
+unable to escape the allowlist — the caller's argv is never trusted.
+
+`cartography_sync` must **not** import `reporting.*` (that pulls pydantic
+settings): it reads plain env vars. `registry`/`shared` stay stdlib-only;
+`activities`/`worker` may use temporalio.
+
+The worker runs as a separate image on its own task queue, holding only
+cartography intel credentials.
+
+## WF-004 — One module per subprocess, with a fixed workflow ID as the mutex
+
+**Applies to:** `cartography_module` child workflows
+
+Each subprocess runs exactly one `--selected-modules` stage, as a child workflow
+whose fixed ID (`seizu-cartography-module:{module}`) is the per-module mutex.
+
+**Why:** concurrent same-module syncs race on cartography's update tags. The
+pipeline waits up to `CARTOGRAPHY_MODULE_WAIT_SECONDS`.
+
+`create-indexes` and `analysis` are ordinary selectable modules that users place
+explicitly — nothing is injected implicitly.
+
+## WF-005 — Remediation uses two sandboxes so the GitHub token never meets untrusted code
+
+**Applies to:** `reporting/services/sandbox_remediation.py`
+
+*Agent sandbox:* install (no secrets) → clone/branch (GH token via
+`gh auth setup-git`, never on disk or in a URL, **pre-agent**) → guard (skip if
+an open PR exists) → agent run (**provider key only, never the GH token**) →
+extract the change as a base64 git diff.
+
+*Fresh push sandbox* (never ran the agent, npm, or tests): apply the patch to a
+clean clone, commit, push, `gh pr create`.
+
+**Why two:** an agent-planted git hook or PATH shadow in the first sandbox
+cannot reach the token, because the token is only ever present in a VM that
+never executed repository code. Per-command env isolation
+(`run_bash_streaming(envs=...)`) enforces the split within each.
+
+Branches are version-keyed (`seizu/dependency-update/{eco}-{pkg}-{version}`,
+hash fallback) so same-fix re-runs converge and later different-version fixes
+get distinct PRs.
+
+`REMEDIATION_USE_FORK` pushes to a bot-owned fork instead and opens the PR
+cross-repo, so the token needs no write access to target repos.
+
+## WF-006 — CI watching and PR comments happen worker-side, never in the sandbox
+
+**Applies to:** `reporting/services/github_checks.py`
+
+Durable timers plus a read-only worker-side client poll the PR's CI every
+`REMEDIATION_CI_POLL_SECONDS` up to `REMEDIATION_CI_MAX_WAIT_SECONDS` (0
+disables), ignoring checks queued past `REMEDIATION_CI_QUEUED_STUCK_SECONDS` and
+cancelled/stale runs.
+
+On settled failures, up to `REMEDIATION_CI_FIX_MAX_ATTEMPTS` fix-mode sessions
+run with the same two-sandbox isolation: check out the existing PR branch,
+extract only new commits, fast-forward push — **no force, no `gh pr create`**.
+
+Where the failure is unrelated to the upgrade, the agent writes a PR-comment
+file. It is posted worker-side through a **fixed sanitized template** —
+block-quoted, @-mentions and slash-commands neutralized, length-capped — and
+**never verbatim**. The agent never gets credentials.
+
+**Why:** the agent's output is untrusted text. Posting it verbatim under the
+bot's identity would let repository content drive GitHub automation.
+
+## WF-007 — Remediation is enabled by configuration, not by a flag or a permission
+
+**Applies to:** `sandbox_remediation`, `SANDBOX_AGENT_*`
+
+Configured (`REMEDIATION_GITHUB_TOKEN` + an agent key) means enabled. There is
+no per-user permission and no enable flag, because scheduled queries are
+admin-managed and `scheduled_queries:write` is re-checked per run.
+
+**Agent credentials are exposed to untrusted repository code**, so:
+
+- `SANDBOX_AGENT_API_KEY_COMMAND` mints short-lived per-run keys
+  (**recommended**; a static key warns).
+- `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` instead runs a LiteLLM proxy in a
+  *third* sandbox holding the real key, handing the agent only the proxy's
+  ephemeral master key, which dies at teardown. Per-key `/key/generate` needs a
+  DB we don't run, so the config sets an in-memory `max_budget` cap instead.
+  That proxy sandbox stays private (`allow_public_traffic=false`), reached via
+  E2B's traffic-access token sent as a custom header per
+  `SubagentProvider.proxy_transport`.
+
+**Unverified:** the LiteLLM↔CLI wire. `make remediation_smoke SMOKE_PROXY=1`
+probes it — smoke-test before production.
+
+Keeping CVE ids out of PRs is prompt-only (they are public). Workflow-supplied
+repo/branch values are regex-validated and reach scripts only via env vars. PR
+review is the gate.
