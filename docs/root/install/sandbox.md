@@ -39,7 +39,7 @@ fetch data itself rather than having it relayed through `context`.
 A result that fits is returned to the agent as it always was. A result **too
 large to return** — more rows than `CHAT_TOOL_RESULT_MAX_ROWS`, or more bytes
 than `SANDBOX_MAX_OUTPUT_BYTES` — is instead written to a file under
-`/tmp/seizu_results/` and replaced by a receipt: the path, byte size, row count,
+`/home/user/seizu_results/` and replaced by a receipt: the path, byte size, row count,
 column names, and two sample rows, plus a note that the full data is in the
 file. The agent then processes it with `run_python`.
 
@@ -57,10 +57,26 @@ destroyed**, and the next turn of the same thread resumes it by id, so a
 follow-up question reads files the previous turn wrote instead of re-running the
 queries behind them.
 
-Suspension keeps **only the filesystem** (`pause(keep_memory=False)`). A resumed
-sandbox cold-boots rather than restoring a memory snapshot: untrusted processes
-do not outlive the turn, though their data does. Set
-`SANDBOX_SESSION_PERSIST=false` to return to a sandbox per turn.
+Suspension keeps the **full VM state**, memory included
+(`pause(keep_memory=True)`). Set `SANDBOX_SESSION_PERSIST=false` to return to a
+sandbox per turn.
+
+```{warning}
+**Processes survive between turns.** A memory snapshot restores whatever was
+running, so code the model executed in one turn can still be running in the
+next, for the life of the conversation. The sandbox remains network-isolated
+from Seizu's data stores and holds no credentials, and it stays bounded to a
+single user's thread — but this is a wider blast radius than a per-turn
+sandbox, and it is a deliberate trade rather than an oversight.
+
+Filesystem-only suspension was tried and does not work: the code interpreter is
+itself a process, so a resumed sandbox came back unable to run code at all.
+Details in [SBX-005](../dev/decisions/sandbox.md).
+
+If you would rather not accept it, `SANDBOX_SESSION_PERSIST=false` destroys the
+sandbox at the end of every turn, at the cost of each turn re-fetching what the
+last one gathered.
+```
 
 Deleting the chat thread destroys its sandbox, and never fails the deletion if
 the provider call fails — an orphan is logged with its id. Lifecycle rationale

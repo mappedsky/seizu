@@ -160,13 +160,59 @@ every step of a batch shares one sandbox while keeping its own `EpisodeLog`.
 Per-step sessions meant parallel sub-agents could not see each other's files.
 
 **Why suspend rather than destroy:** data fetched in one turn disappeared with
-the sandbox, so the next turn re-fetched it. Pausing keeps only the filesystem
-(`keep_memory=False`) — untrusted *processes* do not outlive a turn, but their
-output does.
+the sandbox, so the next turn re-fetched it.
+
+**Suspension keeps the memory snapshot (`keep_memory=True`), and this is a
+security trade accepted deliberately.** Untrusted processes from one turn
+survive into the next, bounded to a single user's thread, still
+network-isolated and still holding no credentials.
+
+The filesystem-only alternative was tried first, for exactly the isolation that
+sentence gives up, and **it does not work**: the code interpreter is itself a
+process, so every resumed sandbox came back with port 49999 closed and
+`run_python` failing 502 (`"The sandbox is running but port is not open"`) for
+the rest of the turn. Reproduced in bare SDK code with no Seizu involved, and
+five ways of restarting the service by hand — bare relaunch, explicit
+port/ip, as root, `HOME=/root`, explicit `--config` — all failed the same way:
+jupyter starts, but E2B's `/execute` extension never loads, so the port either
+stays shut or answers 404.
+
+This shipped broken. Because the failure is silent (the agent works around a
+dead interpreter and still answers), it survived four instrumented harness runs
+before being noticed, and it is the likely source of a large share of the
+retries, flailing and token blowups seen in those runs.
+
+**Planned way out:** persist result files to an object store and go back to cold
+boots, which is faster and more reliable than resuming a VM. That requires an
+S3-compatible bucket, so `keep_memory=True` stays as the fallback for
+deployments that do not have one — which is why the trade is documented rather
+than treated as temporary.
+
+**Don't:** "tidy" this back to `keep_memory=False` for isolation. A test pins
+the value and says why.
 
 **Don't:** assume retention is solved. Nothing reaps a sandbox whose thread is
 abandoned rather than deleted; `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a
-*running* sandbox, not a paused one. A TTL/sweep is planned separately.
+*running* sandbox, not a paused one. A TTL/sweep is planned separately. A
+memory snapshot also costs more provider-side storage than a disk-only one.
+
+## SBX-010 — Result files live under `/home/user`, never `/tmp`
+
+**Applies to:** `_RESULT_DIR` in `reporting/services/mcp_builtins/sandbox.py`
+
+**Measured:** a file written to `/tmp` is gone after a pause/resume; the same
+file under `/home/user` is intact.
+
+`_RESULT_DIR` was `/tmp/seizu_results`, so every oversized-result file was
+destroyed at the turn boundary while the session ledger went on advertising its
+path to the next turn. The cross-turn half of [SBX-002](#sbx-002) and
+[SBX-008](#sbx-008) — the entire reason receipts persist — could never have
+worked, and the symptom in the logs is
+`not found: lstat /tmp/seizu_results`.
+
+**Don't:** put anything under `/tmp` that is meant to outlive a turn, and don't
+rely on `keep_memory=True` to save it — the path has to be right on its own, or
+the fallback-to-cold-boot plan above reintroduces the bug.
 
 ## SBX-006 — Only terminal resume failures create a replacement sandbox
 

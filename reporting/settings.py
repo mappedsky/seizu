@@ -953,7 +953,9 @@ SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_8
 # Suspend the sandbox between turns instead of destroying it, and resume it on
 # the next turn of the same thread, so a follow-up turn reads files earlier
 # turns wrote instead of re-running their queries. Pausing keeps only the
-# filesystem (keep_memory=False), so untrusted processes do not outlive a turn.
+# full VM state including memory (keep_memory=True), so untrusted processes DO
+# survive into the next turn of that thread -- accepted deliberately, because
+# filesystem-only suspension leaves the code interpreter dead. See SBX-005.
 #
 # Known gap, accepted deliberately: nothing reaps an abandoned sandbox -- see
 # SBX-005 in docs/root/dev/decisions/sandbox.md. Set false to opt out.

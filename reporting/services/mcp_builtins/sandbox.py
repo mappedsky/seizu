@@ -170,7 +170,13 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
 
 # Where oversized results land in the sandbox. A fixed directory and a running
 # number keep paths predictable in a transcript.
-_RESULT_DIR = "/tmp/seizu_results"
+#
+# Under /home/user, not /tmp: /tmp does not survive a pause/resume (measured --
+# a file written to /tmp is gone after resume while the same file under
+# /home/user is intact). Every receipt the session ledger carries between turns
+# pointed into /tmp, so the cross-turn half of SBX-002/SBX-008 could never have
+# worked: the next turn was always sent to read a file that no longer existed.
+_RESULT_DIR = "/home/user/seizu_results"
 # Rows returned per sample in a receipt: enough to show the shape, not the data.
 _RECEIPT_SAMPLE_ROWS = 2
 

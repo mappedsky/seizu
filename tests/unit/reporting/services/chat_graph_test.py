@@ -3713,7 +3713,7 @@ async def test_earlier_turns_findings_reach_the_next_turns_prompt(mocker):
                 "episodes": [{"task": "count CVEs", "outcome": "There are 412 CVE nodes.", "turn": 1}],
                 "receipts": [
                     {
-                        "path": "/tmp/seizu_results/graph__query_001.json",
+                        "path": "/home/user/seizu_results/graph__query_001.json",
                         "source": "graph__query",
                         "purpose": "every critical CVE",
                         "sandbox_id": "sbx-1",

@@ -313,11 +313,21 @@ async def open_backend(
         # the point of suspend_on_exit is to survive.
         if suspend_on_exit() if callable(suspend_on_exit) else suspend_on_exit:
             try:
-                # Filesystem only. The default keeps a full memory snapshot,
-                # which preserves untrusted *processes* across turns and pays
-                # provider-side storage for them; nothing here needs more than
-                # the disk that carries the data between turns.
-                await sandbox.pause(keep_memory=False)
+                # Memory snapshot included, deliberately. keep_memory=False
+                # was tried first, for the isolation of not carrying untrusted
+                # processes between turns, and it does not work: the code
+                # interpreter is itself a process, so every resumed sandbox
+                # came back with port 49999 closed and run_python failing 502
+                # for the rest of the turn. Reproduced in bare SDK code, and
+                # five ways of restarting the service by hand all failed --
+                # jupyter starts but E2B's /execute extension does not load.
+                #
+                # So the cost is real and accepted: untrusted processes from
+                # one turn survive into the next, bounded to a single user's
+                # thread, still network-isolated and still holding no
+                # credentials. See SBX-005 for the trade and the planned way
+                # out (object-store file persistence plus cold boots).
+                await sandbox.pause(keep_memory=True)
                 suspended = True
             except Exception:
                 # A backend that cannot pause must not leave the sandbox running

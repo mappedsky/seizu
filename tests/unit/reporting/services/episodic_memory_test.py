@@ -128,7 +128,7 @@ async def test_one_users_work_is_unreachable_from_another_request():
 def _ledger_with_a_receipt(**kwargs) -> episodic_memory.SessionLedger:
     ledger = episodic_memory.SessionLedger(**kwargs)
     ledger.record_receipt(
-        path="/tmp/seizu_results/graph__query_001.json",
+        path="/home/user/seizu_results/graph__query_001.json",
         source="graph__query",
         purpose="list every critical CVE with its repository",
         sandbox_id="sbx-1",
@@ -154,7 +154,7 @@ def test_a_receipt_says_where_the_data_already_is():
     ledger = _ledger_with_a_receipt()
     rendered = ledger.render_receipts("sbx-1", 4000)
 
-    assert "/tmp/seizu_results/graph__query_001.json" in rendered
+    assert "/home/user/seizu_results/graph__query_001.json" in rendered
     assert "412 rows" in rendered
     assert "cve_id" in rendered
     assert "list every critical CVE" in rendered
@@ -172,7 +172,7 @@ def test_a_receipt_is_not_offered_for_a_different_sandbox():
 def test_re_saving_a_path_replaces_its_receipt():
     ledger = _ledger_with_a_receipt()
     ledger.record_receipt(
-        path="/tmp/seizu_results/graph__query_001.json",
+        path="/home/user/seizu_results/graph__query_001.json",
         source="graph__query",
         purpose="the same file, written again",
         sandbox_id="sbx-1",

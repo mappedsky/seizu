@@ -1298,14 +1298,30 @@ async def test_a_transient_resume_failure_is_not_treated_as_a_dead_sandbox() -> 
     assert not created  # nothing was created to overwrite it with
 
 
-async def test_suspending_keeps_only_the_filesystem() -> None:
-    """A memory snapshot would carry untrusted processes across turns and pay
-    provider storage for them; only the disk carries data between turns."""
+async def test_suspending_keeps_the_memory_snapshot() -> None:
+    """Filesystem-only suspension does not work, so this must not be "tidied" back.
+
+    The code interpreter is a process. Pausing without memory brought every
+    resumed sandbox back with port 49999 closed and run_python failing 502 for
+    the rest of the turn -- reproduced in bare SDK code, and five ways of
+    restarting the service by hand all failed. The cost of keeping memory is
+    untrusted processes surviving into the next turn of one user's thread;
+    see SBX-005.
+    """
     paused: list[Any] = []
     with _patch_async_sandbox({}, paused=paused):
         async with open_backend(api_key="k", domain="", suspend_on_exit=True):
             pass
-    assert paused and paused[0]["keep_memory"] is False
+    assert paused and paused[0]["keep_memory"] is True
+
+
+async def test_result_files_land_somewhere_that_survives_a_resume() -> None:
+    """/tmp is wiped by pause/resume, so a receipt written there is a promise
+    the next turn cannot keep."""
+    from reporting.services.mcp_builtins.sandbox import _RESULT_DIR
+
+    assert not _RESULT_DIR.startswith("/tmp"), "result files must outlive a suspend"
+    assert _RESULT_DIR.startswith("/home/")
 
 
 async def test_teardown_reports_whether_the_sandbox_was_really_suspended() -> None:
@@ -1978,7 +1994,7 @@ async def test_a_later_turn_is_told_about_files_earlier_turns_saved() -> None:
             "episodes": [{"task": "count CVEs", "outcome": "There are 412 CVE nodes.", "turn": 1}],
             "receipts": [
                 {
-                    "path": "/tmp/seizu_results/graph__query_001.json",
+                    "path": "/home/user/seizu_results/graph__query_001.json",
                     "source": "graph__query",
                     "purpose": "every critical CVE",
                     "sandbox_id": "sbx-1",
