@@ -537,7 +537,12 @@ async def test_a_requested_tool_that_does_not_exist_is_ignored_not_fatal() -> No
 
 
 async def test_an_unbound_tool_is_findable_and_callable() -> None:
-    """Narrowing must cost a round trip, not a capability."""
+    """With disclosure off, narrowing costs a round trip and not a capability.
+
+    Only in this mode. Under progressive disclosure an undeclared tool is not
+    reachable by the sub-agent at all -- see SBX-004 and the skill-discovery
+    tests below.
+    """
     fake_tools = [
         Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
         Tool(

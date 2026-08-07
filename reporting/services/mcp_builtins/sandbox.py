@@ -1123,7 +1123,10 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     context = str(args.get("context", "")).strip()
     # What the delegating model asked for, and what the conversation has already
     # unlocked. Together these decide which Seizu tools are bound for this
-    # delegation; everything else stays reachable through find_seizu_tools.
+    # delegation. How anything else is reached depends on
+    # CHAT_LLM_PROGRESSIVE_DISCLOSURE -- tool search when off, skills only when
+    # on, in which case naming `tools` here is the route to an undeclared tool.
+    # See SBX-004 in docs/root/dev/decisions/sandbox.md.
     raw_tools = args.get("tools")
     requested_tools = (
         [str(name).strip() for name in raw_tools if str(name).strip()] if isinstance(raw_tools, list) else []

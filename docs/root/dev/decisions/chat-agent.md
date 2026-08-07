@@ -40,8 +40,13 @@ registration.
 **Applies to:** `CHAT_LLM_PROGRESSIVE_DISCLOSURE`, `chat_orchestrator._required_action_spec`
 
 RBAC is the boundary: `chat_safe_only` + `chat:tools:call` bound
-`_list_chat_tools`, and the sandbox sub-agent gets that whole set regardless of
-what the outer model has been shown.
+`_list_chat_tools` and everything a sandbox sub-agent could ever reach. Nothing
+below widens that set.
+
+What a model is *shown* is narrower, and under progressive disclosure so is what
+the sub-agent may actually call without loading a skill — see
+[SBX-004](sandbox.md). That narrowing is context economy and skill curation, not
+authorization: it decides what is convenient to reach, never what is permitted.
 
 Because disclosure only decides what a model is *shown*:
 

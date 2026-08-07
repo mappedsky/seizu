@@ -97,16 +97,25 @@ disclosure models in one system, and the mismatch is how an undisclosed tool
 name reached session memory (see SBX-003). A skill's `tools_required` is its
 author naming the tools for a workflow, and the instructions arrive with them.
 
-All routes share the same `_invoke`, so they get identical result bounds,
-oversized-result handling and receipts: narrowing costs a round trip, not a
-capability.
+All routes share the same `_invoke`, so whatever is reached gets identical
+result bounds, oversized-result handling and receipts.
 
-**Coverage is the cost.** On one measured deployment, skills reach 30 of the 58
-tools a sub-agent could otherwise browse. Of the 28 lost, roughly twenty are
-management CRUD (roles, spaces, scheduled queries, workflows, toolsets) that a
-data sub-agent has no reason to touch; the rest are answerable with
-`graph__query`. Where no skill covers the need, the delegating model naming the
-tool in `tools` is the intended route — the same limitation the planner has.
+**What narrowing costs differs by mode, and the two should not be conflated:**
+
+- **Disclosure off** — a round trip, not a capability. Everything RBAC permits
+  is still reachable through `find_seizu_tools`.
+- **Disclosure on** — a round trip *and*, where skill coverage is incomplete, a
+  capability. A tool no skill declares cannot be reached by the sub-agent on its
+  own initiative. That is the deliberate trade, not an oversight.
+
+On one measured deployment, skills reach 30 of the 58 tools a sub-agent could
+otherwise browse. Of the 28 lost, roughly twenty are management CRUD (roles,
+spaces, scheduled queries, workflows, toolsets) that a data sub-agent has no
+reason to touch; the rest are answerable with `graph__query`. Where no skill
+covers the need, the delegating model naming the tool in `tools` is the intended
+route — the same limitation the planner has. So the loss is bounded by how the
+deployment's skills are authored, and is recoverable by the caller, but it is a
+real loss rather than a deferred cost.
 
 **Don't:** add a free-text tool search back under progressive disclosure, and
 don't bind discovery tools when no skills exist — two tools that can never find
