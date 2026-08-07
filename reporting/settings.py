@@ -411,19 +411,21 @@ SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED = bool_env("SANDBOX_AGENT_CREDENTIAL_PROX
 # Max spend (USD) allowed on the per-run virtual key — bounds real-time abuse of
 # a key stolen while the proxy is up.
 SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET = str_env("SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET", "5")
-# pip requirements installed into the proxy sandbox, space-separated. Every
-# requirement must be pinned exactly (name[extras]==version) — an unpinned
-# "litellm[proxy]" resolves at run time to whatever was released that day, and
-# its own dependency ranges resolve just as loosely, which is exactly how the
-# proxy broke in the field (a fastapi release removed a symbol litellm's proxy
-# imports). Bump this deliberately, after `make remediation_smoke SMOKE_PROXY=1`.
+# pip requirements for the proxy sandbox, space-separated. Every requirement
+# must be pinned exactly (name[extras]==version) — an unpinned "litellm[proxy]"
+# resolves at run time to whatever was released that day, and its own dependency
+# ranges resolve just as loosely, which is exactly how the proxy broke in the
+# field (a fastapi release removed a symbol litellm's proxy imports). Used to
+# compile the hash lock (`make lock_proxy_requirements`), which is what a
+# templateless run installs and what `make build_proxy_template` bakes in. Bump
+# deliberately, then re-lock, rebuild, and `make remediation_smoke SMOKE_PROXY=1`.
 SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS = str_env(
     "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS", "litellm[proxy]==1.87.0"
 )
 # E2B template for the proxy sandbox, built from the requirements above by
-# `make build_proxy_template`. Empty → the plain base image, and every run pays
-# the full install. The install phase runs either way, so a template that has
-# drifted from the pins above is corrected rather than silently used.
+# `make build_proxy_template`. Set → the run uses that image as built and skips
+# the install entirely (keeping it current is then the operator's job — nothing
+# at run time checks it). Empty → the base image plus a run-time install.
 SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE = str_env("SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE", "")
 
 # Hard timeout for one remediation run (all sandbox phases). A full clone →

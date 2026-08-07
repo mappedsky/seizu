@@ -135,17 +135,28 @@ Keeping CVE ids out of PRs is prompt-only (they are public). Workflow-supplied
 repo/branch values are regex-validated and reach scripts only via env vars. PR
 review is the gate.
 
-## WF-008 — The proxy sandbox installs a hash-locked set, every run
+## WF-008 — The proxy sandbox runs a hash-locked requirement set
 
 **Applies to:** `sandbox_agent.proxy_install_plan`,
 `reporting/services/sandbox_proxy_requirements.txt`,
-`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS`
+`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` / `_TEMPLATE`
 
-The proxy sandbox builds itself from PyPI at run time, so what it installs is a
-checked-in, fully resolved, hash-locked requirement set
-(`make lock_proxy_requirements`) installed with `pip --require-hashes`. The
-install runs unconditionally rather than skipping when a LiteLLM is already
-present, and it imports `litellm.proxy.proxy_server` before reporting success.
+The requirement set is checked in fully resolved and hash-locked
+(`make lock_proxy_requirements`). It reaches the sandbox one of two ways, and
+these are separate concerns:
+
+- **A template** (`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`): the operator built
+  an image from the lock with `make build_proxy_template`, and that build
+  already proved the proxy imports. The run uses the image **as built** — no
+  install, no re-check. Keeping it current is the operator's job; nothing at run
+  time notices a template built from older requirements.
+- **No template:** the run provisions the base image itself, installing the lock
+  with `pip --no-deps --require-hashes` and importing
+  `litellm.proxy.proxy_server` before reporting success. It installs
+  unconditionally rather than skipping when a LiteLLM is already present.
+
+Both paths come from one `proxy_install_plan()`, so a template cannot contain a
+different set than a templateless run would install.
 
 Top-level requirements are still validated as exact pins
 (`proxy_requirements_error`), because they are what the lock is compiled from —
@@ -190,12 +201,12 @@ The same validation is what makes the operator-supplied list safe to word-split
 unquoted in the fallback install command; it is re-checked in `credential_proxy`
 so direct callers cannot skip it.
 
-`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` + `make build_proxy_template` bake the
-same pins into an E2B template so runs stop paying for the install. **The
-install phase still runs against a template** — pip short-circuits on satisfied
-pins, and keeping the phase means a stale template is corrected rather than
-silently serving a LiteLLM nobody configured. A stale template costs a slow run,
-never a wrong one.
+The install phase was briefly kept for templated runs too (pip short-circuits on
+satisfied pins, so a drifted template would self-correct). That was dropped
+deliberately: it conflated two ownership models. Building an image *is* the
+operator saying "this is the environment"; re-installing over it at run time
+makes the template advisory and hides which set actually ran. The trade is that
+a template built from older requirements is now only caught by rebuilding it.
 
 ## WF-009 — Remediation failures name the step they happened in
 

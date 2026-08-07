@@ -283,14 +283,19 @@ async def _run_proxy() -> int:
             script, timeout_seconds=timeout_seconds or 300, on_output=on_output, envs=envs
         )
 
-    # Print the template and install plan too: with a template the install phase
-    # is a no-op, so a template that never reached the process looks exactly
-    # like a pass — and the same goes for silently losing the hash lock.
+    # Say which setup is under test: with a template nothing is installed, so a
+    # template that never reached the process would otherwise look exactly like
+    # a pass — and the same goes for silently losing the hash lock.
+    template = settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE
+    install = (
+        "none (template as built)"
+        if template
+        else ("hash-locked" if sandbox_agent.proxy_install_plan().locked else "top-level pins only")
+    )
     print(
         f"Proxy smoke: provider={provider.name} namespace={sandbox_agent.proxy_namespace(provider)} "
         f"requirements={' '.join(sandbox_agent.proxy_requirements())} "
-        f"install={'hash-locked' if sandbox_agent.proxy_install_plan().locked else 'top-level pins only'} "
-        f"template={settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or '(base image)'}"
+        f"install={install} template={template or '(base image)'}"
     )
     print("\n########## PROXY SANDBOX (private LiteLLM) ##########")
     reachable = False

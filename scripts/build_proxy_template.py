@@ -3,12 +3,11 @@
 Without a template, every remediation run that uses the credential proxy
 (``SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED``) installs LiteLLM's whole proxy
 dependency tree from PyPI before the proxy can boot. This bakes **the same
-pinned requirements** (``SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS``) into a
-reusable template, after which the run's install phase finds everything already
-satisfied and returns immediately.
+requirement set the run would install** into a reusable template, after which
+runs skip the install entirely.
 
-Measured on E2B cloud, proxy sandbox create → serving: ~31s from the base image
-vs ~20s from a template. The bigger win is that a run no longer depends on PyPI
+Measured on E2B cloud, proxy sandbox create → serving: ~33s from the base image
+vs ~12s from a template. The bigger win is that a run no longer depends on PyPI
 resolving correctly while it is running — which is what broke it.
 
     make build_proxy_template                      # name from the settings/default
@@ -23,10 +22,11 @@ requirement set that cannot actually serve fails here rather than during a
 remediation run — that import is exactly what broke when the requirements were
 unpinned.
 
-The run-time install phase is deliberately *not* skipped when a template is
-configured: pip short-circuits on an already-satisfied pin, and keeping the
-phase means a template built from older pins is corrected (or fails loudly)
-instead of quietly serving a different LiteLLM than the one configured.
+Runs with a template configured install **nothing** — the image is used as built.
+That keeps the two setups separate concerns (you lock the requirements and bake
+an image; templateless runs do a best-effort install instead), and it means a
+template is only as current as the last build: nothing at run time re-checks it,
+so re-run this after every `make lock_proxy_requirements`.
 
 Requires ``SANDBOX_API_KEY`` (E2B). Templates are an E2B-cloud feature — on a
 self-hosted backend (``SANDBOX_DOMAIN`` set) sandbox creation ignores templates,

@@ -19,14 +19,15 @@ Credential isolation notes carried over from the remediation flow:
 - The credential proxy (:func:`credential_proxy`) runs a short-lived LiteLLM
   proxy in a *separate* sandbox holding the real provider key and hands the agent
   only the proxy's ephemeral master key (spend-capped in memory) that dies when
-  the proxy sandbox is torn down. LiteLLM is installed there from PyPI at run
-  time, so it installs a **checked-in hash-locked set**
-  (``sandbox_proxy_requirements.txt``, compiled from
+  the proxy sandbox is torn down. That sandbox is provisioned one of two ways:
+  from a prebuilt template (``SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE``), used
+  exactly as built, or — with no template — by installing the **checked-in
+  hash-locked set** (``sandbox_proxy_requirements.txt``, compiled from
   ``SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS`` by
-  ``make lock_proxy_requirements``) — an unpinned install broke the proxy in the
-  field when a transitive release dropped a symbol LiteLLM's proxy imports, and
-  this VM holds the real provider key. The agent-CLI-to-proxy wire remains
-  unverified against a live CLI — confirm with
+  ``make lock_proxy_requirements``) at run time. An unpinned install broke the
+  proxy in the field when a transitive release dropped a symbol LiteLLM's proxy
+  imports, and this VM holds the real provider key. The agent-CLI-to-proxy wire
+  remains unverified against a live CLI — confirm with
   ``make remediation_smoke SMOKE_PROXY=1`` before relying on the proxy path.
 """
 
@@ -80,22 +81,28 @@ litellm_settings:
 general_settings:
   master_key: os.environ/PROXY_MASTER_KEY
 """
-# Install phase for the proxy sandbox. Two rules, both learned the hard way:
+# Install phase for the proxy sandbox — **only when no template is configured.**
+# The two modes are deliberately separate concerns:
 #
-# 1. **Install the exact pins every time**, rather than skipping when a litellm
-#    is already present. The proxy is only as good as the version installed, and
-#    "some litellm exists" says nothing about whether its proxy imports.
+# - *Template* (SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE): the operator locked the
+#   requirements and built an image from them, and the build already proved the
+#   proxy imports. The run uses that image as it is: no install, no re-check.
+#   Keeping a template current is then the operator's job — nothing at run time
+#   will notice one built from older requirements.
+# - *No template*: a best-effort install into the base image, from the lock when
+#   it covers the configured requirements (see proxy_install_plan).
+#
+# Whichever install runs, two rules hold, both learned the hard way:
+#
+# 1. **Install every time**, rather than skipping when a litellm is already
+#    present. The proxy is only as good as the version installed, and "some
+#    litellm exists" says nothing about whether its proxy imports.
 # 2. **Verify the proxy imports before declaring the phase done.** The failure
 #    this replaces was an unpinned install resolving to a litellm whose proxy
 #    could not import its own fastapi dependency: the CLI died at boot, and all
 #    the operator saw was a health-check timeout with the real traceback buried
 #    in a background log. Importing here fails the *install* phase with the
 #    ImportError itself.
-#
-# With SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE pointing at a template built by
-# ``scripts/build_proxy_template.py``, everything is already installed and pip
-# short-circuits — but the phase still runs, so a template that has drifted from
-# the configured requirements is corrected (or fails loudly), never used silently.
 PROXY_IMPORT_CHECK = "python3 -c 'import litellm.proxy.proxy_server'"
 
 # Default path: install the checked-in hash-locked set (see
@@ -554,12 +561,16 @@ _warned_unlocked_proxy = False
 
 
 def proxy_install_plan() -> ProxyInstallPlan:
-    """Install the hash-locked set when it matches the configured requirements.
+    """How to provision a proxy sandbox that has no template.
 
-    The lock covers one requirement set — the shipped default. An operator who
-    pins something else gets their own top-level pins installed instead, which
-    is supported but leaves the transitive tree resolving at run time, so it
-    warns. Regenerating the lock (`make lock_proxy_requirements`) restores it.
+    Uses the hash-locked set when it matches the configured requirements. The
+    lock covers one requirement set — the shipped default. An operator who pins
+    something else gets their own top-level pins installed instead, which is
+    supported but leaves the transitive tree resolving at run time, so it warns.
+    Regenerating the lock (`make lock_proxy_requirements`) restores it.
+
+    Also the recipe `scripts/build_proxy_template.py` bakes into a template, so
+    the two paths install the same thing.
     """
     global _warned_unlocked_proxy
     requirements = proxy_requirements()
@@ -737,6 +748,7 @@ async def credential_proxy(
     # All built-in providers have a header/config transport, so the proxy stays
     # private (gated by E2B's traffic-access token); "public" is a fallback only.
     private = provider.proxy_transport != "public"
+    template = settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or None
     # Creating the proxy sandbox is where a template that does not exist fails.
     _step("proxy_sandbox")
     async with open_backend(
@@ -745,20 +757,25 @@ async def credential_proxy(
         allow_internet=True,
         timeout_seconds=sandbox_timeout_seconds,
         allow_public_traffic=not private,
-        # A template with the pins baked in (scripts/build_proxy_template.py)
-        # turns the install phase into a fast no-op; empty → the base image and
-        # a full install each run. Never an agent template: this VM holds the
-        # real key and has no business carrying a coding-agent CLI.
-        template=settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or None,
+        # A template built by scripts/build_proxy_template.py already contains
+        # the requirements; empty → the base image, which the install phase below
+        # provisions instead. Never an agent template: this VM holds the real key
+        # and has no business carrying a coding-agent CLI.
+        template=template,
     ) as proxy:
         _step("proxy_config")
         config = _LITELLM_CONFIG.format(namespace=proxy_namespace(provider), budget=budget)
         await proxy.write_file(LITELLM_CONFIG_PATH, config)
         proxy_env = {"PROXY_REAL_KEY": real_key, "PROXY_MASTER_KEY": master_key}
-        plan = proxy_install_plan()
-        for path, content in plan.files.items():
-            await proxy.write_file(path, content)
-        await run_phase(proxy, "proxy_install", plan.script, plan.env, timeout_seconds=_PROXY_INSTALL_TIMEOUT_SECONDS)
+        if template is None:
+            # No template: provision the base image ourselves. With one, the
+            # image is used as built — see the install-phase comment above.
+            plan = proxy_install_plan()
+            for path, content in plan.files.items():
+                await proxy.write_file(path, content)
+            await run_phase(
+                proxy, "proxy_install", plan.script, plan.env, timeout_seconds=_PROXY_INSTALL_TIMEOUT_SECONDS
+            )
         await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_START_TIMEOUT_SECONDS)
         _step("proxy_host")
         host = await proxy.get_host(_PROXY_PORT)

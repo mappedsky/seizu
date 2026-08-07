@@ -318,10 +318,10 @@ async def test_credential_proxy_conflicts_with_base_url() -> None:
         assert "mutually exclusive" in (config_error() or "")
 
 
-async def test_credential_proxy_installs_the_hash_locked_set_by_default() -> None:
-    # The default requirement set has a checked-in hash lock, and that is what
-    # the sandbox holding the real provider key installs — every transitive
-    # package pinned, not just the top-level one.
+async def test_credential_proxy_installs_the_hash_locked_set_without_a_template() -> None:
+    # With no template the run provisions the base image itself, and installs
+    # the checked-in hash lock — every transitive package pinned, not just the
+    # top-level one, in the sandbox holding the real provider key.
     proxy = _FakeBackend()
     agent = _FakeBackend()
     push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
@@ -361,10 +361,10 @@ async def test_credential_proxy_falls_back_to_top_level_pins_when_unlocked() -> 
     assert result.status == "completed"
 
 
-async def test_credential_proxy_uses_its_template_and_still_installs() -> None:
-    # A prebuilt template removes the per-run install cost, but the install
-    # phase runs anyway: pip is a no-op on satisfied pins, and a template built
-    # from older pins must be corrected rather than silently used.
+async def test_credential_proxy_uses_a_template_as_built() -> None:
+    # A template is the operator's own build from the locked requirements, so
+    # the run uses it as it is: no install phase, nothing written into the
+    # sandbox for one. (Keeping the template current is then their job.)
     proxy = _FakeBackend()
     agent = _FakeBackend()
     push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
@@ -382,7 +382,11 @@ async def test_credential_proxy_uses_its_template_and_still_installs() -> None:
     # The proxy sandbox gets the proxy template — never the agent CLI's.
     assert opens[0]["template"] == "seizu-litellm-proxy"
     assert opens[1]["template"] == "claude"
-    assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start"]
+    assert [p for p, _ in proxy.calls] == ["proxy_start"]
+    assert sandbox_agent._PROXY_LOCK_SANDBOX_PATH not in proxy.files
+    # Only the LiteLLM config, which is per-run (namespace, budget) and cannot
+    # come from an image.
+    assert list(proxy.files) == [sandbox_agent.LITELLM_CONFIG_PATH]
     assert result.status == "completed"
 
 
