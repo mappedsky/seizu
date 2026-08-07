@@ -504,13 +504,21 @@ def agent_config_error() -> str | None:
 @dataclass(frozen=True)
 class ProxyLock:
     """A parsed hash-locked requirement file: its contents, what it was compiled
-    from, and the sandbox runtime it was resolved for."""
+    from, and the sandbox runtime it was resolved for.
+
+    ``machine`` is what the sandbox compares itself against (``uname -m``);
+    ``platform`` is the fuller uv target tag it was resolved with, kept so
+    re-locking reproduces the same environment — the two differ for anything but
+    the common case (``x86_64-unknown-linux-musl`` and
+    ``x86_64-unknown-linux-gnu`` share a machine but not an ABI).
+    """
 
     path: str
     text: str
     requirements: list[str]
     python: str
     machine: str
+    platform: str
 
 
 @dataclass(frozen=True)
@@ -545,7 +553,7 @@ def read_proxy_lock() -> ProxyLock | None:
     except OSError:
         return None
     requirements: list[str] = []
-    python = machine = ""
+    python = machine = platform = ""
     for line in text.splitlines():
         if not line.startswith("#"):
             break  # header is over
@@ -553,10 +561,10 @@ def read_proxy_lock() -> ProxyLock | None:
             requirements = line[len(PROXY_LOCK_INPUT_MARKER) :].split()
         elif line.startswith(PROXY_LOCK_RUNTIME_MARKER):
             fields = dict(f.split("=", 1) for f in line[len(PROXY_LOCK_RUNTIME_MARKER) :].split() if "=" in f)
-            python, machine = fields.get("python", ""), fields.get("machine", "")
+            python, machine, platform = fields.get("python", ""), fields.get("machine", ""), fields.get("platform", "")
     if not python or not machine or "--hash=" not in text:
         return None
-    return ProxyLock(path=path, text=text, requirements=requirements, python=python, machine=machine)
+    return ProxyLock(path=path, text=text, requirements=requirements, python=python, machine=machine, platform=platform)
 
 
 def proxy_lock_error() -> str | None:

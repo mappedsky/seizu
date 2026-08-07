@@ -68,18 +68,22 @@ build_proxy_template:
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.build_proxy_template
 
 # Recompiles the hash-locked requirement set the credential-proxy sandbox
-# installs. With no arguments it re-locks exactly what the current lock records,
-# so this is idempotent; REQUIREMENTS changes what is pinned, and
-# PYTHON_VERSION/PLATFORM/OUTPUT produce a lock for a different sandbox runtime.
-# Runs in seizu-temporal-worker so it sees the same
-# SANDBOX_AGENT_CREDENTIAL_PROXY_* configuration the proxy itself uses. Usage:
+# installs. With no arguments it re-locks the configured lock in place — same
+# file, requirements and runtime, all read from its header, though transitive
+# versions re-resolve; REQUIREMENTS changes what is pinned, and PYTHON_VERSION/PLATFORM/
+# OUTPUT produce a lock for a different sandbox runtime. OUTPUT is a path in the
+# repository (this runs in a disposable container that mounts nothing else).
+# With SANDBOX_API_KEY set it measures the target runtime in a real sandbox
+# rather than assuming one; PROBE=0 skips that. Runs in seizu-temporal-worker so
+# it sees the same SANDBOX_* configuration the proxy itself uses. Usage:
 #     make lock_proxy_requirements
 #     make lock_proxy_requirements REQUIREMENTS="litellm[proxy]==1.90.0"
-#     make lock_proxy_requirements PYTHON_VERSION=3.12 OUTPUT=/srv/litellm-3.12.txt
+#     make lock_proxy_requirements PYTHON_VERSION=3.12 OUTPUT=locks/litellm-3.12.txt
 .PHONY: lock_proxy_requirements
 lock_proxy_requirements:
 	docker compose run --rm --no-deps -e PROXY_REQUIREMENTS=$(REQUIREMENTS) \
 		-e PROXY_PYTHON_VERSION=$(PYTHON_VERSION) -e PROXY_PLATFORM=$(PLATFORM) -e PROXY_OUTPUT=$(OUTPUT) \
+		-e PROBE=$(PROBE) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.lock_proxy_requirements
 
 # Runs on the host, not in a container: it recreates the seizu service between

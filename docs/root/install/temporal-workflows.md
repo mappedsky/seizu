@@ -444,7 +444,9 @@ make build_proxy_template              # REQUIRED if you use a template —
 make remediation_smoke SMOKE_PROXY=1   # prove it still boots
 ```
 
-With no `REQUIREMENTS`, `make lock_proxy_requirements` re-resolves exactly what the current lock records, so re-locking is idempotent.
+With no arguments, `make lock_proxy_requirements` re-locks the configured lock in place — same file, requirements and target runtime, all read from its own header — so it needs no arguments and cannot overwrite a different lock. (Transitive versions still re-resolve to the newest compatible release; that is what re-locking is for.)
+
+With `SANDBOX_API_KEY` set it also **measures** the target runtime by opening a real templateless sandbox, instead of assuming one — `PROBE=0` skips that. `OUTPUT` is a path inside the repository, since the command runs in a disposable container that mounts nothing else; copy the result to wherever the worker will read it.
 
 Keep the old pin if step 4 fails. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it (e.g. `litellm[proxy]==1.90.0 fastapi==0.136.1`) before re-locking.
 
@@ -454,8 +456,9 @@ For a self-hosted `SANDBOX_DOMAIN` backend, or any base image on a different pyt
 
 ```bash
 make lock_proxy_requirements PYTHON_VERSION=3.12 PLATFORM=aarch64-unknown-linux-gnu \
-    OUTPUT=/srv/seizu/litellm-3.12-arm.txt
-# then: SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=/srv/seizu/litellm-3.12-arm.txt
+    OUTPUT=locks/litellm-3.12-arm.txt
+# copy locks/litellm-3.12-arm.txt to the deployment, then:
+# SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=/srv/seizu/litellm-3.12-arm.txt
 ```
 
 #### Prebuilding the proxy template

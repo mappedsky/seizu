@@ -166,6 +166,9 @@ def test_lock_selection_carries_the_runtime_it_was_resolved_for(tmp_path: Any) -
         assert plan is not None
         assert plan.env == {"SEIZU_LOCK_PYTHON": "3.12", "SEIZU_LOCK_MACHINE": "aarch64"}
         assert plan.lock.requirements == ["litellm[proxy]==1.90.0"]
+        # The full uv target is kept too: the sandbox compares `uname -m`, but
+        # re-locking has to reproduce the libc, which the machine cannot carry.
+        assert plan.lock.platform == "aarch64-unknown-linux-gnu"
         # The lock itself is what gets written into the sandbox.
         assert plan.files[sandbox_agent._PROXY_LOCK_SANDBOX_PATH] == lock.read_text()
 
@@ -240,3 +243,12 @@ def test_agent_run_script_cds_into_the_workdir() -> None:
     script = sandbox_agent.agent_run_script(sandbox_agent.PROVIDERS["claude"], "/home/user/repo")
     assert "cd /home/user/repo" in script
     assert "claude -p" in script
+
+
+def test_lock_records_the_full_platform_not_just_the_machine() -> None:
+    # A musl and a gnu lock share a machine but not an ABI, so re-locking has to
+    # read the recorded platform rather than deriving one.
+    with _settings():
+        lock = sandbox_agent.read_proxy_lock()
+        assert lock is not None
+        assert lock.platform.startswith(lock.machine + "-")

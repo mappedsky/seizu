@@ -143,8 +143,9 @@ review is the gate.
 
 **The requirement set is a hash-locked file, not a requirement string.** There
 is no setting naming what to install: `make lock_proxy_requirements` compiles a
-fully resolved, hashed lock (whose header records what it came from, so
-re-locking is idempotent), and `_REQUIREMENTS_FILE` chooses *which* lock. A
+fully resolved, hashed lock (whose header records the file, requirements and
+runtime it came from, so re-locking needs no arguments and cannot overwrite a
+different lock), and `_REQUIREMENTS_FILE` chooses *which* lock. A
 requirement string alongside a lock is a second source of truth that can
 silently disagree with it — the earlier design did exactly that, and a bumped
 pin quietly downgraded the install to top-level-only.
@@ -171,6 +172,14 @@ a re-lock instruction. Otherwise a base-image upgrade, or a self-hosted
 matching distribution" inside a sandbox nobody is watching. Locks for other
 runtimes are a supported configuration, not a fork:
 `make lock_proxy_requirements PYTHON_VERSION=… PLATFORM=… OUTPUT=…`.
+
+**The target runtime is measured rather than declared** when `SANDBOX_API_KEY`
+is available: the generator opens a real templateless sandbox and reads its
+python and architecture. Declaring it is how the lock came to target python 3.11
+(the `e2bdev/base` image) while sandboxes run 3.13 — a discrepancy nothing could
+catch before install time. The recorded *platform* still wins over a measurement
+when the architecture is unchanged, because `uname -m` cannot distinguish
+gnu from musl.
 
 **Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
 a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
