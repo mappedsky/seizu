@@ -63,37 +63,39 @@ def _build() -> int:
             f"SANDBOX_DOMAIN is set ({settings.SANDBOX_DOMAIN}) — templates are an E2B-cloud feature and "
             "self-hosted sandboxes ignore them; the run-time install phase covers those"
         )
-    # The template is only as good as the pins it is built from, so hold them to
-    # the same rule the run does.
-    if (invalid := sandbox_agent.proxy_requirements_error()) is not None:
+    # The template is only as good as the lock it is built from, so hold it to
+    # the same rule a templateless run does.
+    if (invalid := sandbox_agent.proxy_lock_error()) is not None:
         return _fail(invalid)
-    requirements = sandbox_agent.proxy_requirements()
+    plan = sandbox_agent.proxy_install_plan()
+    if plan is None:  # unreachable: proxy_lock_error() just passed
+        return _fail("the credential proxy requirement lock is unusable")
 
     name = (
         os.environ.get("TEMPLATE_NAME", "").strip()
         or settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE.strip()
         or DEFAULT_TEMPLATE_NAME
     )
-    print(f"Building E2B template {name!r} with: {' '.join(requirements)}\n")
-
-    # Build from the same plan the run uses, so the template cannot contain a
-    # different dependency set than a run would install — the hash-locked file
-    # by default, the bare pins when an operator configured their own.
-    plan = sandbox_agent.proxy_install_plan()
-    lock = Path(sandbox_agent.PROXY_LOCK_PATH)
-    builder = Template(file_context_path=str(lock.parent)).from_base_image()
-    if plan.locked:
-        print(f"Using the hash-locked requirement set ({lock.name}).")
-        builder = builder.copy(lock.name, sandbox_agent._PROXY_LOCK_SANDBOX_PATH).run_cmd(
-            sandbox_agent.PROXY_LOCKED_INSTALL_CMD
-        )
-    else:
-        print("No hash lock for these requirements — installing the top-level pins only.")
-        builder = builder.pip_install(requirements)
+    lock = Path(plan.lock.path)
+    print(
+        f"Building E2B template {name!r} from {lock.name}: {' '.join(plan.lock.requirements)} "
+        f"(python {plan.lock.python}, {plan.lock.machine})\n"
+    )
+    # Build from the lock the run would install, so a template built by this
+    # script cannot contain a different dependency set than a templateless run.
+    #
+    # …and from the lock's own python, not e2bdev/base: a lock's hashes cover one
+    # ABI, and the base image (3.11) is not the same interpreter as the E2B
+    # default sandbox (3.13) the lock targets. Deriving the image from the lock
+    # is what keeps a template and a templateless run on the same runtime.
     template = (
-        # Build-time proof that these pins can actually serve — the same check
-        # the run's install phase makes, moved to where a failure is cheap.
-        builder.run_cmd(sandbox_agent.PROXY_IMPORT_CHECK)
+        Template(file_context_path=str(lock.parent))
+        .from_python_image(plan.lock.python)
+        .copy(lock.name, sandbox_agent._PROXY_LOCK_SANDBOX_PATH)
+        .run_cmd(sandbox_agent.PROXY_LOCKED_INSTALL_CMD)
+        # Build-time proof that the set can actually serve — the same check the
+        # run's install phase makes, moved to where a failure is cheap.
+        .run_cmd(sandbox_agent.PROXY_IMPORT_CHECK)
     )
     # The SDK would read E2B_API_KEY from the environment; pass the configured
     # key explicitly so the template is built against the same account the runs

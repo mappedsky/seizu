@@ -398,7 +398,7 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `SANDBOX_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. Mutually exclusive with the credential proxy below. |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` | `false` | Run a short-lived LiteLLM proxy in its **own** sandbox holding the real provider key, and hand the agent sandbox only the proxy's ephemeral per-run key with an in-memory spend cap (see below). All providers (`opencode` needs `SANDBOX_AGENT_MODEL` set). |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET` | `5` | USD spend cap (LiteLLM's in-memory global `max_budget`) — bounds real-time abuse of the ephemeral key while the proxy is up. |
-| `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` | `litellm[proxy]==1.87.0` | What the proxy sandbox installs from PyPI, space-separated. Every requirement must be **pinned exactly** (`name[extras]==version`) — the run refuses to start otherwise. The default set ships with a hash lock; see [Pinning the proxy's LiteLLM](#pinning-the-proxys-litellm). |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` | `""` (checked-in lock) | Hash-locked requirement file a **templateless** proxy sandbox installs. Empty → `reporting/services/sandbox_proxy_requirements.txt`. Point it at your own compiled lock to run a different LiteLLM, or one resolved for a different sandbox runtime; see [Pinning the proxy's LiteLLM](#pinning-the-proxys-litellm). |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` | `""` | E2B template for the proxy sandbox, built from those requirements by `make build_proxy_template`. Set → runs use that image **as built** and install nothing. Empty → the plain base image, and every run installs LiteLLM first. |
 | `SANDBOX_AGENT_MODEL` | `""` | Model for the CLI. For `claude`/`codex` a bare model override (empty → the CLI's default). For `opencode` it is **required** and takes the `provider/model` form (e.g. `deepseek/deepseek-v4-pro`), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace. |
 | `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). Also caps each CI-fix run. |
@@ -429,25 +429,34 @@ This path stands up LiteLLM inside a sandbox and depends on each CLI talking to 
 
 #### Pinning the proxy's LiteLLM
 
-The proxy sandbox is ephemeral, so it installs LiteLLM from PyPI on every run. That install must be **pinned exactly**, and `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` is where the pins live (space-separated; anything not of the form `name[extras]==version` is rejected before the run starts, which also keeps the value safe to expand in the install command).
+The proxy sandbox is ephemeral, so without a template it installs LiteLLM from PyPI on every run. What it installs is a **hash-locked requirement file** — never a requirement string — so there is exactly one description of what the proxy runs and no second setting that can disagree with it. A run refuses to start if that file is missing, has no hashes, or does not record the runtime it was resolved for.
 
 The reason is not tidiness. An unpinned `litellm[proxy]` resolves to whatever was published that morning, and LiteLLM's own proxy dependencies are declared as ranges — so a FastAPI release that removed a symbol LiteLLM's proxy imports was enough to make every remediation run fail at the proxy boot, with nothing changed on this side. A templateless run therefore installs the pins unconditionally (it does not skip when some LiteLLM already exists in the image) and imports `litellm.proxy.proxy_server` before reporting success, so a bad pin fails with the actual `ImportError` instead of a health-check timeout.
 
-Pinning the top level alone would not be enough: LiteLLM 1.87.0 pins FastAPI exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same drift survives one level down — in the sandbox that holds your **real provider key**. So the default requirement set ships fully resolved and hash-locked in `reporting/services/sandbox_proxy_requirements.txt`, written into the sandbox and installed with `pip --no-deps --require-hashes`. Configure a different requirement set and the lock no longer applies: your pins are installed on their own, transitive versions resolve at run time, and the worker logs an `AUDIT` warning saying so.
+Pinning the top level alone would not be enough: LiteLLM 1.87.0 pins FastAPI exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same drift survives one level down — in the sandbox that holds your **real provider key**. The shipped lock is fully resolved: 101 packages, each pinned with hashes, written into the sandbox and installed with `pip --no-deps --require-hashes`.
 
 To move to a newer LiteLLM:
 
 ```bash
-# 1. set the new pin (SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS)
-make lock_proxy_requirements      # 2. re-resolve and hash-lock it
-make build_proxy_template         # 3. REQUIRED if you use a template — runs
-                                  #    never install over one
-make remediation_smoke SMOKE_PROXY=1   # 4. prove it still boots
+make lock_proxy_requirements REQUIREMENTS="litellm[proxy]==1.90.0"
+make build_proxy_template              # REQUIRED if you use a template —
+                                       # runs never install over one
+make remediation_smoke SMOKE_PROXY=1   # prove it still boots
 ```
+
+With no `REQUIREMENTS`, `make lock_proxy_requirements` re-resolves exactly what the current lock records, so re-locking is idempotent.
 
 Keep the old pin if step 4 fails. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it (e.g. `litellm[proxy]==1.90.0 fastapi==0.136.1`) before re-locking.
 
-The lock targets the **sandbox image's** interpreter — `e2bdev/base` is python 3.11 today (`docker run --rm e2bdev/base python3 --version`), which is what `LOCK_PYTHON_VERSION` in `scripts/lock_proxy_requirements.py` records. If you point `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` at a custom image built on a different python, re-lock for that version: a mismatched lock installs cleanly on your machine and then fails in the sandbox with "no matching distribution", because the hashes cover wheels for another ABI.
+A lock is only valid for the interpreter and architecture it was resolved for — its hashes cover wheels built for that ABI — so it records them in its header and the install **checks the sandbox against them before running pip**, failing with an explicit re-lock instruction rather than a wall of "no matching distribution". The shipped lock targets python 3.13, which is what an E2B sandbox created with no template runs. (Note that is *not* the same as the `e2bdev/base` docker image, which is python 3.11 — read the sandbox's version off a real run, not a local `docker run`. `make build_proxy_template` builds from the lock's own python for exactly this reason, so a template and a templateless run cannot end up on different interpreters.)
+
+For a self-hosted `SANDBOX_DOMAIN` backend, or any base image on a different python or architecture, compile a lock for it and point the setting at that file:
+
+```bash
+make lock_proxy_requirements PYTHON_VERSION=3.12 PLATFORM=aarch64-unknown-linux-gnu \
+    OUTPUT=/srv/seizu/litellm-3.12-arm.txt
+# then: SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=/srv/seizu/litellm-3.12-arm.txt
+```
 
 #### Prebuilding the proxy template
 
@@ -459,9 +468,11 @@ make build_proxy_template                        # or TEMPLATE_NAME=my-proxy
 SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE=seizu-litellm-proxy
 ```
 
-The build uses the same install plan a run would — `e2bdev/base` + the hash-locked set (or your own pins when the lock does not cover them) + an `import litellm.proxy.proxy_server` step, so a requirement set that cannot serve fails the build rather than a remediation run. It needs `SANDBOX_API_KEY`; E2B templates are a cloud feature, so with a self-hosted `SANDBOX_DOMAIN` there is nothing to build and the run-time install covers it. Measured on E2B cloud, the proxy sandbox goes from create to serving in ~33s on the base image and ~12s from a template (the first creation from a freshly built template is slower — cold cache).
+The build uses the same install plan a run would — `python:<the lock's python>` + the hash-locked set + an `import litellm.proxy.proxy_server` step, so a requirement set that cannot serve fails the build rather than a remediation run. It needs `SANDBOX_API_KEY`; E2B templates are a cloud feature, so with a self-hosted `SANDBOX_DOMAIN` there is nothing to build and the run-time install covers it. Measured on E2B cloud, the proxy sandbox goes from create to serving in ~33s on the base image and ~12s from a template (the first creation from a freshly built template is slower — cold cache).
 
-With a template configured, runs **install nothing** — the image is used as you built it, and the two setups stay separate concerns: you lock the requirements and bake an image; runs without a template do a best-effort install instead. The consequence is that a template is only as current as your last `make build_proxy_template`: nothing at run time re-checks it, so re-lock *and* rebuild together when you bump the pins.
+With a template configured, runs **install nothing and inspect nothing** — the image is used as you built it. That is deliberate: a template is *your* environment, and the only contract it has to meet is that it can run a LiteLLM proxy. Our lock is one valid answer, not the only one — it drifts from upstream by design, and you may want a newer LiteLLM than we have pinned, or an image built from something else entirely. `make build_proxy_template` is offered as a convenience, not as the definition of a valid template.
+
+The consequence is real and yours to manage: nothing at run time notices a template built from older requirements, or one missing LiteLLM altogether (that surfaces at `proxy_start`, as a health-check failure with the LiteLLM log attached). So re-lock *and* rebuild together when you bump the pins.
 
 ## Local development
 

@@ -139,30 +139,38 @@ review is the gate.
 
 **Applies to:** `sandbox_agent.proxy_install_plan`,
 `reporting/services/sandbox_proxy_requirements.txt`,
-`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` / `_TEMPLATE`
+`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` / `_TEMPLATE`
 
-The requirement set is checked in fully resolved and hash-locked
-(`make lock_proxy_requirements`). It reaches the sandbox one of two ways, and
-these are separate concerns:
+**The requirement set is a hash-locked file, not a requirement string.** There
+is no setting naming what to install: `make lock_proxy_requirements` compiles a
+fully resolved, hashed lock (whose header records what it came from, so
+re-locking is idempotent), and `_REQUIREMENTS_FILE` chooses *which* lock. A
+requirement string alongside a lock is a second source of truth that can
+silently disagree with it — the earlier design did exactly that, and a bumped
+pin quietly downgraded the install to top-level-only.
 
-- **A template** (`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`): the operator built
-  an image from the lock with `make build_proxy_template`, and that build
-  already proved the proxy imports. The run uses the image **as built** — no
-  install, no re-check. Keeping it current is the operator's job; nothing at run
-  time notices a template built from older requirements.
+It reaches the sandbox one of two ways, and these are separate concerns:
+
+- **A template** (`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`): an image the
+  operator supplied. The run uses it **as built** — no install, and no
+  inspection of what it contains. Its only contract is that it can run a LiteLLM
+  proxy.
 - **No template:** the run provisions the base image itself, installing the lock
   with `pip --no-deps --require-hashes` and importing
   `litellm.proxy.proxy_server` before reporting success. It installs
   unconditionally rather than skipping when a LiteLLM is already present.
 
-Both paths come from one `proxy_install_plan()`, so a template cannot contain a
-different set than a templateless run would install.
+`build_proxy_template` builds from the same `proxy_install_plan()`, so *our*
+template contains what a templateless run would install.
 
-Top-level requirements are still validated as exact pins
-(`proxy_requirements_error`), because they are what the lock is compiled from —
-and because an operator may configure a set the lock does not cover, which
-falls back to installing those pins alone (transitive versions resolve at run
-time) and logs an AUDIT warning.
+**A lock is only valid for the runtime it was resolved for** — its hashes cover
+wheels for one python ABI and architecture — so the header records them and the
+install compares the sandbox against them **before running pip**, failing with
+a re-lock instruction. Otherwise a base-image upgrade, or a self-hosted
+`SANDBOX_DOMAIN` backend on another architecture, produces a wall of "no
+matching distribution" inside a sandbox nobody is watching. Locks for other
+runtimes are a supported configuration, not a fork:
+`make lock_proxy_requirements PYTHON_VERSION=… PLATFORM=… OUTPUT=…`.
 
 **Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
 a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
@@ -183,10 +191,15 @@ reading:
 - `uv pip compile --no-config`, or this project's own `[tool.uv]`
   constraint-dependencies are applied to the sandbox's resolution — where they
   make it unsolvable against LiteLLM's exact FastAPI pin.
-- The resolution targets the **sandbox's** interpreter (`e2bdev/base` is python
-  **3.11**, not this project's), on linux x86_64. A lock built for the wrong
-  version installs fine locally and fails in the sandbox: the hashes cover
-  wheels for another ABI.
+- The resolution targets the **sandbox's** interpreter, on linux x86_64. An E2B
+  sandbox with no template runs python **3.13**; the `e2bdev/base` docker image
+  is **3.11**; neither is this project's. A lock built for the wrong one
+  installs fine locally and fails in the sandbox, because the hashes cover
+  wheels for another ABI — which is why `build_proxy_template` builds from
+  `python:<the lock's python>` rather than a fixed base image, and why the
+  target is recorded in the lock and re-checked in the sandbox.
+  `make lock_proxy_requirements` runs in `seizu-temporal-worker`, the service
+  that holds the proxy configuration.
 - `pip install --no-deps`. The lock is the complete closure, so pip has nothing
   to resolve — and the base image's pip (23.2.1) otherwise rejects the whole
   install because `mcp` names `pyjwt[crypto]>=…`, which that version treats as
@@ -205,8 +218,16 @@ The install phase was briefly kept for templated runs too (pip short-circuits on
 satisfied pins, so a drifted template would self-correct). That was dropped
 deliberately: it conflated two ownership models. Building an image *is* the
 operator saying "this is the environment"; re-installing over it at run time
-makes the template advisory and hides which set actually ran. The trade is that
-a template built from older requirements is now only caught by rebuilding it.
+makes the template advisory and hides which set actually ran.
+
+**A template is deliberately not verified against the lock**, either — no marker
+file, no digest comparison. The checked-in lock is one valid answer, not the
+definition of a correct proxy: it drifts from upstream by design, and an
+operator may legitimately want a newer LiteLLM, or an image built from something
+else entirely. Requiring a match would make `build_proxy_template` the only
+supported way to have a template, which is not the intent. The accepted cost:
+nothing notices a stale template, and a template with no LiteLLM at all fails at
+`proxy_start` (health check plus the LiteLLM log) rather than at install.
 
 ## WF-009 — Remediation failures name the step they happened in
 
