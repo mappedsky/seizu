@@ -574,6 +574,65 @@ async def test_an_unbound_tool_is_findable_and_callable() -> None:
         )
 
 
+async def test_the_core_tool_set_is_configurable() -> None:
+    """The core bypasses disclosure, so a deployment that wants graph access
+    gated has to be able to narrow or empty it."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__schema", description="Schema", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+    ]
+    with (
+        _disclosure(True),
+        patch("reporting.settings.SANDBOX_CORE_TOOLS", ["graph__schema"]),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        narrowed = await _build_seizu_tools(_current_user(), skills_available=[])
+
+    assert {t.name for t in narrowed} == {"graph__schema"}
+
+
+async def test_an_empty_core_binds_nothing_up_front() -> None:
+    """Emptying SANDBOX_CORE_TOOLS routes even graph access through a skill or
+    through the delegating model naming `tools` -- the strict-disclosure shape."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="CVEs", inputSchema={"type": "object"}),
+    ]
+    skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
+    with (
+        _disclosure(True),
+        patch("reporting.settings.SANDBOX_CORE_TOOLS", []),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), skills_available=skills)
+        names = {t.name for t in tools}
+
+        # No typed Seizu tools at all; only the skill route remains.
+        assert names == {"find_seizu_skills", "load_seizu_skill", "call_seizu_tool"}
+
+        # ...and the delegating model can still direct it explicitly.
+        directed = await _build_seizu_tools(_current_user(), skills_available=skills, requested=["graph__query"])
+
+    assert "graph__query" in {t.name for t in directed}
+
+
+async def test_the_core_never_widens_past_rbac() -> None:
+    """SANDBOX_CORE_TOOLS bypasses disclosure, not authorization: a core tool the
+    user may not call is not in the RBAC-filtered listing, so it is not bound."""
+    # graph__query absent from the listing = this role lacks query:execute.
+    fake_tools = [Tool(name="reports__get", description="Get report", inputSchema={"type": "object"})]
+    with (
+        _disclosure(True),
+        patch("reporting.settings.SANDBOX_CORE_TOOLS", ["graph__query", "graph__schema"]),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), skills_available=[])
+
+    assert "graph__query" not in {t.name for t in tools}
+    assert "graph__schema" not in {t.name for t in tools}
+
+
 async def test_under_progressive_disclosure_the_subagent_searches_skills_not_tools() -> None:
     """Free-text tool search reaches anything RBAC permits by string match.
 
@@ -829,6 +888,49 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     tool_names = {t.name for t in captured_tools}
     assert "run_python" in tool_names
     assert "graph__query" in tool_names
+
+
+async def test_an_empty_core_still_leaves_the_sandbox_able_to_run_code() -> None:
+    """SANDBOX_CORE_TOOLS gates Seizu tools only.
+
+    The sandbox execution tools come from _build_sandbox_tools(backend), a
+    separate path, so emptying the core must not leave the sub-agent unable to
+    run code -- which would make the sandbox useless rather than restricted.
+    """
+    fake_backend = _make_fake_backend()
+    fake_result = _make_fake_agent_result("result")
+    captured_tools: list[Any] = []
+
+    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+        captured_tools.extend(tools)
+        return MagicMock(ainvoke=AsyncMock(return_value=fake_result))
+
+    seizu_tool = Tool(
+        name="graph__query",
+        description="Run a Cypher query",
+        inputSchema={"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]},
+    )
+    with (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.SANDBOX_CORE_TOOLS", []),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", side_effect=fake_create_react_agent),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[seizu_tool])),
+    ):
+        await _handle_delegate({"task": "analyze graph"}, _current_user())
+
+    tool_names = {t.name for t in captured_tools}
+    # Execution tools survive an emptied core.
+    assert {"run_python", "run_bash", "write_file", "list_files"} <= tool_names
+    # ...while the Seizu tool it would otherwise have been handed does not.
+    assert "graph__query" not in tool_names
 
 
 # ---------------------------------------------------------------------------

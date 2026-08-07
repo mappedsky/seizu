@@ -257,14 +257,26 @@ def _file_result_receipt(path: str, text: str) -> str:
     return json.dumps(receipt, default=str)
 
 
-# Bound for every delegation regardless of disclosure. A sub-agent exists to
-# fetch and compute, and these are the tools that "fetch" means when no specific
-# one has been named; without them a narrowed delegation would have to spend a
-# discovery round trip to do the most ordinary thing it does. All read-only.
-_CORE_TOOL_NAMES = frozenset({"graph__query", "graph__schema", "graph__validate_query", "graph__explain"})
 # How many matches find_seizu_tools returns, and how much of each description.
 _FIND_TOOLS_LIMIT = 12
 _FIND_TOOLS_DESC_MAX = 200
+
+
+def _core_tool_names() -> frozenset[str]:
+    """Tools bound to every delegation regardless of disclosure.
+
+    Read from settings on each call rather than frozen at import, so a
+    deployment can narrow or empty the set (``SANDBOX_CORE_TOOLS``) and so tests
+    can exercise both shapes.
+
+    This bypasses *disclosure*, not RBAC: the caller intersects the result with
+    the permitted tools, so a role without ``query:execute`` gets none of them.
+    Emptying it routes even graph access through a skill or through the
+    delegating model naming ``tools``. See SBX-003.
+    """
+    from reporting import settings as _settings
+
+    return frozenset(_settings.SANDBOX_CORE_TOOLS)
 
 
 def _bound_tool_names(
@@ -279,7 +291,7 @@ def _bound_tool_names(
     SBX-003 in docs/root/dev/decisions/sandbox.md.
     """
     names = {tool.name for tool in reachable}
-    bound = {name for name in _CORE_TOOL_NAMES if name in names}
+    bound = {name for name in _core_tool_names() if name in names}
     asked = {name for name in (requested or []) if name in names}
     if asked:
         return bound | asked
@@ -338,7 +350,7 @@ async def _build_seizu_tools(
     Confirmation-gated mutating tools are excluded — the sub-agent cannot drive
     the interactive confirmation round-trip, so those stay with the outer agent.
 
-    What is *bound* is narrower: ``_CORE_TOOL_NAMES`` + ``disclosed`` +
+    What is *bound* is narrower: ``SANDBOX_CORE_TOOLS`` + ``disclosed`` +
     ``requested``, where ``requested`` narrows as well as widens. How the
     sub-agent reaches anything else follows ``CHAT_LLM_PROGRESSIVE_DISCLOSURE``
     — tool search when off, skill search and render when on.

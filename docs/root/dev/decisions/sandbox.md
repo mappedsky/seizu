@@ -56,10 +56,20 @@ from the oversize test.
 
 **Applies to:** `_bound_tool_names` in `reporting/services/mcp_builtins/sandbox.py`
 
-Bound = the read-only graph core (`_CORE_TOOL_NAMES`) + what the conversation
+Bound = the read-only graph core (`SANDBOX_CORE_TOOLS`) + what the conversation
 disclosed (`chat_graph.current_disclosed_tools()`) + what the delegating call
 named in `tools`. Naming `tools` **narrows** as well as widens: a caller that
 knows the task gets that plus the core, not the disclosed set on top.
+
+**The core is configurable, and bypasses disclosure but not RBAC.**
+`_core_tool_names()` reads `SANDBOX_CORE_TOOLS` per call and the result is
+intersected with the caller's permitted tools, so a role without
+`query:execute` gets none of it. It defaults non-empty because "fetch some
+data" is what a sub-agent is *for*, and the harness measured the core covering
+every delegation across four samples with no sample needing discovery — putting
+the most ordinary operation behind a round trip inverts that. A deployment that
+wants graph access gated can narrow the list or empty it, which routes even
+Cypher through a skill or through the delegating model naming `tools`.
 
 **Why:** the inner agent used to be handed every chat-safe tool — 58 in a
 measured deployment, ~3,800 tokens of schema re-sent on *every* inner LLM call,
@@ -116,6 +126,17 @@ covers the need, the delegating model naming the tool in `tools` is the intended
 route — the same limitation the planner has. So the loss is bounded by how the
 deployment's skills are authored, and is recoverable by the caller, but it is a
 real loss rather than a deferred cost.
+
+**Do not overstate what this gates.** With the default `SANDBOX_CORE_TOOLS`
+(SBX-003), raw Cypher is bound to every delegation, and anything the gated read
+tools do `graph__query` can also do. So skill gating narrows *convenience and
+curation*, not reach: a sub-agent denied `cve_analysis__count_cves_by_severity`
+writes the equivalent Cypher instead. The "30 of 58" figure describes which
+tools are conveniently reachable, not how much capability is withheld. A
+deployment that wants graph access genuinely restricted must use RBAC
+(`query:execute`) or empty `SANDBOX_CORE_TOOLS`; progressive disclosure alone
+will not do it, and was never an authorization boundary
+([AGT-002](chat-agent.md)).
 
 **Don't:** add a free-text tool search back under progressive disclosure, and
 don't bind discovery tools when no skills exist — two tools that can never find

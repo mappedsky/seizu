@@ -130,10 +130,28 @@ The sandbox is ephemeral and isolated from Seizu's data stores and credentials �
 The sandbox subagent can call read-only Seizu tools (and user-defined toolset tools) on the user's behalf, but never confirmation-gated mutating tools: those stay with the outer chat agent, where the user approves them interactively. The subagent runs to completion inside a single tool call and cannot drive the confirmation round-trip, so gated mutations are filtered out of its tool set and the runtime additionally refuses any gated tool reached without a confirmation context.
 
 **Which tools it is given.** The sub-agent is *bound* the read-only graph tools
-(`graph__query`, `graph__schema`, `graph__validate_query`, `graph__explain`),
-whatever the conversation has already disclosed, and whatever the delegating
-call named in `tools`. Naming `tools` narrows as well as widens: a caller that
-says what the task needs gets that plus the core, not the disclosed set on top.
+(`SANDBOX_CORE_TOOLS`, by default `graph__query`, `graph__schema`,
+`graph__validate_query`, `graph__explain`), whatever the conversation has
+already disclosed, and whatever the delegating call named in `tools`. Naming
+`tools` narrows as well as widens: a caller that says what the task needs gets
+that plus the core, not the disclosed set on top.
+
+```{important}
+The core set bypasses progressive disclosure, so **raw Cypher is available to
+every delegation by default**. Anything the skill-gated read tools do,
+`graph__query` can also do. Skill gating therefore narrows convenience and
+curation, not reach.
+
+To restrict graph access, use the control that actually bounds it:
+
+- **RBAC** — a role without `query:execute` cannot reach the graph tools at all,
+  in the sandbox or anywhere else. `SANDBOX_CORE_TOOLS` is intersected with the
+  caller's permitted tools, so it can never widen access.
+- **`SANDBOX_CORE_TOOLS`** — narrow it (e.g. to `graph__schema`) or set it empty
+  to bind nothing up front, which routes even graph access through a skill or
+  through the delegating model naming `tools`. Expect a discovery round trip on
+  most delegations if you do.
+```
 
 **How it reaches anything else** is decided by `CHAT_LLM_PROGRESSIVE_DISCLOSURE`
 — the same setting that governs the planner:
@@ -162,6 +180,7 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_DOMAIN` | `""` | Sandbox service hostname. Empty → E2B cloud (`e2b.app`). For self-hosted deployments (e.g. OpenKruise Agents): set to your cluster ingress hostname. The E2B SDK constructs `https://api.<domain>` as the API base URL. |
 | `SANDBOX_ALLOW_INTERNET` | `false` | Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access. |
 | `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
+| `SANDBOX_CORE_TOOLS` | `graph__query,graph__schema,graph__validate_query,graph__explain` | Tools bound to every delegation regardless of progressive disclosure. Intersected with the caller's RBAC-permitted tools, so it never widens access. Empty binds nothing up front. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
 | `SANDBOX_PREVIEW_MAX_BYTES` | `2000` | Bytes of a file `preview_file` returns. Files at or under this come back whole; larger ones return shape (size, lines, JSON structure, columns) plus the beginning, so a result file cannot be read back into context. `0` restores `read_file`. |
 | `SANDBOX_SESSION_TIMEOUT_SECONDS` | `1800` | Lifetime of the sandbox shared by a turn's delegations. |

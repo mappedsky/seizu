@@ -896,6 +896,21 @@ SANDBOX_ALLOW_INTERNET = bool_env("SANDBOX_ALLOW_INTERNET", False)
 # Hard timeout for a single sandbox__delegate invocation (seconds).
 SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 
+# Tools bound to every sandbox delegation regardless of progressive disclosure,
+# because "fetch some data" is what a sub-agent is for and the default set is
+# what that means when no specific tool has been named.
+#
+# These bypass *disclosure*, not RBAC: each is intersected with the caller's
+# permitted tools, so a role without query:execute gets none of them. Set empty
+# to bind nothing up front and route even graph access through a skill (or
+# through the delegating model naming `tools`) -- at the cost of a discovery
+# round trip on the most ordinary thing a delegation does. See SBX-003 in
+# docs/root/dev/decisions/sandbox.md.
+SANDBOX_CORE_TOOLS = list_env(
+    "SANDBOX_CORE_TOOLS",
+    ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"],
+)
+
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # Caps for a sub-agent tool result written to a sandbox file rather than
