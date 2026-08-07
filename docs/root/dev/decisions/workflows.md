@@ -134,3 +134,49 @@ probes it — smoke-test before production.
 Keeping CVE ids out of PRs is prompt-only (they are public). Workflow-supplied
 repo/branch values are regex-validated and reach scripts only via env vars. PR
 review is the gate.
+
+## WF-008 — The proxy sandbox installs exactly-pinned requirements, every run
+
+**Applies to:** `sandbox_agent._PROXY_INSTALL`,
+`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS`
+
+The proxy sandbox builds itself from PyPI at run time. Requirements must be
+pinned exactly (`name[extras]==version`, enforced by `proxy_requirements_error`
+before a run starts); the install runs unconditionally rather than skipping when
+a LiteLLM is already present, and it imports `litellm.proxy.proxy_server` before
+reporting success.
+
+**Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
+a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
+FastAPI versions, FastAPI 0.141 removed `get_flat_dependant` — which LiteLLM's
+proxy imports — and every remediation run started failing with nothing changed
+here. The presence check made it worse: it would happily use an unrelated
+LiteLLM baked into an image.
+
+The import check exists because the failure mode without it is bad: the CLI dies
+in a backgrounded `nohup`, the phase reports a health-check timeout two minutes
+later, and the real `ImportError` is only in a log tail. Bumping the pin is a
+deliberate act — verify with `make remediation_smoke SMOKE_PROXY=1`.
+
+The same validation is what makes the requirement list safe to word-split
+unquoted in the install command; it is re-checked in `credential_proxy` so
+direct callers cannot skip it.
+
+`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` + `make build_proxy_template` bake the
+same pins into an E2B template so runs stop paying for the install. **The
+install phase still runs against a template** — pip short-circuits on satisfied
+pins, and keeping the phase means a stale template is corrected rather than
+silently serving a LiteLLM nobody configured. A stale template costs a slow run,
+never a wrong one.
+
+## WF-009 — Remediation failures name the phase they happened in
+
+**Applies to:** `sandbox_remediation._run`
+
+A failed run reports `"<phase> phase: <detail>"`, and falls back to the
+exception type when the provider's exception carries no message.
+
+**Why:** the sandbox provider raises a bare "command exited with code 1 and
+error:" — often with an empty message, since the detail went to stdout. The
+phase is the first thing an operator needs and the one thing that message never
+contains.

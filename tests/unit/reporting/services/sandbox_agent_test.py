@@ -20,6 +20,7 @@ def _settings(**overrides: Any) -> ExitStack:
         "SANDBOX_AGENT_MODEL": "",
         "SANDBOX_AGENT_TEMPLATE": "",
         "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED": False,
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS": "litellm[proxy]==1.87.0",
         "ANTHROPIC_API_KEY": "",
         "OPENAI_API_KEY": "",
         "DEEPSEEK_API_KEY": "",
@@ -120,6 +121,24 @@ def test_use_credential_proxy_depends_on_a_routable_namespace() -> None:
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["opencode"]) is True
     with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=False):
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["claude"]) is False
+
+
+def test_proxy_requirements_accepts_exact_pins() -> None:
+    # Extras, several requirements, and versions with local/dev segments are all
+    # ordinary pins; only the pinning itself is mandatory.
+    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS="litellm[proxy]==1.87.0 fastapi==0.136.1"):
+        assert sandbox_agent.proxy_requirements_error() is None
+        assert sandbox_agent.proxy_requirements() == ["litellm[proxy]==1.87.0", "fastapi==0.136.1"]
+    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS="litellm==1.87.0rc1"):
+        assert sandbox_agent.proxy_requirements_error() is None
+
+
+def test_proxy_requirements_rejects_anything_not_exactly_pinned() -> None:
+    # An unpinned or ranged requirement resolves to whatever PyPI serves on the
+    # day of the run — the failure mode this setting exists to prevent.
+    for bad in ("litellm[proxy]", "litellm[proxy]>=1.87.0", "litellm[proxy]~=1.87.0", "litellm==1.87.*", "", "   "):
+        with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS=bad):
+            assert sandbox_agent.proxy_requirements_error() is not None
 
 
 def test_proxy_namespace() -> None:

@@ -74,7 +74,9 @@ def _phase_of(cmd: str) -> str:
     # specific markers (agent CLI, gh pr create) before the generic clone check.
     if "litellm --config" in cmd:
         return "proxy_start"
-    if "litellm[proxy]" in cmd:
+    # The requirements are passed as an env var, so the install script itself
+    # only ever names the variable — never a literal requirement.
+    if "SEIZU_PROXY_REQUIREMENTS" in cmd:
         return "proxy_install"
     if "npm install -g" in cmd:
         return "install"  # agent-sandbox install (gh + provider CLI)
@@ -146,6 +148,8 @@ def _settings(**overrides: Any) -> ExitStack:
         "REMEDIATION_GH_SHA256": "",
         "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED": False,
         "SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET": "5",
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS": "litellm[proxy]==1.87.0",
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE": "",
         "SANDBOX_AGENT_TEMPLATE": "",
         "REMEDIATION_GITHUB_HOST": "github.com",
         "REMEDIATION_GITHUB_TOKEN": _GH_TOKEN,
@@ -312,6 +316,88 @@ async def test_credential_proxy_opencode_writes_a_private_config() -> None:
 async def test_credential_proxy_conflicts_with_base_url() -> None:
     with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True, SANDBOX_AGENT_BASE_URL="https://gw"):
         assert "mutually exclusive" in (config_error() or "")
+
+
+async def test_credential_proxy_installs_the_configured_pins() -> None:
+    # The proxy sandbox builds itself from PyPI at run time, so what it installs
+    # must be exactly the configured pins — an unpinned install resolves to
+    # whatever was released that day and has broken the proxy in the field.
+    proxy = _FakeBackend()
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    with (
+        _settings(
+            SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+            SANDBOX_AGENT_API_KEY="real-anthropic-key",
+            SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS="litellm[proxy]==1.87.0 uvloop==0.21.0",
+        ),
+        _patched_open([proxy, agent, push], []),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    install_env = dict(proxy.calls)["proxy_install"]
+    assert install_env == {"SEIZU_PROXY_REQUIREMENTS": "litellm[proxy]==1.87.0 uvloop==0.21.0"}
+    assert result.status == "completed"
+
+
+async def test_credential_proxy_uses_its_template_and_still_installs() -> None:
+    # A prebuilt template removes the per-run install cost, but the install
+    # phase runs anyway: pip is a no-op on satisfied pins, and a template built
+    # from older pins must be corrected rather than silently used.
+    proxy = _FakeBackend()
+    agent = _FakeBackend()
+    push = _FakeBackend(outputs={"push": "SEIZU_PR_URL=https://github.com/org/app/pull/1\n"})
+    opens: list[dict[str, Any]] = []
+    with (
+        _settings(
+            SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+            SANDBOX_AGENT_API_KEY="real-anthropic-key",
+            SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE="seizu-litellm-proxy",
+        ),
+        _patched_open([proxy, agent, push], opens),
+    ):
+        result = await run_remediation(**_TARGET)
+
+    # The proxy sandbox gets the proxy template — never the agent CLI's.
+    assert opens[0]["template"] == "seizu-litellm-proxy"
+    assert opens[1]["template"] == "claude"
+    assert [p for p, _ in proxy.calls] == ["proxy_install", "proxy_start"]
+    assert result.status == "completed"
+
+
+def test_proxy_install_script_pins_and_verifies_the_import() -> None:
+    script = sandbox_agent._PROXY_INSTALL
+    # No literal requirement in the script (the pins come from the env var), and
+    # no "skip if litellm already exists" short-circuit — an unrelated litellm
+    # already in the image says nothing about whether its proxy imports.
+    assert "litellm[proxy]" not in script
+    assert "command -v litellm" not in script
+    assert "pip install --quiet $SEIZU_PROXY_REQUIREMENTS" in script
+    # The import is what actually broke; check it here rather than letting the
+    # CLI die at boot behind a health-check timeout.
+    assert "import litellm.proxy.proxy_server" in script
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        "litellm[proxy]",  # unpinned — the bug this guards against
+        "litellm[proxy]>=1.87.0",  # a range resolves just as loosely
+        "",
+        "litellm[proxy]==1.87.0; rm -rf /",  # shell metacharacters
+        "litellm[proxy]==$(whoami)",
+    ],
+)
+async def test_unpinned_or_unsafe_proxy_requirements_are_rejected(requirements: str) -> None:
+    with _settings(
+        SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+        SANDBOX_AGENT_API_KEY="real-anthropic-key",
+        SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS=requirements,
+    ):
+        assert "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS" in (config_error() or "")
+        # The run refuses rather than shelling out with the bad value.
+        result = await run_remediation(**_TARGET)
+    assert result.status == "failed"
 
 
 async def test_guard_skips_agent_and_push_when_open_pr_exists() -> None:
@@ -782,6 +868,29 @@ async def test_phase_failure_returns_masked_output() -> None:
     assert "partial with" in result.output_tail
     # The push phase never ran after the agent failed.
     assert [phase for phase, _ in backend.calls] == ["install", "setup", "guard", "agent"]
+
+
+async def test_failure_names_the_phase_that_failed() -> None:
+    # The sandbox provider's own message is a bare "command exited with code N",
+    # which does not say what was running — so the result names the phase.
+    backend = _FakeBackend(fail_phase="setup")
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert (result.error or "").startswith("setup phase: ")
+
+
+async def test_failure_with_an_empty_message_still_reports_something() -> None:
+    # A command failure whose exception carries no message (the provider puts
+    # the detail on stdout) must not produce an empty error field.
+    backend = _FakeBackend()
+    backend.run_bash_streaming = AsyncMock(side_effect=RuntimeError(""))  # type: ignore[method-assign]
+    with _settings(), _patched_backend(backend):
+        result = await run_remediation(**_TARGET)
+
+    assert result.status == "failed"
+    assert (result.error or "") == "install phase: RuntimeError"
 
 
 async def test_no_changes_committed_is_a_distinct_error() -> None:

@@ -398,6 +398,8 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `SANDBOX_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. Mutually exclusive with the credential proxy below. |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` | `false` | Run a short-lived LiteLLM proxy in its **own** sandbox holding the real provider key, and hand the agent sandbox only the proxy's ephemeral per-run key with an in-memory spend cap (see below). All providers (`opencode` needs `SANDBOX_AGENT_MODEL` set). |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET` | `5` | USD spend cap (LiteLLM's in-memory global `max_budget`) — bounds real-time abuse of the ephemeral key while the proxy is up. |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` | `litellm[proxy]==1.87.0` | What the proxy sandbox installs from PyPI, space-separated. Every requirement must be **pinned exactly** (`name[extras]==version`) — the run refuses to start otherwise. See [Pinning the proxy's LiteLLM](#pinning-the-proxys-litellm). |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` | `""` | E2B template for the proxy sandbox, built from those requirements by `make build_proxy_template`. Empty → the plain base image, and every run installs LiteLLM first. |
 | `SANDBOX_AGENT_MODEL` | `""` | Model for the CLI. For `claude`/`codex` a bare model override (empty → the CLI's default). For `opencode` it is **required** and takes the `provider/model` form (e.g. `deepseek/deepseek-v4-pro`), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace. |
 | `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). Also caps each CI-fix run. |
 | `REMEDIATION_CI_MAX_WAIT_SECONDS` | `3600` | Total time the workflow watches one PR's checks (including re-runs after a fix push). `0` disables the CI watch. |
@@ -424,6 +426,28 @@ The agent's provider key is the one credential that must be present while the ag
 The proxy sandbox stays **private** (`allow_public_traffic: false`): the agent CLI reaches it using E2B's traffic-access token sent as a custom request header, so the proxy port is never world-reachable. Each provider carries that header differently — Claude Code via `ANTHROPIC_CUSTOM_HEADERS`; codex via a written `~/.codex/config.toml` `model_provider` with `env_http_headers`; opencode via a written `@ai-sdk/openai-compatible` provider block with `options.headers`. (A hypothetical provider with no header support would fall back to a public port gated only by the ephemeral key.)
 
 This path stands up LiteLLM inside a sandbox and depends on each CLI talking to it with a custom header and correct model routing; **verify it against your CLI/LiteLLM versions with a real run before enabling in production** (`make remediation_smoke SMOKE_PROXY=1` probes exactly this — it boots the private proxy, mints a key, and confirms a second sandbox can reach it via the traffic-access header). The LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape, header passthrough) is the fragile part.
+
+#### Pinning the proxy's LiteLLM
+
+The proxy sandbox is ephemeral, so it installs LiteLLM from PyPI on every run. That install must be **pinned exactly**, and `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` is where the pins live (space-separated; anything not of the form `name[extras]==version` is rejected before the run starts, which also keeps the value safe to expand in the install command).
+
+The reason is not tidiness. An unpinned `litellm[proxy]` resolves to whatever was published that morning, and LiteLLM's own proxy dependencies are declared as ranges — so a FastAPI release that removed a symbol LiteLLM's proxy imports was enough to make every remediation run fail at the proxy boot, with nothing changed on this side. The install phase therefore installs the pins unconditionally (it does not skip when some LiteLLM already exists in the image) and imports `litellm.proxy.proxy_server` before reporting success, so a bad pin fails with the actual `ImportError` instead of a health-check timeout.
+
+To move to a newer LiteLLM: set the new pin, run `make remediation_smoke SMOKE_PROXY=1`, and keep the old value if the proxy no longer boots. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it (e.g. `litellm[proxy]==1.90.0 fastapi==0.136.1`).
+
+#### Prebuilding the proxy template
+
+Installing that dependency tree on every run makes each run depend on PyPI resolving correctly while it is running — which is what broke it — and costs about ten seconds. `make build_proxy_template` bakes the configured pins into an E2B template instead:
+
+```bash
+make build_proxy_template                        # or TEMPLATE_NAME=my-proxy
+# then, on the temporal worker:
+SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE=seizu-litellm-proxy
+```
+
+The build is `e2bdev/base` + `pip install <your pins>` + an `import litellm.proxy.proxy_server` step, so a requirement set that cannot serve fails the build rather than a remediation run. It needs `SANDBOX_API_KEY`; E2B templates are a cloud feature, so with a self-hosted `SANDBOX_DOMAIN` there is nothing to build and the run-time install covers it. Measured on E2B cloud, the proxy sandbox goes from create to serving in ~31s on the base image and ~20s from a template (the first creation from a freshly built template is slower — cold cache).
+
+The install phase still runs with a template configured — pip returns immediately when the pins are already satisfied, and keeping the phase means a template built from *older* pins gets corrected instead of quietly serving a different LiteLLM than the one you configured. So rebuild the template when you bump the pins, but a stale template degrades to a slow run, not a wrong one.
 
 ## Local development
 

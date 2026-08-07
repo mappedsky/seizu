@@ -19,13 +19,19 @@ Credential isolation notes carried over from the remediation flow:
 - The credential proxy (:func:`credential_proxy`) runs a short-lived LiteLLM
   proxy in a *separate* sandbox holding the real provider key and hands the agent
   only the proxy's ephemeral master key (spend-capped in memory) that dies when
-  the proxy sandbox is torn down. The LiteLLM-in-sandbox specifics are unverified
-  against a live CLI — confirm with a real run before relying on the proxy path.
+  the proxy sandbox is torn down. LiteLLM is installed there from PyPI at run
+  time, so its version set is **pinned exactly**
+  (``SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS``) — an unpinned install broke
+  the proxy in the field when a transitive release dropped a symbol LiteLLM's
+  proxy imports. The agent-CLI-to-proxy wire remains unverified against a live
+  CLI — confirm with ``make remediation_smoke SMOKE_PROXY=1`` before relying on
+  the proxy path.
 """
 
 import asyncio
 import json
 import logging
+import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -49,14 +55,17 @@ SANDBOX_LIFETIME_SLACK_SECONDS = 120
 # --- Ephemeral credential-proxy sandbox -----------------------------------
 LITELLM_CONFIG_PATH = "/home/user/litellm.yaml"
 _PROXY_PORT = 4000
-_PROXY_TIMEOUT_SECONDS = 240
+# The install pulls LiteLLM's whole proxy dependency tree from PyPI, which is
+# large; the boot afterwards is quick.
+_PROXY_INSTALL_TIMEOUT_SECONDS = 600
+_PROXY_START_TIMEOUT_SECONDS = 240
 # LiteLLM config: wildcard model routing to the provider, keys from env so no
 # secret lands in the file, and a global in-memory spend cap (max_budget). The
 # agent authenticates with the ephemeral master key directly — LiteLLM's per-key
 # minting (/key/generate) needs a Postgres database we don't provision, and a
 # per-run credential is single-use anyway. NOTE: the provider namespace and the
-# base-URL suffix (see SubagentProvider) are the fragile wire details — this whole
-# path is unverified against a live LiteLLM + agent CLI; confirm with a real run.
+# base-URL suffix (see SubagentProvider) are the fragile wire details — still
+# unverified against a live agent CLI; confirm with a real run.
 _LITELLM_CONFIG = """\
 model_list:
   - model_name: "*"
@@ -68,7 +77,43 @@ litellm_settings:
 general_settings:
   master_key: os.environ/PROXY_MASTER_KEY
 """
-_PROXY_INSTALL = "set -euo pipefail\ncommand -v litellm >/dev/null 2>&1 || pip install --quiet 'litellm[proxy]'\n"
+# Install phase for the proxy sandbox. Two rules, both learned the hard way:
+#
+# 1. **Install the exact pins every time**, rather than skipping when a litellm
+#    is already present. The proxy is only as good as the version installed, and
+#    "some litellm exists" says nothing about whether its proxy imports.
+# 2. **Verify the proxy imports before declaring the phase done.** The failure
+#    this replaces was an unpinned install resolving to a litellm whose proxy
+#    could not import its own fastapi dependency: the CLI died at boot, and all
+#    the operator saw was a health-check timeout with the real traceback buried
+#    in a background log. Importing here fails the *install* phase with the
+#    ImportError itself.
+#
+# ``$SEIZU_PROXY_REQUIREMENTS`` is intentionally unquoted — it is a space-
+# separated requirement list that must word-split. Its contents are validated
+# against _REQUIREMENT_RE (no shell metacharacters can survive) before any run,
+# and ``set -f`` stops the ``[extras]`` brackets from being read as a glob.
+#
+# With SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE pointing at a template built by
+# ``scripts/build_proxy_template.py``, the pins are already installed and pip
+# short-circuits — but the phase still runs, so a template that has drifted from
+# the configured pins is corrected (or fails loudly) rather than used silently.
+PROXY_IMPORT_CHECK = "python3 -c 'import litellm.proxy.proxy_server'"
+_PROXY_INSTALL = f"""\
+set -euo pipefail
+set -f
+pip install --quiet $SEIZU_PROXY_REQUIREMENTS
+{PROXY_IMPORT_CHECK}
+echo SEIZU_PROXY_INSTALL_OK
+"""
+# Requirements env var for the install script above (non-secret).
+_PROXY_REQUIREMENTS_ENV = "SEIZU_PROXY_REQUIREMENTS"
+# An exactly-pinned pip requirement: ``name[extra,extra]==version``. Deliberately
+# narrow — it both forbids the unpinned/range requirements that made the proxy
+# install non-reproducible and keeps shell metacharacters out of the install
+# command, since the value is word-split by the script above.
+# No "*": "==1.87.*" is a wildcard, not a pin (and would glob in the shell).
+_REQUIREMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?==[A-Za-z0-9][A-Za-z0-9.+!-]*$")
 # Header E2B requires to reach a non-public sandbox's exposed ports.
 _E2B_TRAFFIC_HEADER = "e2b-traffic-access-token"
 # Env var the config-transport CLIs read the traffic-access token from (their
@@ -399,12 +444,40 @@ def agent_config_error() -> str | None:
         # command), a routable LiteLLM namespace, and no external base URL.
         if proxy_namespace(provider) is None:
             return f"credential proxy is not supported for provider {provider.name!r}"
+        if (err := proxy_requirements_error()) is not None:
+            return err
         if settings.SANDBOX_AGENT_BASE_URL:
             return "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED is mutually exclusive with SANDBOX_AGENT_BASE_URL"
         if not (settings.SANDBOX_AGENT_API_KEY or fallback):
             return "credential proxy needs a real key (SANDBOX_AGENT_API_KEY or the global provider key)"
     elif not (settings.SANDBOX_AGENT_API_KEY or settings.SANDBOX_AGENT_API_KEY_COMMAND or fallback):
         return "no API key configured for the sandbox agent (SANDBOX_AGENT_API_KEY or SANDBOX_AGENT_API_KEY_COMMAND)"
+    return None
+
+
+def proxy_requirements() -> list[str]:
+    """The pip requirements the proxy sandbox installs (see the setting)."""
+    from reporting import settings
+
+    return settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS.split()
+
+
+def proxy_requirements_error() -> str | None:
+    """Return why the configured proxy requirements are unusable, or None.
+
+    Every requirement must be pinned exactly. An unpinned requirement resolves
+    to whatever PyPI serves on the day of the run — including transitively, so
+    a working proxy can stop booting with no change on our side.
+    """
+    requirements = proxy_requirements()
+    if not requirements:
+        return "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS is empty"
+    for requirement in requirements:
+        if not _REQUIREMENT_RE.match(requirement):
+            return (
+                f"invalid proxy requirement {requirement!r}: SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS "
+                "must be space-separated, exactly-pinned requirements (e.g. 'litellm[proxy]==1.87.0')"
+            )
     return None
 
 
@@ -525,6 +598,11 @@ async def credential_proxy(
     appended to ``mask_secrets`` so the caller redacts them from its transcript."""
     from reporting import settings
 
+    # Re-checked here, not just in agent_config_error(): this validation is what
+    # makes the install script's unquoted requirement expansion safe, so it
+    # belongs next to the use for direct callers (e.g. the smoke script).
+    if (invalid := proxy_requirements_error()) is not None:
+        raise RuntimeError(invalid)
     master_key = "sk-seizu-" + secrets.token_urlsafe(24)
     mask_secrets.append(master_key)
     start = (
@@ -544,12 +622,20 @@ async def credential_proxy(
         allow_internet=True,
         timeout_seconds=sandbox_timeout_seconds,
         allow_public_traffic=not private,
+        # A template with the pins baked in (scripts/build_proxy_template.py)
+        # turns the install phase into a fast no-op; empty → the base image and
+        # a full install each run. Never an agent template: this VM holds the
+        # real key and has no business carrying a coding-agent CLI.
+        template=settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or None,
     ) as proxy:
         config = _LITELLM_CONFIG.format(namespace=proxy_namespace(provider), budget=budget)
         await proxy.write_file(LITELLM_CONFIG_PATH, config)
         proxy_env = {"PROXY_REAL_KEY": real_key, "PROXY_MASTER_KEY": master_key}
-        await run_phase(proxy, "proxy_install", _PROXY_INSTALL, {}, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
-        await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_TIMEOUT_SECONDS)
+        install_env = {_PROXY_REQUIREMENTS_ENV: " ".join(proxy_requirements())}
+        await run_phase(
+            proxy, "proxy_install", _PROXY_INSTALL, install_env, timeout_seconds=_PROXY_INSTALL_TIMEOUT_SECONDS
+        )
+        await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_START_TIMEOUT_SECONDS)
         host = await proxy.get_host(_PROXY_PORT)
 
         access_token = ""

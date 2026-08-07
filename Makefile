@@ -57,6 +57,16 @@ remediation_smoke:
 		-e SMOKE_PROXY=$(SMOKE_PROXY) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
+# Builds the E2B template the credential-proxy sandbox runs on, from the pinned
+# SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS — so runs stop installing LiteLLM
+# from PyPI every time. Needs SANDBOX_API_KEY (E2B cloud only). Then set
+# SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE to the name it prints. Usage:
+#     make build_proxy_template [TEMPLATE_NAME=seizu-litellm-proxy]
+.PHONY: build_proxy_template
+build_proxy_template:
+	docker compose run --rm --no-deps -e TEMPLATE_NAME=$(TEMPLATE_NAME) \
+		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.build_proxy_template
+
 # Runs on the host, not in a container: it recreates the seizu service between
 # arms, which it could not do from inside that service. Standard library only,
 # so the host needs no project environment.

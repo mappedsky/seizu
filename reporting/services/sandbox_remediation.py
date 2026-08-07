@@ -577,9 +577,13 @@ async def _run(
     gh_env = {"GH_TOKEN": github_token, "GH_ENTERPRISE_TOKEN": github_token, "GH_HOST": github_host}
     git_id_env = {"SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER, "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL}
 
+    # The phase currently running, so a failure can say which one it was.
+    last_phase = ["startup"]
+
     async def _phase(
         backend: SandboxBackend, name: str, script: str, envs: dict[str, str], timeout_seconds: int | None = None
     ) -> str:
+        last_phase[0] = name
         # One line per step (install/setup/guard/agent/extract/push and the
         # proxy phases) so operators can follow a run in the worker logs.
         logger.info(
@@ -593,7 +597,19 @@ async def _run(
     # Handoff from the agent sandbox to the push sandbox (base64 diff + PR text).
     handoff: dict[str, str] = {}
 
+    def _failure(message: str) -> RemediationRunResult:
+        """A failure naming the phase it happened in.
+
+        A sandbox command failure surfaces as the provider's generic "command
+        exited with code N" — which phase produced it is the first thing an
+        operator needs and the one thing that message never says.
+        """
+        return RemediationRunResult(status="failed", error=f"{last_phase[0]} phase: {message}", output_tail=_tail())
+
     async def _agent_sandbox(agent_env: dict[str, str], extra_files: dict[str, str] | None = None) -> str | None:
+        # Sandbox creation and the file writes are outside any phase; name them
+        # so a failure there is not blamed on the previous phase.
+        last_phase[0] = "agent_sandbox"
         async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
@@ -655,6 +671,7 @@ async def _run(
     async def _run_push() -> str:
         """Push from a FRESH sandbox that never ran the agent — so a persistence
         attack planted during the agent phase cannot reach the GitHub token."""
+        last_phase[0] = "push_sandbox"
         async with open_backend(
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
@@ -724,16 +741,17 @@ async def _run(
             else (guard_or_none or "")
         )
     except TimeoutError:
-        return RemediationRunResult(
-            status="failed", error=f"remediation timed out after {timeout}s", output_tail=_tail()
-        )
+        return _failure(f"remediation timed out after {timeout}s")
     except Exception as exc:
         if not fix_mode and "SEIZU_NO_CHANGES" in "".join(transcript):
             return RemediationRunResult(
                 status="failed", error="the coding agent committed no changes", output_tail=_tail()
             )
         logger.exception("sandbox remediation failed for %s", repo)
-        return RemediationRunResult(status="failed", error=_mask(str(exc)) or "remediation failed", output_tail=_tail())
+        # E2B's CommandExitException carries the exit code but an empty message
+        # when the command only wrote to stdout, so fall back to the exception
+        # type rather than reporting an empty error.
+        return _failure(_mask(str(exc)).strip() or type(exc).__name__)
     finally:
         ticker.cancel()
 

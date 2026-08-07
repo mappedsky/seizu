@@ -251,6 +251,10 @@ async def _run_proxy() -> int:
         return _fail("SANDBOX_AGENT_PROVIDER is unknown (expected claude, codex, or opencode)")
     if sandbox_agent.proxy_namespace(provider) is None:
         return _fail("no proxy namespace — set SANDBOX_AGENT_MODEL (required for opencode)")
+    # The pins are the point of this probe: they are what the proxy sandbox
+    # installs, and an unpinned set is what silently breaks between runs.
+    if (invalid := sandbox_agent.proxy_requirements_error()) is not None:
+        return _fail(invalid)
     # Pass ONLY literal strings to _fail(): resolve_*() returns the fallback API
     # key in the same tuple as its error, so surfacing that error to a print/log
     # trips CodeQL's clear-text-logging (and risks leaking on real imprecision).
@@ -279,14 +283,23 @@ async def _run_proxy() -> int:
             script, timeout_seconds=timeout_seconds or 300, on_output=on_output, envs=envs
         )
 
-    print(f"Proxy smoke: provider={provider.name} namespace={sandbox_agent.proxy_namespace(provider)}")
+    # Print the template too: with one configured the install phase is a no-op,
+    # so a template that never reached the process looks exactly like a pass.
+    print(
+        f"Proxy smoke: provider={provider.name} namespace={sandbox_agent.proxy_namespace(provider)} "
+        f"requirements={' '.join(sandbox_agent.proxy_requirements())} "
+        f"template={settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or '(base image)'}"
+    )
     print("\n########## PROXY SANDBOX (private LiteLLM) ##########")
     reachable = False
     async with sandbox_agent.credential_proxy(
         provider=provider,
         real_key=real_key,
         budget="1",
-        sandbox_timeout_seconds=480,
+        # Must outlast the install phase's own bound (installing LiteLLM's proxy
+        # tree from PyPI on a base image is the long pole), or E2B reaps the
+        # sandbox mid-install and the failure looks like a proxy bug.
+        sandbox_timeout_seconds=sandbox_agent._PROXY_INSTALL_TIMEOUT_SECONDS + 300,
         run_phase=run_phase,
         mask_secrets=mask_secrets,
     ) as (base_url, _agent_key, access_token):
