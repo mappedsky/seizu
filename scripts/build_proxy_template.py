@@ -35,6 +35,7 @@ so there is nothing to build.
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 # Work both as a module (python -m scripts.build_proxy_template) and as a plain
@@ -75,13 +76,24 @@ def _build() -> int:
     )
     print(f"Building E2B template {name!r} with: {' '.join(requirements)}\n")
 
+    # Build from the same plan the run uses, so the template cannot contain a
+    # different dependency set than a run would install — the hash-locked file
+    # by default, the bare pins when an operator configured their own.
+    plan = sandbox_agent.proxy_install_plan()
+    lock = Path(sandbox_agent.PROXY_LOCK_PATH)
+    builder = Template(file_context_path=str(lock.parent)).from_base_image()
+    if plan.locked:
+        print(f"Using the hash-locked requirement set ({lock.name}).")
+        builder = builder.copy(lock.name, sandbox_agent._PROXY_LOCK_SANDBOX_PATH).run_cmd(
+            sandbox_agent.PROXY_LOCKED_INSTALL_CMD
+        )
+    else:
+        print("No hash lock for these requirements — installing the top-level pins only.")
+        builder = builder.pip_install(requirements)
     template = (
-        Template()
-        .from_base_image()
-        .pip_install(requirements)
         # Build-time proof that these pins can actually serve — the same check
         # the run's install phase makes, moved to where a failure is cheap.
-        .run_cmd(sandbox_agent.PROXY_IMPORT_CHECK)
+        builder.run_cmd(sandbox_agent.PROXY_IMPORT_CHECK)
     )
     # The SDK would read E2B_API_KEY from the environment; pass the configured
     # key explicitly so the template is built against the same account the runs

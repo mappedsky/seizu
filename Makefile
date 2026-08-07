@@ -67,6 +67,15 @@ build_proxy_template:
 	docker compose run --rm --no-deps -e TEMPLATE_NAME=$(TEMPLATE_NAME) \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.build_proxy_template
 
+# Regenerates the hash-locked requirement set the credential-proxy sandbox
+# installs, from SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS' default pin.
+# --no-config keeps this project's own uv constraints out of the resolution;
+# the python/platform target is the sandbox's, not ours. Run after changing the
+# pin, then `make build_proxy_template` and `make remediation_smoke SMOKE_PROXY=1`.
+.PHONY: lock_proxy_requirements
+lock_proxy_requirements:
+	docker compose run --rm --no-deps seizu uv run --frozen --no-sync python -m scripts.lock_proxy_requirements
+
 # Runs on the host, not in a container: it recreates the seizu service between
 # arms, which it could not do from inside that service. Standard library only,
 # so the host needs no project environment.

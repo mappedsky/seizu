@@ -135,16 +135,23 @@ Keeping CVE ids out of PRs is prompt-only (they are public). Workflow-supplied
 repo/branch values are regex-validated and reach scripts only via env vars. PR
 review is the gate.
 
-## WF-008 — The proxy sandbox installs exactly-pinned requirements, every run
+## WF-008 — The proxy sandbox installs a hash-locked set, every run
 
-**Applies to:** `sandbox_agent._PROXY_INSTALL`,
+**Applies to:** `sandbox_agent.proxy_install_plan`,
+`reporting/services/sandbox_proxy_requirements.txt`,
 `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS`
 
-The proxy sandbox builds itself from PyPI at run time. Requirements must be
-pinned exactly (`name[extras]==version`, enforced by `proxy_requirements_error`
-before a run starts); the install runs unconditionally rather than skipping when
-a LiteLLM is already present, and it imports `litellm.proxy.proxy_server` before
-reporting success.
+The proxy sandbox builds itself from PyPI at run time, so what it installs is a
+checked-in, fully resolved, hash-locked requirement set
+(`make lock_proxy_requirements`) installed with `pip --require-hashes`. The
+install runs unconditionally rather than skipping when a LiteLLM is already
+present, and it imports `litellm.proxy.proxy_server` before reporting success.
+
+Top-level requirements are still validated as exact pins
+(`proxy_requirements_error`), because they are what the lock is compiled from —
+and because an operator may configure a set the lock does not cover, which
+falls back to installing those pins alone (transitive versions resolve at run
+time) and logs an AUDIT warning.
 
 **Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
 a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
@@ -153,14 +160,35 @@ proxy imports — and every remediation run started failing with nothing changed
 here. The presence check made it worse: it would happily use an unrelated
 LiteLLM baked into an image.
 
+Pinning only the top level does not close that: LiteLLM 1.87.0 pins FastAPI
+exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same
+failure mode survives one level down. This sandbox holds the **real provider
+key**, so what executes in it should be a fixed set of artifacts, not a
+resolution.
+
+Three details are non-obvious, and each was found by a failure rather than by
+reading:
+
+- `uv pip compile --no-config`, or this project's own `[tool.uv]`
+  constraint-dependencies are applied to the sandbox's resolution — where they
+  make it unsolvable against LiteLLM's exact FastAPI pin.
+- The resolution targets the **sandbox's** interpreter (`e2bdev/base` is python
+  **3.11**, not this project's), on linux x86_64. A lock built for the wrong
+  version installs fine locally and fails in the sandbox: the hashes cover
+  wheels for another ABI.
+- `pip install --no-deps`. The lock is the complete closure, so pip has nothing
+  to resolve — and the base image's pip (23.2.1) otherwise rejects the whole
+  install because `mcp` names `pyjwt[crypto]>=…`, which that version treats as
+  unpinned even though the lock pins `pyjwt`.
+
 The import check exists because the failure mode without it is bad: the CLI dies
 in a backgrounded `nohup`, the phase reports a health-check timeout two minutes
 later, and the real `ImportError` is only in a log tail. Bumping the pin is a
 deliberate act — verify with `make remediation_smoke SMOKE_PROXY=1`.
 
-The same validation is what makes the requirement list safe to word-split
-unquoted in the install command; it is re-checked in `credential_proxy` so
-direct callers cannot skip it.
+The same validation is what makes the operator-supplied list safe to word-split
+unquoted in the fallback install command; it is re-checked in `credential_proxy`
+so direct callers cannot skip it.
 
 `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` + `make build_proxy_template` bake the
 same pins into an E2B template so runs stop paying for the install. **The
@@ -169,14 +197,27 @@ pins, and keeping the phase means a stale template is corrected rather than
 silently serving a LiteLLM nobody configured. A stale template costs a slow run,
 never a wrong one.
 
-## WF-009 — Remediation failures name the phase they happened in
+## WF-009 — Remediation failures name the step they happened in
 
-**Applies to:** `sandbox_remediation._run`
+**Applies to:** `sandbox_remediation._run`, `sandbox_agent.PhaseReporter`
 
-A failed run reports `"<phase> phase: <detail>"`, and falls back to the
-exception type when the provider's exception carries no message.
+A failed run reports `"<step> phase: <detail>"`, falling back to the exception
+type when the provider's exception carries no message.
 
 **Why:** the sandbox provider raises a bare "command exited with code 1 and
 error:" — often with an empty message, since the detail went to stdout. The
-phase is the first thing an operator needs and the one thing that message never
+step is the first thing an operator needs and the one thing that message never
 contains.
+
+**Commands are not the only steps.** Sandbox creation (where a template that
+does not exist fails), config writes, host/token resolution, the patch handoff
+and teardown all sit *between* commands, and attributing those to whichever
+command ran last is worse than saying nothing. So `_sandbox()` names a
+sandbox for its whole lifetime — including `<name>_teardown`, set only once the
+body has completed — and `credential_proxy` reports its own internal steps
+through the `report_phase` callback rather than the caller guessing.
+
+**Command timeouts carry their own bound.** `PhaseTimeout` records the phase and
+the seconds that actually elapsed, because the proxy phases run under fixed
+bounds (600s/240s) far below `REMEDIATION_TIMEOUT_SECONDS` — reporting the
+run-wide deadline for one of them names a duration that never passed.

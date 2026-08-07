@@ -20,12 +20,14 @@ Credential isolation notes carried over from the remediation flow:
   proxy in a *separate* sandbox holding the real provider key and hands the agent
   only the proxy's ephemeral master key (spend-capped in memory) that dies when
   the proxy sandbox is torn down. LiteLLM is installed there from PyPI at run
-  time, so its version set is **pinned exactly**
-  (``SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS``) — an unpinned install broke
-  the proxy in the field when a transitive release dropped a symbol LiteLLM's
-  proxy imports. The agent-CLI-to-proxy wire remains unverified against a live
-  CLI — confirm with ``make remediation_smoke SMOKE_PROXY=1`` before relying on
-  the proxy path.
+  time, so it installs a **checked-in hash-locked set**
+  (``sandbox_proxy_requirements.txt``, compiled from
+  ``SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS`` by
+  ``make lock_proxy_requirements``) — an unpinned install broke the proxy in the
+  field when a transitive release dropped a symbol LiteLLM's proxy imports, and
+  this VM holds the real provider key. The agent-CLI-to-proxy wire remains
+  unverified against a live CLI — confirm with
+  ``make remediation_smoke SMOKE_PROXY=1`` before relying on the proxy path.
 """
 
 import asyncio
@@ -36,6 +38,7 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -89,25 +92,51 @@ general_settings:
 #    in a background log. Importing here fails the *install* phase with the
 #    ImportError itself.
 #
+# With SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE pointing at a template built by
+# ``scripts/build_proxy_template.py``, everything is already installed and pip
+# short-circuits — but the phase still runs, so a template that has drifted from
+# the configured requirements is corrected (or fails loudly), never used silently.
+PROXY_IMPORT_CHECK = "python3 -c 'import litellm.proxy.proxy_server'"
+
+# Default path: install the checked-in hash-locked set (see
+# scripts/lock_proxy_requirements.py). Every transitive package is pinned with
+# hashes, so the sandbox that holds the real provider key runs a fixed set of
+# artifacts instead of whatever resolves that day — pinning only the top-level
+# requirement leaves pydantic/aiohttp/openai/httpx and the rest on ranges, which
+# is the same drift one level down.
+_PROXY_LOCK_SANDBOX_PATH = "/home/user/litellm-requirements.txt"
+# ``--no-deps`` because the lock is already the complete closure: it stops pip
+# re-deriving dependencies, which is both wasted work and, on the sandbox image's
+# pip (23.2.1), a hard failure — that pip treats a transitive ``pyjwt[crypto]>=…``
+# specifier as an unpinned requirement even though the lock pins pyjwt, and
+# refuses the whole install under --require-hashes.
+PROXY_LOCKED_INSTALL_CMD = f"pip install --no-deps --require-hashes -r {_PROXY_LOCK_SANDBOX_PATH}"
+_PROXY_LOCKED_INSTALL = f"""\
+set -euo pipefail
+{PROXY_LOCKED_INSTALL_CMD} --quiet
+{PROXY_IMPORT_CHECK}
+echo SEIZU_PROXY_INSTALL_OK
+"""
+# Fallback path, for operator-supplied requirements the checked-in lock does not
+# cover. Still exactly pinned, but only at the top level.
+#
 # ``$SEIZU_PROXY_REQUIREMENTS`` is intentionally unquoted — it is a space-
 # separated requirement list that must word-split. Its contents are validated
 # against _REQUIREMENT_RE (no shell metacharacters can survive) before any run,
 # and ``set -f`` stops the ``[extras]`` brackets from being read as a glob.
-#
-# With SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE pointing at a template built by
-# ``scripts/build_proxy_template.py``, the pins are already installed and pip
-# short-circuits — but the phase still runs, so a template that has drifted from
-# the configured pins is corrected (or fails loudly) rather than used silently.
-PROXY_IMPORT_CHECK = "python3 -c 'import litellm.proxy.proxy_server'"
-_PROXY_INSTALL = f"""\
+_PROXY_PINNED_INSTALL = f"""\
 set -euo pipefail
 set -f
 pip install --quiet $SEIZU_PROXY_REQUIREMENTS
 {PROXY_IMPORT_CHECK}
 echo SEIZU_PROXY_INSTALL_OK
 """
-# Requirements env var for the install script above (non-secret).
+# Requirements env var for the fallback script above (non-secret).
 _PROXY_REQUIREMENTS_ENV = "SEIZU_PROXY_REQUIREMENTS"
+# The checked-in lock, and the marker recording what it was compiled from — the
+# lock applies only while the configured requirements still match that input.
+PROXY_LOCK_PATH = str(Path(__file__).with_name("sandbox_proxy_requirements.txt"))
+PROXY_LOCK_INPUT_MARKER = "# seizu-proxy-input:"
 # An exactly-pinned pip requirement: ``name[extra,extra]==version``. Deliberately
 # narrow — it both forbids the unpinned/range requirements that made the proxy
 # install non-reproducible and keeps shell metacharacters out of the install
@@ -147,6 +176,19 @@ class PhaseRunner(Protocol):
     async def __call__(
         self, backend: SandboxBackend, name: str, script: str, envs: dict[str, str], timeout_seconds: int | None = None
     ) -> str: ...
+
+
+class PhaseReporter(Protocol):
+    """Announces the step a helper is *about* to perform.
+
+    Commands are already named by :class:`PhaseRunner`, but the steps between
+    them — creating the sandbox, writing config, resolving the host, tearing
+    down — are where a misconfiguration (a template that does not exist, say)
+    actually fails. Without this the caller can only attribute those to whatever
+    command ran last, which is worse than saying nothing.
+    """
+
+    def __call__(self, name: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -481,6 +523,76 @@ def proxy_requirements_error() -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class ProxyInstallPlan:
+    """How the proxy sandbox installs LiteLLM: the script, its env, and any file
+    written into the sandbox first. ``locked`` says whether the hash-locked set
+    is in use (the default) or only the top-level pins are."""
+
+    script: str
+    env: dict[str, str]
+    files: dict[str, str]
+    locked: bool
+
+
+def proxy_lock_input() -> list[str] | None:
+    """The requirements the checked-in lock was compiled from, or None if the
+    lock is missing or does not record them."""
+    try:
+        with open(PROXY_LOCK_PATH) as handle:
+            for line in handle:
+                if line.startswith(PROXY_LOCK_INPUT_MARKER):
+                    return line[len(PROXY_LOCK_INPUT_MARKER) :].split()
+                if not line.startswith("#"):
+                    break  # header is over; no marker
+    except OSError:
+        return None
+    return None
+
+
+_warned_unlocked_proxy = False
+
+
+def proxy_install_plan() -> ProxyInstallPlan:
+    """Install the hash-locked set when it matches the configured requirements.
+
+    The lock covers one requirement set — the shipped default. An operator who
+    pins something else gets their own top-level pins installed instead, which
+    is supported but leaves the transitive tree resolving at run time, so it
+    warns. Regenerating the lock (`make lock_proxy_requirements`) restores it.
+    """
+    global _warned_unlocked_proxy
+    requirements = proxy_requirements()
+    if proxy_lock_input() == requirements:
+        try:
+            with open(PROXY_LOCK_PATH) as handle:
+                lock = handle.read()
+        except OSError:  # pragma: no cover - read succeeded moments ago
+            lock = ""
+        if lock:
+            return ProxyInstallPlan(
+                script=_PROXY_LOCKED_INSTALL,
+                env={},
+                files={_PROXY_LOCK_SANDBOX_PATH: lock},
+                locked=True,
+            )
+    if not _warned_unlocked_proxy:
+        _warned_unlocked_proxy = True
+        logger.warning(
+            "The credential proxy will install %s without the checked-in hash lock, so its transitive "
+            "dependencies resolve at run time in the sandbox holding the real provider key. Run "
+            "`make lock_proxy_requirements` to lock this requirement set.",
+            " ".join(requirements),
+            extra={"type": "AUDIT"},
+        )
+    return ProxyInstallPlan(
+        script=_PROXY_PINNED_INSTALL,
+        env={_PROXY_REQUIREMENTS_ENV: " ".join(requirements)},
+        files={},
+        locked=False,
+    )
+
+
 def proxy_namespace(provider: SubagentProvider) -> str | None:
     """The LiteLLM provider namespace the proxy routes its wildcard model to, or
     None when the proxy doesn't apply. Static for claude/codex; for opencode it is
@@ -587,6 +699,7 @@ async def credential_proxy(
     sandbox_timeout_seconds: int,
     run_phase: PhaseRunner,
     mask_secrets: list[str],
+    report_phase: PhaseReporter | None = None,
 ) -> AsyncIterator[tuple[str, str, str]]:
     """Open a *separate* sandbox running a LiteLLM proxy seeded with the real
     provider key, and yield ``(base_url, agent_key, access_token)`` for the agent
@@ -595,8 +708,16 @@ async def credential_proxy(
     this sandbox is torn down, and the proxy enforces an in-memory spend cap.
     ``access_token`` is E2B's traffic-access token for a private proxy (``""`` for
     the public fallback). Secrets it creates (master key, traffic token) are
-    appended to ``mask_secrets`` so the caller redacts them from its transcript."""
+    appended to ``mask_secrets`` so the caller redacts them from its transcript.
+
+    ``report_phase`` names each step that is *not* a command, so the caller can
+    attribute a sandbox-creation, config-write, host-resolution or teardown
+    failure to the proxy rather than to whatever command ran last."""
     from reporting import settings
+
+    def _step(name: str) -> None:
+        if report_phase is not None:
+            report_phase(name)
 
     # Re-checked here, not just in agent_config_error(): this validation is what
     # makes the install script's unquoted requirement expansion safe, so it
@@ -616,6 +737,8 @@ async def credential_proxy(
     # All built-in providers have a header/config transport, so the proxy stays
     # private (gated by E2B's traffic-access token); "public" is a fallback only.
     private = provider.proxy_transport != "public"
+    # Creating the proxy sandbox is where a template that does not exist fails.
+    _step("proxy_sandbox")
     async with open_backend(
         api_key=settings.SANDBOX_API_KEY,
         domain=settings.SANDBOX_DOMAIN,
@@ -628,14 +751,16 @@ async def credential_proxy(
         # real key and has no business carrying a coding-agent CLI.
         template=settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE or None,
     ) as proxy:
+        _step("proxy_config")
         config = _LITELLM_CONFIG.format(namespace=proxy_namespace(provider), budget=budget)
         await proxy.write_file(LITELLM_CONFIG_PATH, config)
         proxy_env = {"PROXY_REAL_KEY": real_key, "PROXY_MASTER_KEY": master_key}
-        install_env = {_PROXY_REQUIREMENTS_ENV: " ".join(proxy_requirements())}
-        await run_phase(
-            proxy, "proxy_install", _PROXY_INSTALL, install_env, timeout_seconds=_PROXY_INSTALL_TIMEOUT_SECONDS
-        )
+        plan = proxy_install_plan()
+        for path, content in plan.files.items():
+            await proxy.write_file(path, content)
+        await run_phase(proxy, "proxy_install", plan.script, plan.env, timeout_seconds=_PROXY_INSTALL_TIMEOUT_SECONDS)
         await run_phase(proxy, "proxy_start", start, proxy_env, timeout_seconds=_PROXY_START_TIMEOUT_SECONDS)
+        _step("proxy_host")
         host = await proxy.get_host(_PROXY_PORT)
 
         access_token = ""
@@ -645,3 +770,6 @@ async def credential_proxy(
                 raise RuntimeError("proxy sandbox exposed no traffic-access token for the private proxy")
             mask_secrets.append(access_token)
         yield f"https://{host}{provider.proxy_base_suffix}", master_key, access_token
+        # Reached only when the caller's body finished: from here the only thing
+        # left is tearing this sandbox down, so stop blaming the agent's phases.
+        _step("proxy_teardown")
