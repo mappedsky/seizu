@@ -47,6 +47,7 @@ only the standard library so the host needs no project environment.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -204,6 +205,17 @@ def _same_value(applied: str, expected: str) -> bool:
     left, right = booleans.get(applied.strip().lower()), booleans.get(expected.strip().lower())
     if left is not None and right is not None:
         return left is right
+    # List settings (SANDBOX_CORE_TOOLS, MCP_ENABLED_BUILTINS, ...) come back as
+    # a repr, so a comma-separated arm never matched and every one of them was
+    # rejected as "did not apply" -- including the empty value, which reads back
+    # as "[]" and is the whole point of arming a list at all.
+    if applied.startswith("[") and applied.endswith("]"):
+        try:
+            actual = [str(item) for item in ast.literal_eval(applied)]
+        except (ValueError, SyntaxError):
+            return False
+        wanted = [part.strip() for part in expected.split(",") if part.strip()]
+        return actual == wanted
     try:
         return float(applied) == float(expected)
     except ValueError:

@@ -3,6 +3,28 @@ from importlib import resources
 from cartography_sync.registry import parse_enabled_modules
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
+_DEFAULT_SANDBOX_CORE_TOOLS = ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"]
+
+
+def _core_tools_from_env() -> list[str]:
+    """``SANDBOX_CORE_TOOLS``, where *set but empty* means an empty list.
+
+    Not ``list_env``: that treats an empty value as absent and hands back the
+    default, so ``SANDBOX_CORE_TOOLS=`` — the documented way to bind nothing —
+    silently kept all four graph tools. Caught by the harness's read-back check
+    rather than by review.
+
+    Deliberately not fixed inside ``list_env``: ``ALLOWED_JWT_ALGORITHMS`` also
+    carries a non-empty default, and letting a stray empty assignment empty
+    *that* is a security change, not a convenience.
+    """
+    import os
+
+    raw = os.environ.get("SANDBOX_CORE_TOOLS")
+    if raw is None:
+        return list(_DEFAULT_SANDBOX_CORE_TOOLS)
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
 
 def _parse_kv_pairs(items: list[str]) -> dict[str, str]:
     """Parse a list of ``key=value`` strings into a dict.
@@ -906,10 +928,7 @@ SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 # through the delegating model naming `tools`) -- at the cost of a discovery
 # round trip on the most ordinary thing a delegation does. See SBX-003 in
 # docs/root/dev/decisions/sandbox.md.
-SANDBOX_CORE_TOOLS = list_env(
-    "SANDBOX_CORE_TOOLS",
-    ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"],
-)
+SANDBOX_CORE_TOOLS = _core_tools_from_env()
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
