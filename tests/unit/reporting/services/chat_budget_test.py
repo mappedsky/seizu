@@ -4,7 +4,13 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import HumanMessage
 
-from reporting.services.chat_budget import BudgetController, BudgetExceeded, estimate_tokens, usage_cost_usd
+from reporting.services.chat_budget import (
+    BudgetController,
+    BudgetExceeded,
+    estimate_tokens,
+    usage_cost_usd,
+    usage_from_message,
+)
 
 
 def _ledger(
@@ -265,3 +271,133 @@ def test_usage_cost_usd_falls_back_on_litellm_error(mocker):
     result = usage_cost_usd(mock_model, input_tokens=100, output_tokens=50)
 
     assert result == 0.0
+
+
+# --- Prompt-cache accounting ---------------------------------------------------
+
+
+def _model(name: str = "deepseek/deepseek-chat") -> MagicMock:
+    model = MagicMock()
+    model.model_name = name
+    return model
+
+
+def _message(usage: dict | None) -> MagicMock:
+    message = MagicMock()
+    message.usage_metadata = usage
+    return message
+
+
+def test_usage_from_message_reads_the_providers_cache_accounting():
+    usage = usage_from_message(
+        _message(
+            {
+                "input_tokens": 4016,
+                "output_tokens": 50,
+                "total_tokens": 4066,
+                "input_token_details": {"cache_read": 3968},
+            }
+        )
+    )
+
+    assert (usage.input_tokens, usage.output_tokens) == (4016, 50)
+    # A subset of input_tokens, not an addition to it.
+    assert usage.cache_read_tokens == 3968
+    assert usage.total_tokens == 4066
+    assert usage.reported is True
+
+
+def test_usage_from_message_tolerates_providers_that_report_nothing():
+    for value in (None, {}, {"input_tokens": 0, "output_tokens": 0}, {"input_token_details": "nonsense"}):
+        usage = usage_from_message(_message(value))
+        assert usage.cache_read_tokens == 0
+        assert usage.reported is False
+
+
+def test_cached_input_is_priced_as_cached():
+    """The bug: every input token was billed at the uncached rate.
+
+    A measured DeepSeek call re-sending a 4,016-token prefix reported 3,968 of
+    them as cache reads, charged at a tenth of the rate we charged ourselves.
+    """
+    model = _model()
+    uncached = usage_cost_usd(model, 4016, 50)
+    cached = usage_cost_usd(model, 4016, 50, cache_read_tokens=3968)
+
+    assert cached < uncached
+    # Input tokens stay the *total* and litellm subtracts the cached portion, so
+    # the cached call must price out as 48 fresh input tokens plus 3,968 charged
+    # at the cache rate -- not as either of them counted twice.
+    assert cached == pytest.approx(
+        usage_cost_usd(model, 48, 50) + usage_cost_usd(model, 3968, 0, cache_read_tokens=3968)
+    )
+
+
+def test_cache_details_are_clamped_to_the_input_they_describe():
+    """A provider reporting more cached tokens than input must not negative-price
+    a call: litellm subtracts the cached portion from prompt_tokens, so an
+    unclamped count would credit tokens that were never sent."""
+    model = _model()
+    assert usage_cost_usd(model, 100, 10, cache_read_tokens=10_000) >= 0.0
+    # Nothing to subtract from means nothing to discount.
+    assert usage_cost_usd(model, 0, 0, cache_read_tokens=3968) == 0.0
+
+
+async def test_the_ledger_records_what_was_served_from_cache():
+    controller = BudgetController(_ledger(token_limit=0))
+    reservation = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
+
+    await controller.commit(
+        reservation,
+        input_tokens=4016,
+        output_tokens=50,
+        cost_usd=0.001,
+        usage_estimated=False,
+        cache_read_tokens=3968,
+    )
+
+    snapshot = controller.snapshot()
+    assert snapshot["cache_read_tokens"] == 3968
+    # Tokens are still counted whole: a cached token occupies the context window
+    # and still costs something. Only the *price* differs.
+    assert snapshot["total_tokens"] == 4066
+    assert controller.observed_cache_read_ratio == pytest.approx(3968 / 4016)
+
+
+async def test_a_reservation_reserves_the_uncached_price(_unused=None):
+    """A reservation decides whether a call is *allowed*, so it must assume the
+    worst it could cost. A cache hit is never guaranteed, and a ceiling that
+    assumes one is not a ceiling."""
+    controller = BudgetController(_ledger(token_limit=0))
+    model = _model()
+
+    reservation = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
+    await controller.commit(
+        reservation, input_tokens=4000, output_tokens=50, cost_usd=0.0, usage_estimated=False, cache_read_tokens=3600
+    )
+
+    # The run has been 90% cached, and the reservation still prices the full rate.
+    assert controller.observed_cache_read_ratio == pytest.approx(0.9)
+    assert controller.project_cost_usd(model, 4000, 100) == pytest.approx(usage_cost_usd(model, 4000, 100))
+
+
+async def test_one_phases_cache_rate_cannot_discount_another_phases_call():
+    """The ratio is a property of the whole run, so a cache-heavy sandbox phase
+    used to discount a cold planner call on a different model -- reproduced at
+    6.6x under-reserved."""
+    controller = BudgetController(_ledger(token_limit=0))
+    cheap, expensive = _model("deepseek/deepseek-chat"), _model("anthropic/claude-sonnet-4-5")
+
+    reservation = await controller.reserve(estimated_input_tokens=10, estimated_output_tokens=10)
+    await controller.commit(
+        reservation,
+        input_tokens=100_000,
+        output_tokens=10,
+        cost_usd=0.0,
+        usage_estimated=False,
+        cache_read_tokens=99_000,
+    )
+
+    cold = controller.project_cost_usd(expensive, 100_000, 1_000)
+    assert cold == pytest.approx(usage_cost_usd(expensive, 100_000, 1_000))
+    assert cold > usage_cost_usd(cheap, 100_000, 1_000)

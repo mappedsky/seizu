@@ -3,6 +3,28 @@ from importlib import resources
 from cartography_sync.registry import parse_enabled_modules
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
+_DEFAULT_SANDBOX_CORE_TOOLS = ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"]
+
+
+def _core_tools_from_env() -> list[str]:
+    """``SANDBOX_CORE_TOOLS``, where *set but empty* means an empty list.
+
+    Not ``list_env``: that treats an empty value as absent and hands back the
+    default, so ``SANDBOX_CORE_TOOLS=`` — the documented way to bind nothing —
+    silently kept all four graph tools. Caught by the harness's read-back check
+    rather than by review.
+
+    Deliberately not fixed inside ``list_env``: ``ALLOWED_JWT_ALGORITHMS`` also
+    carries a non-empty default, and letting a stray empty assignment empty
+    *that* is a security change, not a convenience.
+    """
+    import os
+
+    raw = os.environ.get("SANDBOX_CORE_TOOLS")
+    if raw is None:
+        return list(_DEFAULT_SANDBOX_CORE_TOOLS)
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
 
 def _parse_kv_pairs(items: list[str]) -> dict[str, str]:
     """Parse a list of ``key=value`` strings into a dict.
@@ -555,17 +577,92 @@ CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
 # (0 disables it); the loop also stops as soon as a continuation adds no new text.
 CHAT_LLM_MAX_CONTINUATIONS = int_env("CHAT_LLM_MAX_CONTINUATIONS", 2)
 CHAT_LLM_MAX_RESPONSE_CHARS = int_env("CHAT_LLM_MAX_RESPONSE_CHARS", 60_000)
-# Maximum prior messages/characters sent to the LLM. Checkpoints may retain
-# more messages for UI history; this separate cap controls model cost, latency,
-# and provider context pressure.
+# Maximum prior messages/tokens sent to the LLM. Checkpoints may retain more
+# messages for UI history; this separate cap controls model cost, latency, and
+# provider context pressure.
 CHAT_LLM_CONTEXT_MAX_MESSAGES = int_env("CHAT_LLM_CONTEXT_MAX_MESSAGES", 80)
-CHAT_LLM_CONTEXT_MAX_CHARS = int_env("CHAT_LLM_CONTEXT_MAX_CHARS", 120_000)
+# Tokens, counted with the provider's own tokenizer. This replaced a
+# 120,000-*character* cap: measured against real tool payloads the conversion is
+# 3.0 chars/token rather than the 4 the code assumed, so the old cap admitted
+# about a third more tokens than intended, and worst exactly when payloads were
+# largest (structured data tokenizes worse than prose). 40,000 is that cap's
+# measured token equivalent. 0 means "whatever the model's window allows".
+CHAT_LLM_CONTEXT_MAX_TOKENS = int_env("CHAT_LLM_CONTEXT_MAX_TOKENS", 40_000)
+# Share of the model's input window that history may occupy. The remainder is
+# for the system prompt, tool schemas, the session digest, this turn's tool
+# results and the reply. The effective history budget is the smaller of this and
+# CHAT_LLM_CONTEXT_MAX_TOKENS -- a ceiling, not a target, so pointing Seizu at a
+# million-token model does not silently multiply the cost of every call.
+CHAT_LLM_CONTEXT_WINDOW_SHARE = float_env("CHAT_LLM_CONTEXT_WINDOW_SHARE", 0.5)
+# Override the model's input window instead of taking it from litellm's model
+# database. 0 derives it, which is almost always right.
+CHAT_LLM_CONTEXT_WINDOW_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_TOKENS", 0)
+# Window assumed for a model litellm does not know -- typically self-hosted or
+# custom. Small on purpose: guessing low wastes part of a window, guessing high
+# fails the turn. Raise it (or set CHAT_LLM_CONTEXT_WINDOW_TOKENS) when running
+# a large-context model litellm cannot identify.
+CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS = int_env("CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS", 32_768)
+# Fraction of the window held back when sizing a call. Our count is an
+# under-estimate by construction -- providers frame each message with tokens we
+# never see, and a tokenizer resolved by name can differ from the one the
+# endpoint runs -- and under-counting is the direction that fails the call.
+CHAT_LLM_CONTEXT_SAFETY_MARGIN = float_env("CHAT_LLM_CONTEXT_SAFETY_MARGIN", 0.05)
+# Emit explicit prompt-cache breakpoints for providers that need them (Anthropic
+# caches nothing without them; measured at 0 cached tokens over a five-call turn,
+# against 6,513 read back on the next call once a breakpoint was placed).
+# Providers with automatic prefix caching are unaffected either way.
+CHAT_LLM_PROMPT_CACHE_ENABLED = bool_env("CHAT_LLM_PROMPT_CACHE_ENABLED", True)
+# Anthropic will not cache a prefix shorter than this, so a smaller system
+# prompt is left unmarked rather than reshaped into blocks for nothing.
+CHAT_LLM_PROMPT_CACHE_MIN_TOKENS = int_env("CHAT_LLM_PROMPT_CACHE_MIN_TOKENS", 1_024)
+# Disclose the tools declared by the skills a plan step names, from the start of
+# the step, instead of only once the skill renders. The declaration is the skill
+# author naming exactly what the workflow uses, so there is nothing to learn by
+# waiting -- and waiting churns the tool list mid-turn, which is the head of the
+# provider's cached prefix and invalidates everything behind it. Scoped to the
+# skills the step names: unioning every enabled skill's declaration describes
+# the catalogue rather than the need, and took a measured turn from 1 bound tool
+# to 43.
+# The cost is a larger tool list up front, cached after the first call.
+# Set false to disclose only on render.
+CHAT_LLM_DISCLOSE_SKILL_TOOLS = bool_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS", True)
+# Log which part of a request (model, system prompt, tools, messages) changed
+# since the previous call of the same kind, which is what a prompt-cache miss
+# never tells you on its own. Off by default: it is a debugging aid, and it
+# token-counts every component of every call. Anthropic ships an equivalent as a
+# beta, but its beta header is one our LiteLLM version builds from feature
+# detection and will not take from a caller, so the request is rejected outright
+# -- and this works on providers with automatic prefix caching too, where no
+# such feature exists.
+CHAT_LLM_CACHE_DIAGNOSTICS = bool_env("CHAT_LLM_CACHE_DIAGNOSTICS", False)
+# Condense the oldest turns of a long conversation instead of dropping them.
+# Truncation lost what the conversation had said, and moved the boundary on
+# every turn -- the worst shape for a prompt cache, since the prefix changed each
+# time. Compaction cuts back past the budget in chunks so the condensed block
+# stays byte-identical for the many turns it takes to refill.
+CHAT_LLM_HISTORY_COMPACTION = bool_env("CHAT_LLM_HISTORY_COMPACTION", True)
+# How far back a compaction cuts, as a fraction of the history budget. Lower
+# compacts less often but keeps less history; at 1.0 it would compact on nearly
+# every turn, which is the behaviour this replaced.
+CHAT_LLM_HISTORY_COMPACTION_TARGET = float_env("CHAT_LLM_HISTORY_COMPACTION_TARGET", 0.5)
+# Ceiling on the condensed block itself. It grows with the conversation, and
+# something has to stop it; past this the oldest lines are shed, which is the one
+# deeper prefix rewrite this design accepts.
+CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS = int_env("CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS", 1_500)
+# ...but only while that list stays small enough to be worth it: skills are
+# user-authored, and disclosing a large declaration up front is just binding
+# every tool on every call. Above this many tokens of tool schema, fall back to
+# disclosing on render. Scale and rationale: CTX-006 in
+# docs/root/dev/decisions/chat-context.md.
+CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS = int_env("CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS", 6_000)
 # Optional full prompt override. Leave empty to use Seizu's provider-aware
 # security-dashboard prompt.
 CHAT_LLM_SYSTEM_PROMPT = str_env("CHAT_LLM_SYSTEM_PROMPT", "")
 # When true, the model sees available skills first and lets rendered skills
 # disclose which tools to use. When false, the model sees both chat-safe tools
 # and skills up front, matching the normal MCP list-tools/list-prompts shape.
+# Also decides how a sandbox sub-agent reaches tools outside its bound set
+# (SBX-004). Not an authorization boundary -- AGT-002.
 CHAT_LLM_PROGRESSIVE_DISCLOSURE = bool_env("CHAT_LLM_PROGRESSIVE_DISCLOSURE", True)
 # Maximum model-requested structured skill/tool calls the chat agent will execute
 # during one assistant turn. This bounds progressive skill rendering plus
@@ -638,6 +735,19 @@ CHAT_EPISODIC_RECALL_MAX_CHARS = int_env("CHAT_EPISODIC_RECALL_MAX_CHARS", 4_000
 # Entries retained before the oldest are shed. Bounds memory and keeps recall
 # relevant: recent sub-agents cover ground the next one is likeliest to repeat.
 CHAT_EPISODIC_MAX_ENTRIES = int_env("CHAT_EPISODIC_MAX_ENTRIES", 20)
+# The same carry one scope out: what earlier *turns* of the conversation already
+# established, held in the thread's checkpoint. Without it a follow-up turn
+# re-ran the previous turn's queries on top of its own work, because nothing
+# said they had been run. Entries are sub-agent task/outcome pairs; receipts are
+# the files earlier turns left in the (now persistent) sandbox, which is the
+# difference between reading data and fetching it again.
+CHAT_SESSION_MEMORY_MAX_ENTRIES = int_env("CHAT_SESSION_MEMORY_MAX_ENTRIES", 30)
+CHAT_SESSION_MEMORY_MAX_RECEIPTS = int_env("CHAT_SESSION_MEMORY_MAX_RECEIPTS", 40)
+# Budget for the same material in the *top-level* agent's prompt (planner,
+# worker, single-agent loop) rather than a sub-agent's. Smaller, because that
+# model needs to know the data exists in order not to plan a re-fetch, not to
+# work with it. Set 0 to disable the digest without disabling the carry.
+CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS = int_env("CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS", 2_000)
 # Corrective retries when a worker ends a turn without calling the sentinel that
 # submits its step result. A step ends on that explicit call, never on the model
 # simply going quiet, so a plain-text turn is a protocol violation the worker
@@ -808,6 +918,18 @@ SANDBOX_ALLOW_INTERNET = bool_env("SANDBOX_ALLOW_INTERNET", False)
 # Hard timeout for a single sandbox__delegate invocation (seconds).
 SANDBOX_TIMEOUT_SECONDS = int_env("SANDBOX_TIMEOUT_SECONDS", 120)
 
+# Tools bound to every sandbox delegation regardless of progressive disclosure,
+# because "fetch some data" is what a sub-agent is for and the default set is
+# what that means when no specific tool has been named.
+#
+# These bypass *disclosure*, not RBAC: each is intersected with the caller's
+# permitted tools, so a role without query:execute gets none of them. Set empty
+# to bind nothing up front and route even graph access through a skill (or
+# through the delegating model naming `tools`) -- at the cost of a discovery
+# round trip on the most ordinary thing a delegation does. See SBX-003 in
+# docs/root/dev/decisions/sandbox.md.
+SANDBOX_CORE_TOOLS = _core_tools_from_env()
+
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # Caps for a sub-agent tool result written to a sandbox file rather than
@@ -816,27 +938,28 @@ SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
 # never reads the rows itself. Still finite -- write_file takes a string, so the
 # whole result materializes in the Seizu process before reaching the sandbox,
 # and an unbounded query would be a memory event here rather than there.
-# Lifetime of the sandbox shared by a step's delegations. Longer than
-# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox now
-# has to outlive a whole step; the provider would otherwise reap it mid-step.
+#
 # Bytes of a file the sub-agent may pull into context. Above 0 the agent gets
-# preview_file, which returns files at or under this size whole and otherwise
-# only shape -- size, line count, JSON structure, columns -- plus the beginning,
-# so a result written to a file to keep it out of context cannot be read
-# straight back into it. At 0 it gets read_file, which returns up to
-# SANDBOX_MAX_OUTPUT_BYTES.
-#
-# On by default as a design choice, with no measured effect either way. A
-# four-sample comparison found the arms indistinguishable: median answer 925
-# characters with it against 929 without, median queries 26 against 25. An
-# earlier three-sample run appeared to favour it and did not replicate.
-#
-# It is kept because it is the only setting consistent with routing oversized
-# results to files at all: read_file returns up to SANDBOX_MAX_OUTPUT_BYTES, so
-# a result written out precisely to keep it out of context could be read
-# straight back into it. Set 0 for read_file if that trade is not wanted.
+# preview_file (files at or under this size whole; larger ones shape plus the
+# beginning). At 0 it gets read_file, capped at SANDBOX_MAX_OUTPUT_BYTES.
+# On by default as a design choice with no measured effect either way -- see
+# SBX-002 in docs/root/dev/decisions/sandbox.md.
 SANDBOX_PREVIEW_MAX_BYTES = int_env("SANDBOX_PREVIEW_MAX_BYTES", 2_000)
+
+# Lifetime of the sandbox shared by a turn's delegations. Longer than
+# SANDBOX_TIMEOUT_SECONDS (which bounds one delegation) because the sandbox has
+# to outlive a whole turn; the provider would otherwise reap it mid-turn.
 SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_800)
+# Suspend the sandbox between turns instead of destroying it, and resume it on
+# the next turn of the same thread, so a follow-up turn reads files earlier
+# turns wrote instead of re-running their queries. Pausing keeps only the
+# full VM state including memory (keep_memory=True), so untrusted processes DO
+# survive into the next turn of that thread -- accepted deliberately, because
+# filesystem-only suspension leaves the code interpreter dead. See SBX-005.
+#
+# Known gap, accepted deliberately: nothing reaps an abandoned sandbox -- see
+# SBX-005 in docs/root/dev/decisions/sandbox.md. Set false to opt out.
+SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 

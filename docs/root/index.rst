@@ -40,6 +40,7 @@ Documentation
 * `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
 * `MCP Skillsets documentation <https://mappedsky.github.io/seizu/install/mcp-skillsets.html>`_
 * `Basic development documentation <https://mappedsky.github.io/seizu/dev/dependencies.html>`_
+* `Decision log <https://mappedsky.github.io/seizu/dev/decisions/index.html>`_ — why the code is the way it is, per product area
 
 .. toctree::
     :caption: Installation & Configuration
@@ -69,6 +70,7 @@ Documentation
     dev/dependencies
     dev/test
     dev/query-validation
+    dev/decisions/index
     dev/contributing
 
 .. toctree::

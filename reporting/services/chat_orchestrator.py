@@ -42,7 +42,15 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.services import chat_budget, chat_graph, episodic_memory, mcp_builtins, sandbox_session
+from reporting.services import (
+    chat_budget,
+    chat_context,
+    chat_graph,
+    episodic_memory,
+    mcp_builtins,
+    mcp_runtime,
+    sandbox_session,
+)
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
     STEP_RESULT_TOOL,
@@ -54,7 +62,7 @@ from reporting.services.chat_graph import (
     _append_output_limit_notice,
     _auto_continue_answer,
     _blocked_tool_call_response,
-    _budgeted_context_max_chars,
+    _budgeted_context_max_tokens,
     _chat_provider,
     _child_detail_event_accumulator,
     _client_thread_id_from_config,
@@ -205,7 +213,14 @@ _PLANNER_PROMPT = (
     " subject before writing the plan, and make each step goal self-contained:"
     " sub-agents see only their goal and their dependencies' output, so a goal"
     ' that says "the items from the previous turn" reaches a sub-agent that'
-    " cannot see them. Name the items instead."
+    " cannot see them. Name the items instead.\n"
+    "You may also be shown what earlier turns already established and which data"
+    " files they saved. Plan around it: do not add a step that re-fetches data"
+    " already saved, and where a step needs that data, say in its goal which"
+    " file holds it so the sub-agent reads rather than re-queries. Plan a fresh"
+    " fetch only for what is genuinely missing, stale, or was truncated — and if"
+    " everything the request needs is already established, an answer step is the"
+    " whole plan."
 )
 
 _SYNTHESIZER_PROMPT = (
@@ -229,50 +244,22 @@ _SYNTHESIZER_PROMPT = (
 )
 
 
-def _worker_system_prompt(step: dict[str, Any]) -> str:
-    base = chat_graph.build_system_prompt()
-    criteria = step.get("success_criteria") or ""
-    extra = f"\n\nYou are a sub-agent completing exactly ONE step of a larger plan. Step goal: {step.get('goal', '')}."
-    if criteria:
-        extra += f" Success criteria: {criteria}."
-    action_kind = step.get("action_kind") or "auto"
-    required_action = step.get("required_action") or ""
-    required_arguments = step.get("required_arguments") or {}
-    if action_kind in ("skill", "tool") and required_action:
-        extra += (
-            f" This step has a required {action_kind} action: `{required_action}`. You must call that exact"
-            " structured action before returning a step result."
-        )
-        if required_arguments:
-            extra += f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
-    elif action_kind == "answer":
-        # The sentinel is the one exception: it is the protocol for ending a
-        # step, not a data-gathering action, and it is the only tool bound here.
-        extra += (
-            " This is an answer-only step: gather no data and call no tool other than"
-            f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
-        )
-    if step.get("retry_guidance"):
-        # Fenced: the verifier wrote this, but it wrote it *about* an untrusted
-        # result and can carry that result's text into it. Like resume_from, it
-        # lands in a system prompt.
-        extra += "\n\nA previous attempt was rejected for this reason; address it this time.\n" + fenced_within(
-            str(step["retry_guidance"]), 2000
-        )
-    if step.get("resume_from"):
-        # Fenced even though a sub-agent wrote it. A summary is not a trust
-        # boundary: it reports what graph and tool data said, so it can carry
-        # that data's text along with it. This one is the sharpest case, because
-        # it lands in a *system* prompt, where an instruction that survived the
-        # round trip would read with the authority of the system.
-        extra += (
-            "\n\nA previous attempt ran out of budget before finishing and established the following."
-            " Continue from it: do not re-gather what is already here, and fold it into your result so"
-            " nothing it found is lost.\n" + fenced_within(str(step["resume_from"]), 4000)
-        )
-    extra += (
-        " Use the available tools/skills to accomplish the goal, then return a"
-        " concise factual result for this step only. Do not list internal action"
+def _worker_system_prompt() -> str:
+    """The sub-agent contract, identical for every step of every turn.
+
+    Deliberately carries nothing about *which* step this is. It used to embed
+    the goal, success criteria and required action, which made the system
+    prompt differ per step -- and a system prompt is the head of the cached
+    prefix, so no step could ever read another's. Measured on two steps of one
+    turn: the second step read 0 of its 2,963 input tokens where the first had
+    already written an almost identical prefix. What varies now lives in the
+    user message, where it costs one step's tokens instead of everyone's.
+    """
+    return (
+        f"{chat_graph.build_system_prompt()}"
+        "\n\nYou are a sub-agent completing exactly ONE step of a larger plan."
+        " Use the available tools/skills to accomplish the step you are given, then return a"
+        " concise factual result for that step only. Do not list internal action"
         " transcripts, tool names, arguments, or raw JSON unless the step goal"
         " explicitly requires raw data. Do not attempt other steps or restate"
         " the whole conversation."
@@ -285,7 +272,51 @@ def _worker_system_prompt(step: dict[str, Any]) -> str:
         " never pass an announcement or preamble (e.g. 'All data collected, now"
         " delivering the summary') — pass the complete findings themselves."
     )
-    return f"{base}{extra}"
+
+
+def _step_contract(step: dict[str, Any]) -> str:
+    """What makes this step this step, for the user message rather than the system prompt.
+
+    Fencing still applies to everything that came from outside: the verifier's
+    retry guidance and a previous attempt's summary both report what untrusted
+    data said, and can carry that data's text with them.
+    """
+    parts: list[str] = []
+    criteria = step.get("success_criteria") or ""
+    if criteria:
+        parts.append(f"Success criteria: {criteria}.")
+    action_kind = step.get("action_kind") or "auto"
+    required_action = step.get("required_action") or ""
+    required_arguments = step.get("required_arguments") or {}
+    if action_kind in ("skill", "tool") and required_action:
+        contract = (
+            f"This step has a required {action_kind} action: `{required_action}`. You must call that exact"
+            " structured action before returning a step result."
+        )
+        if required_arguments:
+            contract += (
+                f" Required/static arguments: {_truncate_text(json.dumps(required_arguments, default=str), 1000)}."
+            )
+        parts.append(contract)
+    elif action_kind == "answer":
+        # The sentinel is the one exception: it is the protocol for ending a
+        # step, not a data-gathering action, and it is the only tool bound here.
+        parts.append(
+            "This is an answer-only step: gather no data and call no tool other than"
+            f" `{_STEP_RESULT_TOOL_NAME}`; derive the result from the dependency context."
+        )
+    if step.get("retry_guidance"):
+        parts.append(
+            "A previous attempt was rejected for this reason; address it this time.\n"
+            + fenced_within(str(step["retry_guidance"]), 2000)
+        )
+    if step.get("resume_from"):
+        parts.append(
+            "A previous attempt ran out of budget before finishing and established the following."
+            " Continue from it: do not re-gather what is already here, and fold it into your result so"
+            " nothing it found is lost.\n" + fenced_within(str(step["resume_from"]), 4000)
+        )
+    return "\n\n".join(parts)
 
 
 def _planner_user_message(user_text: str, conversation_context: str) -> str:
@@ -299,6 +330,9 @@ def _planner_user_message(user_text: str, conversation_context: str) -> str:
 
 def _worker_user_message(step: dict[str, Any], dependency_context: str, conversation_context: str = "") -> str:
     parts = [f"Complete this step: {step.get('goal', '')}"]
+    contract = _step_contract(step)
+    if contract:
+        parts.append(f"\n{contract}")
     if conversation_context:
         parts.append(
             "\nEarlier conversation, provided only so you can resolve references in the step goal."
@@ -474,21 +508,37 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     # Under progressive disclosure the planner sees skills and always-disclosed
     # tools (tools the model can always reach without a skill unlock, e.g.
     # sandbox__delegate) so it can plan their use from the start.
-    always_disclosed_tools_for_capability: list[chat_graph.Tool] = []
+    available_tools_for_capability: list[chat_graph.Tool] = []
     if settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE:
         capability_tools = None
-        _always_disclosed_names = mcp_builtins.always_disclosed_tool_names()
-        if _always_disclosed_names:
+        # Plus whatever earlier turns unlocked. A tool a skill disclosed on a
+        # previous turn stays callable (``disclosed_tools`` rides in the thread
+        # state), so leaving it out of the planner's capability context hides a
+        # capability the conversation demonstrably has -- and the planner then
+        # either plans around it or names it from memory without knowing it is
+        # real.
+        _visible_names = mcp_builtins.always_disclosed_tool_names() | set(state.get("disclosed_tools") or [])
+        if _visible_names:
             _all_tools = await _list_chat_tools(current_user)
-            always_disclosed_tools_for_capability = [t for t in _all_tools if t.name in _always_disclosed_names]
+            available_tools_for_capability = [t for t in _all_tools if t.name in _visible_names]
     else:
         capability_tools = await _list_chat_tools(current_user)
     capability = build_capability_context(
         skills,
         capability_tools,
-        always_disclosed_tools=always_disclosed_tools_for_capability,
+        available_tools=available_tools_for_capability,
     )
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
+    # The planner is where a re-fetch becomes a step, so it is the earliest
+    # point at which knowing the data already exists changes anything. It runs
+    # in its own node with no ambient ledger, so this reads the thread's stored
+    # memory directly.
+    planner_digest = episodic_memory.session_digest(
+        episodic_memory.SessionLedger.from_state(
+            state.get("session_memory"), turn=episodic_memory.turn_number(state["messages"])
+        ),
+        sandbox_id=str(state.get("sandbox_id") or ""),
+    )
 
     run_errors: list[str] = []
     try:
@@ -507,6 +557,8 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
                             ),
                         )
                     ),
+                    # Last, for the same reason the chat loop carries it last.
+                    *([chat_graph.session_memory_message(planner_digest)] if planner_digest else []),
                 ],
                 config,
                 role="planner",
@@ -625,6 +677,45 @@ def _prepare_retries(
 
 
 async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
+    """Own the turn's sandbox and session memory around a batch of steps.
+
+    Both are turn-scoped, not step-scoped. The sandbox used to be opened and
+    destroyed per step, which meant parallel steps could not share a file and
+    nothing survived to the next turn -- so a follow-up question re-ran the
+    previous turn's queries on top of its own work. It is now resumed from the
+    thread's stored id, shared by every step of the batch (``asyncio.gather``
+    copies the context but not the session object), and suspended again here.
+    Each step still gets its own :class:`EpisodeLog`, so step isolation is
+    unchanged; what they share is the ledger and the disk.
+
+    The dispatcher runs once per verify/retry cycle, so a turn with retries
+    suspends and resumes between cycles rather than holding a sandbox open
+    across a model round-trip it is not using it for.
+    """
+    ledger = episodic_memory.start_session_ledger(
+        state.get("session_memory"), turn=episodic_memory.turn_number(state["messages"])
+    )
+    sandbox_session.start_sandbox_session(
+        resume_sandbox_id=state.get("sandbox_id") or "",
+        persist=chat_graph.sandbox_persistence_allowed(config),
+    )
+    try:
+        update = await _dispatch_batch(state, config)
+    except BaseException:
+        # Keep a sandbox the thread already knows about: a failed step must not
+        # cost the conversation everything earlier steps put on its disk.
+        await sandbox_session.abandon_sandbox_session()
+        raise
+    teardown = await sandbox_session.close_sandbox_session()
+    update["session_memory"] = ledger.to_state()
+    if teardown.opened:
+        # Written even when empty, to clear an id the teardown just killed;
+        # omitting the key would leave the dead one in place. SBX-006.
+        update["sandbox_id"] = teardown.suspended_id
+    return update
+
+
+async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
     """Run the next batch of runnable steps as scoped sub-agent workers."""
     plan = [dict(step) for step in state.get("plan") or []]
     results = list(state.get("step_results") or [])
@@ -701,7 +792,7 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
         step["status"] = "ran"
 
     model = get_chat_model("worker", economy=bool(controller and controller.degraded))
-    tool_specs = await _worker_tool_specs(current_user)
+    tool_specs, skill_tools, skill_prompts = await _worker_tool_specs(current_user)
     # Progressive disclosure carries across steps: tools a skill disclosed in an
     # earlier super-step stay callable for the dependent steps that follow.
     progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
@@ -727,6 +818,8 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
                 disclosed_names=disclosed_names,
                 progressive=progressive,
                 writer=writer,
+                skill_tools=skill_tools,
+                skill_prompts=skill_prompts,
             )
             for step in batch
         )
@@ -847,10 +940,18 @@ def _merge_results(existing: list[dict[str, Any]], new: list[dict[str, Any]]) ->
     return list(by_id.values())
 
 
-async def _worker_tool_specs(current_user: CurrentUser | None) -> list[ChatToolSpec]:
+async def _worker_tool_specs(
+    current_user: CurrentUser | None,
+) -> tuple[list[ChatToolSpec], list[chat_graph.Tool], list[chat_graph.Prompt]]:
+    """The worker tool universe, plus the raw listings it was built from.
+
+    The listings come back so a step can scope disclosure to the skills it names
+    and weigh the result, without a second read -- one store read per turn
+    covers every consumer.
+    """
     skills = await _list_chat_prompts(current_user)
     tools = await _list_chat_tools(current_user)
-    return [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)]
+    return [*_skill_tool_specs(skills), *_mcp_tool_specs(tools)], tools, skills
 
 
 # Below this a context entry is more noise than referent, so stop rather than
@@ -980,25 +1081,22 @@ def _step_thresholds(
 
 
 async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    """Run a step, and destroy its sandbox however the step ends.
+    """Run a step and release its budget scope however the step ends.
 
-    The step closes its own session before the summary pass, so on the ordinary
-    path this has nothing left to do. It exists for the error path, where a
-    leaked session would keep a sandbox alive until the provider's timeout.
+    The sandbox is not this function's to close any more: it belongs to the
+    dispatcher and outlives every step in the batch.
     """
     try:
         return await _run_worker_step(step, **kwargs)
     finally:
-        # Both, and in a finally. The step closes its own scope before its
-        # summary pass, but an exception in the loop skipped that -- and because
-        # open_scope does not reset accumulated spend, a retry of the same step
-        # id would inherit the failed attempt's spend and be capped before doing
-        # any work.
+        # In a finally. The step closes its own scope before its summary pass,
+        # but an exception in the loop skipped that -- and because open_scope
+        # does not reset accumulated spend, a retry of the same step id would
+        # inherit the failed attempt's spend and be capped before doing any work.
         controller = _budget_controller(kwargs.get("config") or {})
         if controller is not None:
             controller.close_scope(f"worker:{step['id']}")
         chat_budget.set_current_budget_scope("")
-        await sandbox_session.close_sandbox_session()
 
 
 async def _run_worker_step(
@@ -1015,6 +1113,8 @@ async def _run_worker_step(
     disclosed_names: set[str] | None = None,
     progressive: bool | None = None,
     writer: Any = None,
+    skill_tools: list[chat_graph.Tool] | None = None,
+    skill_prompts: list[chat_graph.Prompt] | None = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
 
@@ -1028,14 +1128,24 @@ async def _run_worker_step(
     # within this step share the object by reference — which is the carry that
     # stops each fresh sandbox subagent re-deriving what the last one found.
     episodic_memory.start_episode_log()
-    # One sandbox for the whole step, opened on first use. Delegations used to
-    # get their own and lose everything on return, so a result written to a file
-    # was gone before the next delegation could read it.
-    sandbox_session.start_sandbox_session()
     if progressive is None:
         progressive = settings.CHAT_LLM_PROGRESSIVE_DISCLOSURE
     disclosed_names = set(disclosed_names or ())
+    skill_tools = list(skill_tools or [])
+    skill_prompts = list(skill_prompts or [])
     _always_disclosed_names = mcp_builtins.always_disclosed_tool_names() if progressive else frozenset()
+    # What the listed skills declare they need, honoured up front rather than on
+    # render -- the tool list heads the provider's cached prefix, so unlocking
+    # mid-turn invalidates everything behind it. Bounded: see
+    # chat_graph.skill_declared_tool_names.
+    skill_names = (
+        chat_graph.skill_declared_tool_names(
+            model, skill_tools, _step_declared_tool_names(step, tool_specs, skill_prompts)
+        )
+        if progressive
+        else set()
+    )
+    disclosed_names |= skill_names
     available_pool = (
         tool_specs
         if not progressive
@@ -1045,6 +1155,27 @@ async def _run_worker_step(
             if spec.kind == "skill" or spec.name in disclosed_names or spec.name in _always_disclosed_names
         ]
     )
+    # A step whose required action exists but has not been disclosed gets it
+    # disclosed, rather than being refused. Progressive disclosure decides what
+    # a model is *shown*, not what it may call -- RBAC decides that, and
+    # `tool_specs` is already filtered to what this user may call in chat. So
+    # refusing here loses the step for no security gain, and the planner has
+    # every reason to name such a tool: it reads the conversation's session
+    # memory, where a tool an earlier turn actually used is recorded by name,
+    # including tools a sandbox sub-agent called (its pool is the whole
+    # chat-safe set, never the disclosure subset). Observed as steps blocked on
+    # `Required tool action cve_analysis__get_recent_cves is not available`
+    # for a tool the previous turn had just used successfully.
+    late_disclosed: set[str] = set()
+    if progressive:
+        required_spec = _required_action_spec(tool_specs, step)
+        if required_spec is not None and all(spec.name != required_spec.name for spec in available_pool):
+            available_pool = [*available_pool, required_spec]
+            disclosed_names.add(required_spec.name)
+            late_disclosed.add(required_spec.name)
+            logger.info(
+                "chat orchestrator: disclosing %s for step %s (required by the plan)", required_spec.name, step_id
+            )
     specs, contract_error = _step_tool_specs(available_pool, step)
     if contract_error:
         contract_result = _step_contract_error_result(step, contract_error)
@@ -1088,13 +1219,33 @@ async def _run_worker_step(
     # step (which otherwise binds no tools at all).
     active_specs.append(STEP_RESULT_TOOL.spec)
     active_names.add(_STEP_RESULT_TOOL_NAME)
-    newly_disclosed_names: set[str] = set()
+    # Seeded with anything disclosed above to satisfy the plan's contract, so a
+    # tool the plan needed stays disclosed for the steps that depend on this one
+    # and for later turns -- the same carry a rendered skill's tools get.
+    newly_disclosed_names: set[str] = set(late_disclosed)
     available = _with_provider_tool_names(active_specs)
-    system_prompt = _worker_system_prompt(step)
+    # What this step may reach is what a sub-agent it spawns may reach. Set per
+    # step (each gather task has its own context copy), so a parallel step's
+    # disclosure never widens this one's.
+    chat_graph.set_disclosed_tools(active_names if progressive else {spec.name for spec in tool_specs})
+    chat_graph.set_available_skills(skill_prompts if progressive else ())
+    system_prompt = _worker_system_prompt()
+    # The worker decides whether to delegate, so it is the one that has to know
+    # the data is already on disk; telling only the sub-agent leaves the
+    # re-fetch already planned by the time anyone knows better. Last, not in the
+    # system prompt: it changes every turn, and a changing prefix costs the
+    # provider's cache for everything after it.
+    session = sandbox_session.current_sandbox_session()
+    worker_digest = episodic_memory.session_digest(
+        episodic_memory.current_session_ledger(),
+        sandbox_id=session.expected_sandbox_id if session is not None else "",
+    )
 
     messages: list[BaseMessage] = [
         HumanMessage(content=_worker_user_message(step, _dependency_context(step, plan, results), conversation_context))
     ]
+    if worker_digest:
+        messages.append(chat_graph.session_memory_message(worker_digest))
 
     _emit(
         writer,
@@ -1285,10 +1436,10 @@ async def _run_worker_step(
         ]
         # Sized against what the run can still afford, then tightened further
         # when this step or the run as a whole is already degraded.
-        context_limit = _budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS)
+        context_limit = _budgeted_context_max_tokens(config, base_max_tokens=chat_context.history_token_budget(model))
         if (controller is not None and controller.degraded) or step_degraded:
-            context_limit = max(8_000, context_limit // 4)
-        messages = _trim_inner_loop_messages(messages, max_chars=context_limit)
+            context_limit = max(2_500, context_limit // 4)
+        messages = _trim_inner_loop_messages(messages, model=model, max_tokens=context_limit)
         for result in batch_results:
             tools_used.append(result.request.name)
             if result.blocked is not None:
@@ -1308,8 +1459,11 @@ async def _run_worker_step(
             active_names.update(spec.name for spec in added)
             newly_disclosed_names.update(spec.name for spec in added)
             available = _with_provider_tool_names(active_specs)
-
-    await sandbox_session.close_sandbox_session()
+            # A skill that just unlocked tools unlocks them for this step's
+            # sub-agents too; without this a delegation after a skill render
+            # would still be working from the pre-render set.
+            if progressive:
+                chat_graph.set_disclosed_tools(active_names)
 
     # The step's own work is over; release its ceiling before the summary pass.
     # That pass is how a step reports what it found, so it must not be refused
@@ -1437,6 +1591,50 @@ def _match_action_spec(tool_specs: list[ChatToolSpec], action_kind: str, require
     if len(suffix) == 1:
         return suffix[0]
     return None
+
+
+def _step_declared_tool_names(
+    step: dict[str, Any], tool_specs: list[ChatToolSpec], skill_prompts: list[chat_graph.Prompt]
+) -> frozenset[str]:
+    """Tools declared by the skills *this step names*, not by the whole catalogue.
+
+    The plan is the signal: a skill step names its skill in ``required_action``,
+    and any step may name skills in ``suggested_tools``. Honouring those
+    declarations up front keeps the tool list stable through the step -- it
+    heads the provider's cached prefix, and unlocking mid-step invalidates
+    everything behind it.
+
+    Scoped deliberately. Every enabled skill's declaration unioned together is
+    the catalogue rather than the need: on one deployment that turned a
+    single-agent turn from 1 bound tool into 43, most of them belonging to
+    workflows the turn would never touch.
+    """
+    named: set[str] = set()
+    candidates = [str(step.get("required_action") or ""), *(str(t) for t in step.get("suggested_tools") or [])]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        spec = _match_action_spec(tool_specs, "skill", candidate)
+        if spec is not None:
+            named.add(spec.name)
+    if not named:
+        return frozenset()
+    return mcp_runtime.declared_tool_names(skill_prompts, only=named)
+
+
+def _required_action_spec(tool_specs: list[ChatToolSpec], step: dict[str, Any]) -> ChatToolSpec | None:
+    """The spec a step's ``required_action`` names, if it names one.
+
+    Resolved against the *whole* permitted universe rather than the disclosed
+    subset, so a caller can tell "this tool does not exist for this user" (a
+    real contract error) from "this tool has not been disclosed yet" (which is
+    fixable by disclosing it).
+    """
+    action_kind = step.get("action_kind") or "auto"
+    required_action = str(step.get("required_action") or "")
+    if action_kind not in ("skill", "tool") or not required_action:
+        return None
+    return _match_action_spec(tool_specs, action_kind, required_action)
 
 
 def _step_tool_specs(tool_specs: list[ChatToolSpec], step: dict[str, Any]) -> tuple[list[ChatToolSpec], str | None]:

@@ -32,8 +32,23 @@ non-linearly. A run measured that way as 121 delegations and 1,726 queries was
 Token totals, budget mode and step outcomes are read from the persisted ledger
 rather than inferred from the stream, so they are unaffected by any of that.
 
+**Scope.** Every turn's stream is written to its own ``_tNN.sse`` file and the
+stream-derived counts are summed over the conversation, so they cover the same
+turns the ledger numbers do. Keeping only the last turn -- as this did until a
+6-turn comparison reported "0 delegations" for an arm whose ledger showed *more*
+sandbox work than the baseline -- puts two different scopes side by side in one
+row, and nothing in the output says which is which. ``answer_chars`` remains the
+last turn's, for comparability with older runs; ``answer_chars_total`` is the
+whole conversation.
+
 Requires the dev stack running (``make up``) with ``CHAT_ENABLED=true`` and a
 real ``CHAT_LLM_PROVIDER``. Sessions are left in place for inspection.
+
+**Do not edit backend code while a run is in progress.** The dev ``seizu``
+service runs gunicorn with ``--reload``, so a save part-way through an arm means
+its samples were not all taken against the same build -- and the arm labels then
+describe a configuration rather than a build, which is exactly the kind of
+silently-invented result the read-back check above exists to prevent.
 
 Runs on the host rather than in a container -- it recreates the ``seizu``
 service between arms, which it could not do from inside that service -- and uses
@@ -41,6 +56,7 @@ only the standard library so the host needs no project environment.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -58,11 +74,27 @@ REPO = Path(__file__).resolve().parent.parent
 OVERLAY = REPO / "chat-harness-arm.yml"
 API = "http://localhost:8080"
 
-SETUP_TURN = "Give me a security overview of the most critical vulnerabilities in the graph"
-FOLLOW_UP_TURN = (
+# A conversation, not a list of unrelated questions: each turn refers back, so
+# the history actually has to be carried. Cycled when more turns are asked for
+# than there are prompts, which is how a run long enough to trigger history
+# compaction is built without inventing forty distinct security questions.
+CONVERSATION = [
+    "Give me a security overview of the most critical vulnerabilities in the graph",
     "Now cross-check that against the actual CVE data in the graph and tell me "
-    "which of those findings are actually reachable from the internet"
-)
+    "which of those findings are actually reachable from the internet",
+    "Which repositories are most exposed by those, and why?",
+    "Summarise what we have established so far in five bullet points",
+    "Of everything discussed, what would you fix first and what would you defer?",
+    "Which of the findings so far depend on data that might be stale?",
+    "Group the findings by the team that would own the fix",
+    "What have we not looked at yet that you would expect to matter?",
+]
+
+
+def conversation_turns(count: int) -> list[str]:
+    """The first *count* prompts, cycling once the written ones run out."""
+    return [CONVERSATION[index % len(CONVERSATION)] for index in range(max(1, count))]
+
 
 _ARM_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[^\s]*$")
 
@@ -99,19 +131,39 @@ def _compose(*args: str, capture: bool = False, env: dict[str, str] | None = Non
     return result.stdout if capture else ""
 
 
+def _compose_file_chain() -> str:
+    """The checkout's own compose files, with the arm overlay appended.
+
+    Naming only ``docker-compose.yml`` here replaces whatever file chain the
+    checkout uses rather than adding to it. A ``.env`` that selects an overlay
+    -- ``COMPOSE_FILE=docker-compose.yml:docker-compose.neo4j-latest.yml``, for
+    instance -- would be dropped, so every arm silently recreated *those*
+    services too, under a different configuration, and the run failed on a
+    dependency that was still starting.
+    """
+    existing = os.environ.get("COMPOSE_FILE") or _dotenv_value("COMPOSE_FILE") or "docker-compose.yml"
+    return f"{existing}:{OVERLAY.name}"
+
+
+def _dotenv_value(key: str) -> str:
+    """Read one key out of the checkout's .env, which compose reads but we don't."""
+    env_file = REPO / ".env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text().splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == key:
+            return value.strip().strip("'\"")
+    return ""
+
+
 def apply_arm(arm: str) -> str:
     """Recreate the backend with this arm applied, and read the value back."""
     if arm == "baseline":
         OVERLAY.write_text("services:\n  seizu:\n    environment: []\n")
     else:
         OVERLAY.write_text(f"services:\n  seizu:\n    environment:\n      - {arm}\n")
-    _compose(
-        "up",
-        "-d",
-        "--force-recreate",
-        "seizu",
-        env={"COMPOSE_FILE": f"docker-compose.yml:{OVERLAY.name}"},
-    )
+    _compose("up", "-d", "--force-recreate", "seizu", env={"COMPOSE_FILE": _compose_file_chain()})
     for _ in range(60):
         try:
             urllib.request.urlopen(f"{API}/healthcheck", timeout=5)  # noqa: S310
@@ -162,6 +214,17 @@ def _same_value(applied: str, expected: str) -> bool:
     left, right = booleans.get(applied.strip().lower()), booleans.get(expected.strip().lower())
     if left is not None and right is not None:
         return left is right
+    # List settings (SANDBOX_CORE_TOOLS, MCP_ENABLED_BUILTINS, ...) come back as
+    # a repr, so a comma-separated arm never matched and every one of them was
+    # rejected as "did not apply" -- including the empty value, which reads back
+    # as "[]" and is the whole point of arming a list at all.
+    if applied.startswith("[") and applied.endswith("]"):
+        try:
+            actual = [str(item) for item in ast.literal_eval(applied)]
+        except (ValueError, SyntaxError):
+            return False
+        wanted = [part.strip() for part in expected.split(",") if part.strip()]
+        return actual == wanted
     try:
         return float(applied) == float(expected)
     except ValueError:
@@ -206,8 +269,38 @@ def stream_metrics(sse: str) -> dict[str, Any]:
     }
 
 
+def aggregate_stream_metrics(streams: list[str]) -> dict[str, Any]:
+    """Per-turn metrics, summed over the conversation.
+
+    Computed per turn and added up rather than by parsing the concatenated
+    streams, because the identifiers a stream carries are only unique *within*
+    a turn: step ids restart at ``s1`` every turn and the routing detail is
+    literally ``routing``. Joining the text first and de-duplicating would fold
+    every turn's steps into one turn's worth.
+
+    ``answer_chars`` stays the last turn's answer so it remains comparable with
+    runs recorded before this existed; ``answer_chars_total`` is the whole
+    conversation's output.
+    """
+    per_turn = [stream_metrics(stream) for stream in streams] or [stream_metrics("")]
+    summed = {
+        key: sum(turn[key] for turn in per_turn)
+        for key in ("delegations", "inner_calls", "queries", "run_python", "steps_failed", "steps_total")
+    }
+    summed["answer_chars"] = per_turn[-1]["answer_chars"]
+    summed["answer_chars_total"] = sum(turn["answer_chars"] for turn in per_turn)
+    return summed
+
+
 def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
-    """The persisted budget for the turn -- the only trustworthy token source."""
+    """Every turn's persisted budget -- the only trustworthy token source.
+
+    Summed across the conversation rather than read off the last turn: what a
+    long session costs is the whole thing, and a per-turn figure hides the fact
+    that early turns are cheap and later ones carry the accumulated history.
+    ``history_summary`` comes back too, because its presence is the direct
+    evidence that compaction engaged at all.
+    """
     script = (
         "import asyncio, json\n"
         "from reporting.services import chat_graph\n"
@@ -216,40 +309,91 @@ def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
         "    graph = chat_graph.get_chat_graph()\n"
         f"    key = 'user:{user_id}:thread:{thread_id}'\n"
         "    state = await graph.aget_state({'configurable': {'thread_id': key}})\n"
+        "    values = getattr(state, 'values', {}) or {}\n"
         "    budgets = [\n"
-        "        b for m in (getattr(state, 'values', {}) or {}).get('messages', [])\n"
+        "        b for m in values.get('messages', [])\n"
         "        if (b := (getattr(m, 'response_metadata', {}) or {}).get('seizu_budget'))\n"
         "    ]\n"
-        "    print('LEDGER' + json.dumps(budgets[-1] if budgets else {}))\n"
+        "    summary = (values.get('history_summary') or {}).get('text') or ''\n"
+        "    print('LEDGER' + json.dumps({'budgets': budgets, 'summary_chars': len(summary)}))\n"
         "asyncio.run(main())"
     )
     out = _compose("exec", "-T", "seizu", "uv", "run", "--frozen", "--no-sync", "python", "-c", script, capture=True)
     for line in out.splitlines():
-        if line.startswith("LEDGER"):
-            budget = json.loads(line[len("LEDGER") :])
-            phases = budget.get("phases") or {}
-            return {
-                "total_tokens": budget.get("total_tokens", 0),
-                "mode": budget.get("mode", ""),
-                "sandbox_tokens": sum(
-                    v.get("total_tokens", 0) for k, v in phases.items() if k.endswith("sandbox_subagent")
-                ),
-            }
-    return {"total_tokens": 0, "mode": "?", "sandbox_tokens": 0}
+        if not line.startswith("LEDGER"):
+            continue
+        payload = json.loads(line[len("LEDGER") :])
+        budgets = payload.get("budgets") or []
+        if not budgets:
+            break
+
+        def total(key: str) -> int:
+            return sum(int(b.get(key) or 0) for b in budgets)
+
+        input_tokens = total("input_tokens")
+        cache_read = total("cache_read_tokens")
+        return {
+            "total_tokens": total("total_tokens"),
+            "llm_calls": total("llm_calls"),
+            # The last turn's mode: whether the conversation ended able to spend.
+            "mode": budgets[-1].get("mode", ""),
+            "sandbox_tokens": sum(
+                v.get("total_tokens", 0)
+                for b in budgets
+                for k, v in (b.get("phases") or {}).items()
+                if k.endswith("sandbox_subagent")
+            ),
+            # Prompt caching is most of what a conversation's *cost* depends on,
+            # and it is invisible in a token total: cached input is billed at a
+            # fraction of fresh input, so two runs with identical token counts
+            # can differ severalfold in spend.
+            "cache_read_tokens": cache_read,
+            "cache_hit_pct": round(cache_read / input_tokens * 100) if input_tokens else 0,
+            "cost_usd": round(sum(float(b.get("cost_usd") or 0.0) for b in budgets), 4),
+            # Non-zero means history compaction engaged.
+            "summary_chars": int(payload.get("summary_chars") or 0),
+        }
+    return {
+        "total_tokens": 0,
+        "llm_calls": 0,
+        "mode": "?",
+        "sandbox_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_hit_pct": 0,
+        "cost_usd": 0.0,
+        "summary_chars": 0,
+    }
 
 
-def run_sample(arm: str, index: int, user_id: str, out_dir: Path) -> dict[str, Any]:
+def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2) -> dict[str, Any]:
     session = json.loads(_post("/api/v1/chat/sessions", {"title": f"harness {arm} #{index}"}))
     thread_id = session["thread_id"]
     started = time.time()
-    _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": SETUP_TURN}, stream=True)
-    sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": FOLLOW_UP_TURN}, stream=True)
+    prompts = conversation_turns(turns)
+    streams: list[str] = []
+    for turn, prompt in enumerate(prompts, start=1):
+        streams.append(_post("/api/v1/chat/stream", {"thread_id": thread_id, "message": prompt}, stream=True))
+        print(f"    turn {turn}/{len(prompts)} done ({int(time.time() - started)}s)", flush=True)
     # Hash the arm rather than embedding it: an ordinary value such as
     # "openai/gpt-4" carries a path separator and would write outside out_dir.
     slug = "baseline" if arm == "baseline" else hashlib.sha256(arm.encode()).hexdigest()[:10]
-    (out_dir / f"{slug}_{index}.sse").write_text(sse)
-    row = {"arm": arm, "slug": slug, "sample": index, "thread": thread_id, "seconds": int(time.time() - started)}
-    row.update(stream_metrics(sse))
+    # One file per turn. This used to keep only the last turn, on the reasoning
+    # that it reached the deepest context -- but every stream-derived number
+    # then described one turn while the ledger numbers beside it described the
+    # whole run, and the two were read as if they were the same scope. That
+    # misreported a 6-turn comparison as "0 delegations" for an arm whose
+    # ledger showed the sandbox doing more work than the baseline's.
+    for turn, stream in enumerate(streams, start=1):
+        (out_dir / f"{slug}_{index}_t{turn:02d}.sse").write_text(stream)
+    row = {
+        "arm": arm,
+        "slug": slug,
+        "sample": index,
+        "thread": thread_id,
+        "turns": len(prompts),
+        "seconds": int(time.time() - started),
+    }
+    row.update(aggregate_stream_metrics(streams))
     row.update(ledger(thread_id, user_id))
     return row
 
@@ -258,11 +402,15 @@ def summarize(rows: list[dict[str, Any]]) -> None:
     arms: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         arms.setdefault(row["arm"], []).append(row)
-    keys = ("answer_chars", "queries", "inner_calls", "delegations", "total_tokens")
+    keys = ("answer_chars", "total_tokens", "llm_calls", "cache_hit_pct", "cost_usd", "summary_chars")
     print(f"\n{'arm':38} {'n':>2}  " + "  ".join(f"{k:>22}" for k in keys))
     for arm, samples in arms.items():
         cells = []
         for key in keys:
+            if key == "cost_usd":
+                costs = sorted(float(s[key]) for s in samples)
+                cells.append(f"${statistics.median(costs):.3f} [{costs[0]:.3f}-{costs[-1]:.3f}]".rjust(22))
+                continue
             values = sorted(int(s[key]) for s in samples)
             cells.append(f"{int(statistics.median(values))} [{values[0]}-{values[-1]}]".rjust(22))
         print(f"{arm[:38]:38} {len(samples):>2}  " + "  ".join(cells))
@@ -278,6 +426,12 @@ def summarize(rows: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples", type=int, default=4)
+    parser.add_argument(
+        "--turns",
+        type=int,
+        default=2,
+        help="Turns per conversation. Long runs are how history compaction is reached at all.",
+    )
     parser.add_argument("--arms", nargs="+", required=True, help='"baseline" or KEY=VALUE')
     parser.add_argument("--user-id", required=True, help="Seizu user id whose threads to read budgets from")
     parser.add_argument("--out", default="chat-harness-results")
@@ -298,7 +452,7 @@ def main() -> int:
             applied = apply_arm(arm)
             print(f"ARM {arm} applied={applied}", flush=True)
             for index in range(1, args.samples + 1):
-                row = run_sample(arm, index, args.user_id, out_dir)
+                row = run_sample(arm, index, args.user_id, out_dir, turns=args.turns)
                 rows.append(row)
                 with results.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")

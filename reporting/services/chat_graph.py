@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -39,6 +39,7 @@ from reporting.schema.confirmations import ActionConfirmation
 from reporting.services import (
     action_confirmations,
     chat_budget,
+    chat_context,
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
@@ -50,6 +51,7 @@ from reporting.services.chat_budget import (
     budget_controller_from_config,
     estimate_tokens,
     usage_cost_usd,
+    usage_from_message,
 )
 from reporting.services.chat_messages import (
     CONTINUATION_MARKDOC,
@@ -61,6 +63,7 @@ from reporting.services.chat_messages import (
     tag_message,
 )
 from reporting.services.mcp_runtime import ChatBlockReason
+from reporting.services.untrusted import fenced_within
 from reporting.utils.sql import build_database_url
 
 logger = logging.getLogger(__name__)
@@ -84,6 +87,37 @@ _child_detail_event_accumulator: ContextVar[dict[str, list[dict[str, Any]]] | No
 )
 
 # Carries the outer chat agent's currently-disclosed tool names into builtin
+# handlers that spawn their own agent -- today only sandbox__delegate, whose
+# sub-agent otherwise had no notion of disclosure and was handed every chat-safe
+# tool in the deployment. Ambient rather than an argument because the handler is
+# reached through the MCP runtime, which passes only (args, current_user); the
+# same reason the detail-event plumbing above is ambient. Set per turn (and per
+# worker step), so an asyncio.gather task inherits the value of the step that
+# spawned it.
+_current_disclosed_tools: ContextVar[frozenset[str]] = ContextVar("_current_disclosed_tools", default=frozenset())
+
+
+def set_disclosed_tools(names: Iterable[str]) -> None:
+    _current_disclosed_tools.set(frozenset(names))
+
+
+def current_disclosed_tools() -> frozenset[str]:
+    return _current_disclosed_tools.get()
+
+
+# The turn's skill listing, carried the same way and for the same reason: a
+# sandbox sub-agent discovers capability through skills under progressive
+# disclosure, and re-listing them per delegation would break the
+# one-listing-per-turn rule that keeps a turn's store reads bounded.
+_current_available_skills: ContextVar[tuple[Any, ...]] = ContextVar("_current_available_skills", default=())
+
+
+def set_available_skills(skills: Iterable[Any]) -> None:
+    _current_available_skills.set(tuple(skills))
+
+
+def current_available_skills() -> tuple[Any, ...]:
+    return _current_available_skills.get()
 
 
 class ChatState(TypedDict):
@@ -100,6 +134,16 @@ class ChatState(TypedDict):
     iteration: NotRequired[int]  # verify-driven retry cycles consumed
     budget: NotRequired[dict[str, Any]]  # serializable per-turn run budget ledger
     run_errors: NotRequired[list[str]]  # non-fatal orchestration/runtime diagnostics
+    # The conversation's sandbox, suspended between turns and resumed by this id
+    # on the next one, and the ledger of what its turns have already gathered
+    # (including the files sitting in that sandbox). Both are per-thread and
+    # overwrite-reduced: whichever node ran the turn's delegations is the sole
+    # writer. See reporting.services.episodic_memory.
+    sandbox_id: NotRequired[str]
+    session_memory: NotRequired[dict[str, Any]]
+    # Oldest history, condensed, so a long conversation stays inside the model's
+    # window without silently losing what it said. See _compact_history.
+    history_summary: NotRequired[dict[str, Any]]
     # Tool names the conversation has already unlocked under progressive
     # disclosure. ``disclosed_tool_names`` is otherwise a per-turn local, so a
     # turn that ended mid-flow (rate limit, output cap) would lose the tools a
@@ -282,6 +326,43 @@ _HEADLESS_PROMPT_ADDENDUM = (
     "Finish with a concise summary of what you did and found."
 )
 
+# Sits above the session digest wherever a top-level agent is given one. It says
+# what the block is *for*, which is the part that changes behaviour: the digest
+# alone reads as background, and a model treated it as background while planning
+# the same fetches over again.
+SESSION_MEMORY_PREAMBLE = (
+    "Work already done earlier in this conversation follows. The findings are established — do not "
+    "re-derive them — and any files listed are still present in the sandbox this conversation shares. "
+    "When a task needs that data, delegate reading the file rather than fetching it again, and only "
+    "gather what is genuinely missing."
+)
+
+
+def session_memory_message(digest: str) -> HumanMessage:
+    """Carry the session digest as the *last* message, never in the system prompt.
+
+    Prompt caching matches the longest common prefix, so anything that changes
+    between turns invalidates everything after it. The digest grows every turn,
+    and it used to sit in the system prompt -- the very first thing sent --
+    which measured at **zero** cached input on a provider that otherwise
+    returned 98% of it cached for an identical prefix. Putting the one part that
+    always changes at the very end leaves everything before it cacheable, so the
+    uncached remainder is the newest exchange and the digest itself.
+
+    That ordering is the provider-agnostic half of caching: automatic prefix
+    caches (DeepSeek, OpenAI, Gemini) need nothing else, and explicit-breakpoint
+    caches (Anthropic) need a stable prefix before a breakpoint is worth
+    placing. Trailing placement also reads naturally -- established facts
+    immediately before the model answers.
+    """
+    return HumanMessage(
+        content=f"{SESSION_MEMORY_PREAMBLE}\n\n{digest}",
+        id=f"msg_{uuid.uuid4().hex}",
+        # Tagged so cache-breakpoint placement can end the cached prefix just
+        # before it: this is the one part that always differs between turns.
+        additional_kwargs={chat_context.SESSION_MEMORY_KEY: True},
+    )
+
 
 def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
     """Scope a client-supplied thread id to the authenticated user.
@@ -368,6 +449,22 @@ def _strip_output_limit_notice(response: str) -> str:
     return response.replace(_OUTPUT_LIMIT_NOTICE, "").replace(_OUTPUT_LIMIT_SUMMARY_NOTICE, "").rstrip()
 
 
+async def _discard_thread_sandbox(graph: Any, namespaced_id: str) -> None:
+    """Destroy the sandbox a thread suspended, if it still has one.
+
+    Best effort throughout: a thread with no sandbox, an unreadable checkpoint
+    and an already-reaped sandbox are all ordinary, and none of them is a reason
+    to refuse to delete the thread.
+    """
+    try:
+        snapshot = await graph.aget_state({"configurable": {"thread_id": namespaced_id}})
+        sandbox_id = str((getattr(snapshot, "values", None) or {}).get("sandbox_id") or "")
+    except Exception:
+        logger.warning("could not read thread state to discard its sandbox", exc_info=True)
+        return
+    await sandbox_session.discard_sandbox(sandbox_id)
+
+
 async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> None:
     """Permanently delete persisted LangGraph state for a user's chat thread."""
     graph = get_chat_graph()
@@ -375,6 +472,10 @@ async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> N
     if checkpointer is None:
         raise RuntimeError("Chat graph does not expose a checkpointer")
     namespaced_id = namespaced_thread_id(current_user, thread_id)
+    # Before the checkpoint goes: it holds the only record of the thread's
+    # suspended sandbox, which would otherwise sit paused, consuming
+    # provider-side storage, with nothing left that could resume or find it.
+    await _discard_thread_sandbox(graph, namespaced_id)
     async_delete = getattr(checkpointer, "adelete_thread", None)
     if callable(async_delete):
         await async_delete(namespaced_id)
@@ -403,16 +504,28 @@ async def mock_agent_node(state: ChatState, _config: RunnableConfig) -> ChatStat
 
 
 async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig) -> ChatState:
-    """Run the turn, and destroy its sandbox however the turn ends.
+    """Run the turn, then suspend its sandbox.
 
     The session is opened lazily inside the node, so this only has work to do
-    when a delegation actually happened. Without the finally an error path would
-    leave a sandbox running until the provider reaped it on its own timeout.
+    when a delegation actually happened. On the ordinary path the sandbox is
+    paused and its id returned to the next turn, which resumes it and finds the
+    data this turn gathered still on disk. A turn that raised keeps its sandbox
+    if the thread already knows the id and destroys it otherwise -- see
+    ``abandon_sandbox_session``. Without either, an error would leave a sandbox
+    *running* until the provider reaped it.
     """
     try:
-        return await chat_agent_node(state, config)
-    finally:
-        await sandbox_session.close_sandbox_session()
+        update = await chat_agent_node(state, config)
+    except BaseException:
+        await sandbox_session.abandon_sandbox_session()
+        raise
+    teardown = await sandbox_session.close_sandbox_session()
+    if teardown.opened:
+        # Written even when empty -- omitting the key keeps a dead id rather
+        # than clearing it, and the digest then advertises receipts under it.
+        # A turn that opened nothing leaves the stored id alone. SBX-006.
+        update["sandbox_id"] = teardown.suspended_id
+    return update
 
 
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
@@ -425,17 +538,34 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         return await mock_agent_node(state, config)
     # The single-agent path reaches sandbox__delegate too, and its loop is the
     # same shape as an orchestrator step: many tool calls, each spawning a
-    # subagent that would otherwise start cold. One log per turn.
+    # subagent that would otherwise start cold. One log per turn, over a ledger
+    # that spans them, and the previous turn's sandbox resumed under it so the
+    # files that ledger names are still readable.
+    session_ledger = episodic_memory.start_session_ledger(
+        state.get("session_memory"), turn=episodic_memory.turn_number(state["messages"])
+    )
     episodic_memory.start_episode_log()
-    sandbox_session.start_sandbox_session()
+    stored_sandbox_id = state.get("sandbox_id") or ""
+    sandbox_session.start_sandbox_session(
+        resume_sandbox_id=stored_sandbox_id,
+        persist=sandbox_persistence_allowed(config),
+    )
     chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
-    messages = _llm_context_messages(state["messages"])
+    # Before the history trim: how much of it fits is a property of the model.
     model = get_chat_model()
+    history_summary = HistorySummary.from_state(state.get("history_summary"))
+    messages, history_summary = _llm_context_with_summary(state["messages"], model, history_summary)
     writer = get_stream_writer()
     base_system_prompt = build_system_prompt(provider, current_user)
     if _headless_from_config(config):
         base_system_prompt = f"{base_system_prompt}\n\n{_HEADLESS_PROMPT_ADDENDUM}"
+    # What earlier turns already established. The model that decides whether to
+    # delegate needs this as much as the sub-agent does: told only afterwards,
+    # it still plans the re-fetch and the sub-agent merely discovers it was
+    # unnecessary. Carried as a trailing message rather than in the system
+    # prompt -- see session_memory_message.
+    session_digest = episodic_memory.session_digest(session_ledger, sandbox_id=stored_sandbox_id)
 
     # One listing per turn — every consumer below (capability context, skill
     # specs, tool specs) works off this snapshot. No cross-turn cache: each
@@ -449,6 +579,12 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     # resumed/follow-up turn can call them directly (the in-turn disclosure set
     # is otherwise reset each turn — see ChatState.disclosed_tools).
     disclosed_tool_names: set[str] = set(state.get("disclosed_tools") or []) if progressive_disclosure else set()
+    # From the skills already listed above -- no second store read.
+    # No up-front skill-tool disclosure here: this path has no signal for *which*
+    # skills a turn will use, and the union of every enabled skill's declaration
+    # is the catalogue rather than the need -- 1 bound tool (343 tokens) became
+    # 43 (4,666) on a turn that may never render a skill at all. The orchestrated
+    # path has that signal, because the plan names the skill.
     if not progressive_disclosure:
         tools = await _list_chat_tools(current_user)
     elif disclosed_tool_names or _always_disclosed_names:
@@ -457,11 +593,12 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # tools exist so they can appear in the capability context.
         tools = await _list_chat_tools(current_user)
 
-    always_disclosed_tools = [t for t in tools if t.name in _always_disclosed_names] if progressive_disclosure else []
+    available_names = disclosed_tool_names | set(_always_disclosed_names)
+    always_disclosed_tools = [t for t in tools if t.name in available_names] if progressive_disclosure else []
     capability_context = build_capability_context(
         skills,
         tools if not progressive_disclosure else None,
-        always_disclosed_tools=always_disclosed_tools,
+        available_tools=always_disclosed_tools,
     )
     if capability_context:
         base_system_prompt = f"{base_system_prompt}\n\n{capability_context}"
@@ -471,7 +608,18 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     if not progressive_disclosure:
         tool_specs = _mcp_tool_specs(tools)
     else:
-        tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
+        tool_specs = _disclosed_tool_specs(tools, available_names)
+    # Hand the same set to any sub-agent this turn spawns, so the sandbox works
+    # from the conversation's disclosure rather than the whole catalogue. With
+    # disclosure off there is nothing to inherit and the sub-agent keeps the
+    # full set, matching what the outer model itself is given.
+    set_disclosed_tools({spec.name for spec in tool_specs} if progressive_disclosure else ())
+    # With disclosure off the sub-agent searches tools directly and never needs
+    # these; with it on they are its only route to anything unbound.
+    set_available_skills(skills if progressive_disclosure else ())
+
+    if session_digest:
+        messages = [*messages, session_memory_message(session_digest)]
 
     action_count = 0
     action_summaries: list[str] = []
@@ -651,7 +799,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         ]
         messages = _trim_inner_loop_messages(
             messages,
-            max_chars=_budgeted_context_max_chars(config, base_max_chars=settings.CHAT_LLM_CONTEXT_MAX_CHARS),
+            model=model,
+            max_tokens=_budgeted_context_max_tokens(config, base_max_tokens=chat_context.history_token_budget(model)),
         )
         if blocked_results:
             response = _blocked_tool_call_response(blocked_results)
@@ -662,7 +811,8 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 disclosed_tool_names.update(newly_disclosed)
                 if not tools:
                     tools = await _list_chat_tools(current_user)
-                tool_specs = _disclosed_tool_specs(tools, disclosed_tool_names | _always_disclosed_names)
+                available_names |= disclosed_tool_names
+                tool_specs = _disclosed_tool_specs(tools, available_names)
 
     if not response and action_summaries and not response_is_broken:
         synthesis_system_prompt = _combined_system_prompt(
@@ -730,6 +880,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         extra_metadata=_run_metadata(config, state, failed=response_is_broken),
     )
     state_update: ChatState = {"messages": [*_trim_messages(state["messages"], ai_message), ai_message]}
+    # Carry this turn's findings and saved files to the next one. Written even
+    # when nothing was added, so an older serialized form is replaced by the
+    # current one rather than being re-parsed every turn.
+    state_update["session_memory"] = session_ledger.to_state()
+    # Carry the condensed history forward. Without this the boundary would be
+    # recomputed from nothing every turn, which is the prefix churn compaction
+    # exists to avoid.
+    if history_summary.text:
+        state_update["history_summary"] = history_summary.to_state()
     if progressive_disclosure and disclosed_tool_names:
         # Persist the union so a later turn (including one resuming after an
         # interrupted turn) keeps tools this conversation already unlocked.
@@ -1162,7 +1321,7 @@ async def _resume_confirmed_tool_turn(
         f"{summary_note} Do not call additional tools in this resume turn.",
     )
     context = [
-        *_llm_context_messages(state["messages"]),
+        *_llm_context_messages(state["messages"], model),
         HumanMessage(
             content=f"Approved Seizu tool(s) ran with result(s):\n\n{_truncate_text(combined_results, 12000)}",
             id=f"msg_{uuid.uuid4().hex}",
@@ -1289,6 +1448,7 @@ async def _run_llm_tool_turn(
     allow_reserve: bool = False,
     phase: str = "worker",
     max_output_tokens: int | None = None,
+    _context_retry: bool = False,
 ) -> LLMTurnResult:
     """Run one LLM turn, streaming text deltas via *writer* as they arrive.
 
@@ -1308,14 +1468,20 @@ async def _run_llm_tool_turn(
         runnable = bind_tools(tool_schemas)
 
     controller = budget_controller_from_config(config)
-    estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     estimated_output = max_output_tokens if max_output_tokens is not None else settings.CHAT_LLM_MAX_TOKENS
+    # The one place the whole request exists in one scope, and therefore the only
+    # place it can be checked as a whole. Every caller's own cap bounds part of
+    # it; this bounds the request the provider will actually receive.
+    messages = _fit_messages_to_window(
+        model, system_prompt, messages, tool_schemas, max_output_tokens=max(1, estimated_output)
+    )
+    estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     reservation = None
     if controller is not None:
         reservation = await controller.reserve(
             estimated_input_tokens=estimated_input,
             estimated_output_tokens=max(1, estimated_output),
-            estimated_cost_usd=usage_cost_usd(model, estimated_input, max(1, estimated_output)),
+            estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max(1, estimated_output)),
             allow_reserve=allow_reserve,
             phase=phase,
         )
@@ -1331,8 +1497,17 @@ async def _run_llm_tool_turn(
     markup_filter = _ToolMarkupFilter()
     try:
         invocation_kwargs = {"max_tokens": max_output_tokens} if max_output_tokens is not None else {}
+        # Placed here, on the assembled request, for the same reason the window
+        # is checked here: it is the only scope holding the whole thing.
+        cached_system, cached_messages = chat_context.with_cache_breakpoints(model, system_prompt, messages)
+        # Same scope, same reason: what a cache miss will not tell you is which
+        # part of the request moved. Keyed per phase and thread so consecutive
+        # calls of the same kind are what get compared.
+        chat_context.log_cache_divergence(
+            f"{_thread_id_from_config(config)}:{phase}", model, system_prompt, tool_schemas, messages
+        )
         async for chunk in runnable.astream(
-            [SystemMessage(content=system_prompt), *messages],
+            [SystemMessage(content=cached_system), *cached_messages],
             config=config,
             **invocation_kwargs,
         ):
@@ -1367,9 +1542,43 @@ async def _run_llm_tool_turn(
                         writer({"kind": "token", "content": safe})
                         streamed += safe
             merged = chunk if merged is None else merged + chunk
-    except Exception:
+    except Exception as exc:
         if controller is not None and reservation is not None:
             await controller.release(reservation)
+        # A window we sized wrong is recoverable; failing the turn over it is
+        # not. Only before any text has shipped -- a provider rejects an
+        # oversized request up front, so this is the ordinary case, and retrying
+        # after a partial stream would duplicate what the user already saw.
+        if not _context_retry and not streamed and chat_context.is_context_overflow(exc):
+            # Tightened against what was actually sent, not against what we
+            # believed the window to be: an overflow *is* that belief being
+            # wrong, so halving our own allowance can leave the request exactly
+            # as oversized as it already was. Halving the real size always makes
+            # the retry meaningfully smaller.
+            sent_tokens = sum(_message_context_tokens(model, message) for message in messages)
+            tightened = _trim_inner_loop_messages(
+                messages,
+                model=model,
+                max_tokens=max(_MIN_CONTEXT_MAX_TOKENS, sent_tokens // 2),
+            )
+            logger.warning(
+                "context window exceeded at ~%d tokens over %d messages; retrying once with %d messages",
+                sent_tokens,
+                len(messages),
+                len(tightened),
+            )
+            return await _run_llm_tool_turn(
+                model,
+                system_prompt,
+                tightened,
+                tools,
+                config,
+                writer,
+                allow_reserve=allow_reserve,
+                phase=phase,
+                max_output_tokens=max_output_tokens,
+                _context_retry=True,
+            )
         raise
     if stream_text and writer is not None:
         tail = markup_filter.flush()
@@ -1380,14 +1589,19 @@ async def _run_llm_tool_turn(
         writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
 
     merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
-    usage = getattr(merged, "usage_metadata", None)
-    usage_estimated = not isinstance(usage, dict) or not usage.get("total_tokens")
-    input_tokens = int(usage.get("input_tokens", 0)) if isinstance(usage, dict) else 0
-    output_tokens = int(usage.get("output_tokens", 0)) if isinstance(usage, dict) else 0
+    usage = usage_from_message(merged)
+    usage_estimated = not usage.reported
+    input_tokens, output_tokens = usage.input_tokens, usage.output_tokens
     if usage_estimated:
         input_tokens = estimated_input
         output_tokens = estimate_tokens(model, "", [AIMessage(content=merged_text)], [])
-    cost_usd = usage_cost_usd(model, input_tokens, output_tokens)
+    cost_usd = usage_cost_usd(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
+    )
     if controller is not None and reservation is not None:
         await controller.commit(
             reservation,
@@ -1395,6 +1609,8 @@ async def _run_llm_tool_turn(
             output_tokens=output_tokens,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
         )
     tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
     leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
@@ -1618,6 +1834,8 @@ _CONTEXT_DIGEST_HEADER = (
 )
 # Floor on a digest line's share, below which a result is cut into noise.
 _MIN_DIGEST_LINE_CHARS = 200
+# Floor on the digest's own share of a tight cap, in tokens.
+_MIN_DIGEST_TOKENS = 70
 
 
 def _is_context_digest(message: BaseMessage) -> bool:
@@ -1649,7 +1867,13 @@ def _digest_dropped_exchange(ai_message: AIMessage, tool_messages: list[ToolMess
     return lines
 
 
-def _context_digest_message(lines: list[str], *, max_chars: int) -> HumanMessage:
+def _context_digest_message(lines: list[str], *, model: Any, max_tokens: int) -> HumanMessage:
+    # Truncating a line is a character operation, so the token budget is
+    # converted using a ratio measured on these very lines rather than a
+    # constant -- the constant is wrong by a third on structured payloads and
+    # right on prose, and a digest of tool results is mostly the former.
+    joined = "\n".join(lines)
+    max_chars = chat_context.chars_for_tokens(model, joined, max_tokens)
     # Account for the joining newlines so every call keeps a line by construction:
     # truncating all of them beats losing one call's evidence outright, since a
     # missing line reads as "that call never happened".
@@ -1666,8 +1890,8 @@ def _context_digest_message(lines: list[str], *, max_chars: int) -> HumanMessage
     )
 
 
-def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) -> list[BaseMessage]:
-    """Cap the inner-turn message list by total character count, condensing what it sheds.
+def _trim_inner_loop_messages(messages: list[BaseMessage], *, model: Any, max_tokens: int) -> list[BaseMessage]:
+    """Cap the inner-turn message list by token count, condensing what it sheds.
 
     Tool results are bounded per call by ``CHAT_TOOL_RESULT_MAX_BYTES``, but
     nothing else stops the loop from accumulating up to
@@ -1683,18 +1907,18 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
     from the messages themselves — no summarization call, so no added latency,
     cost, or risk of inventing a finding that was never returned.
     """
-    if max_chars <= 0 or len(messages) <= 4:
+    if max_tokens <= 0 or len(messages) <= 4:
         return messages
-    total = sum(_message_context_size(m) for m in messages)
-    if total <= max_chars:
+    total = sum(_message_context_tokens(model, m) for m in messages)
+    if total <= max_tokens:
         return messages
 
     # Reserve room for the digest up front, so re-inserting it cannot push the
     # result back over the cap we were asked to hit.
     # Never let the reserve exceed half the cap: at small caps the per-line floor
     # would otherwise price the digest above the whole budget and trim everything.
-    digest_budget = min(max_chars // 2, max(_MIN_DIGEST_LINE_CHARS, max_chars // 5))
-    target = max(0, max_chars - digest_budget)
+    digest_budget = min(max_tokens // 2, max(_MIN_DIGEST_TOKENS, max_tokens // 5))
+    target = max(0, max_tokens - digest_budget)
 
     preserve_head = isinstance(messages[0], HumanMessage) and not _is_context_digest(messages[0])
     head: list[BaseMessage] = [messages[0]] if preserve_head else []
@@ -1713,7 +1937,7 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
         if sum(1 for message in body if isinstance(message, AIMessage)) <= 1:
             break
         first = body[0]
-        total -= _message_context_size(first)
+        total -= _message_context_tokens(model, first)
         body.pop(0)
         if _is_context_digest(first):
             # Re-absorb an earlier digest so successive trims merge into one
@@ -1725,63 +1949,107 @@ def _trim_inner_loop_messages(messages: list[BaseMessage], *, max_chars: int) ->
         tool_messages: list[ToolMessage] = []
         while body and isinstance(body[0], ToolMessage):
             tool_dropped = body.pop(0)
-            total -= _message_context_size(tool_dropped)
+            total -= _message_context_tokens(model, tool_dropped)
             tool_messages.append(tool_dropped)
         fresh.extend(_digest_dropped_exchange(first, tool_messages))
 
     lines = [*carried, *fresh]
     if not lines:
         return [*head, *body]
-    return [*head, _context_digest_message(lines, max_chars=digest_budget), *body]
+    return [*head, _context_digest_message(lines, model=model, max_tokens=digest_budget), *body]
 
 
-# Rough chars-per-token, used only to relate two caps expressed in different
-# units. Never used to bill the budget — that uses real provider usage.
-_CHARS_PER_TOKEN = 4
 # Never squeeze context below this: past it the model loses the thread of its own
 # turn and the loop stops making progress at all.
-_MIN_CONTEXT_MAX_CHARS = 8_000
+_MIN_CONTEXT_MAX_TOKENS = 2_500
 # Ceiling on the share of the remaining allowance one call may plan to spend, so
 # a single context-heavy call cannot consume everything the run has left.
 _CONTEXT_BUDGET_SHARE = 0.5
 
 
-def _budgeted_context_max_chars(config: RunnableConfig, *, base_max_chars: int) -> int:
+def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
     """Fit the per-call context cap inside what the run can still afford.
 
-    ``CHAT_LLM_CONTEXT_MAX_CHARS`` bounds one call and ``CHAT_RUN_TOKEN_BUDGET``
-    bounds the whole run, and nothing related them: at the defaults, four calls
-    at the per-call cap exhaust the entire run budget. A long tool loop therefore
-    ran at full context until it hit a wall mid-turn, rather than tightening as
-    it went. Sizing each call against the remaining allowance makes the loop
-    degrade smoothly, and pairs with the digest in ``_trim_inner_loop_messages``
-    so tightening condenses evidence instead of discarding it.
+    Three limits meet here and they answer different questions: the model's
+    window says what will *load*, ``CHAT_LLM_CONTEXT_MAX_TOKENS`` says how much
+    history is useful, and ``CHAT_RUN_TOKEN_BUDGET`` says what the run can pay
+    for. Nothing related the last two: at the defaults, four calls at the
+    per-call cap exhausted the entire run budget, so a long tool loop ran at full
+    context until it hit a wall mid-turn rather than tightening as it went.
+    Sizing each call against the remaining allowance makes the loop degrade
+    smoothly, and pairs with the digest in ``_trim_inner_loop_messages`` so
+    tightening condenses evidence instead of discarding it.
     """
     controller = budget_controller_from_config(config)
     if controller is None or not controller.enabled:
-        return base_max_chars
+        return base_max_tokens
     remaining = controller.remaining_normal_tokens
     if remaining is None:
-        return base_max_chars
-    affordable = int(remaining * _CONTEXT_BUDGET_SHARE) * _CHARS_PER_TOKEN
-    return max(_MIN_CONTEXT_MAX_CHARS, min(base_max_chars, affordable))
+        return base_max_tokens
+    affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
+    return max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
 
 
-def _message_context_size(message: BaseMessage) -> int:
-    size = len(message_text(getattr(message, "content", "")))
+def _message_context_text(message: BaseMessage) -> str:
+    """Everything about a message that occupies context, as one string.
+
+    Tool calls and tool-call ids are part of what is sent to the provider, so a
+    size that counted only the text under-reported exactly the messages a tool
+    loop accumulates most of.
+    """
+    parts = [message_text(getattr(message, "content", ""))]
     if isinstance(message, AIMessage):
         if message.tool_calls:
-            size += len(_json_dump(message.tool_calls))
+            parts.append(_json_dump(message.tool_calls))
         if message.invalid_tool_calls:
-            size += len(_json_dump(message.invalid_tool_calls))
+            parts.append(_json_dump(message.invalid_tool_calls))
         raw_tool_calls = message.additional_kwargs.get("tool_calls")
         if raw_tool_calls:
-            size += len(_json_dump(raw_tool_calls))
+            parts.append(_json_dump(raw_tool_calls))
     if isinstance(message, ToolMessage):
-        size += len(message.tool_call_id)
+        parts.append(message.tool_call_id)
         if message.name:
-            size += len(message.name)
-    return size
+            parts.append(message.name)
+    return "\n".join(part for part in parts if part)
+
+
+def _fit_messages_to_window(
+    model: Any,
+    system_prompt: str,
+    messages: list[BaseMessage],
+    tool_schemas: list[dict[str, Any]],
+    *,
+    max_output_tokens: int,
+) -> list[BaseMessage]:
+    """Trim the conversation so the *whole* request fits the model's window.
+
+    The per-call caps elsewhere are about cost and usefulness and bound only the
+    conversation. This is the hard constraint: window minus the system prompt,
+    the tool schemas, the reply and a safety margin is what the messages may
+    occupy, and anything over it is condensed rather than dropped.
+    """
+    allowance = chat_context.message_allowance_tokens(
+        model,
+        system_prompt=system_prompt,
+        tool_schemas=tool_schemas,
+        max_output_tokens=max_output_tokens,
+        message_count=len(messages),
+    )
+    if allowance <= 0:
+        # The fixed parts alone do not fit. Trimming messages cannot fix that,
+        # and emptying them guarantees a useless call, so leave it to the
+        # provider and the overflow retry above.
+        logger.warning(
+            "system prompt and tools alone exceed the context window for %s", chat_context.model_name_of(model)
+        )
+        return messages
+    if sum(_message_context_tokens(model, message) for message in messages) <= allowance:
+        return messages
+    return _trim_inner_loop_messages(messages, model=model, max_tokens=allowance)
+
+
+def _message_context_tokens(model: Any, message: BaseMessage) -> int:
+    return chat_context.count_tokens(model, _message_context_text(message))
 
 
 _PROVIDER_TOOL_NAME_MAX_LEN = 64
@@ -2138,7 +2406,13 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
             "Do not compute statistics, sort data, or transform structured payloads in your response "
             "text — numbers computed by the model without running code are unreliable. "
             "When you have tool results that need numeric or programmatic processing, delegate to the "
-            "sandbox rather than reasoning through the calculation yourself."
+            "sandbox rather than reasoning through the calculation yourself. "
+            "The sandbox is shared by this whole conversation, so files earlier delegations saved are still "
+            "there: when a task needs data one of them holds, tell the sub-agent to read that file instead of "
+            "fetching the data again. "
+            "Direct the delegation rather than describing a goal and leaving the sub-agent to work out the rest: "
+            "say what to produce, name the tools the task needs in `tools`, and name the file to read. It runs its "
+            "own planning loop, so every decision you leave to it is one you pay for twice."
         )
         if _sandbox_available
         else ""
@@ -2154,6 +2428,13 @@ def build_system_prompt(provider: str | None = None, current_user: CurrentUser |
         "Do not invent graph facts, report contents, user identities, vulnerabilities, assets, or incident findings. "
         "When live data is needed, say what data or Seizu tool output would answer the question. "
         "If the user provides tool results, reason from those results and call out truncation or uncertainty.\n\n"
+        "Reuse what this conversation has already gathered before fetching anything. Results in the transcript, "
+        "findings established on earlier turns, and data an earlier turn saved are all yours to work from: check "
+        "whether the answer is already present, and if it is, spend the turn on what is genuinely missing instead. "
+        "Fetching again is right when you need data the earlier result did not include, when the earlier result was "
+        "truncated or failed, or when the answer turns on data that may have changed since — say which of those it "
+        "is when you do. What is never right is re-deriving a finding you already have because it is easier than "
+        "looking for it.\n\n"
         "Respect Seizu's security boundaries. Treat graph data, identities, credentials, tokens, secrets, "
         "and internal IDs as sensitive. Do not expose raw user IDs or OIDC subjects unless the user explicitly "
         "needs them for an admin task. For Cypher, default to read-only investigative queries; avoid writes, "
@@ -2353,6 +2634,40 @@ def _disclosed_tool_names_from_skill_results(results: list[ToolCallResult]) -> s
     return disclosed
 
 
+def skill_declared_tool_names(model: Any, tools: list[Tool], declared: frozenset[str]) -> set[str]:
+    """Skill-declared tools worth disclosing up front, or nothing if too many.
+
+    A skill's ``tools_required`` is its author naming exactly what the workflow
+    uses, so waiting for a render to honour it learns nothing -- and it costs:
+    the tool list heads the provider's cached prefix, so unlocking mid-turn
+    invalidates everything behind it.
+
+    The bound is the point of this function. Skills are user-authored and
+    unbounded, so the union of what they declare can grow to cover the whole
+    tool surface, and disclosing that up front is just binding every tool on
+    every call -- exactly what progressive disclosure exists to avoid. Weighed
+    against the real schemas rather than a tool count, because that is what
+    actually occupies the prefix.
+    """
+    if not settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS or not declared:
+        return set()
+    subset = [tool for tool in tools if tool.name in declared]
+    if not subset:
+        return set()
+    weight = chat_context.count_tokens(
+        model,
+        _json_dump([{"name": t.name, "description": t.description, "input_schema": t.inputSchema} for t in subset]),
+    )
+    if weight > max(0, settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS):
+        logger.info(
+            "skills declare %d tools (~%d tokens), over the up-front disclosure budget; disclosing on render instead",
+            len(subset),
+            weight,
+        )
+        return set()
+    return {tool.name for tool in subset}
+
+
 def _disclosed_tool_specs(tools: list[Tool], disclosed: set[str]) -> list[ChatToolSpec]:
     """Tool specs for the subset of ``tools`` already disclosed to the model."""
     return _mcp_tool_specs([tool for tool in tools if tool.name in disclosed])
@@ -2487,7 +2802,7 @@ async def _invoke_structured_output(
                 reservation = await controller.reserve(
                     estimated_input_tokens=estimated_input,
                     estimated_output_tokens=max_output_tokens,
-                    estimated_cost_usd=usage_cost_usd(model, estimated_input, max_output_tokens),
+                    estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max_output_tokens),
                     allow_reserve=allow_reserve,
                     phase=phase,
                 )
@@ -2499,7 +2814,10 @@ async def _invoke_structured_output(
                     reservation,
                     input_tokens=estimated_input,
                     output_tokens=output_tokens,
-                    cost_usd=usage_cost_usd(model, estimated_input, output_tokens),
+                    # No usage reported on this path at all, so the cost is a
+                    # projection like the reservation was -- at the full rate it
+                    # would overstate every structured call of a cached run.
+                    cost_usd=controller.project_cost_usd(model, estimated_input, output_tokens),
                     usage_estimated=True,
                 )
             _structured_output_native_ok[id(model)] = True
@@ -2789,7 +3107,7 @@ def _json_dump(value: Any) -> str:
 def build_capability_context(
     skills: list[Prompt],
     tools: list[Tool] | None,
-    always_disclosed_tools: list[Tool] | None = None,
+    available_tools: list[Tool] | None = None,
 ) -> str:
     """Build the capability section of the system prompt from already-listed data.
 
@@ -2800,15 +3118,15 @@ def build_capability_context(
     (skills + always-disclosed tools only).
     """
     if tools is None:
-        return _progressive_capability_context(skills, always_disclosed_tools or [])
+        return _progressive_capability_context(skills, available_tools or [])
     return _full_capability_context(skills, tools)
 
 
 def _progressive_capability_context(
     skills: list[Prompt],
-    always_disclosed_tools: list[Tool] | None = None,
+    available_tools: list[Tool] | None = None,
 ) -> str:
-    if not skills and not always_disclosed_tools:
+    if not skills and not available_tools:
         return ""
     header = (
         "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
@@ -2816,15 +3134,18 @@ def _progressive_capability_context(
         "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
         "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
         "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill, by prior "
-        "conversation context, or listed below as always available. Skill descriptions can include trigger phrases; "
+        "conversation context, or listed below as available now. Skill descriptions can include trigger phrases; "
         "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
         "trigger it."
     )
     sections: list[str] = [header]
     if skills:
         sections.append(f"Available skills:\n{_format_skills(skills)}")
-    if always_disclosed_tools:
-        sections.append(f"Always-available tools:\n{_format_tools(always_disclosed_tools)}")
+    if available_tools:
+        # "available now" rather than "always available": the list is the
+        # always-on tools plus anything a skill unlocked earlier in this
+        # conversation, and both are callable without rendering a skill again.
+        sections.append(f"Tools available now:\n{_format_tools(available_tools)}")
     return "\n\n".join(sections)
 
 
@@ -2927,12 +3248,29 @@ def _bypass_confirmations_from_config(config: RunnableConfig) -> bool:
     return configurable.get("bypass_confirmations") is True
 
 
+def _thread_id_from_config(config: RunnableConfig) -> str:
+    configurable = config.get("configurable")
+    return str(configurable.get("thread_id") or "") if isinstance(configurable, dict) else ""
+
+
 def _headless_from_config(config: RunnableConfig) -> bool:
     """Whether this turn is an automated run with no human present."""
     configurable = config.get("configurable")
     if not isinstance(configurable, dict):
         return False
     return configurable.get("headless") is True
+
+
+def sandbox_persistence_allowed(config: RunnableConfig) -> bool:
+    """Whether this turn's sandbox should be kept for the next one.
+
+    Never for a headless run. Persisting pays off when a later turn arrives on
+    the same thread, and a scheduled chat gets a *new* thread per run — so every
+    run would suspend a sandbox that nothing can ever resume, one per run,
+    forever. The setting stays the switch for interactive chat; this is a
+    property of the caller, not of the deployment.
+    """
+    return settings.SANDBOX_SESSION_PERSIST and not _headless_from_config(config)
 
 
 def _resume_confirmation_id(messages: list[Any]) -> str | None:
@@ -2996,7 +3334,181 @@ def _last_user_request(messages: list[Any]) -> str:
     return ""
 
 
-def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
+_HISTORY_SUMMARY_KEY = "seizu_history_summary"
+# Share of the history budget the condensed block may occupy. It has to be
+# reserved rather than competed for: a summary as large as the budget leaves no
+# room for the history it summarizes, and every turn recompacts.
+_SUMMARY_BUDGET_SHARE = 0.25
+# One line per dropped turn: enough to say what was asked and answered.
+_SUMMARY_LINE_MAX_CHARS = 220
+
+
+@dataclass(frozen=True)
+class HistorySummary:
+    """The oldest turns of a conversation, condensed, and how far it reaches.
+
+    ``covers_through_id`` is the id of the last message it accounts for, so the
+    boundary survives a history whose filtering changed underneath it. A count
+    alone would silently shift.
+    """
+
+    text: str = ""
+    covers_through_id: str = ""
+
+    def to_state(self) -> dict[str, Any]:
+        return {"text": self.text, "covers_through_id": self.covers_through_id}
+
+    @classmethod
+    def from_state(cls, value: Any) -> "HistorySummary":
+        if not isinstance(value, dict):
+            return cls()
+        return cls(text=str(value.get("text") or ""), covers_through_id=str(value.get("covers_through_id") or ""))
+
+
+def _is_history_summary(message: Any) -> bool:
+    kwargs = getattr(message, "additional_kwargs", None)
+    return bool(isinstance(kwargs, dict) and kwargs.get(_HISTORY_SUMMARY_KEY))
+
+
+def _summary_message(model: Any, summary: HistorySummary, budget_tokens: int) -> HumanMessage | None:
+    """The condensed transcript, fenced as untrusted data.
+
+    Compaction flattens assistant turns into a *user* message, and an assistant
+    turn carries whatever graph and tool output it was reporting on. Left
+    unfenced, that promotes provider-controlled text into the role the model
+    treats as instructions -- and it survives every later turn, because the
+    block is deliberately stable. A sentence of prose asking the model not to
+    obey it is not the boundary this repository uses; ``fenced_within`` states
+    the boundary and escapes the content so the block cannot be closed early
+    from inside.
+    """
+    fenced = fenced_within(summary.text, chat_context.chars_for_tokens(model, summary.text, budget_tokens))
+    if not fenced:
+        # The reserve cannot even hold the boundary statement. A header over an
+        # empty fence says nothing and still costs tokens, and unfenced content
+        # is not an option -- so emit no block at all and let the tail stand.
+        return None
+    return HumanMessage(
+        content="Earlier in this conversation, condensed because it no longer fits.\n\n" + fenced,
+        id=f"msg_{uuid.uuid4().hex}",
+        additional_kwargs={_HISTORY_SUMMARY_KEY: True},
+    )
+
+
+def _summarize_dropped(messages: list[BaseMessage]) -> str:
+    """Condense dropped turns deterministically -- never with a model call.
+
+    Determinism is the whole design here, not thrift. A model-written summary
+    differs between runs, so re-deriving it would rewrite the prefix and cost the
+    provider's cache for the entire conversation; the same dropped messages must
+    always produce the same bytes. It also cannot invent something the
+    conversation never said, which a summarizing call can.
+    """
+    lines: list[str] = []
+    for message in messages:
+        text = message_text(getattr(message, "content", "")).strip()
+        if not text:
+            continue
+        speaker = "User" if isinstance(message, HumanMessage) else "Assistant"
+        lines.append(f"{speaker}: {_truncate_text(text, _SUMMARY_LINE_MAX_CHARS)}")
+    return "\n".join(lines)
+
+
+def _compact_history(
+    model: Any, context: list[BaseMessage], summary: HistorySummary, budget: int
+) -> tuple[list[BaseMessage], HistorySummary]:
+    """Fit the conversation in ``budget`` by condensing its oldest turns.
+
+    Truncation -- what this replaces -- dropped the oldest turns outright, so a
+    long conversation quietly forgot what it had said, and it moved the boundary
+    on *every* turn, which is the worst possible shape for a prompt cache: the
+    prefix changed each time.
+
+    The condensed block is itself bounded, so this is not unlimited memory: as it
+    fills, the oldest lines are shed and the most recent of the dropped turns are
+    what remain.
+
+    Two properties make this cheaper than what it replaces rather than dearer.
+    It compacts in **chunks**: when the tail no longer fits it is cut back to
+    ``CHAT_LLM_HISTORY_COMPACTION_TARGET`` of the budget, so the summary then
+    stays byte-identical for the many turns it takes to refill, and each of those
+    turns is a clean append. And the summary is deterministic, so the same
+    coverage always renders the same bytes.
+    """
+    if budget <= 0 or not context:
+        return context, summary
+
+    ids = [str(getattr(message, "id", "") or "") for message in context]
+    # Only when there *is* a boundary: an empty id matches every message that
+    # carries none, which silently resumed a fresh conversation from its second
+    # message. A boundary that has fallen out of the window resolves to 0 too --
+    # the summary text still describes turns that happened, and the tail is
+    # simply measured from the start.
+    covered = (
+        ids.index(summary.covers_through_id) + 1
+        if summary.covers_through_id and summary.covers_through_id in ids
+        else 0
+    )
+
+    def tail_tokens(start: int) -> int:
+        return sum(chat_context.count_tokens(model, message_text(m.content)) for m in context[start:])
+
+    reserve = min(max(0, settings.CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS), int(budget * _SUMMARY_BUDGET_SHARE))
+    summary_tokens = chat_context.count_tokens(model, summary.text)
+    if summary_tokens + tail_tokens(covered) <= budget:
+        block = _summary_message(model, summary, reserve) if summary.text else None
+        return ([block] if block else []) + context[covered:], summary
+
+    # The summary has its own share of the budget, and the tail is cut back to a
+    # fraction of what is left. Both halves matter: without a reserve the summary
+    # competes with the history it describes, and once it grew past the budget
+    # every turn recompacted -- reintroducing the per-turn rewrite this exists to
+    # prevent. Without cutting the tail back *past* its trigger, the next turn
+    # would compact again for want of room to grow.
+    tail_target = int((budget - reserve) * min(max(settings.CHAT_LLM_HISTORY_COMPACTION_TARGET, 0.1), 0.9))
+    boundary = covered
+    while boundary < len(context) - 1 and tail_tokens(boundary) > tail_target:
+        boundary += 1
+    newly_dropped = context[covered:boundary]
+    text = "\n".join(part for part in (summary.text, _summarize_dropped(newly_dropped)) if part)
+
+    # Bound the summary itself: it grows with the conversation, and something has
+    # to stop it. Shedding the oldest lines is the one deeper rewrite this design
+    # accepts, and the chunking makes it rare.
+    lines = text.split("\n")
+    while len(lines) > 1 and chat_context.count_tokens(model, "\n".join(lines)) > reserve:
+        lines.pop(0)
+    text = "\n".join(lines)
+
+    updated = HistorySummary(text=text, covers_through_id=ids[boundary - 1] if boundary else "")
+    block = _summary_message(model, updated, reserve) if text else None
+    return ([block] if block else []) + context[boundary:], updated
+
+
+def _llm_context_messages(
+    messages: list[Any], model: Any = None, summary: HistorySummary | None = None
+) -> list[BaseMessage]:
+    """History alone, for callers with nowhere to persist a moved boundary."""
+    return _llm_context_with_summary(messages, model, summary or HistorySummary())[0]
+
+
+def _llm_context_with_summary(
+    messages: list[Any], model: Any, summary: HistorySummary
+) -> tuple[list[BaseMessage], HistorySummary]:
+    """Prior turns of the conversation, bounded to what this model will take.
+
+    The bound is ``chat_context.history_token_budget``: the smaller of what is
+    configured and the share of the model's own input window history may
+    occupy. It used to be a fixed character count that no model was consulted
+    about -- ~40,000 tokens once measured, which overflows a 32k window on
+    history alone and uses 4% of a million-token one.
+
+    The oldest turns are *condensed* rather than dropped -- see
+    ``_compact_history`` -- so what a long conversation said survives in some
+    form instead of vanishing, and the boundary moves in chunks rather than on
+    every turn, which is what keeps the provider's cached prefix stable between
+    compactions.
+    """
     filtered = drop_tagged(messages, MessageTag.EPHEMERAL, MessageTag.BROKEN)
     context: list[BaseMessage] = []
     for message in filtered:
@@ -3009,19 +3521,24 @@ def _llm_context_messages(messages: list[Any]) -> list[BaseMessage]:
     if max_messages > 0:
         context = context[-max_messages:]
 
-    max_chars = settings.CHAT_LLM_CONTEXT_MAX_CHARS
-    if max_chars <= 0:
-        return context
+    max_tokens = chat_context.history_token_budget(model)
+    if max_tokens <= 0:
+        return context, summary
+    if settings.CHAT_LLM_HISTORY_COMPACTION:
+        return _compact_history(model, context, summary, max_tokens)
 
     retained: list[BaseMessage] = []
-    total_chars = 0
+    total_tokens = 0
     for message in reversed(context):
-        text_len = len(message_text(message.content))
-        if retained and total_chars + text_len > max_chars:
+        tokens = chat_context.count_tokens(model, message_text(message.content))
+        # Always keep the most recent turn, however large: a call with no
+        # conversation at all cannot answer a follow-up, and the alternative to
+        # an oversized last turn is not a smaller one, it is none.
+        if retained and total_tokens + tokens > max_tokens:
             break
         retained.append(message)
-        total_chars += text_len
-    return list(reversed(retained))
+        total_tokens += tokens
+    return list(reversed(retained)), summary
 
 
 def _is_broken_ai_message(message: AIMessage) -> bool:

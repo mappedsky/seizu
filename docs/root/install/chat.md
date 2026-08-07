@@ -60,6 +60,138 @@ For multi-step requests, chat can route a turn through a plan → dispatch → v
 
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
+### Fitting the model's context window
+
+Context caps are **tokens**, counted with the provider's own tokenizer, and the
+model's window is read from litellm's model database rather than configured.
+
+The window is a **ceiling, not a target**. `CHAT_LLM_CONTEXT_MAX_TOKENS` remains
+the "how much history is useful and affordable" knob and the window only clamps
+it down, so pointing Seizu at a large-context model does not silently multiply
+the cost of every call:
+
+| model | window | history budget |
+|---|---|---|
+| `deepseek/deepseek-v4-pro` | 1,000,000 | 40,000 (configured cap) |
+| `anthropic/claude-sonnet-4-5` | 200,000 | 40,000 (configured cap) |
+| `deepseek/deepseek-chat` | 131,072 | 40,000 (configured cap) |
+| unknown / self-hosted | 32,768 (assumed) | 16,384 (clamped by share) |
+
+**The whole request is budgeted, not just history.** Before each call the
+conversation is trimmed to `window − system prompt − tool schemas − reply −
+safety margin`, covering every LLM call: the chat loop, orchestrator workers,
+synthesis and continuations alike. `CHAT_LLM_CONTEXT_SAFETY_MARGIN` (5%) plus a
+per-message framing allowance covers tokens we cannot see — providers frame each
+message, and a tokenizer resolved by name can differ from the one the endpoint
+runs. If a provider rejects a call anyway, the turn is retried once with a
+halved conversation; a retry is skipped once text has streamed.
+
+**Long conversations are compacted, not truncated.** When history no longer
+fits, the oldest turns are condensed into a single block rather than dropped.
+The block is deterministic (never a model call) and is rebuilt in chunks, so it
+stays byte-identical for many turns at a stretch — which is what keeps a long
+conversation cacheable. Simulated over 40 turns against a 4,000-token budget:
+5 compactions, request bounded 2,421–3,348 tokens.
+
+The block is bounded by `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` and by a reserved
+share of the history budget, so this is **not unlimited memory**: as it fills,
+the oldest lines are shed. Set `CHAT_LLM_HISTORY_COMPACTION=false` to go back to
+dropping the oldest turns.
+
+```{note}
+Why tokens rather than characters, why the retry halves what was *sent*, why the
+block is deterministic and reserved, and the measurements behind each — see
+[CTX-001 through CTX-003](../dev/decisions/chat-context.md).
+```
+
+### Prompt caching and cost
+
+An agent loop re-sends a growing prefix on every call, and providers serve most
+of it from their prompt cache at a fraction of the input price. The ledger reads
+that accounting back out of the response (`input_token_details.cache_read` /
+`cache_creation`) and prices each portion at its own rate — a measured DeepSeek
+call re-sending a 4,016-token prefix reported 3,968 as cache reads, making the
+naive price **21.7× overstated**.
+
+Two things make Seizu's requests cacheable, and both are automatic:
+
+- **Volatile content goes last.** Prompt caching matches the longest common
+  *prefix*, so the session digest is carried as the final message rather than in
+  the system prompt. This is the provider-agnostic half — automatic prefix
+  caches (DeepSeek, OpenAI, Gemini) need nothing else.
+- **Explicit breakpoints** for Anthropic, which caches nothing without them.
+  Seizu marks up to three blocks with `cache_control`: the system prompt (tool
+  schemas are ordered ahead of it, so one mark covers both), the message before
+  the session digest, and the last message. Providers with automatic caching are
+  left untouched. A system prompt below `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` is
+  left unmarked. Set `CHAT_LLM_PROMPT_CACHE_ENABLED=false` to disable.
+
+Measured on a live two-turn Anthropic conversation: turn 1 writes ~11,000 tokens
+and reads none (cold; writes carry a 1.25× premium); turn 2 reads 16,467 — 56%
+of its input — and writes 1,801.
+
+Two consequences worth knowing when reading the ledger:
+
+- **Reservations use the uncached price**, because a cache hit is never
+  guaranteed. Committed cost stays exact, so the ledger self-corrects the moment
+  a call returns.
+- **Tokens are counted whole.** `CHAT_RUN_TOKEN_BUDGET` counts a cached token
+  like any other — it still occupies the context window. Only the price
+  differs. `cache_read_tokens` appears in the run ledger and per phase.
+
+```{note}
+The measurements behind the ordering and the breakpoints, and why reservations
+are not discounted by the observed hit rate, are
+[CTX-004, CTX-005 and CTX-008](../dev/decisions/chat-context.md).
+```
+
+### Diagnosing a cache miss
+
+`usage.cache_read_input_tokens` tells you the cache missed; it never tells you
+*why*. Set `CHAT_LLM_CACHE_DIAGNOSTICS=true` and each LLM call is fingerprinted
+— model, system prompt, tools, and each message, as hashes — and compared with
+the previous call of the same kind. When the prefix moves, the log names the
+component and estimates the tokens behind it:
+
+```
+cache diagnostic [user:…:thread:…:worker:s1]: tools_changed, ~4000 tokens behind the divergence
+```
+
+The answer is always one of `model_changed`, `system_changed`, `tools_changed`,
+`messages_changed`, or `messages_truncated` (history rewritten rather than
+appended to). Only the earliest divergence is reported; later ones hide behind
+it. Fingerprints are hashes only — never prompt content — bounded in number, and
+process-local.
+
+**Leave it off in production:** it token-counts every component of every call.
+Why this exists rather than Anthropic's own beta, and how comparisons are
+scoped, is [CTX-007](../dev/decisions/chat-context.md).
+
+### Disclosing what skills declare
+
+A skill's `tools_required` is its author stating exactly which tools the
+workflow uses, so those tools are disclosed from the start of a step rather than
+when the skill renders — a tool list that grows mid-turn invalidates the cached
+prefix behind it.
+
+The disclosure is **scoped** to the skills a step names (`required_action` /
+`suggested_tools`) rather than to every enabled skill, and **bounded** by
+`CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` of tool schema, above which tools are
+disclosed on render as before. The bound is in schema tokens rather than tool
+count, since that is what occupies the prefix. The single-agent path has no
+signal for which skills a turn will use, so it always discloses on render.
+
+Declarations ride on the skill listing the turn already makes, so this adds no
+store read. Names of tools that no longer exist, or that the user cannot reach,
+drop out — the live listing is the authority. Set
+`CHAT_LLM_DISCLOSE_SKILL_TOOLS=false` to disclose only on render.
+
+```{note}
+The measured cost of getting this wrong — a per-step system prompt, and a
+catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
+[CTX-006](../dev/decisions/chat-context.md).
+```
+
 ## Configuration
 
 ### Core
@@ -81,13 +213,25 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_LLM_SYSTEM_PROMPT` | `""` | Full system prompt override. Empty uses Seizu's built-in security-dashboard prompt. |
-| `CHAT_LLM_PROGRESSIVE_DISCLOSURE` | `true` | Show the model skills first and let rendered skills disclose which tools to use; `false` presents all chat-safe tools and skills up front. |
+| `CHAT_LLM_PROGRESSIVE_DISCLOSURE` | `true` | Show the model skills first and let rendered skills disclose which tools to use; `false` presents all chat-safe tools and skills up front. Disclosure decides what the model is *shown* — RBAC decides what it may call — so it carries across turns, the planner sees what earlier turns unlocked, and a tool a plan explicitly requires is disclosed rather than refused. |
 | `CHAT_LLM_MAX_AUTO_ACTIONS` | `12` | Maximum tool/skill calls the agent executes in one assistant turn. |
 | `CHAT_LLM_MAX_PARALLEL_TOOL_CALLS` | `4` | Maximum tool calls run concurrently in one batch. |
 | `CHAT_LLM_MAX_CONTINUATIONS` | `2` | Auto-continuation attempts when a reply is cut off by the token limit; `0` disables (leaving the manual **Continue response** button). |
 | `CHAT_LLM_MAX_RESPONSE_CHARS` | `60000` | Hard ceiling on a stitched auto-continued response; `0` disables. |
 | `CHAT_LLM_CONTEXT_MAX_MESSAGES` | `80` | Maximum prior messages sent to the LLM (checkpoints may retain more for UI history). |
-| `CHAT_LLM_CONTEXT_MAX_CHARS` | `120000` | Maximum prior-message characters sent to the LLM. |
+| `CHAT_LLM_CONTEXT_MAX_TOKENS` | `40000` | Maximum prior-conversation **tokens** sent to the LLM, counted with the provider's tokenizer. `0` means "whatever the window allows". See [Fitting the model's context window](#fitting-the-models-context-window). |
+| `CHAT_LLM_CONTEXT_WINDOW_SHARE` | `0.5` | Share of the model's input window history may occupy; the rest is for the system prompt, tool schemas, this turn's tool results and the reply. The effective budget is the smaller of this and `CHAT_LLM_CONTEXT_MAX_TOKENS`. |
+| `CHAT_LLM_CONTEXT_WINDOW_TOKENS` | `0` | Override the model's input window instead of reading it from litellm's model database. `0` derives it. |
+| `CHAT_LLM_CONTEXT_WINDOW_FALLBACK_TOKENS` | `32768` | Window assumed for a model litellm cannot identify (typically self-hosted). Small on purpose. |
+| `CHAT_LLM_CONTEXT_SAFETY_MARGIN` | `0.05` | Fraction of the window held back when sizing a call, covering provider message framing and tokenizer differences we cannot observe. |
+| `CHAT_LLM_PROMPT_CACHE_ENABLED` | `true` | Emit explicit `cache_control` breakpoints for providers that need them (Anthropic). Providers with automatic prefix caching are unaffected. |
+| `CHAT_LLM_PROMPT_CACHE_MIN_TOKENS` | `1024` | Shortest system prompt worth marking; below this the provider will not cache the prefix. |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS` | `true` | Disclose the tools declared by the skills a plan step names, from the start of the step, instead of only once the skill renders. |
+| `CHAT_LLM_HISTORY_COMPACTION` | `true` | Condense the oldest turns of a long conversation instead of dropping them. |
+| `CHAT_LLM_HISTORY_COMPACTION_TARGET` | `0.5` | How far back a compaction cuts, as a fraction of the space available to history. Lower compacts less often and keeps less; at 1.0 it would compact almost every turn. |
+| `CHAT_LLM_HISTORY_SUMMARY_MAX_TOKENS` | `1500` | Ceiling on the condensed block, also capped at a quarter of the history budget. |
+| `CHAT_LLM_CACHE_DIAGNOSTICS` | `false` | Log which request component changed since the previous call of the same kind. A debugging aid; see [Diagnosing a cache miss](#diagnosing-a-cache-miss). |
+| `CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS` | `6000` | Skip that up-front disclosure when the declared tools' schemas exceed this, so a skill declaring a great many tools does not turn into binding them all on every call. |
 
 ### Orchestrator
 
@@ -105,12 +249,15 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_RUN_TOKEN_BUDGET` | `400000` | Per-run token budget; `0` disables this dimension. Includes sandbox sub-agent spend, which is typically 70-85% of a delegating turn — lower it if the sandbox is disabled or rarely used. |
-| `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. |
+| `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. Cache-aware: input the provider served from its prompt cache is priced at the cache rate, and a reservation is projected using the hit rate the run has actually observed. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
 | `CHAT_EPISODIC_RECALL_MAX_CHARS` | `4000` | Results carried from earlier sandbox delegations into the next one's prompt, so each fresh sub-agent does not re-derive what the last one found; `0` disables. |
 | `CHAT_EPISODIC_MAX_ENTRIES` | `20` | Delegation results retained before the oldest are shed. |
+| `CHAT_SESSION_MEMORY_MAX_ENTRIES` | `30` | The same carry one scope out: sub-agent results kept across the *turns* of a conversation, so a follow-up turn does not re-run the previous turn's work. Stored in the thread's checkpoint. |
+| `CHAT_SESSION_MEMORY_MAX_RECEIPTS` | `40` | Files earlier turns left in the (persistent) sandbox that later turns are told about, so they read the data instead of fetching it again. See [Sandbox delegation](sandbox.md). |
+| `CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS` | `2000` | Budget for that material in the *top-level* agent's prompt (planner, worker, single-agent loop), which is where a re-fetch would otherwise be planned; `0` disables the digest without disabling the carry. |
 | `CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN` | `12.0` | Floor on a step's token ceiling, as a multiple of the planner's per-step estimate. The ceiling is normally a share of what the run has left. |
 | `CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE` | `1.0` | How far past its fair share a step may go before being stopped rather than only degraded and asked to converge. `1.0` makes the share a hard cut. |
 | `CHAT_LLM_PLANNER_MODEL` | `""` | Optional planner model override; empty inherits `CHAT_LLM_MODEL`. |
