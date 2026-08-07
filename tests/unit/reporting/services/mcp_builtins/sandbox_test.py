@@ -747,6 +747,68 @@ async def test_with_no_skills_the_subagent_gets_no_discovery_tools_at_all() -> N
     assert {t.name for t in tools} == {"graph__query"}
 
 
+async def test_the_prompt_never_points_at_a_tool_the_delegation_lacks() -> None:
+    """With an emptied SANDBOX_CORE_TOOLS there may be no graph tool at all.
+
+    Naming graph__query anyway sends the sub-agent after something it was never
+    given -- a failed call at best, an invented number at worst -- and it
+    contradicts the strict-disclosure configuration the setting exists to offer.
+    """
+    # Empty core, no skills: nothing bound but the sandbox execution tools.
+    bare = _subagent_prompt(set())
+    assert "graph__query" not in bare
+    assert "no general-purpose query tool" in bare
+    assert "do not call tools you were not given" in bare
+
+    # Empty core, skills present: discovery via skills, still no Cypher claim.
+    skills_only = _subagent_prompt({"find_seizu_skills", "load_seizu_skill", "call_seizu_tool"})
+    assert "find_seizu_skills" in skills_only
+    assert "graph__query" not in skills_only
+
+    # Default core: the Cypher fallback is honest, so it is offered.
+    with_core = _subagent_prompt({"graph__query", "find_seizu_skills", "load_seizu_skill"})
+    assert "graph__query with Cypher is the general-purpose route" in with_core
+
+
+async def test_a_skill_that_unlocks_nothing_does_not_invent_a_fallback_tool() -> None:
+    """The same rule at the other site: the no-tools-unlocked reply pointed at
+    graph__query unconditionally, including when the core was emptied."""
+    fake_tools = [Tool(name="reports__get", description="Get report", inputSchema={"type": "object"})]
+    skills = [_skill("cve__severity", "Severity breakdown", [])]
+    rendered = mcp_runtime.ChatActionOutcome(text="Compute it.", blocked=None, tools_required=())
+    with (
+        _disclosure(True),
+        patch("reporting.settings.SANDBOX_CORE_TOOLS", []),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.render_prompt_for_chat", AsyncMock(return_value=rendered)),
+    ):
+        by_name = {t.name: t for t in await _build_seizu_tools(_current_user(), skills_available=skills)}
+        loaded = await by_name["load_seizu_skill"].coroutine(name="cve__severity")
+
+    assert "unlocked no additional tools" in loaded
+    assert "graph__query" not in loaded
+    assert "no general-purpose query tool" in loaded
+
+
+async def test_a_skill_that_unlocks_nothing_still_offers_cypher_when_bound() -> None:
+    """...and the converse, so the guard above is not just deleting the hint."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+    ]
+    skills = [_skill("cve__severity", "Severity breakdown", [])]
+    rendered = mcp_runtime.ChatActionOutcome(text="Compute it.", blocked=None, tools_required=())
+    with (
+        _disclosure(True),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.render_prompt_for_chat", AsyncMock(return_value=rendered)),
+    ):
+        by_name = {t.name: t for t in await _build_seizu_tools(_current_user(), skills_available=skills)}
+        loaded = await by_name["load_seizu_skill"].coroutine(name="cve__severity")
+
+    assert "graph__query with Cypher is the general-purpose route" in loaded
+
+
 async def test_the_subagent_is_told_the_discovery_route_it_actually_has() -> None:
     """A prompt naming find_seizu_tools when only skill discovery is bound sends
     the sub-agent after a tool that is not there."""

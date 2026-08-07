@@ -487,7 +487,7 @@ async def _build_seizu_tools(
         return result
     skills = list(skills_available if skills_available is not None else _turn_skills())
     if skills:
-        result.extend(_skill_discovery_tools(current_user, skills, undiscovered, _invoke))
+        result.extend(_skill_discovery_tools(current_user, skills, undiscovered, _invoke, bound_names))
     return result
 
 
@@ -515,6 +515,7 @@ def _skill_discovery_tools(
     skills: list[Any],
     undiscovered: list[Any],
     invoke: Any,
+    bound_names: set[str] | None = None,
 ) -> list[Any]:
     """Skill-mediated access to the tools that were not bound for this delegation.
 
@@ -606,9 +607,19 @@ def _skill_discovery_tools(
             # sub-agent would otherwise discover the gap one failed
             # call_seizu_tool at a time. Measured on one deployment, 1 of 10
             # skills declares nothing.
+            # Points at graph__query only when it is actually bound: with an
+            # emptied SANDBOX_CORE_TOOLS it is not, and naming it here sent the
+            # sub-agent after a tool it never had.
+            if "graph__query" in (bound_names or set()):
+                route = "graph__query with Cypher is the general-purpose route."
+            else:
+                route = (
+                    "you have no general-purpose query tool here, so say what you cannot "
+                    "determine rather than calling something you were not given."
+                )
             return (
-                f"{body}\n\n[This skill unlocked no additional tools. Follow it with the tools you "
-                "already have — graph__query with Cypher is the general-purpose route.]"
+                f"{body}\n\n[This skill unlocked no additional tools. "
+                f"Follow it with the tools you already have — {route}]"
             )
         available = ", ".join(sorted(newly))
         return f"{body}\n\n[Tools now callable with call_seizu_tool: {available}]"
@@ -1065,18 +1076,40 @@ _DISCOVERY_CLAUSE_SKILLS = """\
 - Your tool list is the tools this task was expected to need, not everything Seizu has. If \
   none of them provides the data, search with find_seizu_skills for a skill covering the \
   workflow, load it with load_seizu_skill, and run the tools it unlocks with call_seizu_tool. \
-  Do that rather than concluding the data does not exist.
-- If no skill covers it, graph__query with Cypher is the general-purpose route. Say what you \
-  could not determine; do not guess at numbers."""
+  Do that rather than concluding the data does not exist."""
 
 _DISCOVERY_CLAUSE_NONE = """\
-- Your tool list is the tools this task was expected to need. If none of them provides the \
-  data, use graph__query with Cypher, and say what you could not determine rather than \
-  guessing at numbers."""
+- Your tool list is the tools this task was expected to need, and there is no way to reach \
+  others from here."""
+
+# The last-resort route, which exists only when the deployment left a raw query
+# tool in SANDBOX_CORE_TOOLS. Naming graph__query unconditionally is what the
+# review caught: with an emptied core the prompt sent the sub-agent after a tool
+# it had never been given, which is a failed call at best and an invented result
+# at worst -- and it contradicted the strict-disclosure configuration the
+# setting exists to offer.
+_FALLBACK_WITH_CYPHER = """\
+- If nothing above covers it, graph__query with Cypher is the general-purpose route. Say what \
+  you could not determine; do not guess at numbers."""
+
+_FALLBACK_WITHOUT_CYPHER = """\
+- You have no general-purpose query tool in this delegation. Work with the data you were \
+  given and whatever your listed tools return; if that is not enough, say plainly what you \
+  could not determine. Do not guess at numbers, and do not call tools you were not given."""
+
+
+def _fallback_clause(tool_names: set[str]) -> str:
+    """What to fall back on, decided by what is actually bound."""
+    return _FALLBACK_WITH_CYPHER if "graph__query" in tool_names else _FALLBACK_WITHOUT_CYPHER
 
 
 def _subagent_prompt(tool_names: set[str]) -> str:
-    """The sub-agent system prompt, describing the discovery route it actually has."""
+    """The sub-agent system prompt, describing the routes it actually has.
+
+    Both halves are derived from ``tool_names`` rather than from settings: the
+    prompt has to match the tools handed to *this* delegation, and a narrowed or
+    emptied ``SANDBOX_CORE_TOOLS`` changes that per call.
+    """
     if "find_seizu_tools" in tool_names:
         discovery = _DISCOVERY_CLAUSE_TOOLS
     elif "find_seizu_skills" in tool_names:
@@ -1084,7 +1117,7 @@ def _subagent_prompt(tool_names: set[str]) -> str:
     else:
         discovery = _DISCOVERY_CLAUSE_NONE
     # replace(), not format(): the prompt contains literal JSON braces.
-    return _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, discovery)
+    return _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, f"{discovery}\n{_fallback_clause(tool_names)}")
 
 
 def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:

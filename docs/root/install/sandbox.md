@@ -73,6 +73,13 @@ Filesystem-only suspension was tried and does not work: the code interpreter is
 itself a process, so a resumed sandbox came back unable to run code at all.
 Details in [SBX-005](../dev/decisions/sandbox.md).
 
+**With `SANDBOX_ALLOW_INTERNET=true` this compounds.** A surviving process keeps
+its outbound access, so code started in one turn can still be running — and
+still reaching the internet — while later turns feed the sandbox new data. That
+is an exfiltration path for anything supplied after the process started, not
+just for what it was given at the time. Treat persistence and outbound internet
+as a combination to enable deliberately, not independently.
+
 If you would rather not accept it, `SANDBOX_SESSION_PERSIST=false` destroys the
 sandbox at the end of every turn, at the cost of each turn re-fetching what the
 last one gathered.
@@ -195,7 +202,7 @@ Sandbox delegation requires the `sandbox:delegate` permission, which is granted 
 | `SANDBOX_API_KEY` | `""` | API key for the sandbox provider. Required for E2B cloud; leave empty for self-hosted deployments that use internal auth. |
 | `SANDBOX_DOMAIN` | `""` | Sandbox service hostname. Empty → E2B cloud (`e2b.app`). For self-hosted deployments (e.g. OpenKruise Agents): set to your cluster ingress hostname. The E2B SDK constructs `https://api.<domain>` as the API base URL. |
 | `SANDBOX_ALLOW_INTERNET` | `false` | Allow sandboxes to make outbound internet connections. Off by default for a hardened posture; enable only when a task legitimately needs network access. |
-| `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the tool returns an error and the sandbox is destroyed. |
+| `SANDBOX_TIMEOUT_SECONDS` | `120` | Maximum wall-clock time for one sandbox task. If exceeded, the delegation returns an error; the sandbox itself is **not** destroyed — it stays with the conversation and is suspended at the end of the turn like any other. |
 | `SANDBOX_CORE_TOOLS` | `graph__query,graph__schema,graph__validate_query,graph__explain` | Tools bound to every delegation regardless of progressive disclosure. Intersected with the caller's RBAC-permitted tools, so it never widens access. Empty binds nothing up front. |
 | `SANDBOX_MAX_OUTPUT_BYTES` | `50000` | Byte cap applied both to each inner tool result fed back to the sandbox agent and to the final result string returned to the chat agent. Larger output is truncated with a `[truncated]` suffix. |
 | `SANDBOX_PREVIEW_MAX_BYTES` | `2000` | Bytes of a file `preview_file` returns. Files at or under this come back whole; larger ones return shape (size, lines, JSON structure, columns) plus the beginning, so a result file cannot be read back into context. `0` restores `read_file`. |
