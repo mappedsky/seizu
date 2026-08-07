@@ -32,6 +32,15 @@ non-linearly. A run measured that way as 121 delegations and 1,726 queries was
 Token totals, budget mode and step outcomes are read from the persisted ledger
 rather than inferred from the stream, so they are unaffected by any of that.
 
+**Scope.** Every turn's stream is written to its own ``_tNN.sse`` file and the
+stream-derived counts are summed over the conversation, so they cover the same
+turns the ledger numbers do. Keeping only the last turn -- as this did until a
+6-turn comparison reported "0 delegations" for an arm whose ledger showed *more*
+sandbox work than the baseline -- puts two different scopes side by side in one
+row, and nothing in the output says which is which. ``answer_chars`` remains the
+last turn's, for comparability with older runs; ``answer_chars_total`` is the
+whole conversation.
+
 Requires the dev stack running (``make up``) with ``CHAT_ENABLED=true`` and a
 real ``CHAT_LLM_PROVIDER``. Sessions are left in place for inspection.
 
@@ -260,6 +269,29 @@ def stream_metrics(sse: str) -> dict[str, Any]:
     }
 
 
+def aggregate_stream_metrics(streams: list[str]) -> dict[str, Any]:
+    """Per-turn metrics, summed over the conversation.
+
+    Computed per turn and added up rather than by parsing the concatenated
+    streams, because the identifiers a stream carries are only unique *within*
+    a turn: step ids restart at ``s1`` every turn and the routing detail is
+    literally ``routing``. Joining the text first and de-duplicating would fold
+    every turn's steps into one turn's worth.
+
+    ``answer_chars`` stays the last turn's answer so it remains comparable with
+    runs recorded before this existed; ``answer_chars_total`` is the whole
+    conversation's output.
+    """
+    per_turn = [stream_metrics(stream) for stream in streams] or [stream_metrics("")]
+    summed = {
+        key: sum(turn[key] for turn in per_turn)
+        for key in ("delegations", "inner_calls", "queries", "run_python", "steps_failed", "steps_total")
+    }
+    summed["answer_chars"] = per_turn[-1]["answer_chars"]
+    summed["answer_chars_total"] = sum(turn["answer_chars"] for turn in per_turn)
+    return summed
+
+
 def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
     """Every turn's persisted budget -- the only trustworthy token source.
 
@@ -338,16 +370,21 @@ def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2
     thread_id = session["thread_id"]
     started = time.time()
     prompts = conversation_turns(turns)
-    sse = ""
+    streams: list[str] = []
     for turn, prompt in enumerate(prompts, start=1):
-        sse = _post("/api/v1/chat/stream", {"thread_id": thread_id, "message": prompt}, stream=True)
+        streams.append(_post("/api/v1/chat/stream", {"thread_id": thread_id, "message": prompt}, stream=True))
         print(f"    turn {turn}/{len(prompts)} done ({int(time.time() - started)}s)", flush=True)
     # Hash the arm rather than embedding it: an ordinary value such as
     # "openai/gpt-4" carries a path separator and would write outside out_dir.
     slug = "baseline" if arm == "baseline" else hashlib.sha256(arm.encode()).hexdigest()[:10]
-    # The last turn's stream: the deepest context the conversation reached, and
-    # the one a context change is most likely to show up in.
-    (out_dir / f"{slug}_{index}.sse").write_text(sse)
+    # One file per turn. This used to keep only the last turn, on the reasoning
+    # that it reached the deepest context -- but every stream-derived number
+    # then described one turn while the ledger numbers beside it described the
+    # whole run, and the two were read as if they were the same scope. That
+    # misreported a 6-turn comparison as "0 delegations" for an arm whose
+    # ledger showed the sandbox doing more work than the baseline's.
+    for turn, stream in enumerate(streams, start=1):
+        (out_dir / f"{slug}_{index}_t{turn:02d}.sse").write_text(stream)
     row = {
         "arm": arm,
         "slug": slug,
@@ -356,7 +393,7 @@ def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2
         "turns": len(prompts),
         "seconds": int(time.time() - started),
     }
-    row.update(stream_metrics(sse))
+    row.update(aggregate_stream_metrics(streams))
     row.update(ledger(thread_id, user_id))
     return row
 
