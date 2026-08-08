@@ -563,9 +563,11 @@ def _parse_proxy_lock(path: str) -> ProxyLock | str:
             requirements = line[len(PROXY_LOCK_INPUT_MARKER) :].split()
         elif line.startswith(PROXY_LOCK_RUNTIME_MARKER):
             fields = dict(f.split("=", 1) for f in line[len(PROXY_LOCK_RUNTIME_MARKER) :].split() if "=" in f)
-    missing = [name for name in ("python", "machine", "platform") if not fields.get(name)]
+    marker = PROXY_LOCK_INPUT_MARKER.strip("#: ")
+    runtime_marker = PROXY_LOCK_RUNTIME_MARKER.strip("#: ")
+    missing = [f"{runtime_marker} {name}" for name in ("python", "machine", "platform") if not fields.get(name)]
     if not requirements:
-        missing.insert(0, f"a non-empty {PROXY_LOCK_INPUT_MARKER.strip('#: ')} header")
+        missing.insert(0, f"{marker} requirements")
     if missing:
         return (
             f"the credential proxy requirement lock {path} is missing {', '.join(missing)} "
