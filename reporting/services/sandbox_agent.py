@@ -539,21 +539,23 @@ def proxy_lock_path() -> str:
     return settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE.strip() or DEFAULT_PROXY_LOCK_PATH
 
 
-def read_proxy_lock() -> ProxyLock | None:
-    """Parse the configured lock file, or None if it is missing or unusable.
+def _parse_proxy_lock(path: str) -> ProxyLock | str:
+    """Parse a lock file, or return why it cannot be used.
 
-    A usable lock has hashes (otherwise it is not a lock) and records the
-    runtime it was resolved for (otherwise the sandbox cannot be checked against
-    it). Both come from `make lock_proxy_requirements`.
+    **Every recorded field is required.** A lock is not just a list of hashes:
+    the runtime fields are what the sandbox is checked against, and the input
+    fields are what re-locking reproduces. Accepting a partially-populated one
+    means a consumer silently invents the rest — re-locking a lock with no
+    recorded requirements would compile *nothing* over it, and one with no
+    recorded platform would quietly retarget an ARM lock at x86_64.
     """
-    path = proxy_lock_path()
     try:
         with open(path) as handle:
             text = handle.read()
-    except OSError:
-        return None
+    except OSError as exc:
+        return f"the credential proxy requirement lock {path} cannot be read ({exc.strerror or exc})"
     requirements: list[str] = []
-    python = machine = platform = ""
+    fields: dict[str, str] = {}
     for line in text.splitlines():
         if not line.startswith("#"):
             break  # header is over
@@ -561,10 +563,30 @@ def read_proxy_lock() -> ProxyLock | None:
             requirements = line[len(PROXY_LOCK_INPUT_MARKER) :].split()
         elif line.startswith(PROXY_LOCK_RUNTIME_MARKER):
             fields = dict(f.split("=", 1) for f in line[len(PROXY_LOCK_RUNTIME_MARKER) :].split() if "=" in f)
-            python, machine, platform = fields.get("python", ""), fields.get("machine", ""), fields.get("platform", "")
-    if not python or not machine or "--hash=" not in text:
-        return None
-    return ProxyLock(path=path, text=text, requirements=requirements, python=python, machine=machine, platform=platform)
+    missing = [name for name in ("python", "machine", "platform") if not fields.get(name)]
+    if not requirements:
+        missing.insert(0, f"a non-empty {PROXY_LOCK_INPUT_MARKER.strip('#: ')} header")
+    if missing:
+        return (
+            f"the credential proxy requirement lock {path} is missing {', '.join(missing)} "
+            "— regenerate it with `make lock_proxy_requirements`"
+        )
+    if "--hash=" not in text:
+        return f"the credential proxy requirement lock {path} has no hash pins — it is not a lock"
+    return ProxyLock(
+        path=path,
+        text=text,
+        requirements=requirements,
+        python=fields["python"],
+        machine=fields["machine"],
+        platform=fields["platform"],
+    )
+
+
+def read_proxy_lock() -> ProxyLock | None:
+    """The configured lock, or None if it is missing or unusable."""
+    parsed = _parse_proxy_lock(proxy_lock_path())
+    return parsed if isinstance(parsed, ProxyLock) else None
 
 
 def proxy_lock_error() -> str | None:
@@ -574,14 +596,8 @@ def proxy_lock_error() -> str | None:
     sandboxes and hands one the real provider key, so a missing or malformed
     lock should stop it before any of that.
     """
-    path = proxy_lock_path()
-    if read_proxy_lock() is None:
-        return (
-            f"the credential proxy requirement lock {path} is missing or unusable (it must be a "
-            "hash-pinned file with a seizu-proxy-runtime header — regenerate it with "
-            "`make lock_proxy_requirements`)"
-        )
-    return None
+    parsed = _parse_proxy_lock(proxy_lock_path())
+    return None if isinstance(parsed, ProxyLock) else parsed
 
 
 def proxy_install_plan() -> ProxyInstallPlan | None:
@@ -593,7 +609,7 @@ def proxy_install_plan() -> ProxyInstallPlan | None:
     """
     lock = read_proxy_lock()
     if lock is None:
-        return None
+        return None  # the caller reports proxy_lock_error()
     return ProxyInstallPlan(
         script=_PROXY_LOCKED_INSTALL,
         env={_PROXY_LOCK_PYTHON_ENV: lock.python, _PROXY_LOCK_MACHINE_ENV: lock.machine},

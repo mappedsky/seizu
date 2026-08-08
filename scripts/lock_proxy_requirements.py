@@ -130,7 +130,7 @@ def _resolve_output(existing: sandbox_agent.ProxyLock | None) -> Path | str:
                 "OUTPUT=<path in the repo> (with REQUIREMENTS=) to compile a new lock — otherwise this would "
                 "rewrite the checked-in default instead."
             )
-        return Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
+        return Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)  # bootstrap or repair the default
     # This runs in a disposable container where only the repository is mounted,
     # so anything outside it is written to a filesystem that ceases to exist.
     target = Path(configured)
@@ -173,6 +173,12 @@ def _lock() -> int:
     output = _resolve_output(existing)
     if isinstance(output, str):
         return _fail(output)
+    if existing is None and Path(sandbox_agent.proxy_lock_path()).exists():
+        # A file is there but did not parse. Replacing it is legitimate (that is
+        # how you repair one), but it must not look like an ordinary re-lock:
+        # nothing of what it recorded is being carried forward.
+        print(f"NOTE: {sandbox_agent.proxy_lock_error()}")
+        print("      Compiling from scratch — nothing from that file is carried over.\n")
 
     if requested := os.environ.get("PROXY_REQUIREMENTS", "").split():
         requirements, source = requested, "REQUIREMENTS"

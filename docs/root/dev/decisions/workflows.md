@@ -166,6 +166,13 @@ It reaches the sandbox one of two ways, and these are separate concerns:
 `build_proxy_template` builds from the same `proxy_install_plan()`, so *our*
 template contains what a templateless run would install.
 
+**A lock is valid only if every recorded field is present** — requirements,
+python, machine, platform, hashes. Partial acceptance means each consumer
+invents the rest, and the failure is destructive rather than loud: re-locking a
+lock with no recorded requirements compiles *nothing* over it, and one with no
+recorded platform quietly retargets an ARM lock at x86_64. `_parse_proxy_lock`
+is the single definition, and it names what is missing.
+
 **A lock is only valid for the runtime it was resolved for** — its hashes cover
 wheels for one python ABI and architecture — so the header records them and the
 install compares the sandbox against them **before running pip**, failing with

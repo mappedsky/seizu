@@ -106,3 +106,23 @@ def test_unknown_machine_is_an_error_rather_than_a_guess(monkeypatch: Any) -> No
 async def test_probe_is_skipped_without_a_sandbox_key() -> None:
     with patch("reporting.settings.SANDBOX_API_KEY", ""):
         assert await lock._probe_sandbox_runtime() is None
+
+
+def test_partial_lock_headers_are_not_re_lockable(tmp_path: Any) -> None:
+    # The generator trusts a parsed lock, so a half-populated one is how a
+    # re-lock quietly destroys the thing it was meant to refresh: no recorded
+    # requirements compiles *nothing* over it, and no recorded platform sends an
+    # ARM lock to the x86_64 default.
+    hashes = "litellm==1.87.0 \\\n    --hash=sha256:abc\n"
+    runtime = f"{sandbox_agent.PROXY_LOCK_RUNTIME_MARKER} python=3.13 machine=x86_64"
+    no_input = tmp_path / "no_input.txt"
+    no_input.write_text(f"{runtime} platform=x86_64-unknown-linux-gnu\n{hashes}")
+    no_platform = tmp_path / "no_platform.txt"
+    no_platform.write_text(
+        f"{sandbox_agent.PROXY_LOCK_INPUT_MARKER} litellm[proxy]==1.87.0\n"
+        f"{sandbox_agent.PROXY_LOCK_RUNTIME_MARKER} python=3.13 machine=aarch64\n{hashes}"
+    )
+    for bad, wanted in ((no_input, "seizu-proxy-input"), (no_platform, "platform")):
+        with patch("reporting.settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE", str(bad)):
+            assert sandbox_agent.read_proxy_lock() is None
+            assert wanted in (sandbox_agent.proxy_lock_error() or "")
