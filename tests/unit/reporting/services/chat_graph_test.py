@@ -548,8 +548,8 @@ async def test_chat_graph_filters_unexecuted_tool_calls_from_next_context(mocker
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
         return_value=[
-            Tool(name="skillsets__list", description="List skillsets", inputSchema={"type": "object"}),
-            Tool(name="toolsets__list", description="List toolsets", inputSchema={"type": "object"}),
+            Tool(name="skillsets__list", description="List skillsets", input_schema={"type": "object"}),
+            Tool(name="toolsets__list", description="List toolsets", input_schema={"type": "object"}),
         ],
     )
     mocker.patch(
@@ -791,7 +791,7 @@ async def test_exhausted_budget_degrades_to_synthesis_instead_of_killing_the_tur
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="graph__schema", description="Schema", inputSchema={"type": "object"})],
+        return_value=[Tool(name="graph__schema", description="Schema", input_schema={"type": "object"})],
     )
 
     async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
@@ -965,7 +965,7 @@ async def test_chat_graph_streams_tool_enabled_text_as_it_arrives(mocker):
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -1028,7 +1028,7 @@ async def test_chat_graph_finishes_on_structured_respond_to_user_without_a_nudge
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -1281,8 +1281,8 @@ async def test_progressive_disclosure_exposes_only_skill_required_tools(mocker):
     list_tools = mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
         return_value=[
-            Tool(name="github_security__org_overview", description="Org overview", inputSchema={"type": "object"}),
-            Tool(name="github_security__update_repo", description="Update repo", inputSchema={"type": "object"}),
+            Tool(name="github_security__org_overview", description="Org overview", input_schema={"type": "object"}),
+            Tool(name="github_security__update_repo", description="Update repo", input_schema={"type": "object"}),
         ],
     )
     mocker.patch(
@@ -1349,8 +1349,8 @@ async def test_progressive_disclosure_persists_unlocked_tools_across_turns(mocke
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
         return_value=[
-            Tool(name="github_security__org_overview", description="Org overview", inputSchema={"type": "object"}),
-            Tool(name="github_security__update_repo", description="Update repo", inputSchema={"type": "object"}),
+            Tool(name="github_security__org_overview", description="Org overview", input_schema={"type": "object"}),
+            Tool(name="github_security__update_repo", description="Update repo", input_schema={"type": "object"}),
         ],
     )
     mocker.patch(
@@ -1425,8 +1425,8 @@ async def test_chat_graph_runs_model_requested_tools_in_parallel(mocker):
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
         return_value=[
-            Tool(name="security__one", description="One", inputSchema={"type": "object"}),
-            Tool(name="security__two", description="Two", inputSchema={"type": "object"}),
+            Tool(name="security__one", description="One", input_schema={"type": "object"}),
+            Tool(name="security__two", description="Two", input_schema={"type": "object"}),
         ],
     )
     call_tool = mocker.patch(
@@ -1469,7 +1469,7 @@ async def test_chat_graph_retries_empty_response_after_action_result(mocker):
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -1515,8 +1515,8 @@ async def test_chat_graph_retries_nonterminal_post_action_text_without_streaming
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
         return_value=[
-            Tool(name="security__one", description="One", inputSchema={"type": "object"}),
-            Tool(name="security__two", description="Two", inputSchema={"type": "object"}),
+            Tool(name="security__one", description="One", input_schema={"type": "object"}),
+            Tool(name="security__two", description="Two", input_schema={"type": "object"}),
         ],
     )
     call_tool = mocker.patch(
@@ -1576,7 +1576,7 @@ async def test_chat_graph_retries_repeated_tool_call_without_rerunning(mocker):
             Tool(
                 name="toolsets__list_tools",
                 description="List tools",
-                inputSchema={"type": "object", "properties": {"toolset_id": {"type": "string"}}},
+                input_schema={"type": "object", "properties": {"toolset_id": {"type": "string"}}},
             )
         ],
     )
@@ -1620,7 +1620,7 @@ async def test_chat_graph_repeated_tool_fallback_does_not_rerun_or_dump_internal
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="skillsets__list", description="List skillsets", inputSchema={"type": "object"})],
+        return_value=[Tool(name="skillsets__list", description="List skillsets", input_schema={"type": "object"})],
     )
     call_tool = mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -1727,7 +1727,7 @@ async def test_chat_graph_empty_response_fallback_preserves_last_action_result(m
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -2429,7 +2429,7 @@ async def test_chat_graph_reports_unavailable_tool_call_and_persists_notice(mock
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="toolsets__list", description="List toolsets", inputSchema={"type": "object"})],
+        return_value=[Tool(name="toolsets__list", description="List toolsets", input_schema={"type": "object"})],
     )
     call_tool = mocker.patch("reporting.services.chat_graph.mcp_runtime.call_tool_for_chat")
     graph = chat_graph.build_chat_graph(MemorySaver())
@@ -2467,7 +2467,7 @@ async def test_chat_graph_reports_permission_denied_tool_result_and_persists_not
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -2639,7 +2639,7 @@ async def test_final_synthesis_retries_internal_action_transcript(mocker):
     mocker.patch("reporting.services.chat_graph.mcp_runtime.list_prompts_for_user", return_value=[])
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.list_tools_for_user",
-        return_value=[Tool(name="security__one", description="One", inputSchema={"type": "object"})],
+        return_value=[Tool(name="security__one", description="One", input_schema={"type": "object"})],
     )
     mocker.patch(
         "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
@@ -2914,7 +2914,7 @@ def test_build_capability_context_progressive_disclosure_includes_always_disclos
         Tool(
             name="sandbox__delegate",
             description="Delegate a task to an isolated sandbox",
-            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+            input_schema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
         )
     ]
 
@@ -2933,7 +2933,7 @@ def test_build_capability_context_progressive_disclosure_no_skills_only_always_d
         Tool(
             name="sandbox__delegate",
             description="Delegate a task to an isolated sandbox",
-            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+            input_schema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
         )
     ]
 
@@ -2956,7 +2956,7 @@ def test_build_capability_context_full_disclosure_lists_skills_and_tools():
         Tool(
             name="graph__query",
             description="Run a read-only Cypher query",
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {"cypher": {"type": "string"}},
                 "required": ["cypher"],
@@ -3800,7 +3800,7 @@ def test_the_sandbox_note_says_earlier_turns_files_are_still_there(mocker):
 def test_the_capability_context_labels_tools_as_available_now(mocker):
     """The list is always-on tools *plus* whatever earlier turns unlocked, so
     "always available" would mislabel half of it."""
-    tools = [Tool(name="sandbox__delegate", description="Delegate", inputSchema={"type": "object"})]
+    tools = [Tool(name="sandbox__delegate", description="Delegate", input_schema={"type": "object"})]
     context = chat_graph.build_capability_context([], None, available_tools=tools)
 
     assert "Tools available now:" in context
@@ -3960,7 +3960,7 @@ async def test_an_overflow_after_streaming_is_not_retried(mocker):
 
 
 def _tool(name: str, description: str = "x") -> Tool:
-    return Tool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
+    return Tool(name=name, description=description, input_schema={"type": "object", "properties": {}})
 
 
 def test_skill_declared_tools_are_disclosed_when_a_step_names_the_skill(mocker):

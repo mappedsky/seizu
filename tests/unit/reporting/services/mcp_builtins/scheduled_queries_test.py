@@ -3,13 +3,12 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-from mcp import types as mcp_types
-
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.report_config import ScheduledQueryItem, ScheduledQueryVersion, User
 from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
 from reporting.services.query_validator import ValidationResult
+from tests.unit.reporting.services import mcp_dispatch
 
 _NOW = "2024-01-01T00:00:00+00:00"
 
@@ -31,11 +30,6 @@ def _current_user() -> CurrentUser:
 
 
 async def _call(server, name, arguments):
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name=name, arguments=arguments),
-    )
     perm_tok = _mcp_permissions.set(ALL_PERMISSIONS)
     user_tok = _mcp_current_user.set(_current_user())
     session_tok = _mcp_session_key.set("test-session")
@@ -45,12 +39,12 @@ async def _call(server, name, arguments):
             new_callable=AsyncMock,
             return_value=None,
         ):
-            result = await handler(req)
+            result = await mcp_dispatch.call_tool(server, name, arguments)
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
         _mcp_session_key.reset(session_tok)
-    return result.root.content
+    return result.content
 
 
 def _sq_item() -> ScheduledQueryItem:

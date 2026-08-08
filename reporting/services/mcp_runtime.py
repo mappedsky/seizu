@@ -227,7 +227,7 @@ async def list_tools_for_user(
             Tool(
                 name=builtin.name,
                 description=builtin.description,
-                inputSchema=builtin.input_schema,
+                input_schema=builtin.input_schema,
             )
         )
 
@@ -239,7 +239,7 @@ async def list_tools_for_user(
                     Tool(
                         name=f"{tool.toolset_id}__{tool.tool_id}",
                         description=tool.description or f"{tool.name} tool",
-                        inputSchema=build_input_schema(tool.parameters),
+                        input_schema=build_input_schema(tool.parameters),
                     )
                 )
         except Exception:
@@ -629,10 +629,9 @@ async def list_prompts_for_user(
                     title=skill.name,
                     description=_skill_prompt_description(skill),
                     # Carried on the listing so a caller can honour the author's
-                    # declaration without a second store read. The field is
-                    # aliased to `_meta`; passing `meta=` instead sets a shadowed
-                    # extra that `prompt.meta` never returns.
-                    _meta={SKILL_TOOLS_META_KEY: list(skill.tools_required or ())},
+                    # declaration without a second store read. The attribute is
+                    # `meta`, aliased to the wire's `_meta`.
+                    meta={SKILL_TOOLS_META_KEY: list(skill.tools_required or ())},
                     arguments=[
                         PromptArgument(
                             name=p.name,

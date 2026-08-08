@@ -14,15 +14,23 @@ from typing import Any
 
 import httpx
 import jwt
-from mcp.server.fastmcp.server import StreamableHTTPASGIApp
+from mcp.server import ServerRequestContext
 from mcp.server.lowlevel import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import GetPromptResult, Prompt, TextContent, Tool
+from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, StreamableHTTPSessionManager
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    GetPromptRequestParams,
+    GetPromptResult,
+    ListPromptsResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from reporting import settings
+from reporting import __version__, settings
 from reporting.authnz import CurrentUser, validate_bearer_token
 from reporting.services import mcp_runtime, report_store
 from reporting.services.action_confirmations import bearer_session_key
@@ -55,44 +63,66 @@ _mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_
 # ---------------------------------------------------------------------------
 
 
-def _build_mcp_server() -> Server:
-    server: Server = Server("seizu")
+# The handlers ignore their ServerRequestContext: everything they need about the
+# caller (identity, permissions, confirmation session) is set by
+# _MCPAuthMiddleware in the ContextVars above, which the SDK's per-request task
+# inherits. Keeping them off the context object means the same runtime call works
+# unchanged from the chat agent, which has no MCP request at all.
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return await mcp_runtime.list_tools_for_user(
-            _mcp_current_user.get(),
-            permissions=_mcp_permissions.get(),
-        )
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        return await mcp_runtime.call_tool_for_user(
-            _mcp_current_user.get(),
-            name,
-            arguments,
-            permissions=_mcp_permissions.get(),
-            confirmation_source="mcp",
-            confirmation_session_key=_mcp_session_key.get(),
-        )
+async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None) -> ListToolsResult:
+    tools = await mcp_runtime.list_tools_for_user(
+        _mcp_current_user.get(),
+        permissions=_mcp_permissions.get(),
+    )
+    return ListToolsResult(tools=tools)
 
-    @server.list_prompts()
-    async def list_prompts() -> list[Prompt]:
-        return await mcp_runtime.list_prompts_for_user(
-            _mcp_current_user.get(),
-            permissions=_mcp_permissions.get(),
-        )
 
-    @server.get_prompt()
-    async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
-        return await mcp_runtime.get_prompt_for_user(
-            _mcp_current_user.get(),
-            name,
-            arguments,
-            permissions=_mcp_permissions.get(),
-        )
+async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequestParams) -> CallToolResult:
+    content = await mcp_runtime.call_tool_for_user(
+        _mcp_current_user.get(),
+        params.name,
+        params.arguments,
+        permissions=_mcp_permissions.get(),
+        confirmation_source="mcp",
+        confirmation_session_key=_mcp_session_key.get(),
+    )
+    # The runtime never raises: it turns every failure into a text payload
+    # carrying an "error" key. That predates MCP 2.0 making an uncaught handler
+    # exception a JSON-RPC protocol error rather than an is_error result, and it
+    # is still what we want — a tool that refuses a call is a normal result the
+    # model can read and act on, not a broken request.
+    return CallToolResult(content=list(content))
 
-    return server
+
+async def _handle_list_prompts(
+    ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+) -> ListPromptsResult:
+    prompts = await mcp_runtime.list_prompts_for_user(
+        _mcp_current_user.get(),
+        permissions=_mcp_permissions.get(),
+    )
+    return ListPromptsResult(prompts=prompts)
+
+
+async def _handle_get_prompt(ctx: ServerRequestContext[Any], params: GetPromptRequestParams) -> GetPromptResult:
+    return await mcp_runtime.get_prompt_for_user(
+        _mcp_current_user.get(),
+        params.name,
+        params.arguments,
+        permissions=_mcp_permissions.get(),
+    )
+
+
+def _build_mcp_server() -> Server[Any]:
+    return Server(
+        "seizu",
+        version=__version__,
+        on_list_tools=_handle_list_tools,
+        on_call_tool=_handle_call_tool,
+        on_list_prompts=_handle_list_prompts,
+        on_get_prompt=_handle_get_prompt,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +508,12 @@ def get_mcp_app() -> tuple[StreamableHTTPSessionManager, ASGIApp]:
     Auth and OAuth metadata routing are handled internally by the returned app.
     """
     mcp_server = _build_mcp_server()
+    # ``stateless=True`` only governs the pre-2026-07-28 handshake path, where a
+    # session id and an initialize round-trip would otherwise be required. From
+    # 2026-07-28 a request carries its own protocol version header and the SDK
+    # routes it to a per-request handler with no session at all, so both eras
+    # end up stateless — which is what Seizu has always assumed (nothing is kept
+    # between MCP requests; identity comes from the Bearer token every time).
     session_manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,

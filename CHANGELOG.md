@@ -65,6 +65,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The MCP server speaks the 2026-07-28 protocol revision** (#246). Seizu now
+  builds on the `mcp` 2.x SDK, which serves 2026-07-28 and every earlier
+  revision from the same endpoint — clients negotiate the revision themselves,
+  so existing MCP clients keep working unchanged and no configuration moves.
+  The newer revision drops the initialize handshake and makes every request
+  stand alone, which is what Seizu already assumed: nothing is kept between MCP
+  requests and the caller is re-derived from the Bearer token each time.
+  `serverInfo` now reports the same version as the OpenAPI document rather than
+  an empty string.
 - `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
   whose report-list partition exceeds the 1 MB query cap no longer get a
   silently truncated list.

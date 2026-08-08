@@ -1,11 +1,12 @@
 """Unit tests for reporting/services/mcp_server.py."""
 
+import contextlib
 import json
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
-from mcp import types as mcp_types
 
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef, ToolsetListItem
@@ -17,6 +18,7 @@ from reporting.services.mcp_server import (
     _mcp_permissions,
     _oauth_registration_handler,
 )
+from tests.unit.reporting.services import mcp_dispatch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,56 +88,41 @@ def _skill(
 
 async def _list_tools(server, permissions=ALL_PERMISSIONS):
     """Call the registered list_tools handler."""
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    req = mcp_types.ListToolsRequest(method="tools/list", params=None)
     token = _mcp_permissions.set(permissions)
     try:
-        result = await handler(req)
+        result = await mcp_dispatch.list_tools(server)
     finally:
         _mcp_permissions.reset(token)
-    return result.root.tools
+    return result.tools
 
 
 async def _call_tool(server, name, arguments=None, permissions=ALL_PERMISSIONS):
     """Call the registered call_tool handler and return the text content list."""
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name=name, arguments=arguments or {}),
-    )
     token = _mcp_permissions.set(permissions)
     try:
-        result = await handler(req)
+        result = await mcp_dispatch.call_tool(server, name, arguments)
     finally:
         _mcp_permissions.reset(token)
-    return result.root.content
+    return result.content
 
 
 async def _list_prompts(server, permissions=ALL_PERMISSIONS):
     """Call the registered list_prompts handler."""
-    handler = server.request_handlers[mcp_types.ListPromptsRequest]
-    req = mcp_types.ListPromptsRequest(method="prompts/list", params=None)
     token = _mcp_permissions.set(permissions)
     try:
-        result = await handler(req)
+        result = await mcp_dispatch.list_prompts(server)
     finally:
         _mcp_permissions.reset(token)
-    return result.root.prompts
+    return result.prompts
 
 
 async def _get_prompt(server, name, arguments=None, permissions=ALL_PERMISSIONS):
     """Call the registered get_prompt handler."""
-    handler = server.request_handlers[mcp_types.GetPromptRequest]
-    req = mcp_types.GetPromptRequest(
-        method="prompts/get",
-        params=mcp_types.GetPromptRequestParams(name=name, arguments=arguments or {}),
-    )
     token = _mcp_permissions.set(permissions)
     try:
-        result = await handler(req)
+        return await mcp_dispatch.get_prompt(server, name, arguments)
     finally:
         _mcp_permissions.reset(token)
-    return result.root
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +198,8 @@ async def test_list_tools_with_parameters_builds_schema():
         server = _build_mcp_server()
         tools = await _list_tools(server)
         user_tool = next(t for t in tools if t.name == "ts1__t1")
-        assert "limit" in user_tool.inputSchema["properties"]
-        assert user_tool.inputSchema["required"] == ["limit"]
+        assert "limit" in user_tool.input_schema["properties"]
+        assert user_tool.input_schema["required"] == ["limit"]
 
 
 async def test_list_tools_store_error_returns_builtins_only():
@@ -1668,3 +1655,109 @@ async def test_dispatcher_routes_registration_endpoint(path: str):
     inner.assert_not_called()
     start_messages = [m for m in sent if m.get("type") == "http.response.start"]
     assert any(m.get("status") == 201 for m in start_messages)
+
+
+# ---------------------------------------------------------------------------
+# Streamable HTTP transport — both protocol eras over the real ASGI app
+# ---------------------------------------------------------------------------
+
+# The 2026-07-28 revision drops the initialize handshake: every request carries
+# its own protocol version and client capabilities in ``params._meta``, plus
+# ``MCP-Method`` (and ``MCP-Name`` for named calls) as headers the server checks
+# against the body. A 2025-era client sends none of that. Both must reach the
+# same handlers.
+_MODERN_VERSION = "2026-07-28"
+_MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": _MODERN_VERSION,
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+@contextlib.asynccontextmanager
+async def _mcp_http_client():
+    """Serve ``get_mcp_app()`` over ASGI with auth disabled, as dev mode does."""
+    from reporting.services.mcp_server import get_mcp_app
+
+    session_manager, asgi_app = get_mcp_app()
+    dev_user = User(
+        user_id="u1",
+        sub="testuser",
+        iss="dev",
+        email="testuser",
+        display_name=None,
+        created_at=_NOW,
+        last_login=_NOW,
+    )
+    with (
+        patch.object(mcp_module.settings, "DEVELOPMENT_ONLY_REQUIRE_AUTH", False),
+        patch.object(mcp_module.report_store, "get_or_create_user", new_callable=AsyncMock, return_value=dev_user),
+    ):
+        async with session_manager.run():
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                yield client
+
+
+async def test_streamable_http_serves_legacy_client():
+    """A 2025-era client still gets a handshake and a tool listing."""
+    async with _mcp_http_client() as client:
+        headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18"}
+        init = await client.post(
+            "/api/v1/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        assert init.json()["result"]["protocolVersion"] == "2025-06-18"
+
+        listed = await client.post(
+            "/api/v1/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        )
+
+    tools = listed.json()["result"]["tools"]
+    assert "graph__schema" in {tool["name"] for tool in tools}
+    # The wire form stays camelCase even though the SDK's Python attribute is
+    # now ``input_schema``.
+    assert all("inputSchema" in tool for tool in tools)
+
+
+async def test_streamable_http_serves_2026_client_without_handshake():
+    """A 2026-07-28 client lists and calls tools with no initialize at all."""
+    async with _mcp_http_client() as client:
+        headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": _MODERN_VERSION}
+        listed = await client.post(
+            "/api/v1/mcp",
+            headers={**headers, "MCP-Method": "tools/list"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": _MODERN_META}},
+        )
+
+        with patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.fetch_graph_schema",
+            new_callable=AsyncMock,
+            return_value={"labels": ["CVE"], "relationship_types": [], "property_keys": [], "indexes": []},
+        ):
+            called = await client.post(
+                "/api/v1/mcp",
+                headers={**headers, "MCP-Method": "tools/call", "MCP-Name": "graph__schema"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "graph__schema", "arguments": {}, "_meta": _MODERN_META},
+                },
+            )
+
+    assert "graph__schema" in {tool["name"] for tool in listed.json()["result"]["tools"]}
+    result = called.json()["result"]
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"])["labels"] == ["CVE"]

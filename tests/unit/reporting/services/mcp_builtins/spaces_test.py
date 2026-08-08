@@ -3,8 +3,6 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-from mcp import types as mcp_types
-
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import ReportListItem, User
@@ -15,6 +13,7 @@ from reporting.schema.space_config import (
     SubspaceItem,
 )
 from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
+from tests.unit.reporting.services import mcp_dispatch
 
 _NOW = "2024-01-01T00:00:00+00:00"
 
@@ -75,11 +74,6 @@ def _current_user(user_id: str = "u1") -> CurrentUser:
 
 
 async def _call(server, name, arguments, permissions=None):
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name=name, arguments=arguments),
-    )
     perm_tok = _mcp_permissions.set(permissions or ALL_PERMISSIONS)
     user_tok = _mcp_current_user.set(_current_user())
     session_tok = _mcp_session_key.set("test-session")
@@ -91,12 +85,12 @@ async def _call(server, name, arguments, permissions=None):
             new_callable=AsyncMock,
             return_value=None,
         ):
-            result = await handler(req)
+            result = await mcp_dispatch.call_tool(server, name, arguments)
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
         _mcp_session_key.reset(session_tok)
-    return json.loads(result.root.content[0].text)
+    return json.loads(result.content[0].text)
 
 
 def _patch(name: str, **kwargs):

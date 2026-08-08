@@ -3,12 +3,12 @@
 import json
 from unittest.mock import patch
 
-import mcp.types as mcp_types
 import pytest
 
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.services.mcp_builtins import all_group_names, find_builtin, list_builtin_tools
 from reporting.services.mcp_server import _build_mcp_server, _mcp_permissions
+from tests.unit.reporting.services import mcp_dispatch
 
 
 def test_all_group_names_includes_known_groups():
@@ -90,17 +90,12 @@ async def test_each_builtin_enforces_its_required_permission(tool):
     """Calling a tool without its required permission returns Permission denied."""
     insufficient = frozenset(ALL_PERMISSIONS) - frozenset(tool.required_permissions)
     server = _build_mcp_server()
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name=tool.name, arguments={}),
-    )
     tok = _mcp_permissions.set(insufficient)
     try:
-        result = await handler(req)
+        result = await mcp_dispatch.call_tool(server, tool.name)
     finally:
         _mcp_permissions.reset(tok)
-    data = json.loads(result.root.content[0].text)
+    data = json.loads(result.content[0].text)
     assert "Permission denied" in data["error"], (
         f"{tool.name}: expected permission denial for {tool.required_permissions}, got: {data}"
     )
