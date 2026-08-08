@@ -20,6 +20,8 @@ def _settings(**overrides: Any) -> ExitStack:
         "SANDBOX_AGENT_MODEL": "",
         "SANDBOX_AGENT_TEMPLATE": "",
         "SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED": False,
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE": "",
+        "SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE": "",
         "ANTHROPIC_API_KEY": "",
         "OPENAI_API_KEY": "",
         "DEEPSEEK_API_KEY": "",
@@ -122,6 +124,82 @@ def test_use_credential_proxy_depends_on_a_routable_namespace() -> None:
         assert sandbox_agent.use_credential_proxy(sandbox_agent.PROVIDERS["claude"]) is False
 
 
+def test_checked_in_lock_is_usable() -> None:
+    # The shipped lock is what a templateless run installs, so it must parse:
+    # hashes, the requirements it came from, and the runtime it was resolved for
+    # (without which the sandbox cannot be checked against it).
+    with _settings():
+        assert sandbox_agent.proxy_lock_error() is None
+        lock = sandbox_agent.read_proxy_lock()
+        assert lock is not None
+        assert lock.requirements and all("==" in r for r in lock.requirements)
+        assert lock.python and lock.machine
+        assert "--hash=sha256:" in lock.text
+
+
+def test_unusable_lock_files_are_rejected(tmp_path: Any) -> None:
+    # Each of these would otherwise fail inside the sandbox, after it had been
+    # created and handed the real provider key.
+    missing = tmp_path / "nope.txt"
+    no_hashes = tmp_path / "no_hashes.txt"
+    no_hashes.write_text(f"{sandbox_agent.PROXY_LOCK_RUNTIME_MARKER} python=3.11 machine=x86_64\nlitellm==1.87.0\n")
+    no_runtime = tmp_path / "no_runtime.txt"
+    no_runtime.write_text("litellm==1.87.0 \\\n    --hash=sha256:abc\n")
+    for bad in (missing, no_hashes, no_runtime):
+        with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=str(bad)):
+            assert sandbox_agent.read_proxy_lock() is None
+            assert sandbox_agent.proxy_lock_error() is not None
+            assert sandbox_agent.proxy_install_plan() is None
+
+
+def test_lock_selection_carries_the_runtime_it_was_resolved_for(tmp_path: Any) -> None:
+    # The install refuses on a sandbox whose python/architecture differs, so the
+    # plan has to hand those values to the script.
+    lock = tmp_path / "lock.txt"
+    lock.write_text(
+        f"{sandbox_agent.PROXY_LOCK_INPUT_MARKER} litellm[proxy]==1.90.0\n"
+        f"{sandbox_agent.PROXY_LOCK_RUNTIME_MARKER} python=3.12 machine=aarch64 platform=aarch64-unknown-linux-gnu\n"
+        "litellm==1.90.0 \\\n    --hash=sha256:abc\n"
+    )
+    with _settings(SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=str(lock)):
+        plan = sandbox_agent.proxy_install_plan()
+        assert plan is not None
+        assert plan.env == {"SEIZU_LOCK_PYTHON": "3.12", "SEIZU_LOCK_MACHINE": "aarch64"}
+        assert plan.lock.requirements == ["litellm[proxy]==1.90.0"]
+        # The full uv target is kept too: the sandbox compares `uname -m`, but
+        # re-locking has to reproduce the libc, which the machine cannot carry.
+        assert plan.lock.platform == "aarch64-unknown-linux-gnu"
+        # The lock itself is what gets written into the sandbox.
+        assert plan.files[sandbox_agent._PROXY_LOCK_SANDBOX_PATH] == lock.read_text()
+
+
+def test_install_script_refuses_a_runtime_the_lock_was_not_resolved_for() -> None:
+    script = sandbox_agent._PROXY_LOCKED_INSTALL
+    # Compared in the sandbox, before pip runs: a mismatched lock otherwise
+    # fails as a wall of "no matching distribution" nobody is watching.
+    assert "SEIZU_PROXY_RUNTIME_MISMATCH" in script
+    assert "uname -m" in script and "sys.version_info" in script
+    assert script.index("SEIZU_LOCK_PYTHON") < script.index(sandbox_agent.PROXY_LOCKED_INSTALL_CMD)
+
+
+def test_lock_is_irrelevant_when_a_template_is_configured() -> None:
+    # With a template nothing is installed, so an unusable lock must not block
+    # a run that never reads it.
+    with _settings(
+        SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+        SANDBOX_AGENT_API_KEY="real-key",
+        SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE="/nonexistent/lock.txt",
+        SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE="my-proxy",
+    ):
+        assert sandbox_agent.agent_config_error() is None
+    with _settings(
+        SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED=True,
+        SANDBOX_AGENT_API_KEY="real-key",
+        SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE="/nonexistent/lock.txt",
+    ):
+        assert "lock" in (sandbox_agent.agent_config_error() or "")
+
+
 def test_proxy_namespace() -> None:
     with _settings():
         assert sandbox_agent.proxy_namespace(sandbox_agent.PROVIDERS["claude"]) == "anthropic"
@@ -165,3 +243,12 @@ def test_agent_run_script_cds_into_the_workdir() -> None:
     script = sandbox_agent.agent_run_script(sandbox_agent.PROVIDERS["claude"], "/home/user/repo")
     assert "cd /home/user/repo" in script
     assert "claude -p" in script
+
+
+def test_lock_records_the_full_platform_not_just_the_machine() -> None:
+    # A musl and a gnu lock share a machine but not an ABI, so re-locking has to
+    # read the recorded platform rather than deriving one.
+    with _settings():
+        lock = sandbox_agent.read_proxy_lock()
+        assert lock is not None
+        assert lock.platform.startswith(lock.machine + "-")

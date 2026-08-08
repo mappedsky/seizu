@@ -134,3 +134,140 @@ probes it — smoke-test before production.
 Keeping CVE ids out of PRs is prompt-only (they are public). Workflow-supplied
 repo/branch values are regex-validated and reach scripts only via env vars. PR
 review is the gate.
+
+## WF-008 — The proxy sandbox runs a hash-locked requirement set
+
+**Applies to:** `sandbox_agent.proxy_install_plan`,
+`reporting/services/sandbox_proxy_requirements.txt`,
+`SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` / `_TEMPLATE`
+
+**The requirement set is a hash-locked file, not a requirement string.** There
+is no setting naming what to install: `make lock_proxy_requirements` compiles a
+fully resolved, hashed lock (whose header records the file, requirements and
+runtime it came from, so re-locking needs no arguments and cannot overwrite a
+different lock — a configured lock that cannot be read from the maintenance
+container is an error, never a silent fallback to the checked-in one), and
+`_REQUIREMENTS_FILE` chooses *which* lock. A
+requirement string alongside a lock is a second source of truth that can
+silently disagree with it — the earlier design did exactly that, and a bumped
+pin quietly downgraded the install to top-level-only.
+
+It reaches the sandbox one of two ways, and these are separate concerns:
+
+- **A template** (`SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`): an image the
+  operator supplied. The run uses it **as built** — no install, and no
+  inspection of what it contains. Its only contract is that it can run a LiteLLM
+  proxy.
+- **No template:** the run provisions the base image itself, installing the lock
+  with `pip --no-deps --require-hashes` and importing
+  `litellm.proxy.proxy_server` before reporting success. It installs
+  unconditionally rather than skipping when a LiteLLM is already present.
+
+`build_proxy_template` builds from the same `proxy_install_plan()`, so *our*
+template contains what a templateless run would install.
+
+**A lock is valid only if every recorded field is present** — requirements,
+python, machine, platform, hashes. Partial acceptance means each consumer
+invents the rest, and the failure is destructive rather than loud: re-locking a
+lock with no recorded requirements compiles *nothing* over it, and one with no
+recorded platform quietly retargets an ARM lock at x86_64. `_parse_proxy_lock`
+is the single definition, and it names what is missing.
+
+**A lock is only valid for the runtime it was resolved for** — its hashes cover
+wheels for one python ABI and architecture — so the header records them and the
+install compares the sandbox against them **before running pip**, failing with
+a re-lock instruction. Otherwise a base-image upgrade, or a self-hosted
+`SANDBOX_DOMAIN` backend on another architecture, produces a wall of "no
+matching distribution" inside a sandbox nobody is watching. Locks for other
+runtimes are a supported configuration, not a fork:
+`make lock_proxy_requirements PYTHON_VERSION=… PLATFORM=… OUTPUT=…`.
+
+**The target runtime is measured rather than declared** when `SANDBOX_API_KEY`
+is available: the generator opens a real templateless sandbox and reads its
+python and architecture. Declaring it is how the lock came to target python 3.11
+(the `e2bdev/base` image) while sandboxes run 3.13 — a discrepancy nothing could
+catch before install time. The recorded *platform* still wins over a measurement
+when the architecture is unchanged, because `uname -m` cannot distinguish
+gnu from musl.
+
+**Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
+a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
+FastAPI versions, FastAPI 0.141 removed `get_flat_dependant` — which LiteLLM's
+proxy imports — and every remediation run started failing with nothing changed
+here. The presence check made it worse: it would happily use an unrelated
+LiteLLM baked into an image.
+
+Pinning only the top level does not close that: LiteLLM 1.87.0 pins FastAPI
+exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same
+failure mode survives one level down. This sandbox holds the **real provider
+key**, so what executes in it should be a fixed set of artifacts, not a
+resolution.
+
+Three details are non-obvious, and each was found by a failure rather than by
+reading:
+
+- `uv pip compile --no-config`, or this project's own `[tool.uv]`
+  constraint-dependencies are applied to the sandbox's resolution — where they
+  make it unsolvable against LiteLLM's exact FastAPI pin.
+- The resolution targets the **sandbox's** interpreter, on linux x86_64. An E2B
+  sandbox with no template runs python **3.13**; the `e2bdev/base` docker image
+  is **3.11**; neither is this project's. A lock built for the wrong one
+  installs fine locally and fails in the sandbox, because the hashes cover
+  wheels for another ABI — which is why `build_proxy_template` builds from
+  `python:<the lock's python>` rather than a fixed base image, and why the
+  target is recorded in the lock and re-checked in the sandbox.
+  `make lock_proxy_requirements` runs in `seizu-temporal-worker`, the service
+  that holds the proxy configuration.
+- `pip install --no-deps`. The lock is the complete closure, so pip has nothing
+  to resolve — and the base image's pip (23.2.1) otherwise rejects the whole
+  install because `mcp` names `pyjwt[crypto]>=…`, which that version treats as
+  unpinned even though the lock pins `pyjwt`.
+
+The import check exists because the failure mode without it is bad: the CLI dies
+in a backgrounded `nohup`, the phase reports a health-check timeout two minutes
+later, and the real `ImportError` is only in a log tail. Bumping the pin is a
+deliberate act — verify with `make remediation_smoke SMOKE_PROXY=1`.
+
+The same validation is what makes the operator-supplied list safe to word-split
+unquoted in the fallback install command; it is re-checked in `credential_proxy`
+so direct callers cannot skip it.
+
+The install phase was briefly kept for templated runs too (pip short-circuits on
+satisfied pins, so a drifted template would self-correct). That was dropped
+deliberately: it conflated two ownership models. Building an image *is* the
+operator saying "this is the environment"; re-installing over it at run time
+makes the template advisory and hides which set actually ran.
+
+**A template is deliberately not verified against the lock**, either — no marker
+file, no digest comparison. The checked-in lock is one valid answer, not the
+definition of a correct proxy: it drifts from upstream by design, and an
+operator may legitimately want a newer LiteLLM, or an image built from something
+else entirely. Requiring a match would make `build_proxy_template` the only
+supported way to have a template, which is not the intent. The accepted cost:
+nothing notices a stale template, and a template with no LiteLLM at all fails at
+`proxy_start` (health check plus the LiteLLM log) rather than at install.
+
+## WF-009 — Remediation failures name the step they happened in
+
+**Applies to:** `sandbox_remediation._run`, `sandbox_agent.PhaseReporter`
+
+A failed run reports `"<step> phase: <detail>"`, falling back to the exception
+type when the provider's exception carries no message.
+
+**Why:** the sandbox provider raises a bare "command exited with code 1 and
+error:" — often with an empty message, since the detail went to stdout. The
+step is the first thing an operator needs and the one thing that message never
+contains.
+
+**Commands are not the only steps.** Sandbox creation (where a template that
+does not exist fails), config writes, host/token resolution, the patch handoff
+and teardown all sit *between* commands, and attributing those to whichever
+command ran last is worse than saying nothing. So `_sandbox()` names a
+sandbox for its whole lifetime — including `<name>_teardown`, set only once the
+body has completed — and `credential_proxy` reports its own internal steps
+through the `report_phase` callback rather than the caller guessing.
+
+**Command timeouts carry their own bound.** `PhaseTimeout` records the phase and
+the seconds that actually elapsed, because the proxy phases run under fixed
+bounds (600s/240s) far below `REMEDIATION_TIMEOUT_SECONDS` — reporting the
+run-wide deadline for one of them names a duration that never passed.

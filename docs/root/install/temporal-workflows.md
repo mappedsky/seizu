@@ -398,6 +398,8 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `SANDBOX_AGENT_BASE_URL` | `""` | LLM gateway/proxy base URL exported to the agent phase (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`); typically paired with the key command so the sandbox only ever holds a short-lived gateway key. Mutually exclusive with the credential proxy below. |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_ENABLED` | `false` | Run a short-lived LiteLLM proxy in its **own** sandbox holding the real provider key, and hand the agent sandbox only the proxy's ephemeral per-run key with an in-memory spend cap (see below). All providers (`opencode` needs `SANDBOX_AGENT_MODEL` set). |
 | `SANDBOX_AGENT_CREDENTIAL_PROXY_MAX_BUDGET` | `5` | USD spend cap (LiteLLM's in-memory global `max_budget`) — bounds real-time abuse of the ephemeral key while the proxy is up. |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` | `""` (checked-in lock) | Hash-locked requirement file a **templateless** proxy sandbox installs. Empty → `reporting/services/sandbox_proxy_requirements.txt`. Point it at your own compiled lock to run a different LiteLLM, or one resolved for a different sandbox runtime; see [Pinning the proxy's LiteLLM](#pinning-the-proxys-litellm). |
+| `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE` | `""` | E2B template for the proxy sandbox, built from those requirements by `make build_proxy_template`. Set → runs use that image **as built** and install nothing. Empty → the plain base image, and every run installs LiteLLM first. |
 | `SANDBOX_AGENT_MODEL` | `""` | Model for the CLI. For `claude`/`codex` a bare model override (empty → the CLI's default). For `opencode` it is **required** and takes the `provider/model` form (e.g. `deepseek/deepseek-v4-pro`), which also selects the provider key and — in credential-proxy mode — the LiteLLM namespace. |
 | `REMEDIATION_TIMEOUT_SECONDS` | `1800` | Hard cap for one remediation run (all sandbox phases). Also caps each CI-fix run. |
 | `REMEDIATION_CI_MAX_WAIT_SECONDS` | `3600` | Total time the workflow watches one PR's checks (including re-runs after a fix push). `0` disables the CI watch. |
@@ -424,6 +426,60 @@ The agent's provider key is the one credential that must be present while the ag
 The proxy sandbox stays **private** (`allow_public_traffic: false`): the agent CLI reaches it using E2B's traffic-access token sent as a custom request header, so the proxy port is never world-reachable. Each provider carries that header differently — Claude Code via `ANTHROPIC_CUSTOM_HEADERS`; codex via a written `~/.codex/config.toml` `model_provider` with `env_http_headers`; opencode via a written `@ai-sdk/openai-compatible` provider block with `options.headers`. (A hypothetical provider with no header support would fall back to a public port gated only by the ephemeral key.)
 
 This path stands up LiteLLM inside a sandbox and depends on each CLI talking to it with a custom header and correct model routing; **verify it against your CLI/LiteLLM versions with a real run before enabling in production** (`make remediation_smoke SMOKE_PROXY=1` probes exactly this — it boots the private proxy, mints a key, and confirms a second sandbox can reach it via the traffic-access header). The LiteLLM ↔ agent-CLI wire compatibility (model routing, endpoint shape, header passthrough) is the fragile part.
+
+#### Pinning the proxy's LiteLLM
+
+The proxy sandbox is ephemeral, so without a template it installs LiteLLM from PyPI on every run. What it installs is a **hash-locked requirement file** — never a requirement string — so there is exactly one description of what the proxy runs and no second setting that can disagree with it. A run refuses to start if that file is missing, has no hashes, or does not carry the complete generated header — the requirements it was compiled from *and* the python/machine/platform it was resolved for. Every field is required because each one has a consumer that would otherwise invent it: the runtime fields are what the sandbox is checked against, and the requirements are what re-locking reproduces. If you supply your own lock, generate it with `make lock_proxy_requirements` (or reproduce that header exactly) rather than handing over a bare `pip freeze`.
+
+The reason is not tidiness. An unpinned `litellm[proxy]` resolves to whatever was published that morning, and LiteLLM's own proxy dependencies are declared as ranges — so a FastAPI release that removed a symbol LiteLLM's proxy imports was enough to make every remediation run fail at the proxy boot, with nothing changed on this side. A templateless run therefore installs the pins unconditionally (it does not skip when some LiteLLM already exists in the image) and imports `litellm.proxy.proxy_server` before reporting success, so a bad pin fails with the actual `ImportError` instead of a health-check timeout.
+
+Pinning the top level alone would not be enough: LiteLLM 1.87.0 pins FastAPI exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same drift survives one level down — in the sandbox that holds your **real provider key**. The shipped lock is fully resolved: 101 packages, each pinned with hashes, written into the sandbox and installed with `pip --no-deps --require-hashes`.
+
+To move to a newer LiteLLM:
+
+```bash
+make lock_proxy_requirements REQUIREMENTS="litellm[proxy]==1.90.0"
+make build_proxy_template              # REQUIRED if you use a template —
+                                       # runs never install over one
+make remediation_smoke SMOKE_PROXY=1   # prove it still boots
+```
+
+With no arguments, `make lock_proxy_requirements` re-locks the configured lock in place — same file, requirements and target runtime, all read from its own header — so it needs no arguments and cannot overwrite a different lock. If `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` names a deployment path that is not readable from the maintenance container, it refuses rather than falling back to the checked-in lock; run it where that file is available, or pass `REQUIREMENTS=` and `OUTPUT=` to compile a new one. (Transitive versions still re-resolve to the newest compatible release; that is what re-locking is for.)
+
+With `SANDBOX_API_KEY` set it also **measures** the target runtime by opening a real templateless sandbox, instead of assuming one — `PROBE=0` skips that. `OUTPUT` is a path inside the repository, since the command runs in a disposable container that mounts nothing else; copy the result to wherever the worker will read it.
+
+Keep the old pin if the smoke test fails. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it before re-locking — `REQUIREMENTS` takes a whole requirement list, so quote it:
+
+```bash
+make lock_proxy_requirements REQUIREMENTS="litellm[proxy]==1.90.0 fastapi==0.136.1"
+```
+
+A lock is only valid for the interpreter and architecture it was resolved for — its hashes cover wheels built for that ABI — so it records them in its header and the install **checks the sandbox against them before running pip**, failing with an explicit re-lock instruction rather than a wall of "no matching distribution". The shipped lock targets python 3.13, which is what an E2B sandbox created with no template runs. (Note that is *not* the same as the `e2bdev/base` docker image, which is python 3.11 — read the sandbox's version off a real run, not a local `docker run`. `make build_proxy_template` builds from the lock's own python for exactly this reason, so a template and a templateless run cannot end up on different interpreters.)
+
+For a self-hosted `SANDBOX_DOMAIN` backend, or any base image on a different python or architecture, compile a lock for it and point the setting at that file:
+
+```bash
+make lock_proxy_requirements PYTHON_VERSION=3.12 PLATFORM=aarch64-unknown-linux-gnu \
+    OUTPUT=locks/litellm-3.12-arm.txt
+# copy locks/litellm-3.12-arm.txt to the deployment, then:
+# SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE=/srv/seizu/litellm-3.12-arm.txt
+```
+
+#### Prebuilding the proxy template
+
+Installing that dependency tree on every run makes each run depend on PyPI resolving correctly while it is running — which is what broke it — and costs about twenty seconds. `make build_proxy_template` bakes the configured pins into an E2B template instead:
+
+```bash
+make build_proxy_template                        # or TEMPLATE_NAME=my-proxy
+# then, on the temporal worker:
+SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE=seizu-litellm-proxy
+```
+
+The build uses the same install plan a run would — `python:<the lock's python>` + the hash-locked set + an `import litellm.proxy.proxy_server` step, so a requirement set that cannot serve fails the build rather than a remediation run. It needs `SANDBOX_API_KEY`; E2B templates are a cloud feature, so with a self-hosted `SANDBOX_DOMAIN` there is nothing to build and the run-time install covers it. Measured on E2B cloud, the proxy sandbox goes from create to serving in ~33s on the base image and ~12s from a template (the first creation from a freshly built template is slower — cold cache).
+
+With a template configured, runs **install nothing and inspect nothing** — the image is used as you built it. That is deliberate: a template is *your* environment, and the only contract it has to meet is that it can run a LiteLLM proxy. Our lock is one valid answer, not the only one — it drifts from upstream by design, and you may want a newer LiteLLM than we have pinned, or an image built from something else entirely. `make build_proxy_template` is offered as a convenience, not as the definition of a valid template.
+
+The consequence is real and yours to manage: nothing at run time notices a template built from older requirements, or one missing LiteLLM altogether (that surfaces at `proxy_start`, as a health-check failure with the LiteLLM log attached). So re-lock *and* rebuild together when you bump the pins.
 
 ## Local development
 

@@ -251,6 +251,13 @@ async def _run_proxy() -> int:
         return _fail("SANDBOX_AGENT_PROVIDER is unknown (expected claude, codex, or opencode)")
     if sandbox_agent.proxy_namespace(provider) is None:
         return _fail("no proxy namespace — set SANDBOX_AGENT_MODEL (required for opencode)")
+    # The lock is the point of this probe when there is no template: it is what
+    # the proxy sandbox installs, and an unusable one should fail here.
+    if (
+        not settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE
+        and (invalid := sandbox_agent.proxy_lock_error()) is not None
+    ):
+        return _fail(invalid)
     # Pass ONLY literal strings to _fail(): resolve_*() returns the fallback API
     # key in the same tuple as its error, so surfacing that error to a print/log
     # trips CodeQL's clear-text-logging (and risks leaking on real imprecision).
@@ -279,14 +286,32 @@ async def _run_proxy() -> int:
             script, timeout_seconds=timeout_seconds or 300, on_output=on_output, envs=envs
         )
 
+    # Say which setup is under test. With a template nothing is installed and
+    # nothing inspects the image, so this line is the only record of what was
+    # actually exercised — a template that never reached the process, or a lock
+    # swapped underneath, would otherwise look exactly like a pass.
+    template = settings.SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE
+    if template:
+        install = f"none — template {template} used as built (contents not inspected)"
+    else:
+        lock = sandbox_agent.read_proxy_lock()
+        install = (
+            f"{lock.path} ({' '.join(lock.requirements)}, python {lock.python}/{lock.machine})"
+            if lock
+            else "(no usable lock)"
+        )
     print(f"Proxy smoke: provider={provider.name} namespace={sandbox_agent.proxy_namespace(provider)}")
+    print(f"             install: {install}")
     print("\n########## PROXY SANDBOX (private LiteLLM) ##########")
     reachable = False
     async with sandbox_agent.credential_proxy(
         provider=provider,
         real_key=real_key,
         budget="1",
-        sandbox_timeout_seconds=480,
+        # Must outlast the install phase's own bound (installing LiteLLM's proxy
+        # tree from PyPI on a base image is the long pole), or E2B reaps the
+        # sandbox mid-install and the failure looks like a proxy bug.
+        sandbox_timeout_seconds=sandbox_agent._PROXY_INSTALL_TIMEOUT_SECONDS + 300,
         run_phase=run_phase,
         mask_secrets=mask_secrets,
     ) as (base_url, _agent_key, access_token):

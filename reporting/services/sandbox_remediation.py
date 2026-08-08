@@ -70,8 +70,10 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from reporting.services import github_checks, sandbox_agent
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -352,6 +354,20 @@ Operational facts:
 """
 
 
+class PhaseTimeout(TimeoutError):
+    """A single sandbox command exceeded *its own* bound.
+
+    Distinct from the run-wide deadline: the proxy phases carry fixed bounds
+    (600s/240s) far below `REMEDIATION_TIMEOUT_SECONDS`, so reporting the global
+    timeout for one of them would name a duration that never elapsed.
+    """
+
+    def __init__(self, phase: str, seconds: int) -> None:
+        super().__init__(f"the {phase} command timed out after {seconds}s")
+        self.phase = phase
+        self.seconds = seconds
+
+
 @dataclass
 class RemediationRunResult:
     status: str  # "completed" | "failed" | "skipped"
@@ -577,9 +593,19 @@ async def _run(
     gh_env = {"GH_TOKEN": github_token, "GH_ENTERPRISE_TOKEN": github_token, "GH_HOST": github_host}
     git_id_env = {"SEIZU_GIT_USER": settings.REMEDIATION_GIT_USER, "SEIZU_GIT_EMAIL": settings.REMEDIATION_GIT_EMAIL}
 
+    # The step currently in flight, so a failure can say which one it was. Set
+    # by _phase for commands and by _step for everything between them — sandbox
+    # creation, file writes, teardown — since that is where a misconfiguration
+    # (a template that does not exist, say) actually fails.
+    last_phase = ["startup"]
+
+    def _step(name: str) -> None:
+        last_phase[0] = name
+
     async def _phase(
         backend: SandboxBackend, name: str, script: str, envs: dict[str, str], timeout_seconds: int | None = None
     ) -> str:
+        _step(name)
         # One line per step (install/setup/guard/agent/extract/push and the
         # proxy phases) so operators can follow a run in the worker logs.
         logger.info(
@@ -588,19 +614,50 @@ async def _run(
         )
         transcript.append(f"\n--- phase: {name} ---\n")
         bound = timeout_seconds if timeout_seconds is not None else _remaining(name)
-        return await backend.run_bash_streaming(script, timeout_seconds=bound, on_output=_on_output, envs=envs)
+        try:
+            return await backend.run_bash_streaming(script, timeout_seconds=bound, on_output=_on_output, envs=envs)
+        except TimeoutError as exc:
+            # Carry the bound that actually elapsed; the outer handler cannot
+            # know it, and the run-wide deadline is usually much larger.
+            raise PhaseTimeout(name, bound) from exc
+
+    @asynccontextmanager
+    async def _sandbox(name: str, **kwargs: Any) -> AsyncIterator[SandboxBackend]:
+        """Open a sandbox with the phase named for its whole lifetime.
+
+        Creation and teardown are the parts no command covers: without this, a
+        creation failure is blamed on the previous sandbox's last command and a
+        teardown failure on the body's.
+        """
+        _step(name)
+        async with open_backend(**kwargs) as backend:
+            yield backend
+            # Reached only when the body completed, so anything that fails from
+            # here is teardown, not the work.
+            _step(f"{name}_teardown")
 
     # Handoff from the agent sandbox to the push sandbox (base64 diff + PR text).
     handoff: dict[str, str] = {}
 
+    def _failure(message: str) -> RemediationRunResult:
+        """A failure naming the phase it happened in.
+
+        A sandbox command failure surfaces as the provider's generic "command
+        exited with code N" — which phase produced it is the first thing an
+        operator needs and the one thing that message never says.
+        """
+        return RemediationRunResult(status="failed", error=f"{last_phase[0]} phase: {message}", output_tail=_tail())
+
     async def _agent_sandbox(agent_env: dict[str, str], extra_files: dict[str, str] | None = None) -> str | None:
-        async with open_backend(
+        async with _sandbox(
+            "agent_sandbox",
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
             allow_internet=True,
             timeout_seconds=sandbox_timeout,
             template=template,
         ) as backend:
+            _step("agent_files")
             await backend.write_file(sandbox_agent.PROMPT_PATH, full_prompt)  # no secrets
             if fix_mode:
                 # Placeholder so reading the comment back never errors when the
@@ -621,14 +678,17 @@ async def _run(
                     return guard_output
             # The agent runs with no GitHub token anywhere in this sandbox.
             await _phase(backend, "agent", sandbox_agent.agent_run_script(provider, REPO_PATH), agent_env)
-            # Extract the change as a patch — still no token.
+            # Extract the change as a patch — still no token. The reads that
+            # follow each phase are the handoff to the push sandbox.
             if fix_mode:
                 extract_output = await _phase(backend, "extract", _FIX_EXTRACT_SCRIPT, dict(target_env))
+                _step("handoff")
                 if "SEIZU_NO_NEW_COMMITS" not in extract_output:
                     handoff["patch"] = await backend.read_file(CHANGES_B64_PATH)
                 handoff["comment"] = await backend.read_file(PR_COMMENT_PATH)
             else:
                 await _phase(backend, "extract", _EXTRACT_SCRIPT, {**target_env, "SEIZU_PR_TITLE": pr_title})
+                _step("handoff")
                 handoff["patch"] = await backend.read_file(CHANGES_B64_PATH)
                 handoff["title"] = await backend.read_file(PR_TITLE_PATH)
                 handoff["body"] = await backend.read_file(PR_BODY_PATH)
@@ -645,6 +705,9 @@ async def _run(
                 sandbox_timeout_seconds=sandbox_timeout,
                 run_phase=_phase,
                 mask_secrets=mask_secrets,
+                # Its sandbox creation / config write / teardown are steps no
+                # command covers, and a bad proxy template fails in the first.
+                report_phase=_step,
             ) as (base_url, vkey, access_token):
                 setup = sandbox_agent.proxy_agent_setup(provider, key_envs, base_url, vkey, access_token)
                 return await _agent_sandbox(setup.env, extra_files=setup.files)
@@ -655,13 +718,15 @@ async def _run(
     async def _run_push() -> str:
         """Push from a FRESH sandbox that never ran the agent — so a persistence
         attack planted during the agent phase cannot reach the GitHub token."""
-        async with open_backend(
+        async with _sandbox(
+            "push_sandbox",
             api_key=settings.SANDBOX_API_KEY,
             domain=settings.SANDBOX_DOMAIN,
             allow_internet=True,
             timeout_seconds=_PUSH_TIMEOUT_SECONDS + sandbox_agent.SANDBOX_LIFETIME_SLACK_SECONDS,
             template=None,  # base image + pinned gh only; no agent CLI, no npm
         ) as backend:
+            _step("push_files")
             await backend.write_file(CHANGES_B64_PATH, handoff["patch"])
             if fix_mode:
                 await _phase(
@@ -723,17 +788,22 @@ async def _run(
             if run_push
             else (guard_or_none or "")
         )
-    except TimeoutError:
-        return RemediationRunResult(
-            status="failed", error=f"remediation timed out after {timeout}s", output_tail=_tail()
-        )
+    except TimeoutError as exc:
+        # A PhaseTimeout knows the bound that actually elapsed (the proxy phases
+        # carry their own, far below the run-wide deadline), and _remaining()
+        # explains a deadline reached between phases. Only a bare wait_for
+        # timeout leaves us with nothing but the global bound.
+        return _failure(_mask(str(exc)).strip() or f"remediation timed out after {timeout}s")
     except Exception as exc:
         if not fix_mode and "SEIZU_NO_CHANGES" in "".join(transcript):
             return RemediationRunResult(
                 status="failed", error="the coding agent committed no changes", output_tail=_tail()
             )
         logger.exception("sandbox remediation failed for %s", repo)
-        return RemediationRunResult(status="failed", error=_mask(str(exc)) or "remediation failed", output_tail=_tail())
+        # E2B's CommandExitException carries the exit code but an empty message
+        # when the command only wrote to stdout, so fall back to the exception
+        # type rather than reporting an empty error.
+        return _failure(_mask(str(exc)).strip() or type(exc).__name__)
     finally:
         ticker.cancel()
 
