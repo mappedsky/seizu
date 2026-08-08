@@ -32,8 +32,31 @@ def test_relocking_writes_back_to_the_lock_it_read(monkeypatch: Any) -> None:
     # contents over what every unconfigured deployment installs.
     monkeypatch.delenv("PROXY_OUTPUT", raising=False)
     assert lock._resolve_output(_lock_record()) == Path("/srv/custom-lock.txt")
-    # With no lock to re-read there is nothing to preserve.
-    assert lock._resolve_output(None) == Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
+    # With no lock to re-read, and none configured, there is nothing to preserve.
+    with patch("reporting.settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE", ""):
+        assert lock._resolve_output(None) == Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
+
+
+def test_unreadable_configured_lock_never_retargets_the_default(monkeypatch: Any) -> None:
+    # A deployment lock that is not mounted in this container parses as None.
+    # Falling through to the checked-in default would rewrite what every
+    # unconfigured deployment installs, with default requirements.
+    monkeypatch.delenv("PROXY_OUTPUT", raising=False)
+    with patch("reporting.settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE", "/srv/deployment-lock.txt"):
+        assert isinstance(err := lock._resolve_output(None), str)
+        assert "/srv/deployment-lock.txt" in err
+        # …unless an output is named explicitly, which is the escape hatch the
+        # error points at.
+        monkeypatch.setenv("PROXY_OUTPUT", "locks/new.txt")
+        assert lock._resolve_output(None) == lock._REPO_ROOT / "locks/new.txt"
+
+
+def test_missing_default_lock_can_still_be_bootstrapped(monkeypatch: Any) -> None:
+    # The same "no readable lock" state is fine when the default *is* what was
+    # configured: there is nothing else it could be rewriting.
+    monkeypatch.delenv("PROXY_OUTPUT", raising=False)
+    with patch("reporting.settings.SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE", ""):
+        assert lock._resolve_output(None) == Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
 
 
 def test_output_must_land_in_the_repository(monkeypatch: Any) -> None:

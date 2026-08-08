@@ -145,7 +145,9 @@ review is the gate.
 is no setting naming what to install: `make lock_proxy_requirements` compiles a
 fully resolved, hashed lock (whose header records the file, requirements and
 runtime it came from, so re-locking needs no arguments and cannot overwrite a
-different lock), and `_REQUIREMENTS_FILE` chooses *which* lock. A
+different lock — a configured lock that cannot be read from the maintenance
+container is an error, never a silent fallback to the checked-in one), and
+`_REQUIREMENTS_FILE` chooses *which* lock. A
 requirement string alongside a lock is a second source of truth that can
 silently disagree with it — the earlier design did exactly that, and a bumped
 pin quietly downgraded the install to top-level-only.

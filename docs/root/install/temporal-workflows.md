@@ -444,11 +444,15 @@ make build_proxy_template              # REQUIRED if you use a template —
 make remediation_smoke SMOKE_PROXY=1   # prove it still boots
 ```
 
-With no arguments, `make lock_proxy_requirements` re-locks the configured lock in place — same file, requirements and target runtime, all read from its own header — so it needs no arguments and cannot overwrite a different lock. (Transitive versions still re-resolve to the newest compatible release; that is what re-locking is for.)
+With no arguments, `make lock_proxy_requirements` re-locks the configured lock in place — same file, requirements and target runtime, all read from its own header — so it needs no arguments and cannot overwrite a different lock. If `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE` names a deployment path that is not readable from the maintenance container, it refuses rather than falling back to the checked-in lock; run it where that file is available, or pass `REQUIREMENTS=` and `OUTPUT=` to compile a new one. (Transitive versions still re-resolve to the newest compatible release; that is what re-locking is for.)
 
 With `SANDBOX_API_KEY` set it also **measures** the target runtime by opening a real templateless sandbox, instead of assuming one — `PROBE=0` skips that. `OUTPUT` is a path inside the repository, since the command runs in a disposable container that mounts nothing else; copy the result to wherever the worker will read it.
 
-Keep the old pin if step 4 fails. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it (e.g. `litellm[proxy]==1.90.0 fastapi==0.136.1`) before re-locking.
+Keep the old pin if the smoke test fails. If a future LiteLLM's own dependency ranges resolve badly, pin the offending dependency alongside it before re-locking — `REQUIREMENTS` takes a whole requirement list, so quote it:
+
+```bash
+make lock_proxy_requirements REQUIREMENTS="litellm[proxy]==1.90.0 fastapi==0.136.1"
+```
 
 A lock is only valid for the interpreter and architecture it was resolved for — its hashes cover wheels built for that ABI — so it records them in its header and the install **checks the sandbox against them before running pip**, failing with an explicit re-lock instruction rather than a wall of "no matching distribution". The shipped lock targets python 3.13, which is what an E2B sandbox created with no template runs. (Note that is *not* the same as the `e2bdev/base` docker image, which is python 3.11 — read the sandbox's version off a real run, not a local `docker run`. `make build_proxy_template` builds from the lock's own python for exactly this reason, so a template and a templateless run cannot end up on different interpreters.)
 

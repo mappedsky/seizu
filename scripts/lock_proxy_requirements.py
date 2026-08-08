@@ -115,7 +115,22 @@ def _resolve_output(existing: sandbox_agent.ProxyLock | None) -> Path | str:
     """
     configured = os.environ.get("PROXY_OUTPUT", "").strip()
     if not configured:
-        return Path(existing.path if existing else sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
+        if existing is not None:
+            return Path(existing.path)
+        # No readable lock. Falling back to the checked-in path is right when
+        # that *is* what was configured (bootstrapping, or a corrupted default),
+        # but not when a deployment lock was configured and simply is not
+        # mounted here: re-locking would then rewrite the default with default
+        # requirements, which is the accident this guard exists to prevent.
+        lock_path = sandbox_agent.proxy_lock_path()
+        if lock_path != sandbox_agent.DEFAULT_PROXY_LOCK_PATH:
+            return (
+                f"SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE points at {lock_path}, which cannot be read "
+                "or parsed here, so there is nothing to re-lock. Run this where that file is available, or pass "
+                "OUTPUT=<path in the repo> (with REQUIREMENTS=) to compile a new lock — otherwise this would "
+                "rewrite the checked-in default instead."
+            )
+        return Path(sandbox_agent.DEFAULT_PROXY_LOCK_PATH)
     # This runs in a disposable container where only the repository is mounted,
     # so anything outside it is written to a filesystem that ceases to exist.
     target = Path(configured)
@@ -159,11 +174,12 @@ def _lock() -> int:
     if isinstance(output, str):
         return _fail(output)
 
-    requirements = (
-        os.environ.get("PROXY_REQUIREMENTS", "").split()
-        or (existing.requirements if existing else [])
-        or DEFAULT_REQUIREMENTS.split()
-    )
+    if requested := os.environ.get("PROXY_REQUIREMENTS", "").split():
+        requirements, source = requested, "REQUIREMENTS"
+    elif existing:
+        requirements, source = existing.requirements, f"{existing.path} header"
+    else:
+        requirements, source = DEFAULT_REQUIREMENTS.split(), "built-in default"
 
     probed: tuple[str, str] | None = None
     if os.environ.get("PROBE", "1") != "0":
@@ -179,7 +195,8 @@ def _lock() -> int:
         return _fail(runtime)
     python_version, platform = runtime
 
-    print(f"Compiling {' '.join(requirements)} for python {python_version} ({platform}) → {output}")
+    print(f"Requirements ({source}): {' '.join(requirements)}")
+    print(f"Compiling for python {python_version} ({platform}) → {output}")
     result = subprocess.run(
         [
             "uv",

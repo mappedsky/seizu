@@ -53,8 +53,8 @@ cartography_contract_test: build_cartography_worker
 #   real provider key (+ SANDBOX_AGENT_MODEL for opencode). Usage:
 #     make remediation_smoke SMOKE_PROXY=1
 remediation_smoke:
-	docker compose run --rm --no-deps -e SMOKE_REPO=$(SMOKE_REPO) -e SMOKE_FORK=$(SMOKE_FORK) \
-		-e SMOKE_PROXY=$(SMOKE_PROXY) \
+	docker compose run --rm --no-deps -e SMOKE_REPO="$(SMOKE_REPO)" -e SMOKE_FORK="$(SMOKE_FORK)" \
+		-e SMOKE_PROXY="$(SMOKE_PROXY)" \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.remediation_smoke
 
 # Builds the E2B template the credential-proxy sandbox runs on, from the
@@ -64,7 +64,7 @@ remediation_smoke:
 #     make build_proxy_template [TEMPLATE_NAME=seizu-litellm-proxy]
 .PHONY: build_proxy_template
 build_proxy_template:
-	docker compose run --rm --no-deps -e TEMPLATE_NAME=$(TEMPLATE_NAME) \
+	docker compose run --rm --no-deps -e TEMPLATE_NAME="$(TEMPLATE_NAME)" \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.build_proxy_template
 
 # Recompiles the hash-locked requirement set the credential-proxy sandbox
@@ -81,9 +81,9 @@ build_proxy_template:
 #     make lock_proxy_requirements PYTHON_VERSION=3.12 OUTPUT=locks/litellm-3.12.txt
 .PHONY: lock_proxy_requirements
 lock_proxy_requirements:
-	docker compose run --rm --no-deps -e PROXY_REQUIREMENTS=$(REQUIREMENTS) \
-		-e PROXY_PYTHON_VERSION=$(PYTHON_VERSION) -e PROXY_PLATFORM=$(PLATFORM) -e PROXY_OUTPUT=$(OUTPUT) \
-		-e PROBE=$(PROBE) \
+	docker compose run --rm --no-deps -e PROXY_REQUIREMENTS="$(REQUIREMENTS)" \
+		-e PROXY_PYTHON_VERSION="$(PYTHON_VERSION)" -e PROXY_PLATFORM="$(PLATFORM)" -e PROXY_OUTPUT="$(OUTPUT)" \
+		-e PROBE="$(PROBE)" \
 		seizu-temporal-worker uv run --frozen --no-sync python -m scripts.lock_proxy_requirements
 
 # Runs on the host, not in a container: it recreates the seizu service between
