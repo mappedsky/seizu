@@ -818,7 +818,8 @@ async def test_builtin_call_validates_required_arguments_before_handler(mocker):
         {},
     )
 
-    assert json.loads(result[0].text) == {"error": "Missing required argument(s): skillset_id"}
+    # Wording follows the SDK's pre-2.0 check, which this replaced.
+    assert json.loads(result[0].text) == {"error": "Input validation error: 'skillset_id' is a required property"}
     get_skillset.assert_not_called()
 
 
@@ -1418,3 +1419,117 @@ def test_declared_tool_names_reads_the_listing_rather_than_the_store():
 
     assert rt.declared_tool_names(prompts) == frozenset({"reports__list", "reports__get", "graph__query"})
     assert rt.declared_tool_names([]) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Argument validation against the tool's advertised JSON Schema
+# ---------------------------------------------------------------------------
+#
+# Until MCP 2.0 the SDK's @server.call_tool() wrapper ran
+# jsonschema.validate(arguments, tool.inputSchema) before dispatching, and
+# turned any raised exception into an is_error result. The 2.x constructor
+# callbacks do neither, so both behaviours now live in the runtime -- and are
+# shared with chat, which never had them.
+
+
+async def _pin(arguments, mocker, **kwargs):
+    """Call reports__pin as an MCP caller would, with the store stubbed out."""
+    mocker.patch.object(action_confirmations, "ensure_confirmation", mocker.AsyncMock(return_value=None))
+    return await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "reports__pin",
+        arguments,
+        permissions=ALL_PERMISSIONS,
+        confirmation_source="mcp",
+        confirmation_session_key="session",
+        **kwargs,
+    )
+
+
+async def test_wrongly_typed_argument_is_rejected_against_the_schema(mocker):
+    """A type the schema forbids must not reach the handler."""
+    pin = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.pin_report",
+        mocker.AsyncMock(),
+    )
+    result = await _pin({"report_id": "r1", "pinned": []}, mocker)
+
+    assert "Input validation error" in json.loads(result[0].text)["error"]
+    pin.assert_not_awaited()
+
+
+async def test_coercible_argument_cannot_change_what_a_mutation_does(mocker):
+    """The string "false" must not become the boolean False and unpin a report.
+
+    Handlers parse arguments with pydantic, which coerces; the advertised schema
+    says boolean. Without the schema check this call silently unpinned.
+    """
+    pin = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.pin_report",
+        mocker.AsyncMock(),
+    )
+    result = await _pin({"report_id": "r1", "pinned": "false"}, mocker)
+
+    assert "Input validation error" in json.loads(result[0].text)["error"]
+    pin.assert_not_awaited()
+
+
+async def test_missing_required_argument_is_still_reported(mocker):
+    result = await _pin({"report_id": "r1"}, mocker)
+    assert "'pinned' is a required property" in json.loads(result[0].text)["error"]
+
+
+async def test_conforming_arguments_still_reach_the_handler(mocker):
+    pin = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.pin_report",
+        mocker.AsyncMock(return_value={"report_id": "r1", "pinned": True}),
+    )
+    result = await _pin({"report_id": "r1", "pinned": True}, mocker)
+
+    assert json.loads(result[0].text) == {"report_id": "r1", "pinned": True}
+    pin.assert_awaited_once()
+
+
+async def test_chat_gets_the_same_validation_as_mcp(mocker):
+    """The check lives in the shared runtime so the two cannot diverge."""
+    mocker.patch.object(action_confirmations, "ensure_confirmation", mocker.AsyncMock(return_value=None))
+    pin = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.pin_report",
+        mocker.AsyncMock(),
+    )
+    outcome = await mcp_runtime.call_tool_for_chat(
+        _user(ALL_PERMISSIONS),
+        "reports__pin",
+        {"report_id": "r1", "pinned": "false"},
+        permissions=ALL_PERMISSIONS,
+        confirmation_source="chat",
+        confirmation_session_key="session",
+    )
+
+    assert "Input validation error" in outcome.text
+    pin.assert_not_awaited()
+
+
+async def test_an_unexpected_failure_becomes_a_result_not_a_raise(mocker):
+    """The backstop for everything ahead of the handler's own try/except.
+
+    The confirmation resolvers and the write that records a pending
+    confirmation sit outside it, so without this guard a store outage escaped
+    the runtime and MCP 2.0 turned it into a JSON-RPC protocol error -- a broken
+    server, rather than a failed call the caller can read.
+    """
+    mocker.patch.object(
+        action_confirmations,
+        "ensure_confirmation",
+        mocker.AsyncMock(side_effect=RuntimeError("confirmation store is down")),
+    )
+    result = await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "reports__pin",
+        {"report_id": "r1", "pinned": True},
+        permissions=ALL_PERMISSIONS,
+        confirmation_source="mcp",
+        confirmation_session_key="session",
+    )
+
+    assert json.loads(result[0].text)["error"] == "Failed to execute tool 'reports__pin'"

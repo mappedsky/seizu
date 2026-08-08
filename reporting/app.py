@@ -17,7 +17,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp as StarletteASGIApp
 from starlette.types import Receive, Scope, Send
 
-from reporting import __version__, settings
+from reporting import settings
 from reporting.routes import auth as auth_routes
 from reporting.routes import chat as chat_routes
 from reporting.routes import config as config_routes
@@ -287,7 +287,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Seizu",
-        version=__version__,
+        version="1.0.0",
         openapi_url="/api/openapi.json",
         docs_url="/api/docs",
         redoc_url=None,

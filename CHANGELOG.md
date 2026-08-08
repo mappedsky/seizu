@@ -72,8 +72,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The newer revision drops the initialize handshake and makes every request
   stand alone, which is what Seizu already assumed: nothing is kept between MCP
   requests and the caller is re-derived from the Bearer token each time.
-  `serverInfo` now reports the same version as the OpenAPI document rather than
-  an empty string.
+  Tool arguments are still validated against each tool's advertised JSON Schema
+  before a handler or confirmation resolver sees them — the SDK did this in 1.x
+  and no longer does, so the check now lives in Seizu's shared MCP runtime and
+  covers the chat agent too, which never had it.
+- `serverInfo.version` on the MCP endpoint is now empty rather than reporting the
+  MCP SDK's own version (`1.28.1`), which the 1.x SDK substituted when no server
+  version was set. It was never Seizu's version; there is no single product
+  version to report yet.
 - `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
   whose report-list partition exceeds the 1 MB query cap no longer get a
   silently truncated list.

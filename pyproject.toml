@@ -20,6 +20,7 @@ dependencies = [
     "fastapi>=0.136.0",
     "gunicorn>=25.0.0",
     "httpx>=0.28.0",
+    "jsonschema>=4.20.0",
     "keyring>=25.0.0",
     "langchain-litellm>=0.6.0",
     "litellm>=1.87.0",

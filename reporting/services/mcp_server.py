@@ -30,7 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from reporting import __version__, settings
+from reporting import settings
 from reporting.authnz import CurrentUser, validate_bearer_token
 from reporting.services import mcp_runtime, report_store
 from reporting.services.action_confirmations import bearer_session_key
@@ -87,11 +87,12 @@ async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequ
         confirmation_source="mcp",
         confirmation_session_key=_mcp_session_key.get(),
     )
-    # The runtime never raises: it turns every failure into a text payload
-    # carrying an "error" key. That predates MCP 2.0 making an uncaught handler
-    # exception a JSON-RPC protocol error rather than an is_error result, and it
-    # is still what we want — a tool that refuses a call is a normal result the
-    # model can read and act on, not a broken request.
+    # The runtime validates arguments against the tool's advertised schema and
+    # turns every failure — including anything unexpected — into a text payload
+    # carrying an "error" key, because MCP 2.0 no longer wraps a raised handler
+    # exception into an is_error result the way v1 did; it would surface as a
+    # JSON-RPC protocol error instead. A tool that refuses a call should read as
+    # a normal result the model can act on, not as a broken request.
     return CallToolResult(content=list(content))
 
 
@@ -115,9 +116,14 @@ async def _handle_get_prompt(ctx: ServerRequestContext[Any], params: GetPromptRe
 
 
 def _build_mcp_server() -> Server[Any]:
+    # No version: there is no single product version to report today --
+    # pyproject says 0.1.0, the tags say v4.2.0, and the changelog says 4.0.0 --
+    # and the package is not installed as a distribution, so importlib.metadata
+    # cannot supply one either. v1 filled this with pkg_version("mcp"), i.e. the
+    # SDK's own version, which merely looked authoritative. Leave it empty until
+    # the product version has one source, rather than assert something false.
     return Server(
         "seizu",
-        version=__version__,
         on_list_tools=_handle_list_tools,
         on_call_tool=_handle_call_tool,
         on_list_prompts=_handle_list_prompts,

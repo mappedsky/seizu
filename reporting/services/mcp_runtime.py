@@ -2,10 +2,12 @@
 
 import json
 import logging
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+import jsonschema
 import neo4j.exceptions
 from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
 from pydantic import ValidationError
@@ -174,11 +176,44 @@ def _permissions(current_user: CurrentUser | None, permissions: frozenset[str] |
     return current_user.permissions if current_user is not None else frozenset()
 
 
-def _missing_required_arguments(input_schema: dict[str, Any], args: dict[str, Any]) -> list[str]:
-    required = input_schema.get("required")
-    if not isinstance(required, list):
-        return []
-    return [name for name in required if isinstance(name, str) and name not in args]
+def _schema_violation(input_schema: dict[str, Any], args: dict[str, Any]) -> str | None:
+    """Validate *args* against the tool's advertised JSON Schema.
+
+    Returns a caller-actionable message, or ``None`` when the arguments conform.
+
+    This lives here, ahead of the confirmation gate, because a tool's schema is
+    the contract it published in ``tools/list`` and nothing downstream re-checks
+    it. Until MCP 2.0 the SDK's ``@server.call_tool()`` wrapper ran exactly this
+    check before dispatching; the 2.x constructor callbacks do not, so dropping
+    it here would have silently widened what reaches a handler.
+
+    Checking only ``required`` is not enough, and the gap is not cosmetic:
+    handlers parse arguments with pydantic, which *coerces*. A ``"pinned":
+    "false"`` string against a ``boolean`` schema became ``False`` and unpinned
+    the report, where the schema check rejects it -- a wrongly typed argument
+    must not be able to change what a mutation does. Malformed values also
+    reached the confirmation resolvers, which parse the same arguments and
+    raised out of the call entirely.
+
+    Runs for chat as well as MCP so the two cannot diverge on what a tool will
+    accept.
+    """
+    try:
+        jsonschema.validate(instance=args, schema=input_schema)
+    except jsonschema.ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path)
+        return (
+            f"Input validation error: {location}: {exc.message}"
+            if location
+            else f"Input validation error: {exc.message}"
+        )
+    except jsonschema.SchemaError:
+        # A malformed *schema* is our bug, not the caller's. Log it and let the
+        # call through to the handler's own parsing rather than refusing a
+        # request the caller had no way to get right.
+        logger.exception("Built-in tool schema is not valid JSON Schema; skipping argument validation")
+        return None
+    return None
 
 
 async def list_tools_for_user(
@@ -262,17 +297,20 @@ async def call_tool_for_user(
     confirmation_session_key: str | None = None,
 ) -> list[TextContent]:
     """MCP-shaped tool call. Use ``call_tool_for_chat`` from the chat agent."""
-    content, _blocked = await _call_tool_core(
-        current_user,
+    content, _blocked = await _guarded(
         name,
-        arguments,
-        gate_permission=gate_permission,
-        permissions=permissions,
-        chat_safe_only=chat_safe_only,
-        result_max_rows=result_max_rows,
-        result_max_bytes=result_max_bytes,
-        confirmation_source=confirmation_source,
-        confirmation_session_key=confirmation_session_key,
+        _call_tool_core(
+            current_user,
+            name,
+            arguments,
+            gate_permission=gate_permission,
+            permissions=permissions,
+            chat_safe_only=chat_safe_only,
+            result_max_rows=result_max_rows,
+            result_max_bytes=result_max_bytes,
+            confirmation_source=confirmation_source,
+            confirmation_session_key=confirmation_session_key,
+        ),
     )
     return content
 
@@ -318,23 +356,49 @@ async def call_tool_for_chat(
     ``include_chat_only`` exposes tools marked ``chat_only=True`` (e.g.
     ``sandbox__delegate``) that are invisible on the MCP server endpoint.
     """
-    content, blocked = await _call_tool_core(
-        current_user,
+    content, blocked = await _guarded(
         name,
-        arguments,
-        gate_permission=gate_permission,
-        permissions=permissions,
-        chat_safe_only=chat_safe_only,
-        include_chat_only=include_chat_only,
-        result_max_rows=result_max_rows,
-        result_max_bytes=result_max_bytes,
-        confirmation_source=confirmation_source,
-        confirmation_session_key=confirmation_session_key,
-        confirmation_batch_id=confirmation_batch_id,
-        confirmation_pre_approved=confirmation_pre_approved,
-        bypass_confirmations=bypass_confirmations,
+        _call_tool_core(
+            current_user,
+            name,
+            arguments,
+            gate_permission=gate_permission,
+            permissions=permissions,
+            chat_safe_only=chat_safe_only,
+            include_chat_only=include_chat_only,
+            result_max_rows=result_max_rows,
+            result_max_bytes=result_max_bytes,
+            confirmation_source=confirmation_source,
+            confirmation_session_key=confirmation_session_key,
+            confirmation_batch_id=confirmation_batch_id,
+            confirmation_pre_approved=confirmation_pre_approved,
+            bypass_confirmations=bypass_confirmations,
+        ),
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
+
+
+async def _guarded(
+    name: str, call: Coroutine[Any, Any, tuple[list[TextContent], ChatBlockReason | None]]
+) -> tuple[list[TextContent], ChatBlockReason | None]:
+    """Never let a tool call raise out of the runtime.
+
+    Until MCP 2.0 the SDK's ``@server.call_tool()`` wrapper turned *any*
+    exception from a handler into an ``is_error`` result. The 2.x constructor
+    callbacks do not, so an escape now becomes a JSON-RPC protocol error, which
+    reads to a client as a broken server rather than a failed call.
+
+    ``_call_tool_core`` guards its handler invocation but not the three awaits
+    ahead of it -- the two confirmation resolvers and the write that records a
+    pending confirmation -- so a resolver parsing bad arguments, or the
+    confirmation store being unreachable, would escape. Argument validation now
+    stops the first of those at the door; this is the backstop for the rest.
+    """
+    try:
+        return await call
+    except Exception:
+        logger.exception("Unhandled error calling MCP tool %s", name)
+        return text_response({"error": f"Failed to execute tool '{name}'"}), None
 
 
 async def _call_tool_core(
@@ -375,9 +439,9 @@ async def _call_tool_core(
                 text_response({"error": f"Permission denied: {', '.join(missing)}"}),
                 ChatBlockReason.PERMISSION_DENIED,
             )
-        missing_args = _missing_required_arguments(builtin.input_schema, args)
-        if missing_args:
-            return text_response({"error": f"Missing required argument(s): {', '.join(missing_args)}"}), None
+        violation = _schema_violation(builtin.input_schema, args)
+        if violation:
+            return text_response({"error": violation}), None
         if builtin.confirmation is not None and bypass_confirmations:
             # Bypass mode (chat UI bypass toggle or a headless agent run):
             # honored only for callers holding chat:bypass_permissions, and

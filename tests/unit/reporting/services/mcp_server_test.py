@@ -1761,3 +1761,71 @@ async def test_streamable_http_serves_2026_client_without_handshake():
     result = called.json()["result"]
     assert result["isError"] is False
     assert json.loads(result["content"][0]["text"])["labels"] == ["CVE"]
+
+
+# ---------------------------------------------------------------------------
+# Invalid arguments over the wire, in both protocol eras
+# ---------------------------------------------------------------------------
+#
+# MCP 1.x validated arguments against the advertised inputSchema inside the
+# SDK's call_tool wrapper. The 2.x callbacks do not, so these assert the
+# replacement in the runtime is actually reached over the transport -- and that
+# a rejection arrives as a readable tool result rather than a JSON-RPC error.
+
+
+async def test_invalid_arguments_are_rejected_for_a_legacy_client():
+    async with _mcp_http_client() as client:
+        headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18"}
+        with patch(
+            "reporting.services.mcp_builtins.reports.report_store.pin_report",
+            new_callable=AsyncMock,
+        ) as pin:
+            resp = await client.post(
+                "/api/v1/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    # "false" is a string; the schema says boolean.
+                    "params": {"name": "reports__pin", "arguments": {"report_id": "r1", "pinned": "false"}},
+                },
+            )
+
+    body = resp.json()
+    assert "error" not in body, "a refused call must be a result, not a JSON-RPC protocol error"
+    assert "Input validation error" in json.loads(body["result"]["content"][0]["text"])["error"]
+    pin.assert_not_awaited()
+
+
+async def test_invalid_arguments_are_rejected_for_a_2026_client():
+    async with _mcp_http_client() as client:
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN_VERSION,
+            "MCP-Method": "tools/call",
+            "MCP-Name": "reports__pin",
+        }
+        with patch(
+            "reporting.services.mcp_builtins.reports.report_store.pin_report",
+            new_callable=AsyncMock,
+        ) as pin:
+            resp = await client.post(
+                "/api/v1/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "reports__pin",
+                        "arguments": {"report_id": "r1", "pinned": []},
+                        "_meta": _MODERN_META,
+                    },
+                },
+            )
+
+    body = resp.json()
+    assert "error" not in body, "a refused call must be a result, not a JSON-RPC protocol error"
+    assert "Input validation error" in json.loads(body["result"]["content"][0]["text"])["error"]
+    pin.assert_not_awaited()
