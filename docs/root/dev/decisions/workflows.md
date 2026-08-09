@@ -192,23 +192,32 @@ gnu from musl.
 
 **Why:** the original `command -v litellm || pip install 'litellm[proxy]'` was
 a dependency-resolution time bomb. LiteLLM's proxy extra allows a range of
-FastAPI versions, FastAPI 0.141 removed `get_flat_dependant` — which LiteLLM's
+FastAPI versions, FastAPI removed `get_flat_dependant` — which LiteLLM's
 proxy imports — and every remediation run started failing with nothing changed
 here. The presence check made it worse: it would happily use an unrelated
 LiteLLM baked into an image.
 
-Pinning only the top level does not close that: LiteLLM 1.87.0 pins FastAPI
-exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same
-failure mode survives one level down. This sandbox holds the **real provider
-key**, so what executes in it should be a fixed set of artifacts, not a
-resolution.
+Pinning only the top level does not close that: LiteLLM leaves FastAPI,
+pydantic, aiohttp, openai and httpx on ranges, so the same failure mode survives
+one level down. This sandbox holds the **real provider key**, so what executes
+in it should be a fixed set of artifacts, not a resolution.
+
+**FastAPI is pinned alongside LiteLLM, and the pin is a ceiling.** LiteLLM 1.96.0
+asks for `fastapi<1.0,>=0.136.3` and still imports `get_flat_dependant`, which
+FastAPI dropped in **0.140.7** — so resolving its range freely picks a FastAPI
+whose proxy cannot import, exactly the original failure. `0.140.6` is the newest
+that works; a security bump of LiteLLM's transitive tree therefore re-locks as
+`REQUIREMENTS="litellm[proxy]==<v> fastapi==<newest still exporting it>"`. Check
+whether a newer LiteLLM has dropped that import before raising the FastAPI pin —
+and prove the pair with an install + `litellm.proxy.proxy_server` import in a
+real templateless sandbox, because nothing else catches it.
 
 Three details are non-obvious, and each was found by a failure rather than by
 reading:
 
 - `uv pip compile --no-config`, or this project's own `[tool.uv]`
   constraint-dependencies are applied to the sandbox's resolution — where they
-  make it unsolvable against LiteLLM's exact FastAPI pin.
+  make it unsolvable against the lock's exact FastAPI pin.
 - The resolution targets the **sandbox's** interpreter, on linux x86_64. An E2B
   sandbox with no template runs python **3.13**; the `e2bdev/base` docker image
   is **3.11**; neither is this project's. A lock built for the wrong one

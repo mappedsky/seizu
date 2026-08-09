@@ -433,7 +433,9 @@ The proxy sandbox is ephemeral, so without a template it installs LiteLLM from P
 
 The reason is not tidiness. An unpinned `litellm[proxy]` resolves to whatever was published that morning, and LiteLLM's own proxy dependencies are declared as ranges — so a FastAPI release that removed a symbol LiteLLM's proxy imports was enough to make every remediation run fail at the proxy boot, with nothing changed on this side. A templateless run therefore installs the pins unconditionally (it does not skip when some LiteLLM already exists in the image) and imports `litellm.proxy.proxy_server` before reporting success, so a bad pin fails with the actual `ImportError` instead of a health-check timeout.
 
-Pinning the top level alone would not be enough: LiteLLM 1.87.0 pins FastAPI exactly but leaves pydantic, aiohttp, openai and httpx on ranges, so the same drift survives one level down — in the sandbox that holds your **real provider key**. The shipped lock is fully resolved: 101 packages, each pinned with hashes, written into the sandbox and installed with `pip --no-deps --require-hashes`.
+Pinning the top level alone would not be enough: LiteLLM leaves FastAPI, pydantic, aiohttp, openai and httpx on ranges, so the same drift survives one level down — in the sandbox that holds your **real provider key**. The shipped lock is fully resolved: 106 packages, each pinned with hashes, written into the sandbox and installed with `pip --no-deps --require-hashes`.
+
+The shipped lock pins FastAPI alongside LiteLLM (`litellm[proxy]==1.96.0 fastapi==0.140.6`) and that pin is a **ceiling, not a floor**: LiteLLM 1.96.0 accepts `fastapi<1.0,>=0.136.3` but still imports `get_flat_dependant`, which FastAPI removed in 0.140.7 — so letting its range resolve freely installs a proxy that cannot import. When you bump LiteLLM, check whether it has dropped that import before raising the FastAPI pin.
 
 To move to a newer LiteLLM:
 
