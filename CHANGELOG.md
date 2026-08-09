@@ -80,6 +80,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MCP SDK's own version (`1.28.1`), which the 1.x SDK substituted when no server
   version was set. It was never Seizu's version; there is no single product
   version to report yet.
+- **MCP requests over 4 MiB are rejected with HTTP `413`.** The SDK enforces this
+  at the transport, before the body is parsed, so an oversized call arrives as an
+  HTTP error rather than a tool result. It bounds the whole JSON-RPC request, so
+  in practice it caps tool *arguments* — a very large Cypher query sent to
+  `graph__query`, say. Responses are unaffected and stay governed by
+  `MCP_TOOL_RESULT_MAX_BYTES`.
 - `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
   whose report-list partition exceeds the 1 MB query cap no longer get a
   silently truncated list.

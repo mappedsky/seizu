@@ -204,7 +204,10 @@ class _ToolFailure(Exception):
     """
 
     def __init__(self, payload: dict[str, Any]) -> None:
-        super().__init__(str(payload.get("error", "tool call failed")))
+        # Carries either shape the runtime emits: a single "error", or the
+        # "errors" list a user-defined tool's parameter check produces.
+        detail = payload.get("error") or payload.get("errors") or "tool call failed"
+        super().__init__(str(detail))
         self.payload = payload
 
 
@@ -622,9 +625,15 @@ async def _call_tool_core(
         # validate_tool_arguments below, which accepts a coercible string and
         # then passes the *original* through to Cypher.
         _validate_arguments(build_input_schema(target_tool.parameters), args)
+        # Still runs, because the two disagree at one edge: JSON Schema counts
+        # 2.0 as an integer (a number with no fractional part), where this
+        # rejects a float outright. Raised rather than returned so that
+        # rejection is reported the same way as the one above -- both refuse to
+        # honour the call, and a caller should not have to know which validator
+        # caught it. The payload shape is unchanged.
         arg_errors = validate_tool_arguments(target_tool.parameters, args)
         if arg_errors:
-            return text_response({"errors": arg_errors}), None
+            raise _ToolFailure({"errors": arg_errors})
 
         params_with_defaults = {p.name: p.default for p in target_tool.parameters}
         params_with_defaults.update(args)

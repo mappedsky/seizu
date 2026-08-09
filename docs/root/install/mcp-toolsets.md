@@ -299,6 +299,14 @@ These are separate from `CHAT_TOOL_RESULT_MAX_ROWS`/`_BYTES`, which are far
 tighter because they protect a model's context; an MCP client is not a model
 context and is not bounded by them.
 
+**Request size.** These bound the *response*. The request is bounded separately
+by the MCP SDK, which rejects a Streamable HTTP body over **4 MiB** with HTTP
+`413 Request body too large` — at the transport, before the body is parsed, so
+it arrives as an HTTP error rather than a tool result. This applies to the whole
+JSON-RPC request, so it caps arguments: a very large Cypher query sent to
+`graph__query`, or a large parameter to a user-defined tool. It is not
+configurable through Seizu settings today.
+
 **Response shape when truncated.** A result within the limits is returned
 unchanged. One that exceeds them is returned as an object carrying the rows that
 fit, where an untruncated user-defined tool result is a bare list. Clients that

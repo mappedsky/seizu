@@ -1625,3 +1625,45 @@ async def test_a_tool_that_answered_is_not_flagged_as_an_error(mocker):
 
     assert json.loads(result.content[0].text) == {"error": "Tool 'ts1__missing' not found"}
     assert result.is_error is False
+
+
+async def test_the_float_edge_is_reported_like_any_other_rejection(mocker):
+    """The two validators disagree at exactly one value; the report is the same.
+
+    JSON Schema counts 2.0 as an integer (a number with no fractional part), so
+    it clears ``_validate_arguments`` and is then refused by
+    ``validate_tool_arguments``, which rejects a float outright. A caller should
+    not have to know which check caught it, so both refuse the same way.
+    """
+    run_query = mocker.patch.object(mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock())
+    mocker.patch.object(
+        report_store,
+        "get_enabled_tool",
+        mocker.AsyncMock(
+            return_value=ToolItem(
+                tool_id="t1",
+                toolset_id="ts1",
+                name="mytool",
+                description="",
+                cypher="MATCH (n) RETURN n LIMIT $limit",
+                parameters=[ToolParamDef(name="limit", type="integer", description="", required=True)],
+                enabled=True,
+                current_version=1,
+                created_at=_NOW,
+                updated_at=_NOW,
+                created_by="u",
+            )
+        ),
+    )
+
+    result = await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "ts1__t1",
+        {"limit": 2.0},
+        permissions=ALL_PERMISSIONS,
+    )
+
+    # The payload shape a client already parses is unchanged; only the flag is.
+    assert json.loads(result.content[0].text) == {"errors": ["Parameter 'limit' must be an integer, got float"]}
+    assert result.is_error is True
+    run_query.assert_not_awaited()
