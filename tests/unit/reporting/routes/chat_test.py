@@ -561,6 +561,51 @@ async def test_chat_history_round_trips_persisted_messages(mocker):
     assert all(message["id"] for message in messages)
 
 
+async def test_chat_history_timestamps_both_turns(mocker):
+    """Every persisted turn comes back with the time it was recorded."""
+    from datetime import datetime
+
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from reporting.services.chat_graph import build_chat_graph
+
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
+    graph = build_chat_graph(MemorySaver())
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=graph)
+    mocker.patch("reporting.services.chat_graph.get_chat_graph", return_value=graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1013")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1013"})
+        assert first.status_code == 200
+        second = await client.post("/api/v1/chat/stream", json={"message": "Again", "thread_id": "1013"})
+        assert second.status_code == 200
+        history = await client.get("/api/v1/chat/history", params={"thread_id": "1013"})
+
+    messages = history.json()["messages"]
+    stamps = [message["metadata"]["created_at"] for message in messages]
+    assert len(stamps) == 4
+    # Parseable, ordered, and — the point of stamping only unseen ids — the first
+    # turn keeps its own time when the second turn rewrites the message list.
+    parsed = [datetime.fromisoformat(stamp) for stamp in stamps]
+    assert parsed == sorted(parsed)
+    assert all(stamp.tzinfo is not None for stamp in parsed)
+
+
+async def test_chat_history_omits_timestamp_for_unstamped_messages(mocker):
+    """A message persisted before timestamps existed reports no time."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from reporting.routes.chat import _to_history_message
+
+    user = _to_history_message(HumanMessage(content="Hi", id="m1"), 0)
+    assistant = _to_history_message(AIMessage(content="Hello", id="m2"), 1)
+    assert user is not None and assistant is not None
+    assert user.metadata is None
+    assert assistant.metadata is None
+
+
 async def test_chat_history_hides_and_collapses_continue_response_turn(mocker):
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -591,7 +636,10 @@ async def test_chat_history_hides_and_collapses_continue_response_turn(mocker):
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["text"] == "Hi"
     assert messages[1]["text"].startswith("I received your message: Hi")
-    assert messages[1]["metadata"] is None
+    # Collapsed back into one answer: no cut-off marker survives, and the merged
+    # message keeps the timestamp of the turn it continues rather than gaining a
+    # second one.
+    assert set(messages[1]["metadata"]) == {"created_at"}
 
 
 async def test_chat_sessions_list_sorts_by_updated_at(mocker):

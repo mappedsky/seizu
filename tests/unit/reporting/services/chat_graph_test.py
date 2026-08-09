@@ -14,7 +14,7 @@ from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
 from reporting.services import chat_context, chat_graph, sandbox_session
-from reporting.services.chat_messages import MessageTag, has_tag
+from reporting.services.chat_messages import MessageTag, created_at, has_tag, stamp_created_at
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
 _NOW = "2024-01-01T00:00:00+00:00"
@@ -4248,3 +4248,33 @@ async def test_a_turn_that_opened_no_sandbox_keeps_the_stored_id(mocker):
         pass
 
     assert (await graph.aget_state(config)).values["sandbox_id"] == "sbx-kept"
+
+
+def test_add_timestamped_messages_stamps_only_messages_new_to_the_state():
+    existing = HumanMessage(content="asked earlier", id="m1")
+    replay = HumanMessage(content="asked earlier", id="m1")
+    fresh = AIMessage(content="answering", id="m2")
+
+    merged = chat_graph.add_timestamped_messages([existing], [replay, fresh])
+
+    # A node returning the whole list must not re-date the history it replays,
+    # and a message persisted before timestamps existed stays untimed.
+    assert created_at(merged[0]) is None
+    assert created_at(merged[1]) is not None
+
+
+def test_add_timestamped_messages_keeps_an_existing_stamp():
+    stamped = stamp_created_at(HumanMessage(content="hi", id="m1"))
+    original = created_at(stamped)
+
+    merged = chat_graph.add_timestamped_messages([], [stamped])
+
+    assert created_at(merged[0]) == original
+
+
+def test_add_timestamped_messages_ignores_non_conversation_messages():
+    tool_message = ToolMessage(content="{}", tool_call_id="call-1", id="m1")
+
+    merged = chat_graph.add_timestamped_messages([], [tool_message])
+
+    assert created_at(merged[0]) is None

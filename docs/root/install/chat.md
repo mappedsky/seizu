@@ -48,7 +48,9 @@ Users holding `chat:bypass_permissions` see a **Bypass confirmations** toggle (o
 
 ## Sessions and history
 
-Conversations are grouped into sessions listed in the chat sidebar; sessions can be created, renamed, and deleted. The active thread id is kept in browser `localStorage`, and reloading the page rehydrates the conversation from the server. Thread ids are namespaced server-side per user, so one user can never reach another user's thread.
+Conversations are grouped into sessions listed in the chat sidebar; sessions can be created, renamed, and deleted. Hovering a sidebar entry shows when that session was last active. The active thread id is kept in browser `localStorage`, so reloading the page rehydrates the conversation from the server. Thread ids are namespaced server-side per user, so one user can never reach another user's thread.
+
+Every turn is timestamped when it is persisted. Assistant replies show the time beside their copy button; hovering your own message reveals its time and a copy button of its own. Messages persisted before timestamps were recorded simply show no time.
 
 Assistant turns include an expandable details section showing thinking and tool calls (arguments and output). Replies cut off by the output-token limit are auto-continued server-side and stitched into one response (bounded by `CHAT_LLM_MAX_CONTINUATIONS`); a manual **Continue response** action covers the rest.
 

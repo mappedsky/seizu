@@ -59,6 +59,7 @@ from reporting.services.chat_messages import (
     drop_tagged,
     has_tag,
     message_text,
+    stamp_created_at,
     strip_chat_ui_markers,
     tag_message,
 )
@@ -120,8 +121,26 @@ def current_available_skills() -> tuple[Any, ...]:
     return _current_available_skills.get()
 
 
+def add_timestamped_messages(left: Any, right: Any) -> Any:
+    """``add_messages``, stamping each newly-arriving message with its time.
+
+    One choke point rather than every ``HumanMessage``/``AIMessage`` construction
+    site: the route, the agent nodes, the orchestrator and headless runs all reach
+    the checkpoint through this reducer, so none of them can forget.
+
+    Only messages whose id is not already in the state are stamped. Nodes routinely
+    return the whole list (``[*trimmed, ai_message]``), and messages persisted
+    before timestamps existed must stay untimed rather than be back-dated to now.
+    """
+    known_ids = {getattr(message, "id", None) for message in left} if isinstance(left, list) else set()
+    for message in right if isinstance(right, list) else [right]:
+        if isinstance(message, (HumanMessage, AIMessage)) and getattr(message, "id", None) not in known_ids:
+            stamp_created_at(message)
+    return add_messages(left, right)
+
+
 class ChatState(TypedDict):
-    messages: Annotated[list[Any], add_messages]
+    messages: Annotated[list[Any], add_timestamped_messages]
     # Orchestration state (plan -> dispatch -> verify). All optional so the
     # simple single-agent path never has to populate them; they round-trip
     # through the checkpointer so an orchestrated turn can resume mid-plan.

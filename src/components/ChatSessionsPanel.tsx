@@ -228,7 +228,16 @@ function ChatSessionsPanel({
                       {/* MUI tooltip rather than a native `title`: the browser
                           waits a second or more before showing one. */}
                       <Tooltip
-                        title={session.title || 'New session'}
+                        title={
+                          <>
+                            <Box component="div">
+                              {session.title || 'New session'}
+                            </Box>
+                            <Box component="div">
+                              {`Last activity ${new Date(session.updated_at).toLocaleString()}`}
+                            </Box>
+                          </>
+                        }
                         placement="top"
                         arrow
                         disableInteractive

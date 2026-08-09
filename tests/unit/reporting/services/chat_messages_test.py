@@ -1,6 +1,16 @@
+from datetime import datetime
+
 from langchain_core.messages import AIMessage, HumanMessage
 
-from reporting.services.chat_messages import MessageTag, drop_tagged, has_tag, message_text, tag_message
+from reporting.services.chat_messages import (
+    MessageTag,
+    created_at,
+    drop_tagged,
+    has_tag,
+    message_text,
+    stamp_created_at,
+    tag_message,
+)
 
 
 def test_message_text_plain_string():
@@ -51,3 +61,21 @@ def test_drop_tagged_filters_only_tagged():
     result = drop_tagged([keep_user, drop, keep_ai], MessageTag.EPHEMERAL)
 
     assert result == [keep_user, keep_ai]
+
+
+def test_stamp_created_at_records_an_aware_iso_timestamp_once():
+    message = HumanMessage(content="hi")
+    assert created_at(message) is None
+
+    stamp_created_at(message)
+    first = created_at(message)
+    assert first is not None
+    assert datetime.fromisoformat(first).tzinfo is not None
+
+    stamp_created_at(message)
+    assert created_at(message) == first
+
+
+def test_created_at_tolerates_non_messages_and_bad_values():
+    assert created_at(object()) is None
+    assert created_at(HumanMessage(content="hi", additional_kwargs={"seizu_created_at": 17})) is None

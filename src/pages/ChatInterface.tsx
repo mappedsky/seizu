@@ -134,6 +134,12 @@ type SeizuChatMessage = UIMessage<
     finish_reason?: string;
     response_cut_off?: boolean;
     seizu_hidden?: boolean;
+    // ISO-8601 UTC, stamped when the message was persisted. Absent while a turn
+    // is still live (see liveTimestamps) and on messages persisted before
+    // timestamps were recorded.
+    created_at?: string;
+    // Set by useChatHistory on messages read back from the checkpoint.
+    seizu_persisted?: boolean;
   },
   {
     'seizu-detail': SeizuChatDetail;
@@ -142,6 +148,12 @@ type SeizuChatMessage = UIMessage<
 
 function chatSessionPath(threadId: string): string {
   return `/app/chat/${encodeURIComponent(threadId)}`;
+}
+
+function formatMessageTime(iso: string | undefined): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString();
 }
 
 function messageText(message: SeizuChatMessage): string {
@@ -988,6 +1000,45 @@ export default function ChatInterface() {
     () => messages.filter((message) => message.metadata?.seizu_hidden !== true),
     [messages],
   );
+  // A message only carries a server timestamp once it comes back from
+  // /chat/history; the copy the stream produces has none. So a message that is
+  // neither timed nor yet persisted is stamped with the browser's clock, and
+  // that stands in until the thread is reloaded. Server metadata always wins.
+  //
+  // A message the server has persisted but not timed is a turn from before
+  // timestamps were recorded: it gets no time at all rather than today's date,
+  // which is what stamping every untimed message did to every old conversation.
+  const [liveTimestamps, setLiveTimestamps] = useState<Record<string, string>>(
+    {},
+  );
+  useEffect(() => {
+    const now = new Date().toISOString();
+    setLiveTimestamps((current) => {
+      let added = false;
+      const next: Record<string, string> = {};
+      for (const message of messages) {
+        if (message.metadata?.created_at || message.metadata?.seizu_persisted)
+          continue;
+        const stamp = current[message.id];
+        next[message.id] = stamp ?? now;
+        added ||= stamp === undefined;
+      }
+      // Rebuilt from the current conversation, so switching threads or
+      // hydrating history also drops the stamps those messages no longer need.
+      // Identity is preserved when nothing moved, or this would re-run forever.
+      const unchanged =
+        !added && Object.keys(next).length === Object.keys(current).length;
+      return unchanged ? current : next;
+    });
+  }, [messages]);
+  const messageTime = useCallback(
+    (message: SeizuChatMessage): string =>
+      formatMessageTime(
+        message.metadata?.created_at ?? liveTimestamps[message.id],
+      ),
+    [liveTimestamps],
+  );
+
   // Id of the assistant message currently being streamed. It renders through
   // <StreamingMarkdown> (plain text while tokens arrive, parsed on quiesce)
   // rather than feeding the whole growing response to Markdoc every token.
@@ -1169,7 +1220,7 @@ export default function ChatInterface() {
     touchSession,
   ]);
 
-  const handleCopyAssistantResponse = async (message: SeizuChatMessage) => {
+  const handleCopyMessage = async (message: SeizuChatMessage) => {
     const text = messageText(message);
     if (!text || !navigator.clipboard) return;
     try {
@@ -1366,6 +1417,7 @@ export default function ChatInterface() {
                     const loadMore = continuableMessage?.id === message.id;
                     const isContinuationSource =
                       pendingContinuationTargetMessageId === message.id;
+                    const timestamp = messageTime(message);
                     return (
                       <Box key={message.id}>
                         <Box
@@ -1377,6 +1429,12 @@ export default function ChatInterface() {
                             display: 'flex',
                             flexDirection: 'column',
                             mb: 1.5,
+                            // The user's turn keeps its time and copy action out
+                            // of the way until the message is pointed at (or
+                            // reached with the keyboard). Pointer-less devices
+                            // never fire hover, so there they stay visible.
+                            '&:hover .seizu-user-message-actions, &:focus-within .seizu-user-message-actions':
+                              { opacity: 1 },
                           }}
                         >
                           <Box
@@ -1567,9 +1625,7 @@ export default function ChatInterface() {
                                         aria-label="Copy assistant response"
                                         disabled={!text}
                                         onClick={() => {
-                                          void handleCopyAssistantResponse(
-                                            message,
-                                          );
+                                          void handleCopyMessage(message);
                                         }}
                                         size="small"
                                         sx={{
@@ -1585,10 +1641,63 @@ export default function ChatInterface() {
                                       </IconButton>
                                     </span>
                                   </Tooltip>
+                                  {timestamp ? (
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: 'text.secondary' }}
+                                    >
+                                      {timestamp}
+                                    </Typography>
+                                  ) : null}
                                 </Box>
                               </Box>
                             )}
                           </Box>
+                          {message.role === 'user' ? (
+                            <Box
+                              aria-label="User message actions"
+                              className="seizu-user-message-actions"
+                              sx={{
+                                alignItems: 'center',
+                                display: 'flex',
+                                gap: 0.5,
+                                mt: 0.25,
+                                opacity: 0,
+                                transition: 'opacity 120ms ease',
+                                '@media (hover: none)': { opacity: 1 },
+                              }}
+                            >
+                              {timestamp ? (
+                                <Typography
+                                  variant="caption"
+                                  sx={{ color: 'text.secondary' }}
+                                >
+                                  {timestamp}
+                                </Typography>
+                              ) : null}
+                              <Tooltip
+                                title={copied ? 'Copied' : 'Copy message'}
+                              >
+                                <span>
+                                  <IconButton
+                                    aria-label="Copy your message"
+                                    disabled={!text}
+                                    onClick={() => {
+                                      void handleCopyMessage(message);
+                                    }}
+                                    size="small"
+                                    sx={{ color: 'text.secondary', p: 0.25 }}
+                                  >
+                                    {copied ? (
+                                      <Check sx={{ fontSize: 16 }} />
+                                    ) : (
+                                      <ContentCopy sx={{ fontSize: 16 }} />
+                                    )}
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </Box>
+                          ) : null}
                         </Box>
                       </Box>
                     );
