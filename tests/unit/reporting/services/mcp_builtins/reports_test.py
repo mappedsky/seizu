@@ -3,14 +3,13 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-from mcp import types as mcp_types
-
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import ReportListItem, ReportVersion, User
 from reporting.services.mcp_server import _build_mcp_server, _mcp_current_user, _mcp_permissions, _mcp_session_key
 from reporting.services.spaces import SPACE_MEMBER_ACCESS
+from tests.unit.reporting.services import mcp_dispatch
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _EXPIRES = "2099-01-01T00:00:00+00:00"
@@ -69,11 +68,6 @@ async def _call(
     current_user: CurrentUser | None = None,
     bypass_confirmation: bool = True,
 ):
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name=name, arguments=arguments),
-    )
     perm_tok = _mcp_permissions.set(ALL_PERMISSIONS)
     user_tok = _mcp_current_user.set(current_user or _current_user())
     # Simulate what _MCPAuthMiddleware sets before dispatching.
@@ -88,14 +82,14 @@ async def _call(
                 new_callable=AsyncMock,
                 return_value=None,
             ):
-                result = await handler(req)
+                result = await mcp_dispatch.call_tool(server, name, arguments)
         else:
-            result = await handler(req)
+            result = await mcp_dispatch.call_tool(server, name, arguments)
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
         _mcp_session_key.reset(session_tok)
-    return result.root.content
+    return result.content
 
 
 async def test_reports_create_uses_current_user():
@@ -163,19 +157,15 @@ async def test_reports_create_requires_write_permission():
     from reporting.authnz.permissions import Permission
 
     readonly = frozenset({Permission.REPORTS_READ.value})
-    handler = _build_mcp_server().request_handlers[mcp_types.CallToolRequest]
-    req = mcp_types.CallToolRequest(
-        method="tools/call",
-        params=mcp_types.CallToolRequestParams(name="reports__create", arguments={"name": "x"}),
-    )
+    server = _build_mcp_server()
     perm_tok = _mcp_permissions.set(readonly)
     user_tok = _mcp_current_user.set(_current_user())
     try:
-        result = await handler(req)
+        result = await mcp_dispatch.call_tool(server, "reports__create", {"name": "x"})
     finally:
         _mcp_permissions.reset(perm_tok)
         _mcp_current_user.reset(user_tok)
-    data = json.loads(result.root.content[0].text)
+    data = json.loads(result.content[0].text)
     assert "Permission denied" in data["error"]
 
 

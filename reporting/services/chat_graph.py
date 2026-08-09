@@ -2155,7 +2155,7 @@ def _mcp_tool_specs(tools: list[Tool]) -> list[ChatToolSpec]:
             name=tool.name,
             kind="tool",
             description=tool.description or f"{tool.name} tool",
-            input_schema=tool.inputSchema if isinstance(tool.inputSchema, dict) else {"type": "object"},
+            input_schema=tool.input_schema if isinstance(tool.input_schema, dict) else {"type": "object"},
         )
         for tool in tools
     ]
@@ -2656,7 +2656,7 @@ def skill_declared_tool_names(model: Any, tools: list[Tool], declared: frozenset
         return set()
     weight = chat_context.count_tokens(
         model,
-        _json_dump([{"name": t.name, "description": t.description, "input_schema": t.inputSchema} for t in subset]),
+        _json_dump([{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in subset]),
     )
     if weight > max(0, settings.CHAT_LLM_DISCLOSE_SKILL_TOOLS_MAX_TOKENS):
         logger.info(
@@ -3204,7 +3204,7 @@ def _prompt_arguments(prompt: Prompt) -> str:
 
 
 def _tool_arguments(tool: Tool) -> str:
-    input_schema = tool.inputSchema
+    input_schema = tool.input_schema
     properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
     if not isinstance(properties, dict):
         return ""

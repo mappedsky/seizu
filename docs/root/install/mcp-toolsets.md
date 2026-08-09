@@ -215,6 +215,8 @@ Which groups are exposed is controlled by the `MCP_ENABLED_BUILTINS` setting (se
 
 The MCP server is available at `/api/v1/mcp` when `MCP_ENABLED=true` (the default).
 
+Seizu serves the **2026-07-28** protocol revision and every earlier revision from the same endpoint, over Streamable HTTP. Clients negotiate the revision themselves — there is nothing to configure, and a client written against an older revision keeps working. Either way each request stands alone: Seizu keeps no state between MCP requests and re-derives the caller from the Bearer token every time, which is what the 2026-07-28 revision assumes by default.
+
 Authentication uses the same Bearer JWT tokens as the REST API. In development, authentication can be disabled via `DEVELOPMENT_ONLY_REQUIRE_AUTH=false`.
 
 Tool names are namespaced as `{toolset_id}__{tool_id}` (double underscore separator) for user-defined tools, or `{group}__{action}` for built-ins (e.g. `graph__query`, `reports__list`). Only tools in **enabled** toolsets and built-in groups included in `MCP_ENABLED_BUILTINS` are exposed to MCP clients.
@@ -296,6 +298,14 @@ stops at whichever bound is reached first.
 These are separate from `CHAT_TOOL_RESULT_MAX_ROWS`/`_BYTES`, which are far
 tighter because they protect a model's context; an MCP client is not a model
 context and is not bounded by them.
+
+**Request size.** These bound the *response*. The request is bounded separately
+by the MCP SDK, which rejects a Streamable HTTP body over **4 MiB** with HTTP
+`413 Request body too large` — at the transport, before the body is parsed, so
+it arrives as an HTTP error rather than a tool result. This applies to the whole
+JSON-RPC request, so it caps arguments: a very large Cypher query sent to
+`graph__query`, or a large parameter to a user-defined tool. It is not
+configurable through Seizu settings today.
 
 **Response shape when truncated.** A result within the limits is returned
 unchanged. One that exceeds them is returned as an object carrying the rows that

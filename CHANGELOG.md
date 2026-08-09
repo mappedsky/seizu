@@ -65,6 +65,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The MCP server speaks the 2026-07-28 protocol revision** (#246). Seizu now
+  builds on the `mcp` 2.x SDK, which serves 2026-07-28 and every earlier
+  revision from the same endpoint — clients negotiate the revision themselves,
+  so existing MCP clients keep working unchanged and no configuration moves.
+  The newer revision drops the initialize handshake and makes every request
+  stand alone, which is what Seizu already assumed: nothing is kept between MCP
+  requests and the caller is re-derived from the Bearer token each time.
+  Tool arguments are still validated against each tool's advertised JSON Schema
+  before a handler or confirmation resolver sees them — the SDK did this in 1.x
+  and no longer does, so the check now lives in Seizu's shared MCP runtime and
+  covers the chat agent too, which never had it. That schema is the single
+  authority for user-defined tools as well: a value it accepts is accepted, so
+  a client validating against `tools/list` cannot have a conforming call
+  refused. In particular an integral float (`2.0`) for an integer parameter is
+  normalized rather than rejected, while a numeric *string* (`"2"`) still is —
+  the store's older parameter check accepted those and then passed the original
+  string through to Cypher.
+- `serverInfo.version` on the MCP endpoint is now empty rather than reporting the
+  MCP SDK's own version (`1.28.1`), which the 1.x SDK substituted when no server
+  version was set. It was never Seizu's version; there is no single product
+  version to report yet.
+- **MCP requests over 4 MiB are rejected with HTTP `413`.** The SDK enforces this
+  at the transport, before the body is parsed, so an oversized call arrives as an
+  HTTP error rather than a tool result. It bounds the whole JSON-RPC request, so
+  in practice it caps tool *arguments* — a very large Cypher query sent to
+  `graph__query`, say. Responses are unaffected and stay governed by
+  `MCP_TOOL_RESULT_MAX_BYTES`.
 - `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
   whose report-list partition exceeds the 1 MB query cap no longer get a
   silently truncated list.

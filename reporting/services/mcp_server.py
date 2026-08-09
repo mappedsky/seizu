@@ -14,10 +14,18 @@ from typing import Any
 
 import httpx
 import jwt
-from mcp.server.fastmcp.server import StreamableHTTPASGIApp
+from mcp.server import ServerRequestContext
 from mcp.server.lowlevel import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import GetPromptResult, Prompt, TextContent, Tool
+from mcp.server.streamable_http_manager import StreamableHTTPASGIApp, StreamableHTTPSessionManager
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    GetPromptRequestParams,
+    GetPromptResult,
+    ListPromptsResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -55,44 +63,72 @@ _mcp_session_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("_
 # ---------------------------------------------------------------------------
 
 
-def _build_mcp_server() -> Server:
-    server: Server = Server("seizu")
+# The handlers ignore their ServerRequestContext: everything they need about the
+# caller (identity, permissions, confirmation session) is set by
+# _MCPAuthMiddleware in the ContextVars above, which the SDK's per-request task
+# inherits. Keeping them off the context object means the same runtime call works
+# unchanged from the chat agent, which has no MCP request at all.
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return await mcp_runtime.list_tools_for_user(
-            _mcp_current_user.get(),
-            permissions=_mcp_permissions.get(),
-        )
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any] | None) -> list[TextContent]:
-        return await mcp_runtime.call_tool_for_user(
-            _mcp_current_user.get(),
-            name,
-            arguments,
-            permissions=_mcp_permissions.get(),
-            confirmation_source="mcp",
-            confirmation_session_key=_mcp_session_key.get(),
-        )
+async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None) -> ListToolsResult:
+    tools = await mcp_runtime.list_tools_for_user(
+        _mcp_current_user.get(),
+        permissions=_mcp_permissions.get(),
+    )
+    return ListToolsResult(tools=tools)
 
-    @server.list_prompts()
-    async def list_prompts() -> list[Prompt]:
-        return await mcp_runtime.list_prompts_for_user(
-            _mcp_current_user.get(),
-            permissions=_mcp_permissions.get(),
-        )
 
-    @server.get_prompt()
-    async def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:
-        return await mcp_runtime.get_prompt_for_user(
-            _mcp_current_user.get(),
-            name,
-            arguments,
-            permissions=_mcp_permissions.get(),
-        )
+async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequestParams) -> CallToolResult:
+    result = await mcp_runtime.call_tool_for_user(
+        _mcp_current_user.get(),
+        params.name,
+        params.arguments,
+        permissions=_mcp_permissions.get(),
+        confirmation_source="mcp",
+        confirmation_session_key=_mcp_session_key.get(),
+    )
+    # The runtime validates arguments against the tool's advertised schema and
+    # never raises, because MCP 2.0 no longer wraps a raised handler exception
+    # into an is_error result the way v1 did — it would surface as a JSON-RPC
+    # protocol error, i.e. a broken server rather than a failed call. It does
+    # report which failures were failures, so they stay distinguishable from a
+    # tool that ran and returned an unwelcome answer.
+    return CallToolResult(content=list(result.content), is_error=result.is_error)
 
-    return server
+
+async def _handle_list_prompts(
+    ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+) -> ListPromptsResult:
+    prompts = await mcp_runtime.list_prompts_for_user(
+        _mcp_current_user.get(),
+        permissions=_mcp_permissions.get(),
+    )
+    return ListPromptsResult(prompts=prompts)
+
+
+async def _handle_get_prompt(ctx: ServerRequestContext[Any], params: GetPromptRequestParams) -> GetPromptResult:
+    return await mcp_runtime.get_prompt_for_user(
+        _mcp_current_user.get(),
+        params.name,
+        params.arguments,
+        permissions=_mcp_permissions.get(),
+    )
+
+
+def _build_mcp_server() -> Server[Any]:
+    # No version: there is no single product version to report today --
+    # pyproject says 0.1.0, the tags say v4.2.0, and the changelog says 4.0.0 --
+    # and the package is not installed as a distribution, so importlib.metadata
+    # cannot supply one either. v1 filled this with pkg_version("mcp"), i.e. the
+    # SDK's own version, which merely looked authoritative. Leave it empty until
+    # the product version has one source, rather than assert something false.
+    return Server(
+        "seizu",
+        on_list_tools=_handle_list_tools,
+        on_call_tool=_handle_call_tool,
+        on_list_prompts=_handle_list_prompts,
+        on_get_prompt=_handle_get_prompt,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +514,12 @@ def get_mcp_app() -> tuple[StreamableHTTPSessionManager, ASGIApp]:
     Auth and OAuth metadata routing are handled internally by the returned app.
     """
     mcp_server = _build_mcp_server()
+    # ``stateless=True`` only governs the pre-2026-07-28 handshake path, where a
+    # session id and an initialize round-trip would otherwise be required. From
+    # 2026-07-28 a request carries its own protocol version header and the SDK
+    # routes it to a per-request handler with no session at all, so both eras
+    # end up stateless — which is what Seizu has always assumed (nothing is kept
+    # between MCP requests; identity comes from the Bearer token every time).
     session_manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,
