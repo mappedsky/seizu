@@ -132,6 +132,7 @@ describe('ScheduledChatView', () => {
           role: 'assistant',
           text: 'Digest complete.',
           metadata: {
+            created_at: '2026-01-02T00:00:04Z',
             details: [
               {
                 kind: 'thinking',
@@ -262,6 +263,9 @@ describe('ScheduledChatView', () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText('Digest complete.')).toBeInTheDocument();
+    expect(
+      screen.getByText(new Date('2026-01-02T00:00:04Z').toLocaleString()),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText('Details (2)'));
 
     expect(screen.getByText('Planning the digest')).toBeInTheDocument();

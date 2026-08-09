@@ -148,6 +148,11 @@ function RunMessage({ message }: { message: ScheduledChatTranscriptMessage }) {
         <Typography variant="caption">
           {message.role === 'user' ? 'Prompt' : 'Assistant'}
         </Typography>
+        {message.metadata?.created_at ? (
+          <Typography variant="caption">
+            {new Date(message.metadata.created_at).toLocaleString()}
+          </Typography>
+        ) : null}
       </Box>
       {message.role === 'assistant' && details.length > 0 ? (
         <Accordion

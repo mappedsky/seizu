@@ -31,7 +31,13 @@ from reporting.services.chat_graph import (
     load_thread_messages,
     namespaced_thread_id,
 )
-from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, message_text, tag_message
+from reporting.services.chat_messages import (
+    CONTINUATION_MARKDOC,
+    MessageTag,
+    created_at,
+    message_text,
+    tag_message,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -236,6 +242,12 @@ def _to_history_message(message: Any, index: int) -> ChatHistoryMessage | None:
 
 def _history_message_metadata(message: Any, role: str, text: str) -> dict[str, object] | None:
     metadata: dict[str, object] = {}
+
+    # Absent on messages persisted before timestamps were recorded; the UI simply
+    # shows no time for those rather than guessing one.
+    stamped_at = created_at(message)
+    if stamped_at:
+        metadata["created_at"] = stamped_at
 
     response_metadata = getattr(message, "response_metadata", None)
     if isinstance(response_metadata, dict):
