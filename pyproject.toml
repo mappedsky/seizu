@@ -14,7 +14,7 @@ dependencies = [
     "authlib>=1.6.0",
     "e2b-code-interpreter>=1.0.0",
     "boto3>=1.42.0",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     "cyver>=2.0.0",
     "datadog>=0.52.0",
     "fastapi>=0.136.0",
@@ -43,7 +43,7 @@ dependencies = [
     "uvicorn>=0.46.0",
     "langgraph-checkpoint-aws>=1.0.7",
     "langgraph>=1.2.1",
-    "langgraph-checkpoint-postgres>=3.1.0",
+    "langgraph-checkpoint-postgres>=3.1.1",
     "psycopg[binary]>=3.3.4",
     "alembic>=1.18.5",
 ]
@@ -73,9 +73,19 @@ dev = [
 
 [tool.uv]
 constraint-dependencies = [
-    "aiohttp>=3.14.1",
+    "aiohttp>=3.14.3",
+    "h2>=4.4.1",
     "starlette>=1.3.1",
     "urllib3>=2.7.0",
+]
+# langchain-litellm caps cryptography at <49.0.0, and that bound is the only
+# thing holding the tree below cryptography 50.0.0 — the fix for CVE-2026-69247.
+# It is also unused: nothing under langchain_litellm/ imports cryptography.
+# Upstream has already widened the pin to <51.0.0 on main, but has not cut a
+# release carrying it; the newest release (0.7.0) still ships <49.0.0 in its
+# wheel metadata. Drop this override once that release lands.
+override-dependencies = [
+    "cryptography>=50.0.0",
 ]
 
 [tool.uv.workspace]
