@@ -1541,11 +1541,11 @@ async def test_an_unexpected_failure_becomes_a_result_not_a_raise(mocker):
 async def test_stored_tool_rejects_a_coercible_string(mocker):
     """A user-defined tool's schema is enforced too, not just a built-in's.
 
-    ``validate_tool_arguments`` coerces "5" to 5 to decide it is valid, then
-    throws the coerced value away -- so the *string* reached Cypher, where a
-    parameter used in arithmetic or a comparison behaves differently. The
-    advertised schema says integer. The existing "not-an-int" case never caught
-    this, because that one fails coercion too.
+    This path used to be gated by the store's ``validate_tool_arguments``, which
+    coerces "5" to 5 to decide it is valid and then throws the coerced value
+    away -- so the *string* reached Cypher, where a parameter used in arithmetic
+    or a comparison behaves differently. The advertised schema says integer. A
+    "not-an-int" case never caught this, because that one fails coercion too.
     """
     run_query = mocker.patch.object(mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock())
     mocker.patch.object(
@@ -1627,34 +1627,35 @@ async def test_a_tool_that_answered_is_not_flagged_as_an_error(mocker):
     assert result.is_error is False
 
 
-async def test_the_float_edge_is_reported_like_any_other_rejection(mocker):
-    """The two validators disagree at exactly one value; the report is the same.
-
-    JSON Schema counts 2.0 as an integer (a number with no fractional part), so
-    it clears ``_validate_arguments`` and is then refused by
-    ``validate_tool_arguments``, which rejects a float outright. A caller should
-    not have to know which check caught it, so both refuse the same way.
-    """
-    run_query = mocker.patch.object(mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock())
-    mocker.patch.object(
-        report_store,
-        "get_enabled_tool",
-        mocker.AsyncMock(
-            return_value=ToolItem(
-                tool_id="t1",
-                toolset_id="ts1",
-                name="mytool",
-                description="",
-                cypher="MATCH (n) RETURN n LIMIT $limit",
-                parameters=[ToolParamDef(name="limit", type="integer", description="", required=True)],
-                enabled=True,
-                current_version=1,
-                created_at=_NOW,
-                updated_at=_NOW,
-                created_by="u",
-            )
-        ),
+def _int_param_tool() -> ToolItem:
+    return ToolItem(
+        tool_id="t1",
+        toolset_id="ts1",
+        name="mytool",
+        description="",
+        cypher="MATCH (n) RETURN n LIMIT $limit",
+        parameters=[ToolParamDef(name="limit", type="integer", description="", required=True)],
+        enabled=True,
+        current_version=1,
+        created_at=_NOW,
+        updated_at=_NOW,
+        created_by="u",
     )
+
+
+async def test_an_integral_float_is_accepted_and_normalized(mocker):
+    """A value the advertised schema allows must not be refused.
+
+    JSON Schema counts 2.0 as an integer, so a client validating against the
+    schema from tools/list can legitimately send one. Neo4j will not take a
+    float where the Cypher uses an integer, so it is normalized rather than
+    rejected -- advertising a contract and then refusing what it permits is the
+    bug this replaced.
+    """
+    run_query = mocker.patch.object(
+        mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock(return_value=([], None))
+    )
+    mocker.patch.object(report_store, "get_enabled_tool", mocker.AsyncMock(return_value=_int_param_tool()))
 
     result = await mcp_runtime.call_tool_for_user(
         _user(ALL_PERMISSIONS),
@@ -1663,7 +1664,24 @@ async def test_the_float_edge_is_reported_like_any_other_rejection(mocker):
         permissions=ALL_PERMISSIONS,
     )
 
-    # The payload shape a client already parses is unchanged; only the flag is.
-    assert json.loads(result.content[0].text) == {"errors": ["Parameter 'limit' must be an integer, got float"]}
-    assert result.is_error is True
+    assert result.is_error is False
+    passed = run_query.await_args.args[1]
+    assert passed["limit"] == 2
+    assert isinstance(passed["limit"], int) and not isinstance(passed["limit"], bool)
+
+
+async def test_normalizing_does_not_reopen_string_coercion(mocker):
+    """Only an integral float is converted; a numeric string stays refused."""
+    run_query = mocker.patch.object(mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock())
+    mocker.patch.object(report_store, "get_enabled_tool", mocker.AsyncMock(return_value=_int_param_tool()))
+
+    for value in ("2", 2.5, True, "false"):
+        result = await mcp_runtime.call_tool_for_user(
+            _user(ALL_PERMISSIONS),
+            "ts1__t1",
+            {"limit": value},
+            permissions=ALL_PERMISSIONS,
+        )
+        assert result.is_error is True, value
+        assert "Input validation error" in json.loads(result.content[0].text)["error"], value
     run_query.assert_not_awaited()

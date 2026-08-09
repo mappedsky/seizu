@@ -75,7 +75,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Tool arguments are still validated against each tool's advertised JSON Schema
   before a handler or confirmation resolver sees them — the SDK did this in 1.x
   and no longer does, so the check now lives in Seizu's shared MCP runtime and
-  covers the chat agent too, which never had it.
+  covers the chat agent too, which never had it. That schema is the single
+  authority for user-defined tools as well: a value it accepts is accepted, so
+  a client validating against `tools/list` cannot have a conforming call
+  refused. In particular an integral float (`2.0`) for an integer parameter is
+  normalized rather than rejected, while a numeric *string* (`"2"`) still is —
+  the store's older parameter check accepted those and then passed the original
+  string through to Cypher.
 - `serverInfo.version` on the MCP endpoint is now empty rather than reporting the
   MCP SDK's own version (`1.28.1`), which the 1.x SDK substituted when no server
   version was set. It was never Seizu's version; there is no single product

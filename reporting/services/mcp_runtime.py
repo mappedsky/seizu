@@ -16,7 +16,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
 from reporting.schema.confirmations import ConfirmationSource
-from reporting.schema.mcp_config import render_skill_prompt, validate_tool_arguments
+from reporting.schema.mcp_config import render_skill_prompt
 from reporting.services import action_confirmations, report_store, reporting_neo4j
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
@@ -211,6 +211,32 @@ class _ToolFailure(Exception):
         self.payload = payload
 
 
+def _normalize_arguments(parameters: list[Any], arguments: dict[str, Any]) -> dict[str, Any]:
+    """Put schema-valid values into the type the query needs.
+
+    JSON Schema counts ``2.0`` as an integer -- a number with no fractional
+    part -- so a client validating against the schema Seizu published in
+    ``tools/list`` may legitimately send one, and Neo4j will not take a float
+    where the Cypher uses an integer (``LIMIT $n``). Normalizing is the only
+    honest answer: refusing it would mean advertising a contract and then
+    rejecting a value that contract allows.
+
+    This is not the coercion the schema check exists to stop. Nothing here turns
+    a *string* into a number -- ``"5"`` is still refused by the gate above, as is
+    ``2.5`` -- and only a parameter the tool itself declared as an integer is
+    touched. ``bool`` is an ``int`` subclass but never a ``float``, so ``True``
+    cannot reach this conversion.
+    """
+    normalized = dict(arguments)
+    for param in parameters:
+        if param.type != "integer":
+            continue
+        value = normalized.get(param.name)
+        if isinstance(value, float) and value.is_integer():
+            normalized[param.name] = int(value)
+    return normalized
+
+
 def _validate_arguments(input_schema: dict[str, Any], args: dict[str, Any]) -> None:
     """Check *args* against the tool's advertised JSON Schema, or raise.
 
@@ -227,9 +253,12 @@ def _validate_arguments(input_schema: dict[str, Any], args: dict[str, Any]) -> N
       "false"`` against a ``boolean`` schema became ``False`` and unpinned the
       report. Malformed values also reached the confirmation resolvers, which
       parse the same arguments and raised out of the call entirely.
-    - User-defined tools ran ``validate_tool_arguments``, which computes a
-      coerced value and then discards it, so ``"5"`` for an ``integer`` passed
-      the check and reached Neo4j as the *string* ``"5"``.
+    - User-defined tools ran the store's ``validate_tool_arguments``, which
+      computes a coerced value and then discards it, so ``"5"`` for an
+      ``integer`` passed the check and reached Neo4j as the *string* ``"5"``.
+      That validator no longer gates this path at all: it is looser than the
+      advertised schema for every type except an integral float, which
+      :func:`_normalize_arguments` handles.
 
     A wrongly typed argument must not be able to change what a mutation does, or
     what a query matches. Runs for chat as well as MCP so the two cannot diverge
@@ -620,23 +649,17 @@ async def _call_tool_core(
         if target_tool is None:
             return text_response({"error": f"Tool '{name}' not found"}), None
 
-        # Against the same schema the tool advertised in tools/list, which is
-        # what the SDK checked before 2.0 -- and stricter than
-        # validate_tool_arguments below, which accepts a coercible string and
-        # then passes the *original* through to Cypher.
+        # The schema this tool advertised in tools/list is the only gate, which
+        # is what the SDK checked before 2.0. It is stricter than the store's
+        # validate_tool_arguments for every type the two disagree on -- that one
+        # accepts "5", "false" and the like, then passes the *original* string
+        # to Cypher -- except for an integral float, which is normalized below
+        # rather than refused, since the advertised schema permits it.
         _validate_arguments(build_input_schema(target_tool.parameters), args)
-        # Still runs, because the two disagree at one edge: JSON Schema counts
-        # 2.0 as an integer (a number with no fractional part), where this
-        # rejects a float outright. Raised rather than returned so that
-        # rejection is reported the same way as the one above -- both refuse to
-        # honour the call, and a caller should not have to know which validator
-        # caught it. The payload shape is unchanged.
-        arg_errors = validate_tool_arguments(target_tool.parameters, args)
-        if arg_errors:
-            raise _ToolFailure({"errors": arg_errors})
 
         params_with_defaults = {p.name: p.default for p in target_tool.parameters}
         params_with_defaults.update(args)
+        params_with_defaults = _normalize_arguments(target_tool.parameters, params_with_defaults)
 
         # A chat caller states its bounds; anyone else gets the MCP contract,
         # which is far looser. Inheriting the chat caps here silently truncated
