@@ -1,6 +1,10 @@
 version: 2
 
 updates:
+  # Keep uv updates rooted at the workspace root. GitHub's managed
+  # update-uv-graph job now scans the repository through the canonical root
+  # uv.lock; reintroducing subdirectory uv entries risks reviving the older
+  # /docs and workspace-member graphing failures.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:

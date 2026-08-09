@@ -88,6 +88,8 @@ override-dependencies = [
     "cryptography>=50.0.0",
 ]
 
+# Keep the separately published CLI package in the root uv workspace so the
+# repository has a single canonical uv.lock for dependency graph submission.
 [tool.uv.workspace]
 members = ["packages/seizu-cli"]
 
