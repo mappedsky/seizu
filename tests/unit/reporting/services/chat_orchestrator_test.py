@@ -2373,8 +2373,8 @@ async def test_the_planner_sees_tools_earlier_turns_unlocked(mocker):
         "reporting.services.chat_orchestrator._list_chat_tools",
         new_callable=AsyncMock,
         return_value=[
-            Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", inputSchema={"type": "object"}),
-            Tool(name="never_disclosed__tool", description="Hidden", inputSchema={"type": "object"}),
+            Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", input_schema={"type": "object"}),
+            Tool(name="never_disclosed__tool", description="Hidden", input_schema={"type": "object"}),
         ],
     )
     mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)

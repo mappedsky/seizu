@@ -451,7 +451,7 @@ async def _build_seizu_tools(
 
     result: list[Any] = []
     for tool in seizu_tools:
-        schema: dict[str, Any] = tool.inputSchema or {}
+        schema: dict[str, Any] = tool.input_schema or {}
         properties = schema.get("properties", {})
         required = set(schema.get("required") or [])
         fields: dict[str, Any] = {}
@@ -693,8 +693,8 @@ def _discovery_tools(undiscovered: list[Any], invoke: Any) -> list[Any]:
                 {
                     "name": tool.name,
                     "description": _truncate((tool.description or "").strip(), _FIND_TOOLS_DESC_MAX),
-                    "arguments": (tool.inputSchema or {}).get("properties", {}),
-                    "required": (tool.inputSchema or {}).get("required", []),
+                    "arguments": (tool.input_schema or {}).get("properties", {}),
+                    "required": (tool.input_schema or {}).get("required", []),
                 },
                 default=str,
             )

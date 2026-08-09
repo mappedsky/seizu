@@ -477,8 +477,8 @@ async def test_build_seizu_tools_binds_the_core_and_offers_the_rest_by_search() 
     find_seizu_tools/call_seizu_tool. RBAC is unchanged either way.
     """
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object", "properties": {}}),
     ]
     with (
         _disclosure(False),
@@ -491,9 +491,9 @@ async def test_build_seizu_tools_binds_the_core_and_offers_the_rest_by_search() 
 
 async def test_build_seizu_tools_binds_what_the_conversation_disclosed() -> None:
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="roles__list", description="Roles", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object", "properties": {}}),
+        Tool(name="roles__list", description="Roles", input_schema={"type": "object", "properties": {}}),
     ]
     with (
         _disclosure(False),
@@ -509,9 +509,9 @@ async def test_naming_tools_on_the_delegation_narrows_as_well_as_widens() -> Non
     sub-agent instead of leaving it to work out which one to use -- and keeps
     the disclosed set it does not need out of its context."""
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="cve_analysis__get_cve", description="CVE", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_cve", description="CVE", input_schema={"type": "object", "properties": {}}),
     ]
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
         tools = await _build_seizu_tools(
@@ -529,7 +529,7 @@ async def test_naming_tools_on_the_delegation_narrows_as_well_as_widens() -> Non
 async def test_a_requested_tool_that_does_not_exist_is_ignored_not_fatal() -> None:
     """A delegating model that guesses a name should not break the delegation;
     the RBAC-filtered listing stays the authority on what exists."""
-    fake_tools = [Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})]
+    fake_tools = [Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}})]
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
         tools = await _build_seizu_tools(_current_user(), requested=["no_such__tool"])
 
@@ -544,11 +544,11 @@ async def test_an_unbound_tool_is_findable_and_callable() -> None:
     tests below.
     """
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
         Tool(
             name="cve_analysis__get_recent_cves",
             description="Recent CVEs by severity",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []},
+            input_schema={"type": "object", "properties": {"limit": {"type": "integer"}}, "required": []},
         ),
     ]
     with (
@@ -578,9 +578,9 @@ async def test_the_core_tool_set_is_configurable() -> None:
     """The core bypasses disclosure, so a deployment that wants graph access
     gated has to be able to narrow or empty it."""
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="graph__schema", description="Schema", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="graph__schema", description="Schema", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object"}),
     ]
     with (
         _disclosure(True),
@@ -596,8 +596,8 @@ async def test_an_empty_core_binds_nothing_up_front() -> None:
     """Emptying SANDBOX_CORE_TOOLS routes even graph access through a skill or
     through the delegating model naming `tools` -- the strict-disclosure shape."""
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="cve_analysis__get_recent_cves", description="CVEs", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="CVEs", input_schema={"type": "object"}),
     ]
     skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
     with (
@@ -621,7 +621,7 @@ async def test_the_core_never_widens_past_rbac() -> None:
     """SANDBOX_CORE_TOOLS bypasses disclosure, not authorization: a core tool the
     user may not call is not in the RBAC-filtered listing, so it is not bound."""
     # graph__query absent from the listing = this role lacks query:execute.
-    fake_tools = [Tool(name="reports__get", description="Get report", inputSchema={"type": "object"})]
+    fake_tools = [Tool(name="reports__get", description="Get report", input_schema={"type": "object"})]
     with (
         _disclosure(True),
         patch("reporting.settings.SANDBOX_CORE_TOOLS", ["graph__query", "graph__schema"]),
@@ -640,8 +640,8 @@ async def test_under_progressive_disclosure_the_subagent_searches_skills_not_too
     the sub-agent gets the same skill-mediated route the planner has.
     """
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="cve_analysis__get_recent_cves", description="CVEs", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="CVEs", input_schema={"type": "object"}),
     ]
     skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
     with (
@@ -657,8 +657,8 @@ async def test_under_progressive_disclosure_the_subagent_searches_skills_not_too
 
 async def test_a_skill_unlocks_the_tools_its_author_declared() -> None:
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="cve_analysis__get_recent_cves", description="Recent CVEs", input_schema={"type": "object"}),
     ]
     skills = [_skill("cve__triage", "Triage recent CVEs", ["cve_analysis__get_recent_cves"])]
     rendered = mcp_runtime.ChatActionOutcome(
@@ -691,8 +691,8 @@ async def test_a_skill_unlocks_the_tools_its_author_declared() -> None:
 
 async def test_a_skill_that_declares_no_tools_says_so() -> None:
     """Otherwise the sub-agent discovers the gap one failed call at a time."""
-    fake_tools = [Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})]
-    fake_tools.append(Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}))
+    fake_tools = [Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}})]
+    fake_tools.append(Tool(name="reports__get", description="Get report", input_schema={"type": "object"}))
     skills = [_skill("cve__severity", "Severity breakdown", [])]
     rendered = mcp_runtime.ChatActionOutcome(text="Compute the distribution.", blocked=None, tools_required=())
     with (
@@ -710,8 +710,8 @@ async def test_a_skill_that_declares_no_tools_says_so() -> None:
 async def test_a_skill_declaration_cannot_widen_rbac() -> None:
     """tools_required is a disclosure request; the RBAC-filtered listing answers it."""
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object"}),
     ]
     skills = [_skill("admin__audit", "Audit roles", ["roles__delete"])]
     rendered = mcp_runtime.ChatActionOutcome(text="Audit.", blocked=None, tools_required=("roles__delete",))
@@ -735,8 +735,8 @@ async def test_with_no_skills_the_subagent_gets_no_discovery_tools_at_all() -> N
     the delegating model naming tools stays the route in that case.
     """
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object"}),
     ]
     with (
         _disclosure(True),
@@ -773,7 +773,7 @@ async def test_the_prompt_never_points_at_a_tool_the_delegation_lacks() -> None:
 async def test_a_skill_that_unlocks_nothing_does_not_invent_a_fallback_tool() -> None:
     """The same rule at the other site: the no-tools-unlocked reply pointed at
     graph__query unconditionally, including when the core was emptied."""
-    fake_tools = [Tool(name="reports__get", description="Get report", inputSchema={"type": "object"})]
+    fake_tools = [Tool(name="reports__get", description="Get report", input_schema={"type": "object"})]
     skills = [_skill("cve__severity", "Severity breakdown", [])]
     rendered = mcp_runtime.ChatActionOutcome(text="Compute it.", blocked=None, tools_required=())
     with (
@@ -793,8 +793,8 @@ async def test_a_skill_that_unlocks_nothing_does_not_invent_a_fallback_tool() ->
 async def test_a_skill_that_unlocks_nothing_still_offers_cypher_when_bound() -> None:
     """...and the converse, so the guard above is not just deleting the hint."""
     fake_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
-        Tool(name="reports__get", description="Get report", inputSchema={"type": "object"}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+        Tool(name="reports__get", description="Get report", input_schema={"type": "object"}),
     ]
     skills = [_skill("cve__severity", "Severity breakdown", [])]
     rendered = mcp_runtime.ChatActionOutcome(text="Compute it.", blocked=None, tools_required=())
@@ -828,7 +828,7 @@ async def test_build_seizu_tools_coerces_integer_params() -> None:
     int_tool = Tool(
         name="my_toolset__search",
         description="Search",
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "max rows"},
@@ -851,11 +851,11 @@ async def test_build_seizu_tools_coerces_integer_params() -> None:
 async def test_build_seizu_tools_excludes_sandbox_delegate() -> None:
     # sandbox__delegate must never be passed to the inner agent (prevent recursion).
     all_tools = [
-        Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
         Tool(
             name="sandbox__delegate",
             description="Delegate to sandbox",
-            inputSchema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+            input_schema={"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
         ),
     ]
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=all_tools)):
@@ -880,7 +880,7 @@ async def test_build_seizu_tools_requests_confirmation_gated_excluded() -> None:
 async def test_build_seizu_tools_bounds_tool_results() -> None:
     """Seizu tools handed to the subagent bound their results (rows/bytes) and
     byte-cap the text, so a huge graph__query result can't blow up the inner model."""
-    seizu_tool = Tool(name="graph__query", description="Query", inputSchema={"type": "object", "properties": {}})
+    seizu_tool = Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}})
     big_outcome = MagicMock(blocked=None, text="y" * 10_000)
     call_mock = AsyncMock(return_value=big_outcome)
     with (
@@ -930,7 +930,7 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     seizu_tool = Tool(
         name="graph__query",
         description="Run a Cypher query",
-        inputSchema={"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]},
+        input_schema={"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]},
     )
     with (
         patch("reporting.settings.SANDBOX_ENABLED", True),
@@ -970,7 +970,7 @@ async def test_an_empty_core_still_leaves_the_sandbox_able_to_run_code() -> None
     seizu_tool = Tool(
         name="graph__query",
         description="Run a Cypher query",
-        inputSchema={"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]},
+        input_schema={"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]},
     )
     with (
         patch("reporting.settings.SANDBOX_ENABLED", True),
@@ -1634,7 +1634,7 @@ async def _seizu_tool(backend: Any, mocker: Any, *, result: str, name: str = "gr
                 Tool(
                     name=name,
                     description="Run a query",
-                    inputSchema={
+                    input_schema={
                         "type": "object",
                         "properties": {"query": {"type": "string", "description": "cypher"}},
                         "required": ["query"],
