@@ -29,6 +29,13 @@ def _auth_env(mocker):
         "reporting.services.oauth_client.validate_id_token",
         AsyncMock(return_value={"sub": "user-1", "nonce": "nonce-1"}),
     )
+    # Discovery is the same kind of call: every route here reaches it eventually,
+    # and the logout route reaches it via build_post_logout_url even when the
+    # test is about cookies. Left unstubbed it attempts a real fetch against
+    # whatever OIDC_AUTHORITY the environment happens to carry, so these tests
+    # passed or failed on the developer's .env rather than on the code. Tests
+    # asserting on specific endpoints re-patch this and their patch wins.
+    mocker.patch("reporting.services.oauth_client.get_metadata", AsyncMock(return_value=_mock_metadata()))
     oauth_client.reset_metadata_cache()
     yield
     oauth_client.reset_metadata_cache()
