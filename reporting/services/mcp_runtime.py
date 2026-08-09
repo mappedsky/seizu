@@ -48,6 +48,22 @@ class ChatBlockReason(StrEnum):
 
 
 @dataclass(frozen=True)
+class ToolCallOutcome:
+    """An MCP tool call's body, and whether the call failed outright.
+
+    ``is_error`` maps to ``CallToolResult.is_error`` on the wire. It marks a
+    call that could not be honoured -- arguments the schema rejects, a
+    misconfigured tool, an unexpected fault -- as opposed to a tool that ran and
+    returned an unwelcome answer, which is an ordinary result. The 1.x SDK
+    wrapper drew that line; carrying it here keeps it after the 2.x callbacks
+    stopped doing so.
+    """
+
+    content: list[TextContent]
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
 class ChatActionOutcome:
     """Chat-specific result for a tool call or skill render.
 
@@ -176,44 +192,59 @@ def _permissions(current_user: CurrentUser | None, permissions: frozenset[str] |
     return current_user.permissions if current_user is not None else frozenset()
 
 
-def _schema_violation(input_schema: dict[str, Any], args: dict[str, Any]) -> str | None:
-    """Validate *args* against the tool's advertised JSON Schema.
+class _ToolFailure(Exception):
+    """A call that failed rather than returned — reported with ``is_error``.
 
-    Returns a caller-actionable message, or ``None`` when the arguments conform.
+    MCP draws a line between a tool that *ran* and produced an unwelcome answer
+    ("report not found", "permission denied", "confirmation required") and a
+    call that could not be honoured at all. The first is an ordinary result; the
+    second is a result flagged ``is_error``. The 1.x SDK drew that line for us
+    via ``_make_error_result``; carrying it explicitly keeps the distinction
+    after the 2.x callbacks stopped doing so.
+    """
 
-    This lives here, ahead of the confirmation gate, because a tool's schema is
-    the contract it published in ``tools/list`` and nothing downstream re-checks
-    it. Until MCP 2.0 the SDK's ``@server.call_tool()`` wrapper ran exactly this
-    check before dispatching; the 2.x constructor callbacks do not, so dropping
-    it here would have silently widened what reaches a handler.
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("error", "tool call failed")))
+        self.payload = payload
 
-    Checking only ``required`` is not enough, and the gap is not cosmetic:
-    handlers parse arguments with pydantic, which *coerces*. A ``"pinned":
-    "false"`` string against a ``boolean`` schema became ``False`` and unpinned
-    the report, where the schema check rejects it -- a wrongly typed argument
-    must not be able to change what a mutation does. Malformed values also
-    reached the confirmation resolvers, which parse the same arguments and
-    raised out of the call entirely.
 
-    Runs for chat as well as MCP so the two cannot diverge on what a tool will
-    accept.
+def _validate_arguments(input_schema: dict[str, Any], args: dict[str, Any]) -> None:
+    """Check *args* against the tool's advertised JSON Schema, or raise.
+
+    Runs ahead of the confirmation gate and of execution, because the schema is
+    the contract the tool published in ``tools/list`` and nothing downstream
+    re-checks it. Until MCP 2.0 the SDK's ``@server.call_tool()`` wrapper ran
+    exactly this against every tool it dispatched, built-in or user-defined.
+
+    Checking types rather than only ``required`` is the point, and the gap it
+    closes is not cosmetic. Both kinds of tool quietly accepted values their
+    advertised schema forbids, by different routes:
+
+    - Built-in handlers parse with pydantic, which *coerces*: ``"pinned":
+      "false"`` against a ``boolean`` schema became ``False`` and unpinned the
+      report. Malformed values also reached the confirmation resolvers, which
+      parse the same arguments and raised out of the call entirely.
+    - User-defined tools ran ``validate_tool_arguments``, which computes a
+      coerced value and then discards it, so ``"5"`` for an ``integer`` passed
+      the check and reached Neo4j as the *string* ``"5"``.
+
+    A wrongly typed argument must not be able to change what a mutation does, or
+    what a query matches. Runs for chat as well as MCP so the two cannot diverge
+    on what a tool will accept.
     """
     try:
         jsonschema.validate(instance=args, schema=input_schema)
     except jsonschema.ValidationError as exc:
         location = ".".join(str(part) for part in exc.absolute_path)
-        return (
-            f"Input validation error: {location}: {exc.message}"
-            if location
-            else f"Input validation error: {exc.message}"
-        )
-    except jsonschema.SchemaError:
-        # A malformed *schema* is our bug, not the caller's. Log it and let the
-        # call through to the handler's own parsing rather than refusing a
-        # request the caller had no way to get right.
-        logger.exception("Built-in tool schema is not valid JSON Schema; skipping argument validation")
-        return None
-    return None
+        detail = f"{location}: {exc.message}" if location else exc.message
+        raise _ToolFailure({"error": f"Input validation error: {detail}"}) from exc
+    except jsonschema.SchemaError as exc:
+        # A malformed schema is our bug, not the caller's -- but it is still a
+        # broken type guard, and letting the call through would restore exactly
+        # the coercion this check exists to stop, on a tool that might mutate.
+        # Invalid validation policy fails closed.
+        logger.exception("Tool schema is not valid JSON Schema; refusing the call")
+        raise _ToolFailure({"error": "Tool is misconfigured: its input schema is not valid JSON Schema"}) from exc
 
 
 async def list_tools_for_user(
@@ -295,9 +326,9 @@ async def call_tool_for_user(
     result_max_bytes: int | None = None,
     confirmation_source: ConfirmationSource | None = None,
     confirmation_session_key: str | None = None,
-) -> list[TextContent]:
+) -> ToolCallOutcome:
     """MCP-shaped tool call. Use ``call_tool_for_chat`` from the chat agent."""
-    content, _blocked = await _guarded(
+    content, _blocked, is_error = await _guarded(
         name,
         _call_tool_core(
             current_user,
@@ -312,7 +343,7 @@ async def call_tool_for_user(
             confirmation_session_key=confirmation_session_key,
         ),
     )
-    return content
+    return ToolCallOutcome(content=content, is_error=is_error)
 
 
 async def call_tool_for_chat(
@@ -356,7 +387,7 @@ async def call_tool_for_chat(
     ``include_chat_only`` exposes tools marked ``chat_only=True`` (e.g.
     ``sandbox__delegate``) that are invisible on the MCP server endpoint.
     """
-    content, blocked = await _guarded(
+    content, blocked, _is_error = await _guarded(
         name,
         _call_tool_core(
             current_user,
@@ -380,8 +411,8 @@ async def call_tool_for_chat(
 
 async def _guarded(
     name: str, call: Coroutine[Any, Any, tuple[list[TextContent], ChatBlockReason | None]]
-) -> tuple[list[TextContent], ChatBlockReason | None]:
-    """Never let a tool call raise out of the runtime.
+) -> tuple[list[TextContent], ChatBlockReason | None, bool]:
+    """Never let a tool call raise out of the runtime; say when one failed.
 
     Until MCP 2.0 the SDK's ``@server.call_tool()`` wrapper turned *any*
     exception from a handler into an ``is_error`` result. The 2.x constructor
@@ -393,12 +424,20 @@ async def _guarded(
     pending confirmation -- so a resolver parsing bad arguments, or the
     confirmation store being unreachable, would escape. Argument validation now
     stops the first of those at the door; this is the backstop for the rest.
+
+    The third element is ``is_error``: true only when the call could not be
+    honoured at all, which is the same line the 1.x wrapper drew. A tool that
+    ran and reported "not found" or "permission denied" returns an ordinary
+    result, because it *did* answer.
     """
     try:
-        return await call
+        content, blocked = await call
+        return content, blocked, False
+    except _ToolFailure as failure:
+        return text_response(failure.payload), None, True
     except Exception:
         logger.exception("Unhandled error calling MCP tool %s", name)
-        return text_response({"error": f"Failed to execute tool '{name}'"}), None
+        return text_response({"error": f"Failed to execute tool '{name}'"}), None, True
 
 
 async def _call_tool_core(
@@ -439,9 +478,7 @@ async def _call_tool_core(
                 text_response({"error": f"Permission denied: {', '.join(missing)}"}),
                 ChatBlockReason.PERMISSION_DENIED,
             )
-        violation = _schema_violation(builtin.input_schema, args)
-        if violation:
-            return text_response({"error": violation}), None
+        _validate_arguments(builtin.input_schema, args)
         if builtin.confirmation is not None and bypass_confirmations:
             # Bypass mode (chat UI bypass toggle or a headless agent run):
             # honored only for callers holding chat:bypass_permissions, and
@@ -580,6 +617,11 @@ async def _call_tool_core(
         if target_tool is None:
             return text_response({"error": f"Tool '{name}' not found"}), None
 
+        # Against the same schema the tool advertised in tools/list, which is
+        # what the SDK checked before 2.0 -- and stricter than
+        # validate_tool_arguments below, which accepts a coercible string and
+        # then passes the *original* through to Cypher.
+        _validate_arguments(build_input_schema(target_tool.parameters), args)
         arg_errors = validate_tool_arguments(target_tool.parameters, args)
         if arg_errors:
             return text_response({"errors": arg_errors}), None
@@ -618,6 +660,10 @@ async def _call_tool_core(
             ),
             None,
         )
+    except _ToolFailure:
+        # A rejected argument is not an execution failure to be relabelled;
+        # let it reach _guarded, which reports it with is_error.
+        raise
     except neo4j.exceptions.Neo4jError as exc:
         # The tool's own cypher/parameters are wrong (e.g. a missing parameter
         # because the query references $x that the tool doesn't declare, or a

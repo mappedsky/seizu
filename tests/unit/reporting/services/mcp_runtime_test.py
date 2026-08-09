@@ -1,3 +1,4 @@
+import dataclasses
 import json
 
 from reporting.authnz import CurrentUser
@@ -5,7 +6,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
-from reporting.services import action_confirmations, mcp_runtime
+from reporting.services import action_confirmations, mcp_runtime, report_store
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _LATER = "2099-01-01T00:30:00+00:00"
@@ -139,7 +140,7 @@ async def test_chat_tool_gate_blocks_call_before_store_lookup(mocker):
         gate_permission=Permission.CHAT_TOOLS_CALL,
     )
 
-    assert json.loads(result[0].text) == {"error": "Permission denied: chat:tools:call"}
+    assert json.loads(result.content[0].text) == {"error": "Permission denied: chat:tools:call"}
     get_enabled_tool.assert_not_called()
 
 
@@ -154,7 +155,7 @@ async def test_tool_call_still_requires_underlying_mcp_permission(mocker):
         gate_permission=Permission.CHAT_TOOLS_CALL,
     )
 
-    assert json.loads(result[0].text) == {"error": "Permission denied: tools:call"}
+    assert json.loads(result.content[0].text) == {"error": "Permission denied: tools:call"}
     get_enabled_tool.assert_not_called()
 
 
@@ -190,7 +191,7 @@ async def test_chat_tool_call_uses_mcp_acl_and_executes_user_defined_tool(mocker
     # the query stops at the source instead of being trimmed after the fact.
     assert run_query.await_args.args[:2] == ("MATCH (n) RETURN n LIMIT $limit", {"limit": 3})
     assert run_query.await_args.kwargs["max_rows"] > 0
-    assert json.loads(result[0].text) == [{"name": "node-1"}]
+    assert json.loads(result.content[0].text) == [{"name": "node-1"}]
 
 
 async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
@@ -215,7 +216,7 @@ async def test_chat_tool_call_surfaces_neo4j_error_without_stacktrace(mocker):
         gate_permission=Permission.CHAT_TOOLS_CALL,
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     # The database message is surfaced so the caller can see why the tool failed.
     assert "Expected parameter(s): cve_id, limit" in data["error"]
     # Logged concisely (warning), not as a full-traceback ERROR.
@@ -239,7 +240,7 @@ async def test_chat_tool_call_applies_row_limit(mocker):
         result_max_rows=1,
     )
 
-    assert json.loads(result[0].text) == {
+    assert json.loads(result.content[0].text) == {
         "results": [{"name": "node-1"}],
         "truncated": True,
         "truncated_reasons": ["row_limit"],
@@ -266,7 +267,7 @@ async def test_chat_tool_call_applies_byte_limit(mocker):
         result_max_bytes=20,
     )
 
-    assert json.loads(result[0].text) == {
+    assert json.loads(result.content[0].text) == {
         "error": "Tool result exceeded chat size limit",
         "truncated": True,
         "truncated_reasons": ["byte_limit"],
@@ -288,13 +289,13 @@ async def test_chat_tool_call_byte_limit_sheds_rows(mocker):
         result_max_bytes=500,
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     # Graceful: keep as many whole rows as fit rather than discarding everything.
     assert data["truncated_reasons"] == ["byte_limit"]
     assert data["total_rows"] == 12
     assert 1 <= len(data["results"]) < 12
     assert data["returned"] == len(data["results"])
-    assert len(result[0].text.encode("utf-8")) <= 500
+    assert len(result.content[0].text.encode("utf-8")) <= 500
 
 
 async def test_chat_safe_tool_listing_includes_create_write_builtins(mocker):
@@ -345,7 +346,7 @@ async def test_chat_safe_tool_call_allows_create_write_builtin_without_confirmat
         chat_safe_only=True,
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     assert "error" not in data
 
 
@@ -633,7 +634,7 @@ async def test_unapproved_mutating_builtin_returns_confirmation_without_handler(
         confirmation_session_key="session-1",
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     assert data["confirmation_required"] is True
     assert data["confirmation_id"] == "confirm-1"
     delete_report.assert_not_called()
@@ -657,7 +658,7 @@ async def test_repeated_pending_mutating_builtin_reuses_confirmation_without_han
         confirmation_session_key="session-1",
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     assert data["confirmation_required"] is True
     assert data["confirmation_id"] == "confirm-1"
     delete_report.assert_not_called()
@@ -688,7 +689,7 @@ async def test_approved_mutating_builtin_executes_handler(mocker):
         confirmation_session_key="session-1",
     )
 
-    assert json.loads(result[0].text) == {"report_id": "r1"}
+    assert json.loads(result.content[0].text) == {"report_id": "r1"}
     delete_report.assert_awaited_once_with("r1", user_id="user-1")
     claim_confirmation.assert_awaited_once_with("confirm-1", "user-1")
     create_confirmation.assert_not_called()
@@ -727,7 +728,7 @@ async def test_builtin_handler_validation_error_returns_actionable_message(mocke
         confirmation_session_key="session-1",
     )
 
-    payload = json.loads(result[0].text)
+    payload = json.loads(result.content[0].text)
     assert "Invalid arguments" in payload["error"]
     assert "tools_required" in payload["error"]
 
@@ -802,7 +803,7 @@ async def test_denied_mutating_builtin_blocks_handler(mocker):
         confirmation_session_key="session-1",
     )
 
-    data = json.loads(result[0].text)
+    data = json.loads(result.content[0].text)
     assert data["confirmation_required"] is True
     assert data["status"] == "denied"
     delete_report.assert_not_called()
@@ -819,7 +820,9 @@ async def test_builtin_call_validates_required_arguments_before_handler(mocker):
     )
 
     # Wording follows the SDK's pre-2.0 check, which this replaced.
-    assert json.loads(result[0].text) == {"error": "Input validation error: 'skillset_id' is a required property"}
+    assert json.loads(result.content[0].text) == {
+        "error": "Input validation error: 'skillset_id' is a required property"
+    }
     get_skillset.assert_not_called()
 
 
@@ -1454,7 +1457,7 @@ async def test_wrongly_typed_argument_is_rejected_against_the_schema(mocker):
     )
     result = await _pin({"report_id": "r1", "pinned": []}, mocker)
 
-    assert "Input validation error" in json.loads(result[0].text)["error"]
+    assert "Input validation error" in json.loads(result.content[0].text)["error"]
     pin.assert_not_awaited()
 
 
@@ -1470,13 +1473,13 @@ async def test_coercible_argument_cannot_change_what_a_mutation_does(mocker):
     )
     result = await _pin({"report_id": "r1", "pinned": "false"}, mocker)
 
-    assert "Input validation error" in json.loads(result[0].text)["error"]
+    assert "Input validation error" in json.loads(result.content[0].text)["error"]
     pin.assert_not_awaited()
 
 
 async def test_missing_required_argument_is_still_reported(mocker):
     result = await _pin({"report_id": "r1"}, mocker)
-    assert "'pinned' is a required property" in json.loads(result[0].text)["error"]
+    assert "'pinned' is a required property" in json.loads(result.content[0].text)["error"]
 
 
 async def test_conforming_arguments_still_reach_the_handler(mocker):
@@ -1486,7 +1489,7 @@ async def test_conforming_arguments_still_reach_the_handler(mocker):
     )
     result = await _pin({"report_id": "r1", "pinned": True}, mocker)
 
-    assert json.loads(result[0].text) == {"report_id": "r1", "pinned": True}
+    assert json.loads(result.content[0].text) == {"report_id": "r1", "pinned": True}
     pin.assert_awaited_once()
 
 
@@ -1532,4 +1535,93 @@ async def test_an_unexpected_failure_becomes_a_result_not_a_raise(mocker):
         confirmation_session_key="session",
     )
 
-    assert json.loads(result[0].text)["error"] == "Failed to execute tool 'reports__pin'"
+    assert json.loads(result.content[0].text)["error"] == "Failed to execute tool 'reports__pin'"
+
+
+async def test_stored_tool_rejects_a_coercible_string(mocker):
+    """A user-defined tool's schema is enforced too, not just a built-in's.
+
+    ``validate_tool_arguments`` coerces "5" to 5 to decide it is valid, then
+    throws the coerced value away -- so the *string* reached Cypher, where a
+    parameter used in arithmetic or a comparison behaves differently. The
+    advertised schema says integer. The existing "not-an-int" case never caught
+    this, because that one fails coercion too.
+    """
+    run_query = mocker.patch.object(mcp_runtime.reporting_neo4j, "run_query_streamed", mocker.AsyncMock())
+    mocker.patch.object(
+        report_store,
+        "get_enabled_tool",
+        mocker.AsyncMock(
+            return_value=ToolItem(
+                tool_id="t1",
+                toolset_id="ts1",
+                name="mytool",
+                description="",
+                cypher="MATCH (n) RETURN n LIMIT $limit",
+                parameters=[ToolParamDef(name="limit", type="integer", description="", required=True)],
+                enabled=True,
+                current_version=1,
+                created_at=_NOW,
+                updated_at=_NOW,
+                created_by="u",
+            )
+        ),
+    )
+
+    result = await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "ts1__t1",
+        {"limit": "5"},
+        permissions=ALL_PERMISSIONS,
+    )
+
+    assert "Input validation error" in json.loads(result.content[0].text)["error"]
+    assert result.is_error is True
+    run_query.assert_not_awaited()
+
+
+async def test_a_misconfigured_schema_fails_closed(mocker):
+    """An invalid schema is a broken type guard, so the call is refused.
+
+    Letting it through would silently restore the coercion the check exists to
+    stop, on a tool that might mutate.
+    """
+    broken = dataclasses.replace(
+        mcp_runtime.find_builtin("reports__pin"),
+        # "type" must be a string or list of strings; 5 makes the schema itself
+        # invalid, which is what a typo in a tool definition looks like.
+        input_schema={"type": "object", "properties": {"pinned": {"type": 5}}},
+    )
+    mocker.patch.object(mcp_runtime, "find_builtin", return_value=broken)
+    pin = mocker.patch(
+        "reporting.services.mcp_builtins.reports.report_store.pin_report",
+        mocker.AsyncMock(),
+    )
+
+    result = await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "reports__pin",
+        {"report_id": "r1", "pinned": True},
+        permissions=ALL_PERMISSIONS,
+        confirmation_source="mcp",
+        confirmation_session_key="session",
+    )
+
+    assert "not valid JSON Schema" in json.loads(result.content[0].text)["error"]
+    assert result.is_error is True
+    pin.assert_not_awaited()
+
+
+async def test_a_tool_that_answered_is_not_flagged_as_an_error(mocker):
+    """ "Not found" is an answer. Only an unhonourable call sets is_error."""
+    mocker.patch.object(report_store, "get_enabled_tool", mocker.AsyncMock(return_value=None))
+
+    result = await mcp_runtime.call_tool_for_user(
+        _user(ALL_PERMISSIONS),
+        "ts1__missing",
+        {},
+        permissions=ALL_PERMISSIONS,
+    )
+
+    assert json.loads(result.content[0].text) == {"error": "Tool 'ts1__missing' not found"}
+    assert result.is_error is False

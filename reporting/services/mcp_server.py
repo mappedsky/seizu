@@ -79,7 +79,7 @@ async def _handle_list_tools(ctx: ServerRequestContext[Any], params: PaginatedRe
 
 
 async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequestParams) -> CallToolResult:
-    content = await mcp_runtime.call_tool_for_user(
+    result = await mcp_runtime.call_tool_for_user(
         _mcp_current_user.get(),
         params.name,
         params.arguments,
@@ -88,12 +88,12 @@ async def _handle_call_tool(ctx: ServerRequestContext[Any], params: CallToolRequ
         confirmation_session_key=_mcp_session_key.get(),
     )
     # The runtime validates arguments against the tool's advertised schema and
-    # turns every failure — including anything unexpected — into a text payload
-    # carrying an "error" key, because MCP 2.0 no longer wraps a raised handler
-    # exception into an is_error result the way v1 did; it would surface as a
-    # JSON-RPC protocol error instead. A tool that refuses a call should read as
-    # a normal result the model can act on, not as a broken request.
-    return CallToolResult(content=list(content))
+    # never raises, because MCP 2.0 no longer wraps a raised handler exception
+    # into an is_error result the way v1 did — it would surface as a JSON-RPC
+    # protocol error, i.e. a broken server rather than a failed call. It does
+    # report which failures were failures, so they stay distinguishable from a
+    # tool that ran and returned an unwelcome answer.
+    return CallToolResult(content=list(result.content), is_error=result.is_error)
 
 
 async def _handle_list_prompts(

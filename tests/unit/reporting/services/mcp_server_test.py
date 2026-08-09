@@ -1794,6 +1794,8 @@ async def test_invalid_arguments_are_rejected_for_a_legacy_client():
 
     body = resp.json()
     assert "error" not in body, "a refused call must be a result, not a JSON-RPC protocol error"
+    # ...but still flagged as a failed call, the way the 1.x SDK reported it.
+    assert body["result"]["isError"] is True
     assert "Input validation error" in json.loads(body["result"]["content"][0]["text"])["error"]
     pin.assert_not_awaited()
 
@@ -1827,5 +1829,29 @@ async def test_invalid_arguments_are_rejected_for_a_2026_client():
 
     body = resp.json()
     assert "error" not in body, "a refused call must be a result, not a JSON-RPC protocol error"
+    # ...but still flagged as a failed call, the way the 1.x SDK reported it.
+    assert body["result"]["isError"] is True
     assert "Input validation error" in json.loads(body["result"]["content"][0]["text"])["error"]
     pin.assert_not_awaited()
+
+
+async def test_a_successful_call_is_not_flagged_as_an_error():
+    """is_error must stay false for a call that actually ran."""
+    async with _mcp_http_client() as client:
+        with patch(
+            "reporting.services.mcp_builtins.graph.reporting_neo4j.fetch_graph_schema",
+            new_callable=AsyncMock,
+            return_value={"labels": ["CVE"], "relationship_types": [], "property_keys": [], "indexes": []},
+        ):
+            resp = await client.post(
+                "/api/v1/mcp",
+                headers={"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-06-18"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "graph__schema", "arguments": {}},
+                },
+            )
+
+    assert resp.json()["result"]["isError"] is False
