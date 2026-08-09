@@ -12,6 +12,7 @@ filter on the tag rather than on message content.
 """
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -80,3 +81,32 @@ def has_tag(message: Any, tag: MessageTag) -> bool:
 def drop_tagged(messages: Iterable[Any], *tags: MessageTag) -> list[Any]:
     """Return *messages* without any carrying one of *tags*."""
     return [message for message in messages if not any(has_tag(message, tag) for tag in tags)]
+
+
+_CREATED_AT_KEY = "seizu_created_at"
+
+
+def stamp_created_at(message: BaseMessage) -> BaseMessage:
+    """Record when *message* entered the conversation, if it isn't stamped yet.
+
+    Stored in ``additional_kwargs`` (like tags) so it round-trips through the
+    checkpoint serializer, and written only once: a message re-emitted by a node
+    that returns the whole list, or rebuilt by a continuation merge that carries
+    the original ``additional_kwargs`` forward, keeps its first timestamp.
+    """
+    if not isinstance(message.additional_kwargs.get(_CREATED_AT_KEY), str):
+        message.additional_kwargs[_CREATED_AT_KEY] = datetime.now(UTC).isoformat()
+    return message
+
+
+def created_at(message: Any) -> str | None:
+    """Return the ISO-8601 UTC time *message* was stamped with, if any.
+
+    ``None`` for messages persisted before timestamps were recorded — callers
+    render those without a time rather than inventing one.
+    """
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if not isinstance(additional_kwargs, dict):
+        return None
+    value = additional_kwargs.get(_CREATED_AT_KEY)
+    return value if isinstance(value, str) else None

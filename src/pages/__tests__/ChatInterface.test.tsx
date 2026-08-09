@@ -1454,6 +1454,139 @@ describe('ChatInterface', () => {
     });
   });
 
+  it('shows persisted timestamps and copies the user message from its hover actions', async () => {
+    const writeText = jest.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const asked = '2024-05-05T10:20:00.000Z';
+    const answered = '2024-05-05T10:20:30.000Z';
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'user-message',
+          role: 'user',
+          metadata: { created_at: asked },
+          parts: [{ type: 'text', text: 'Show findings' }],
+        },
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          metadata: { created_at: answered },
+          parts: [{ type: 'text', text: 'Here they are' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    expect(
+      screen.getByText(new Date(asked).toLocaleString()),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(new Date(answered).toLocaleString()),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy your message' }));
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith('Show findings');
+    });
+  });
+
+  it('leaves a persisted turn from before timestamps existed untimed', async () => {
+    // Regression: stamping every untimed message with the browser clock dated
+    // every message of every pre-existing conversation to today.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'user-message',
+          role: 'user',
+          metadata: { seizu_persisted: true },
+          parts: [{ type: 'text', text: 'Asked last year' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    const actions = screen
+      .getByRole('button', { name: 'Copy your message' })
+      .closest('[aria-label="User message actions"]');
+    expect(actions).not.toBeNull();
+    expect(actions?.textContent).not.toContain(
+      new Date().getFullYear().toString(),
+    );
+  });
+
+  it('stamps a live message that has no server timestamp yet', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'user-message',
+          role: 'user',
+          parts: [{ type: 'text', text: 'Just sent' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    const actions = screen
+      .getByRole('button', { name: 'Copy your message' })
+      .closest('[aria-label="User message actions"]');
+    expect(actions).not.toBeNull();
+    // Rendered from the browser clock, so assert against today rather than a
+    // fixed value.
+    expect(actions?.textContent).toContain(
+      new Date().toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'numeric',
+        year: 'numeric',
+      }),
+    );
+  });
+
   it('shows load more on output-limited assistant responses', async () => {
     const sendMessage = jest.fn();
     const touchSession = jest.fn();

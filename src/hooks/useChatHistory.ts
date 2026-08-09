@@ -30,6 +30,12 @@ type SeizuChatHistoryMessage = UIMessage<
   {
     finish_reason?: string;
     response_cut_off?: boolean;
+    // ISO-8601 UTC; absent on messages persisted before timestamps were recorded.
+    created_at?: string;
+    // Set on everything this hook returns: the message is already in the thread's
+    // checkpoint, so a missing created_at means it predates timestamps rather
+    // than meaning "not saved yet".
+    seizu_persisted?: boolean;
     details?: HistoryDetail[];
   },
   {
@@ -44,6 +50,7 @@ interface ChatHistoryMessage {
   metadata?: {
     finish_reason?: string;
     response_cut_off?: boolean;
+    created_at?: string;
     details?: HistoryDetail[];
   } | null;
 }
@@ -67,7 +74,7 @@ function toUIMessage(message: ChatHistoryMessage): SeizuChatHistoryMessage {
   return {
     id: message.id,
     role: message.role,
-    metadata: message.metadata ?? undefined,
+    metadata: { ...(message.metadata ?? {}), seizu_persisted: true },
     parts,
   };
 }

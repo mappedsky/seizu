@@ -267,6 +267,8 @@ export interface ScheduledChatTranscriptMessage {
     details?: ScheduledChatRunDetail[];
     run_status?: string;
     run_errors?: string[];
+    // ISO-8601 UTC; absent on runs recorded before timestamps existed.
+    created_at?: string;
   } | null;
 }
 
