@@ -476,10 +476,18 @@ services:
       # Generic JWKS settings — works with any standard OIDC provider.
       # When using Authentik (--profile auth), this resolves through the
       # loopback forwarder below, like every other OIDC URL here.
-      - JWKS_URL=http://localhost:9000/application/o/seizu/jwks/
+      #
+      # Every IDP-specific value here is overridable from .env, so pointing dev
+      # at a different provider does not need a compose override file. Doing so
+      # means setting DEV_OIDC_LOOPBACK_TARGET= as well (see below) — the
+      # defaults below and the forwarder only make sense together.
+      - JWKS_URL=${JWKS_URL-http://localhost:9000/application/o/seizu/jwks/}
       - JWT_HEADER_NAME=Authorization
       - JWT_EMAIL_CLAIM=email
-      - JWT_AUDIENCE=seizu
+      - JWT_AUDIENCE=${JWT_AUDIENCE-seizu}
+      # Empty by default, matching the application default. Pin it once the IDP
+      # emits one stable issuer -- see docs/root/install/security.md.
+      - JWT_ISSUER=${JWT_ISSUER-}
       # OIDC client config served to the frontend via GET /api/v1/config.
       # The redirect_uri must be the publicly reachable callback URL in the browser.
       # One authority for everyone -- browser, MCP client, CLI and the backend's
@@ -488,7 +496,7 @@ services:
       # deliberately unset: reaching the IDP under a second hostname is what
       # forks (iss, sub) into two identities. See AUTH-001 in
       # docs/root/dev/decisions/authentication.md.
-      - OIDC_AUTHORITY=http://localhost:9000/application/o/seizu
+      - OIDC_AUTHORITY=${OIDC_AUTHORITY-http://localhost:9000/application/o/seizu}
       # What makes localhost:9000 resolvable in here: scripts/dev_oidc_loopback.py,
       # started and supervised by scripts/dev_entrypoint.sh (this service's
       # command) and forwarding the container's loopback to the IDP. It runs in
@@ -500,17 +508,21 @@ services:
       #
       # The entrypoint starts it only when DEVELOPMENT_ONLY_REQUIRE_AUTH is on,
       # so the default unauthenticated stack neither runs nor depends on it.
-      # Set this empty in .env to disable it for an auth stack pointed at an
-      # IDP other than the compose Authentik. Never set in the production image.
+      # To use an IDP other than the compose Authentik, set this empty in .env
+      # *and* override OIDC_AUTHORITY / JWKS_URL / OIDC_CLIENT_ID there: the
+      # defaults above all point at localhost:9000, which only exists because
+      # this forwarder creates it. Never set in the production image.
       - DEV_OIDC_LOOPBACK_TARGET=${DEV_OIDC_LOOPBACK_TARGET-authentik-server:9000}
-      - OIDC_CLIENT_ID=seizu
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID-seizu}
+      # Unset by default: the dev Authentik client is public (PKCE, no secret).
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET-}
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the
       # callback URL from each incoming request's Host header, so the same
       # build serves users on :3000 (vite dev proxy) and :8080 (FastAPI
       # serving the prod build) without one redirect URL clobbering the other.
       # offline_access requests a refresh_token, which the BFF uses for
       # silent renewal via direct POST to the token endpoint.
-      - "OIDC_SCOPE=openid email profile offline_access"
+      - "OIDC_SCOPE=${OIDC_SCOPE-openid email profile offline_access}"
       # Disable HTTPS redirect in development (plain HTTP)
       - "TALISMAN_FORCE_HTTPS=false"
       # Report store backend — set REPORT_STORE_BACKEND=sqlmodel to switch
