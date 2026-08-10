@@ -62,10 +62,44 @@ confirmation cannot be approved from the browser UI, because the browser is a
 different `user_id` than the MCP client.
 
 Pinning `JWT_ISSUER` does not fix this: it pins exactly one value, so the other
-authentication path then fails validation outright. Fix it at the identity
-provider — configure it to emit one stable issuer regardless of which hostname
-reached it (for a reverse proxy, forward a single canonical `Host` /
-`X-Forwarded-Host`) — then pin `JWT_ISSUER` to that value.
+authentication path then fails validation outright. With two issuers in play
+there is no correct single setting, so the fix belongs at the identity provider
+or in the network. Two shapes work.
+
+**One hostname, two network paths — split-horizon DNS.** `idp.example.com`
+resolves to a private address inside your network and a public one outside.
+Every party uses the same URL, so a host-derived issuer is single-valued by
+construction, the certificate matches the name everyone dials, and
+`OIDC_INTERNAL_AUTHORITY` is not needed at all — leave it unset and point
+`OIDC_AUTHORITY`, `JWKS_URL` and `JWT_ISSUER` at the one name. Where DNS cannot
+be split, an internal reverse proxy holding the same name and certificate is
+the equivalent. This is the shape to prefer, and the one Seizu's own dev stack
+uses (via a loopback forwarder rather than a resolver).
+
+**Two hostnames, with a provider that pins its issuer.** Some providers publish
+a fixed issuer independent of the request host while still adapting the
+backchannel endpoints to whoever asked. Keycloak is the reference case:
+
+```bash
+kc.sh start --hostname https://idp.example.com --hostname-backchannel-dynamic true
+```
+
+The `iss` claim and the browser-facing URLs stay `https://idp.example.com`,
+while a discovery document fetched from inside your network comes back with
+reachable internal token, introspection and JWKS endpoints. Seizu supports this
+directly: set `OIDC_INTERNAL_AUTHORITY` to the internal hostname, and the
+externally-advertised issuer on an internally-fetched document validates
+cleanly. Both authentication paths then carry the same `iss`, and `JWT_ISSUER`
+can be pinned to it.
+
+**What does not work is a host-derived issuer reached under two hostnames.**
+Authentik is the common example — its issuer comes from
+`request.build_absolute_uri()`, and its "issuer mode" setting only chooses the
+URL path, not the host — so no provider-side configuration resolves it and one
+of the two shapes above is required. Forcing a canonical `Host` /
+`X-Forwarded-Host` from a trusted proxy does make the provider stamp one
+issuer, but it then advertises the external endpoints to your internal caller,
+so you need those reachable anyway and have arrived back at split-horizon DNS.
 
 Seizu compares the two discovery documents at startup when
 `OIDC_INTERNAL_AUTHORITY` is set and differs from `OIDC_AUTHORITY`, and logs a
