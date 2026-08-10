@@ -14,8 +14,9 @@ backend with nothing on `localhost:9000` (AUTH-002). Here it lives and dies
 with the process it serves.
 
 Configured by `DEV_OIDC_LOOPBACK_TARGET` (`host:port`); exits quietly when
-unset, so it is inert outside the compose `auth` profile. Never enabled in the
-production image.
+unset. `dev_entrypoint.sh` only starts it when `DEVELOPMENT_ONLY_REQUIRE_AUTH`
+is on, so an unauthenticated stack neither runs nor is supervised against it.
+Never enabled in the production image.
 """
 
 from __future__ import annotations

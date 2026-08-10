@@ -30,9 +30,22 @@ terminate() {
 # never see SIGTERM and every `make down` would wait out the kill timeout.
 trap terminate TERM INT
 
-if [ -n "${DEV_OIDC_LOOPBACK_TARGET:-}" ]; then
+# Mirrors reporting.utils.settings.bool_env, including its default: unset means
+# auth is required. The forwarder only matters to a container that authenticates,
+# so the default unauthenticated stack must not be supervised against it —
+# nothing would use it, and its failure would still take gunicorn down.
+auth_required() {
+    case "${DEVELOPMENT_ONLY_REQUIRE_AUTH-true}" in
+        False | false | 0 | "") return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+if [ -n "${DEV_OIDC_LOOPBACK_TARGET:-}" ] && auth_required; then
     python "$SEIZU_DIR/scripts/dev_oidc_loopback.py" &
     pids+=($!)
+elif [ -n "${DEV_OIDC_LOOPBACK_TARGET:-}" ]; then
+    echo "dev-oidc-loopback: not started (DEVELOPMENT_ONLY_REQUIRE_AUTH is off)"
 fi
 
 gunicorn --config "$SEIZU_DIR/gunicorn.conf" reporting.asgi:application \

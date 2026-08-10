@@ -64,6 +64,12 @@ container passing its port-8080 healthcheck with authentication quietly broken â
 the same silent failure this entry exists to remove. Verified by killing the
 forwarder: gunicorn is signalled and the container exits 137.
 
+Supervision is why the forwarder is also **gated on
+`DEVELOPMENT_ONLY_REQUIRE_AUTH`** (parsed exactly as `bool_env` does, unset
+included): tying the container's life to a process is only defensible where that
+process is load-bearing. The default unauthenticated stack would otherwise be
+taken down by the failure of a forwarder nothing was using.
+
 **Why:** Authentik has no fixed-issuer setting â€” `OAuth2Provider.get_issuer()`
 calls `request.build_absolute_uri()`, so `iss` and every advertised endpoint
 follow the request `Host`, and `issuer_mode` only selects the path. Reaching it

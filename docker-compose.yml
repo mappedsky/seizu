@@ -491,15 +491,18 @@ services:
       - OIDC_AUTHORITY=http://localhost:9000/application/o/seizu
       # What makes localhost:9000 resolvable in here: scripts/dev_oidc_loopback.py,
       # started and supervised by scripts/dev_entrypoint.sh (this service's
-      # command) and forwarding the container's loopback to the IDP. Inert
-      # without the auth profile (nothing connects to it), and never set in the
-      # production image. It runs in this container rather than as a sidecar
-      # because a sidecar sharing this network namespace survives
-      # `up --force-recreate seizu` still reporting healthy while attached to
-      # the dead namespace; the entrypoint supervises both processes so a dead
-      # forwarder takes the container down instead of breaking auth quietly.
-      # See AUTH-002.
-      - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
+      # command) and forwarding the container's loopback to the IDP. It runs in
+      # this container rather than as a sidecar because a sidecar sharing this
+      # network namespace survives `up --force-recreate seizu` still reporting
+      # healthy while attached to the dead namespace; the entrypoint supervises
+      # both processes so a dead forwarder takes the container down instead of
+      # breaking auth quietly. See AUTH-002.
+      #
+      # The entrypoint starts it only when DEVELOPMENT_ONLY_REQUIRE_AUTH is on,
+      # so the default unauthenticated stack neither runs nor depends on it.
+      # Set this empty in .env to disable it for an auth stack pointed at an
+      # IDP other than the compose Authentik. Never set in the production image.
+      - DEV_OIDC_LOOPBACK_TARGET=${DEV_OIDC_LOOPBACK_TARGET-authentik-server:9000}
       - OIDC_CLIENT_ID=seizu
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the
       # callback URL from each incoming request's Host header, so the same
