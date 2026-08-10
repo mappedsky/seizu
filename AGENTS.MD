@@ -25,6 +25,7 @@ rather than restating the reasoning.
 | [`report-store.md`](docs/root/dev/decisions/report-store.md) (`STO`) | Report record shape, the spaces GSI, SQL migrations |
 | [`workflows.md`](docs/root/dev/decisions/workflows.md) (`WF`) | Temporal pipelines, cartography sync, remediation isolation |
 | [`query-validation.md`](docs/root/dev/decisions/query-validation.md) (`QV`) | The Cypher validator and its fuzzing corpus |
+| [`authentication.md`](docs/root/dev/decisions/authentication.md) (`AUTH`) | Identity resolution, issuer handling, OIDC configuration guards |
 
 When you make a decision worth keeping, add an entry there rather than growing
 this file or a docstring — see the log index for the format.
@@ -310,6 +311,8 @@ Two mechanisms resolve to the same `CurrentUser`:
 2. **Bearer JWT** (CLI, MCP, programmatic). Validated by `authnz.validate_bearer_token()`: `PyJWKClient` JWKS check first, then RFC 7662 introspection fallback when `OIDC_ENABLE_TOKEN_INTROSPECTION` is set and the token isn't a verifiable JWT (for opaque tokens). Shared by `get_current_user` (REST) and the MCP middleware.
 
 `get_current_user` consumes only the Bearer path; the cookie is consumed only by the four `/api/v1/auth/*` routes. `_CSRFMiddleware` requires `X-Seizu-Csrf: 1` on mutating methods whenever the session cookie is present; Bearer-only requests are exempt.
+
+**Durable identity is `(iss, sub)` exactly as the token carries it.** The two mechanisms above can reach the IDP through *different* hostnames (`OIDC_INTERNAL_AUTHORITY` vs `OIDC_AUTHORITY`), and an IDP that derives its issuer from the request host then forks one person into two user records — every owner-scoped surface diverges silently. `oauth_client.verify_issuer_consistency()` (called from the app lifespan) compares the two discovery documents and logs a mismatch, fatal only under `OIDC_REQUIRE_CONSISTENT_ISSUER`. **Never normalize or alias `iss` on the way to `get_or_create_user`** — [`AUTH-001`](docs/root/dev/decisions/authentication.md).
 
 **Auth-flow endpoints** (browser-only): `login` generates PKCE verifier + state + nonce into a 5-min `seizu_oauth_state` cookie (SameSite=Lax to survive the redirect back), returns the authorize URL (with `nonce` + `OIDC_AUTHORIZE_EXTRA_PARAMS`). `callback` verifies state, exchanges the code, validates the ID token (gated by `OIDC_VALIDATE_ID_TOKEN`), sets the session cookie, 302s to path-only `return_to`. `refresh` rolls Max-Age (capped at the IDP refresh token's absolute expiry); 401 + clears cookie on IDP rejection. `logout` clears the cookie and (gated by `OIDC_REVOKE_REFRESH_TOKEN_ON_LOGOUT`) best-effort-revokes the refresh token.
 

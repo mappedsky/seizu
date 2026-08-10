@@ -485,6 +485,11 @@ services:
       - OIDC_AUTHORITY=http://localhost:9000/application/o/seizu
       # Internal authority URL for server-side OIDC discovery (differs from
       # OIDC_AUTHORITY in docker dev due to split internal/external hostnames).
+      # Authentik derives its issuer from the request host, so the dev stack
+      # really does hand the browser and MCP/CLI clients two identities for the
+      # same login -- see AUTH-001. Expect the startup issuer-consistency check
+      # to log a warning here: it cannot reach localhost:9000 from the
+      # container to confirm it. Production must present one issuer on both.
       - OIDC_INTERNAL_AUTHORITY=http://authentik-server:9000/application/o/seizu
       - OIDC_CLIENT_ID=seizu
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the

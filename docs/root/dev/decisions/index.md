@@ -20,6 +20,7 @@ works that way*.
 | `STO` | [Report store](report-store.md) | DynamoDB record shape, the GSI, SQL migrations |
 | `WF` | [Workflows](workflows.md) | Temporal pipelines, cartography sync, remediation isolation |
 | `QV` | [Query validation](query-validation.md) | The three validator layers and the fuzzing corpus |
+| `AUTH` | [Authentication](authentication.md) | Identity resolution and the OIDC configuration guards |
 
 ## Referring to a decision
 
@@ -77,4 +78,5 @@ spaces
 report-store
 workflows
 query-validation
+authentication
 ```

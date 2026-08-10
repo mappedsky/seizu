@@ -118,6 +118,85 @@ def rewrite_to_external_origin(url: str) -> str:
     return url
 
 
+async def _fetch_discovery_document(authority: str) -> dict[str, Any]:
+    url = f"{authority.rstrip('/')}/.well-known/openid-configuration"
+    try:
+        async with httpx.AsyncClient(timeout=_OIDC_DISCOVERY_TIMEOUT) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            doc = resp.json()
+    except httpx.HTTPError as exc:
+        raise OAuthClientError(f"Failed to fetch OIDC discovery from {url}: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise OAuthClientError(f"OIDC discovery document at {url} is not a JSON object")
+    return doc
+
+
+async def _discovery_issuer(authority: str) -> str:
+    doc = await _fetch_discovery_document(authority)
+    issuer = doc.get("issuer")
+    if not isinstance(issuer, str) or not issuer:
+        raise OAuthClientError(f"OIDC discovery document at {authority} advertises no issuer")
+    return issuer
+
+
+async def verify_issuer_consistency() -> None:
+    """Check that the internal and external authorities advertise one issuer.
+
+    Durable Seizu identity is ``(iss, sub)``, so an IDP that derives its issuer
+    from the request Host header forks one human into two user records: the
+    browser BFF authenticates against ``OIDC_INTERNAL_AUTHORITY`` while MCP and
+    CLI clients authenticate against ``OIDC_AUTHORITY``. Nothing downstream can
+    tell those identities apart, so the divergence is silent — see AUTH-001.
+
+    Best-effort by design: the server frequently *cannot* reach the external
+    hostname (that being the reason ``OIDC_INTERNAL_AUTHORITY`` exists), and an
+    unverifiable check must not take the app down. A confirmed mismatch is
+    logged loudly, and raises only under ``OIDC_REQUIRE_CONSISTENT_ISSUER``.
+    """
+    if not settings.DEVELOPMENT_ONLY_REQUIRE_AUTH:
+        return
+    external = settings.OIDC_AUTHORITY.rstrip("/")
+    internal = settings.OIDC_INTERNAL_AUTHORITY.rstrip("/")
+    if not external or not internal or internal == external:
+        return
+
+    results = await asyncio.gather(
+        _discovery_issuer(internal),
+        _discovery_issuer(external),
+        return_exceptions=True,
+    )
+    issuers: list[str] = []
+    for authority, result in zip((internal, external), results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Could not verify that OIDC_INTERNAL_AUTHORITY and OIDC_AUTHORITY share an issuer "
+                "(discovery for %s failed: %s). If the identity provider derives its issuer from "
+                "the request host, each authentication path creates a separate Seizu user for the "
+                "same person.",
+                authority,
+                result,
+            )
+            return
+        issuers.append(result)
+
+    internal_issuer, external_issuer = issuers
+    if _normalize_issuer(internal_issuer) == _normalize_issuer(external_issuer):
+        return
+
+    message = (
+        f"OIDC issuer mismatch: OIDC_INTERNAL_AUTHORITY ({internal}) advertises issuer "
+        f"{internal_issuer!r} but OIDC_AUTHORITY ({external}) advertises {external_issuer!r}. "
+        "Seizu identifies users by (iss, sub), so the same person becomes two user records — one "
+        "per authentication path — and private reports, query history, chat threads, scheduled "
+        "chats and MCP action confirmations diverge between them. Configure the identity provider "
+        "to emit one stable issuer for both hostnames, then pin JWT_ISSUER to it."
+    )
+    if settings.OIDC_REQUIRE_CONSISTENT_ISSUER:
+        raise OAuthClientError(message)
+    logger.error("%s Set OIDC_REQUIRE_CONSISTENT_ISSUER=true to make this fatal.", message)
+
+
 def _metadata_is_fresh() -> bool:
     return (
         _metadata_cache is not None
@@ -139,14 +218,7 @@ async def get_metadata() -> OIDCMetadata:
         cached = _metadata_cache
         if cached is not None and _metadata_is_fresh():
             return cached
-        url = f"{_authority_for_discovery()}/.well-known/openid-configuration"
-        try:
-            async with httpx.AsyncClient(timeout=_OIDC_DISCOVERY_TIMEOUT) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                doc = resp.json()
-        except httpx.HTTPError as exc:
-            raise OAuthClientError(f"Failed to fetch OIDC discovery from {url}: {exc}") from exc
+        doc = await _fetch_discovery_document(_authority_for_discovery())
 
         try:
             metadata = OIDCMetadata(
