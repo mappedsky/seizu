@@ -246,32 +246,6 @@ services:
     networks:
       auth:
       proxy:
-  # Makes http://localhost:9000 mean the same thing inside the seizu container
-  # as it does in the developer's browser, by sharing seizu's network namespace
-  # and forwarding its loopback :9000 to authentik-server:9000.
-  #
-  # Authentik derives the `iss` claim from the request Host, so without this the
-  # backend's server-side token exchange (reaching the IDP as
-  # authentik-server:9000) mints a different issuer than the browser, MCP and
-  # CLI clients get through localhost:9000 -- and one person becomes two Seizu
-  # users, with private reports, chat threads and action confirmations diverging
-  # between them. That is issue #258; AUTH-001 has the reasoning.
-  #
-  # This is split-horizon DNS in miniature: one name and port, resolved
-  # differently inside the network than outside, which is how the same problem
-  # is solved in production. Nothing here is a Host-header override -- the
-  # connection really is to localhost:9000. ipv6only=0 matters because
-  # `localhost` resolves to ::1 first inside the container.
-  authentik-loopback:
-    image: alpine/socat:1.8.1.3
-    profiles:
-      - auth
-    restart: unless-stopped
-    network_mode: "service:seizu"
-    depends_on:
-      authentik-server:
-        condition: service_healthy
-    command: TCP6-LISTEN:9000,fork,reuseaddr,ipv6only=0 TCP:authentik-server:9000
   authentik-worker:
     image: ghcr.io/goauthentik/server:2026.2.3
     profiles:
@@ -501,7 +475,7 @@ services:
       - DEVELOPMENT_ONLY_AUTH_USER_EMAIL=testuser
       # Generic JWKS settings — works with any standard OIDC provider.
       # When using Authentik (--profile auth), this resolves through the
-      # authentik-loopback sidecar (see below), like every other OIDC URL here.
+      # loopback forwarder below, like every other OIDC URL here.
       - JWKS_URL=http://localhost:9000/application/o/seizu/jwks/
       - JWT_HEADER_NAME=Authorization
       - JWT_EMAIL_CLAIM=email
@@ -515,6 +489,14 @@ services:
       # forks (iss, sub) into two identities. See AUTH-001 in
       # docs/root/dev/decisions/authentication.md.
       - OIDC_AUTHORITY=http://localhost:9000/application/o/seizu
+      # What makes localhost:9000 resolvable in here: scripts/dev_oidc_loopback.py,
+      # started by this service's command and forwarding the container's loopback
+      # to the IDP. Inert without the auth profile (nothing connects to it), and
+      # never set in the production image. It runs in-process rather than as a
+      # sidecar container because a sidecar sharing this network namespace
+      # survives `up --force-recreate seizu` still reporting healthy while
+      # attached to the dead namespace -- see AUTH-002.
+      - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
       - OIDC_CLIENT_ID=seizu
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the
       # callback URL from each incoming request's Host header, so the same
@@ -657,7 +639,7 @@ services:
     # Start from /run/seizu so the gunicorn arbiter control socket (gunicorn.ctl)
     # is created there instead of in the bind-mounted project volume, which
     # would cause the seizu-node watchpack watcher to trip over the Unix socket.
-    command: bash -c "cd /run/seizu && exec gunicorn --config /home/seizu/seizu/gunicorn.conf reporting.asgi:application --reload --workers=2 -k uvicorn.workers.UvicornWorker --access-logfile=- --error-logfile=-"
+    command: bash -c "cd /run/seizu && { python /home/seizu/seizu/scripts/dev_oidc_loopback.py & } && exec gunicorn --config /home/seizu/seizu/gunicorn.conf reporting.asgi:application --reload --workers=2 -k uvicorn.workers.UvicornWorker --access-logfile=- --error-logfile=-"
     networks:
       proxy:
       database:

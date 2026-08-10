@@ -784,11 +784,10 @@ async def test_verify_issuer_consistency_fails_startup_when_required(mocker):
 async def test_verify_issuer_consistency_accepts_one_stable_issuer(mocker, caplog):
     mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
     mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
-    # Trailing-slash differences are not a mismatch.
     _patch_discovery_by_authority(
         mocker,
         {
-            "http://authentik-server:9000": "https://idp.example.com/application/o/seizu",
+            "http://authentik-server:9000": "https://idp.example.com/application/o/seizu/",
             "http://localhost:9000": "https://idp.example.com/application/o/seizu/",
         },
     )
@@ -797,6 +796,36 @@ async def test_verify_issuer_consistency_accepts_one_stable_issuer(mocker, caplo
         await oauth_client.verify_issuer_consistency()
 
     assert caplog.text == ""
+
+
+async def test_verify_issuer_consistency_reports_trailing_slash_difference(mocker):
+    """A trailing slash is still two identities: (iss, sub) stores iss verbatim."""
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "https://idp.example.com/application/o/seizu",
+            "http://localhost:9000": "https://idp.example.com/application/o/seizu/",
+        },
+    )
+
+    with pytest.raises(oauth_client.OAuthClientError, match="OIDC issuer mismatch"):
+        await oauth_client.verify_issuer_consistency()
+
+
+async def test_configured_authority_still_matches_advertised_trailing_slash(mocker):
+    """The *config* comparison stays lenient — the dev stack depends on it."""
+    mocker.patch("reporting.settings.OIDC_AUTHORITY", "http://localhost:9000/application/o/seizu")
+    mocker.patch("reporting.settings.OIDC_INTERNAL_AUTHORITY", "")
+    _patch_discovery_by_authority(
+        mocker,
+        {"http://localhost:9000": "http://localhost:9000/application/o/seizu/"},
+    )
+
+    metadata = await oauth_client.get_metadata()
+
+    assert metadata.issuer == "http://localhost:9000/application/o/seizu/"
 
 
 async def test_verify_issuer_consistency_warns_when_discovery_unreachable(mocker, caplog):

@@ -48,13 +48,13 @@ failure, or normalize `iss` anywhere between token validation and
 
 ## AUTH-002 — The dev stack reaches Authentik only as `localhost:9000`
 
-**Applies to:** the `authentik-loopback` service in `docker-compose.yml`
+**Applies to:** `scripts/dev_oidc_loopback.py`, the `seizu` service's `command`
 
-A socat sidecar shares the `seizu` container's network namespace and forwards
-its loopback `:9000` to `authentik-server:9000`, so the backend's discovery and
-token exchange use the same URL the browser, MCP clients and the CLI use.
-`OIDC_INTERNAL_AUTHORITY` is therefore unset in dev, and `JWKS_URL` points at
-`localhost:9000` like everything else.
+The backend container runs a small stdlib forwarder on its own loopback `:9000`,
+pointed at `authentik-server:9000` by `DEV_OIDC_LOOPBACK_TARGET`, so the
+backend's discovery and token exchange use the same URL the browser, MCP clients
+and the CLI use. `OIDC_INTERNAL_AUTHORITY` is therefore unset in dev, and
+`JWKS_URL` points at `localhost:9000` like everything else.
 
 **Why:** Authentik has no fixed-issuer setting — `OAuth2Provider.get_issuer()`
 calls `request.build_absolute_uri()`, so `iss` and every advertised endpoint
@@ -78,6 +78,19 @@ a port other than 9000 (a VM port-forward, say) re-forks it under a new name.
 It also makes first-run depend on public DNS, which fails offline and under
 resolvers with DNS-rebinding protection.
 
+**Rejected — a sidecar container sharing the backend's network namespace:** the
+original implementation, a `socat` service with `network_mode: "service:seizu"`.
+It works until anything recreates the backend — which `scripts/chat_harness.py`
+does routinely — and then fails in the worst available way: the sidecar keeps
+reporting `running` while attached to the dead namespace, so nothing restarts
+it, and the new backend has nothing on `localhost:9000`. Measured directly:
+after `up -d --force-recreate --no-deps seizu`, discovery from inside the new
+container returned `ConnectError [Errno 111] Connection refused` with the
+sidecar still listed as up. Running in-process also drops a root container with
+default capabilities out of the backend's network namespace, where the loopback
+OIDC exchange is plaintext HTTP.
+
 **Don't:** add a second hostname for Authentik to the dev config — including a
-"just for the backend" one. `ipv6only=0` on the listener is load-bearing:
-`localhost` resolves to `::1` first inside the container.
+"just for the backend" one. Binding both `127.0.0.1` and `::1` is load-bearing:
+`localhost` resolves to `::1` first inside the container, and an IPv4-only
+listener gets connection-refused for half the lookups.

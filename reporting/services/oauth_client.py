@@ -34,6 +34,10 @@ from reporting import settings
 logger = logging.getLogger(__name__)
 
 _OIDC_DISCOVERY_TIMEOUT = 10.0
+# The startup consistency check runs per Gunicorn worker and its expected
+# failure mode is an unreachable external hostname, so it gets a tighter budget
+# than a discovery fetch a request is waiting on.
+_OIDC_CONSISTENCY_TIMEOUT = 3.0
 _OIDC_REQUEST_TIMEOUT = 30.0
 
 
@@ -76,6 +80,22 @@ def _authority_for_discovery() -> str:
 
 
 def _normalize_issuer(value: str) -> str:
+    """Trailing-slash-insensitive form, for *configuration* comparisons only.
+
+    Two different comparisons happen in this module and they need different
+    strictness:
+
+    - **A configured authority against an advertised/claimed issuer** (this
+      function). Operators write ``OIDC_AUTHORITY`` by hand and providers vary
+      on the trailing slash — the dev stack's authority has none while
+      Authentik advertises one — so an exact match here would reject a working
+      deployment. Nothing identity-bearing is derived from it:
+      ``get_or_create_user`` always receives the raw ``iss`` off the token.
+    - **Two issuers against each other** (``verify_issuer_consistency``), which
+      is exact. Those strings become ``(iss, sub)`` keys verbatim, so
+      ``https://idp/app`` and ``https://idp/app/`` are two users, and OIDC
+      discovery requires issuer values to match exactly anyway.
+    """
     return value.rstrip("/")
 
 
@@ -118,10 +138,15 @@ def rewrite_to_external_origin(url: str) -> str:
     return url
 
 
-async def _fetch_discovery_document(authority: str) -> dict[str, Any]:
+async def fetch_discovery_document(authority: str, *, timeout: float = _OIDC_DISCOVERY_TIMEOUT) -> dict[str, Any]:
+    """Fetch and parse ``{authority}/.well-known/openid-configuration``.
+
+    Shared with the MCP OAuth metadata builder so the two discovery paths can't
+    drift apart on URL construction or error handling.
+    """
     url = f"{authority.rstrip('/')}/.well-known/openid-configuration"
     try:
-        async with httpx.AsyncClient(timeout=_OIDC_DISCOVERY_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             doc = resp.json()
@@ -133,7 +158,7 @@ async def _fetch_discovery_document(authority: str) -> dict[str, Any]:
 
 
 async def _discovery_issuer(authority: str) -> str:
-    doc = await _fetch_discovery_document(authority)
+    doc = await fetch_discovery_document(authority, timeout=_OIDC_CONSISTENCY_TIMEOUT)
     issuer = doc.get("issuer")
     if not isinstance(issuer, str) or not issuer:
         raise OAuthClientError(f"OIDC discovery document at {authority} advertises no issuer")
@@ -180,8 +205,11 @@ async def verify_issuer_consistency() -> None:
             return
         issuers.append(result)
 
+    # Exact, deliberately: these strings are stored as (iss, sub) verbatim, so a
+    # trailing-slash difference is still two users -- and OIDC discovery requires
+    # issuer values to match exactly, without URL normalization.
     internal_issuer, external_issuer = issuers
-    if _normalize_issuer(internal_issuer) == _normalize_issuer(external_issuer):
+    if internal_issuer == external_issuer:
         return
 
     message = (
@@ -218,7 +246,7 @@ async def get_metadata() -> OIDCMetadata:
         cached = _metadata_cache
         if cached is not None and _metadata_is_fresh():
             return cached
-        doc = await _fetch_discovery_document(_authority_for_discovery())
+        doc = await fetch_discovery_document(_authority_for_discovery())
 
         try:
             metadata = OIDCMetadata(
