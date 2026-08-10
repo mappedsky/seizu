@@ -482,12 +482,17 @@ services:
       # means setting DEV_OIDC_LOOPBACK_TARGET= as well (see below) — the
       # defaults below and the forwarder only make sense together.
       - JWKS_URL=${JWKS_URL-http://localhost:9000/application/o/seizu/jwks/}
-      - JWT_HEADER_NAME=Authorization
-      - JWT_EMAIL_CLAIM=email
+      - JWT_HEADER_NAME=${JWT_HEADER_NAME-Authorization}
+      - JWT_EMAIL_CLAIM=${JWT_EMAIL_CLAIM-email}
       - JWT_AUDIENCE=${JWT_AUDIENCE-seizu}
-      # Empty by default, matching the application default. Pin it once the IDP
-      # emits one stable issuer -- see docs/root/install/security.md.
-      - JWT_ISSUER=${JWT_ISSUER-}
+      # Pass-throughs: unset here so reporting/settings.py supplies the default
+      # (some of which are derived -- the revocation and introspection auth
+      # methods default to the token-endpoint one). A compose substitution with
+      # an empty fallback would defeat that, because str_env returns a
+      # set-but-empty variable rather than its default.
+      - JWT_ISSUER
+      - JWT_USERNAME_CLAIM
+      - ALLOWED_JWT_ALGORITHMS
       # OIDC client config served to the frontend via GET /api/v1/config.
       # The redirect_uri must be the publicly reachable callback URL in the browser.
       # One authority for everyone -- browser, MCP client, CLI and the backend's
@@ -514,8 +519,22 @@ services:
       # this forwarder creates it. Never set in the production image.
       - DEV_OIDC_LOOPBACK_TARGET=${DEV_OIDC_LOOPBACK_TARGET-authentik-server:9000}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID-seizu}
-      # Unset by default: the dev Authentik client is public (PKCE, no secret).
-      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET-}
+      # Everything a non-Authentik provider may need, passed through so the
+      # settings defaults survive when unset. The dev client is public (PKCE,
+      # no secret), which is why none of these are set here: a confidential
+      # client needs OIDC_CLIENT_SECRET *and* an auth method other than the
+      # default "none", or authlib sends no client credentials at all.
+      - OIDC_CLIENT_SECRET
+      - OIDC_TOKEN_ENDPOINT_AUTH_METHOD
+      - OIDC_REVOCATION_ENDPOINT_AUTH_METHOD
+      - OIDC_INTROSPECTION_ENDPOINT_AUTH_METHOD
+      # For IDPs issuing opaque access tokens (Google, some Okta/Auth0 setups).
+      - OIDC_ENABLE_TOKEN_INTROSPECTION
+      # Provider-specific authorize knobs, e.g. Google's
+      # "access_type=offline,prompt=consent".
+      - OIDC_AUTHORIZE_EXTRA_PARAMS
+      # Escape hatch for providers whose ID token cannot be verified server-side.
+      - OIDC_VALIDATE_ID_TOKEN
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the
       # callback URL from each incoming request's Host header, so the same
       # build serves users on :3000 (vite dev proxy) and :8080 (FastAPI
