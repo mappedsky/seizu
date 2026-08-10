@@ -90,13 +90,50 @@ the provider call fails — an orphan is logged with its id. Lifecycle rationale
 (turn-level scope, resume failures, error paths) is in
 [SBX-005 through SBX-007](../dev/decisions/sandbox.md).
 
+### Reaping abandoned sandboxes
+
+A conversation a user simply stops replying to is never deleted, so nothing
+tells Seizu its sandbox is finished with. `SANDBOX_SESSION_TIMEOUT_SECONDS`
+bounds a *running* sandbox, not a suspended one, so those would otherwise
+accumulate until the provider's own retention reclaimed them.
+
+The **Temporal worker** sweeps them up: every
+`SANDBOX_REAP_INTERVAL_SECONDS` it lists the provider's suspended sandboxes and
+destroys the ones idle beyond `SANDBOX_REAP_IDLE_SECONDS`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SANDBOX_REAP_ENABLED` | `true` | Run the sweep at all. |
+| `SANDBOX_REAP_IDLE_SECONDS` | `86400` | How long a suspended sandbox may sit unused. `0` disables reaping. |
+| `SANDBOX_REAP_INTERVAL_SECONDS` | `900` | Time between sweeps. |
+| `SANDBOX_REAP_UNTAGGED` | `false` | Also reap suspended sandboxes carrying no Seizu tag. |
+
+The sweep does not depend on `SANDBOX_ENABLED` — turning delegation off is when
+leftover sandboxes most need collecting — but it does need `SANDBOX_API_KEY` or
+`SANDBOX_DOMAIN` to reach the provider.
+
+Every sandbox Seizu creates is tagged with a `seizu_managed` metadata key, and
+the sweep touches nothing else — the listing is account-wide, so an untagged
+sandbox may belong to another deployment or another tool.
+
+**Sandboxes created before this feature carry no tag**, so an existing backlog
+is not cleared by upgrading. Set `SANDBOX_REAP_UNTAGGED=true` for a while to
+collect it, and only when these credentials belong to this deployment alone.
+
 ```{warning}
-**Nothing reaps an abandoned sandbox.** Cleanup happens on thread deletion, so a
-conversation a user simply stops replying to leaves a suspended sandbox until
-the provider's own retention reclaims it, and a deployment with many chat users
-accumulates those. `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox,
-not a paused one. Until a TTL or sweep lands, watch that growth or set
-`SANDBOX_SESSION_PERSIST=false`.
+**The sweep runs in the Temporal worker only** (`seizu-temporal-worker`), where
+it is a single process rather than one sweep per web worker. A deployment that
+runs no Temporal worker does not reap: set `SANDBOX_SESSION_PERSIST=false`
+there, which destroys the sandbox at the end of every turn.
+
+**Treat `SANDBOX_REAP_IDLE_SECONDS` as an upper bound on a sandbox's life, not
+as a precise idle timer.** Idle time is inferred from the provider's own
+timestamps, since there is no way to stamp a last-used time on a sandbox after
+it is created. If the provider does not advance them on resume, a conversation
+still in use past that age loses its accumulated files and its next turn starts
+from a fresh sandbox — recoverable, but it costs that turn the work. Keep the
+value comfortably longer than a conversation's active span. Details in
+[SBX-011](../dev/decisions/sandbox.md).
 ```
 
 ### Session memory

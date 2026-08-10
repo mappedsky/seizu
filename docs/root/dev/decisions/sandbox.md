@@ -23,6 +23,11 @@ across providers, and tests need no E2B package.
 **Don't:** widen the protocol to expose provider features. A sixth operation is
 a sixth thing every future backend must implement.
 
+Account-wide operations that belong to no open sandbox — `kill_sandbox` and
+`list_paused_sandboxes`, which the reaper ([SBX-011](#sbx-011)) runs on — live
+in the same module for the same reason, and return the provider-agnostic
+`SandboxSnapshot` rather than a provider response.
+
 **Note:** `@runtime_checkable` `isinstance` reads members with `getattr_static`,
 so a `MagicMock` standing in for a backend must have **every** member explicitly
 assigned — an auto-created attribute does not satisfy the check.
@@ -191,10 +196,12 @@ than treated as temporary.
 **Don't:** "tidy" this back to `keep_memory=False` for isolation. A test pins
 the value and says why.
 
-**Don't:** assume retention is solved. Nothing reaps a sandbox whose thread is
-abandoned rather than deleted; `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a
-*running* sandbox, not a paused one. A TTL/sweep is planned separately. A
-memory snapshot also costs more provider-side storage than a disk-only one.
+**Don't:** assume retention is solved by the session lifecycle.
+`SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox, not a paused one,
+and a memory snapshot costs more provider-side storage than a disk-only one. The
+sandbox of a thread that is abandoned rather than deleted is reclaimed by the
+sweep in [SBX-011](#sbx-011), which is a periodic pass in one process — not a
+guarantee the lifecycle itself provides.
 
 ## SBX-010 — Result files live under `/home/user`, never `/tmp`
 
@@ -292,3 +299,76 @@ checkpoint.
 
 **Don't:** grant the sub-agent a confirmation-gated tool on the grounds that the
 runtime would catch it. It fails closed there as a backstop, not as the control.
+
+## SBX-011 — Abandoned sandboxes are swept from the provider's listing, not from Seizu's records
+
+**Applies to:** `reporting/services/sandbox_reaper.py`,
+`list_paused_sandboxes`/`kill_sandbox` in `sandbox_backend.py`, `_reap_loop` in
+`reporting/temporal_worker.py`
+
+**Measured, on one developer's account the day this landed:** 59 suspended
+sandboxes, the oldest six days old, every one of them a chat thread that was
+abandoned rather than deleted. The leak is not theoretical and it does not
+plateau.
+
+A periodic pass lists the provider's **suspended** sandboxes and destroys the
+ones idle beyond `SANDBOX_REAP_IDLE_SECONDS` (default 24h). Only sandboxes
+carrying Seizu's `seizu_managed` metadata tag are touched, unless
+`SANDBOX_REAP_UNTAGGED` says the credentials are Seizu's alone. Nothing created
+before this landed carries the tag, so clearing an existing backlog needs that
+setting — which is most of why it exists.
+
+**Why a provider sweep rather than a walk over checkpoints:** the sandboxes that
+leak worst are the ones no checkpoint points at any more — a trimmed thread, a
+run that died between creating a sandbox and storing its id, a database restored
+from a backup. Anything derived from Seizu's own records can only find sandboxes
+Seizu still remembers, which is precisely the set that was never the problem.
+Deleting a thread already kills its sandbox directly, so the sweep is the
+backstop, not the primary path.
+
+**Why paused only:** a running sandbox has a provider-enforced expiry
+(`SANDBOX_SESSION_TIMEOUT_SECONDS`); a paused one has none. That asymmetry is
+the entire leak. Reaping running sandboxes would also mean racing live turns for
+no benefit.
+
+**Idle time is inferred, and the inference is deliberately conservative.** The
+provider offers no way to amend a sandbox's metadata after creation, so there is
+nowhere to stamp a last-used time on resume — a tag written at creation can say
+what a sandbox is *for* and nothing about when it was last used. What a listing
+gives is `started_at` and `end_at`, and whether either advances when a paused
+sandbox is resumed is the provider's behaviour, not something Seizu can pin. So
+the sweep takes the **latest timestamp that is not in the future** and treats it
+as the last known activity:
+
+- if a resume refreshes one of them, this is a true idle reap;
+- if it refreshes neither, it degrades to a maximum-age reap.
+
+On E2B today, `end_at` on a suspended sandbox is observed to be the moment it
+was *paused* — seconds to minutes after `started_at` across all 59 sandboxes
+above — so idle time there is measured from the last suspension, which is the
+precise case. That is an observation about one provider's current behaviour, not
+a contract, which is why the rule below stands regardless of it.
+
+Both are safe. The degraded case costs a still-active conversation its
+accumulated files, and the next turn opens a fresh sandbox — the same outcome a
+terminal resume failure already produces ([SBX-006](#sbx-006)), which the
+sub-agent's own recall already corrects for ([SBX-008](#sbx-008)). Future
+timestamps are **ignored rather than clamped**: `end_at` on a suspended sandbox
+may still carry the expiry it would have had while running, and treating that as
+activity would make the sandbox permanently unreapable.
+
+**Gated on credentials, not on `SANDBOX_ENABLED`.** Turning delegation off is
+the moment a deployment most wants its leftover sandboxes collected; gating on
+the feature flag would stop the collection along with the feature.
+
+**Why it runs in the Temporal worker:** it is one process. Every gunicorn worker
+running the same account-wide sweep would multiply provider calls and race over
+the same kills. The cost is that a deployment running no Temporal worker does
+not reap; `SANDBOX_SESSION_PERSIST=false` is the alternative there, and the
+install docs say so.
+
+**Don't:** reap untagged sandboxes by default. The listing is account-wide, so
+an untagged sandbox may belong to another deployment, another tool, or a person.
+**Don't:** treat `SANDBOX_REAP_IDLE_SECONDS=0` as "reap immediately" — it is
+read as off, because immediately includes the sandbox the currently running turn
+is about to resume.

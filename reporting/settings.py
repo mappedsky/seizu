@@ -986,9 +986,33 @@ SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_8
 # survive into the next turn of that thread -- accepted deliberately, because
 # filesystem-only suspension leaves the code interpreter dead. See SBX-005.
 #
-# Known gap, accepted deliberately: nothing reaps an abandoned sandbox -- see
-# SBX-005 in docs/root/dev/decisions/sandbox.md. Set false to opt out.
+# A thread the user abandons rather than deletes leaves its sandbox suspended;
+# SANDBOX_REAP_* below is what reclaims those. Set false to opt out of
+# persistence entirely.
 SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
+
+# Periodically destroy suspended sandboxes nobody is coming back for -- the
+# chat threads users stop replying to rather than delete. Runs in the Temporal
+# worker (a single process, unlike the web app's workers), so a deployment
+# without that worker does not reap. Only sandboxes Seizu created are touched.
+# Independent of SANDBOX_ENABLED -- turning delegation off is when leftovers
+# most need collecting -- but needs SANDBOX_API_KEY or SANDBOX_DOMAIN to have
+# something to talk to. See SBX-011 in docs/root/dev/decisions/sandbox.md.
+SANDBOX_REAP_ENABLED = bool_env("SANDBOX_REAP_ENABLED", True)
+# How long a suspended sandbox may sit unused before the sweep destroys it.
+# Idle time is inferred from the provider's own timestamps, which may or may not
+# advance when a sandbox is resumed, so treat this as an upper bound on a
+# sandbox's life rather than a precise idle timer -- keep it comfortably longer
+# than a conversation's active span. 0 (or less) disables reaping.
+SANDBOX_REAP_IDLE_SECONDS = int_env("SANDBOX_REAP_IDLE_SECONDS", 86_400)
+# Interval between sweeps.
+SANDBOX_REAP_INTERVAL_SECONDS = int_env("SANDBOX_REAP_INTERVAL_SECONDS", 900)
+# Also reap suspended sandboxes that carry no Seizu tag. Off by default: the
+# listing is account-wide, so untagged sandboxes may belong to another
+# deployment, another tool, or a person. Turn it on only when these credentials
+# are Seizu's alone -- it is also how the sandboxes created before tagging
+# existed get cleaned up.
+SANDBOX_REAP_UNTAGGED = bool_env("SANDBOX_REAP_UNTAGGED", False)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 

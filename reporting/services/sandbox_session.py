@@ -23,10 +23,9 @@ import logging
 from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
 
 from reporting import settings
-from reporting.services.sandbox_backend import SandboxBackend, open_backend
+from reporting.services.sandbox_backend import SandboxBackend, kill_sandbox, open_backend
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +102,9 @@ class SandboxSession:
                         resume_sandbox_id=self._resume_sandbox_id or None,
                         suspend_on_exit=self._suspend_on_exit,
                         on_teardown=self._record_teardown,
+                        # The one kind of sandbox that outlives the run that
+                        # created it, so the one the reaper exists for.
+                        purpose="chat-session",
                     )
                 )
                 # Publish all three together, so the stack can never belong to a
@@ -243,21 +245,14 @@ async def discard_sandbox(sandbox_id: str) -> None:
     """Destroy a suspended sandbox nobody will resume (best effort).
 
     Deleting a thread drops the only record of its sandbox id, so without this
-    the sandbox stays paused -- consuming provider-side storage -- until the
-    provider's own retention reaps it.
+    the sandbox stays paused -- consuming provider-side storage -- until
+    :mod:`reporting.services.sandbox_reaper` sweeps it up, which is a periodic
+    pass rather than the immediate cleanup a deletion deserves.
     """
     if not sandbox_id:
         return
     try:
-        from e2b_code_interpreter import AsyncSandbox
-
-        kwargs: dict[str, Any] = {}
-        if settings.SANDBOX_API_KEY:
-            kwargs["api_key"] = settings.SANDBOX_API_KEY
-        if settings.SANDBOX_DOMAIN:
-            kwargs["domain"] = settings.SANDBOX_DOMAIN
-            kwargs["validate_api_key"] = False
-        await AsyncSandbox.kill(sandbox_id, **kwargs)
+        await kill_sandbox(sandbox_id)
     except Exception:
         # Warning, not info: the id is about to stop being recorded anywhere,
         # so this line is the only thing that can lead an operator to the

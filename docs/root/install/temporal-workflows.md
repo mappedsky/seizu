@@ -25,7 +25,7 @@ stored workflow ── Temporal Schedule ──> Temporal server (task queue: se
 
 - A **Temporal Schedule** starts the configurable parent workflow. Stages run sequentially, activities within a stage run in parallel, and an activity whose type names a code-defined workflow starts and awaits it as a child workflow.
 - The **Temporal server** in local development is the lightweight CLI dev server (`temporal server start-dev`, in-memory). The Web UI is at `http://localhost:8233`.
-- The **Seizu temporal worker** (`python -m reporting.temporal_worker`) hosts the workflow and activity code. Activities own all I/O: resolving the creator's identity, rendering skills, driving the chat agent, and storing results.
+- The **Seizu temporal worker** (`python -m reporting.temporal_worker`) hosts the workflow and activity code. Activities own all I/O: resolving the creator's identity, rendering skills, driving the chat agent, and storing results. Being the one process of its kind, it also runs two background loops: schedule reconciliation and the sandbox reaper (see [Sandbox delegation](sandbox.md)).
 
 ## Identity and permissions
 

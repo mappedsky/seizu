@@ -16,7 +16,7 @@ from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
-from reporting.services import chat_schedules, workflow_schedules
+from reporting.services import chat_schedules, sandbox_reaper, workflow_schedules
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     check_configured_workflow_watch,
@@ -108,12 +108,17 @@ async def _run_worker() -> None:
             },
         )
         async with worker:
-            reconcile_task = asyncio.create_task(_reconcile_loop())
+            # Two loops rather than one: reconciliation runs every minute or so
+            # and the sandbox sweep every quarter hour, and folding the sweep
+            # into the reconcile loop would tie its cadence to a setting that
+            # means something else.
+            background = [asyncio.create_task(_reconcile_loop()), asyncio.create_task(_reap_loop())]
             try:
                 await _shutdown_event.wait()
             finally:
-                reconcile_task.cancel()
-                await asyncio.gather(reconcile_task, return_exceptions=True)
+                for task in background:
+                    task.cancel()
+                await asyncio.gather(*background, return_exceptions=True)
 
 
 async def _reconcile_loop() -> None:
@@ -133,6 +138,31 @@ async def _reconcile_loop() -> None:
             await asyncio.wait_for(
                 _shutdown_event.wait(),
                 timeout=settings.WORKFLOW_RECONCILE_SECONDS,
+            )
+        except TimeoutError:
+            pass
+
+
+async def _reap_loop() -> None:
+    """Sweep up suspended sandboxes no conversation is coming back for.
+
+    Here rather than in the web app because this is one process: every gunicorn
+    worker running the same account-wide sweep would multiply the provider calls
+    and race each other over the same kills. A deployment that runs no Temporal
+    worker therefore does not reap -- documented in the sandbox install docs
+    alongside ``SANDBOX_SESSION_PERSIST=false``, which is the alternative.
+    """
+    if not sandbox_reaper.reaping_configured():
+        return
+    while not _shutdown_event.is_set():
+        try:
+            await sandbox_reaper.reap_abandoned_sandboxes()
+        except Exception:
+            logger.exception("Sandbox reap pass failed")
+        try:
+            await asyncio.wait_for(
+                _shutdown_event.wait(),
+                timeout=settings.SANDBOX_REAP_INTERVAL_SECONDS,
             )
         except TimeoutError:
             pass

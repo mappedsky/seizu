@@ -13,9 +13,22 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+#: Metadata key stamped on every sandbox Seizu creates, so a sweep over the
+#: provider's account can tell Seizu's sandboxes from everything else sharing
+#: the same API key. The value is the caller's ``purpose``, which only ever
+#: appears in log lines.
+MANAGED_METADATA_KEY = "seizu_managed"
+
+#: Pages a single listing will walk before giving up. A provider that keeps
+#: handing out a next-token would otherwise spin here forever; at the default
+#: page size this is far more sandboxes than any deployment holds.
+_MAX_LIST_PAGES = 200
 
 
 @runtime_checkable
@@ -186,6 +199,98 @@ class _E2BSandboxBackend:
         return str(getattr(self._sandbox, "sandbox_id", "") or "")
 
 
+def _api_params(api_key: str, domain: str) -> dict[str, Any]:
+    """Connection options every provider call shares."""
+    params: dict[str, Any] = {}
+    if api_key:
+        params["api_key"] = api_key
+    if domain:
+        # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
+        # to https://api.<domain>; disable client-side key-format validation
+        # because non-E2B deployments issue tokens that don't match "e2b_*".
+        params["domain"] = domain
+        params["validate_api_key"] = False
+    return params
+
+
+def _account_api_params() -> dict[str, Any]:
+    """Connection options for account-wide calls, which have no open sandbox."""
+    from reporting import settings as _settings
+
+    return _api_params(_settings.SANDBOX_API_KEY, _settings.SANDBOX_DOMAIN)
+
+
+@dataclass(frozen=True)
+class SandboxSnapshot:
+    """What the provider's listing says about one sandbox, provider-agnostically.
+
+    Deliberately thin: an id, whether Seizu created it, and the timestamps a
+    sweep can date it by. Anything richer would put provider response shapes
+    back in front of callers, which is the thing :class:`SandboxBackend` exists
+    to prevent (SBX-001).
+    """
+
+    sandbox_id: str
+    managed: bool = False
+    purpose: str = ""
+    started_at: datetime | None = None
+    end_at: datetime | None = None
+
+
+def _as_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _snapshot(info: Any) -> SandboxSnapshot:
+    metadata = getattr(info, "metadata", None) or {}
+    purpose = metadata.get(MANAGED_METADATA_KEY) if isinstance(metadata, dict) else None
+    return SandboxSnapshot(
+        sandbox_id=str(getattr(info, "sandbox_id", "") or ""),
+        managed=purpose is not None,
+        purpose=str(purpose or ""),
+        started_at=_as_utc(getattr(info, "started_at", None)),
+        end_at=_as_utc(getattr(info, "end_at", None)),
+    )
+
+
+async def list_paused_sandboxes() -> list[SandboxSnapshot]:
+    """Every *suspended* sandbox the configured credentials can see.
+
+    Paused only, because a running sandbox already has an expiry the provider
+    enforces, while a paused one has none — that asymmetry is the whole reason
+    a sweep exists. Listing is account-wide, so the result includes sandboxes
+    this deployment never created; :attr:`SandboxSnapshot.managed` is what
+    separates them.
+    """
+    from e2b import SandboxQuery, SandboxState
+    from e2b_code_interpreter import AsyncSandbox
+
+    paginator = AsyncSandbox.list(query=SandboxQuery(state=[SandboxState.PAUSED]), **_account_api_params())
+    snapshots: list[SandboxSnapshot] = []
+    pages = 0
+    while paginator.has_next:
+        if pages >= _MAX_LIST_PAGES:
+            logger.warning("stopped listing sandboxes after %d pages; some were not seen", pages)
+            break
+        snapshots.extend(_snapshot(info) for info in await paginator.next_items())
+        pages += 1
+    return snapshots
+
+
+async def kill_sandbox(sandbox_id: str) -> None:
+    """Destroy a sandbox by id, running or suspended.
+
+    Raises whatever the provider raises: the two callers want opposite things
+    from a failure (one logs an orphan and carries on, the other counts it), so
+    neither gets to have the decision made here.
+    """
+    from e2b_code_interpreter import AsyncSandbox
+
+    await AsyncSandbox.kill(sandbox_id, **_account_api_params())
+
+
 def _terminal_resume_errors() -> tuple[type[BaseException], ...]:
     """Exceptions that mean the sandbox is gone rather than briefly unreachable."""
     try:
@@ -208,6 +313,7 @@ async def open_backend(
     resume_sandbox_id: str | None = None,
     suspend_on_exit: bool | Callable[[], bool] = False,
     on_teardown: Callable[[bool], None] | None = None,
+    purpose: str = "sandbox",
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -250,6 +356,12 @@ async def open_backend(
     ``True`` as a fallback for CLIs that can't, where access is then gated by the
     service's own auth (a budget-capped virtual key) instead of the E2B token.
 
+    ``purpose`` is stamped into the sandbox's provider-side metadata under
+    :data:`MANAGED_METADATA_KEY`. It carries no behaviour; it is what lets the
+    reaper (:mod:`reporting.services.sandbox_reaper`) recognize a sandbox as
+    Seizu's on an API key shared with anything else, and what names it in the
+    log line when one is destroyed.
+
     ``resume_sandbox_id`` reconnects to an existing sandbox — resuming it if it
     was suspended — instead of creating one.  Only *terminal* failures yield a
     fresh sandbox (the caller detects that by comparing
@@ -268,16 +380,12 @@ async def open_backend(
 
     from reporting import settings as _settings
 
-    api_kwargs: dict[str, Any] = {}
-    if api_key:
-        api_kwargs["api_key"] = api_key
-    if domain:
-        # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
-        # to https://api.<domain>; disable client-side key-format validation
-        # because non-E2B deployments issue tokens that don't match "e2b_*".
-        api_kwargs["domain"] = domain
-        api_kwargs["validate_api_key"] = False
+    api_kwargs = _api_params(api_key, domain)
     create_kwargs: dict[str, Any] = dict(api_kwargs)
+    # Set at creation and never afterwards -- the provider has no way to amend a
+    # sandbox's metadata -- so this may say what the sandbox is for and must not
+    # try to say anything about when it was last used.
+    create_kwargs["metadata"] = {MANAGED_METADATA_KEY: purpose}
     if template and not domain:
         create_kwargs["template"] = template
     elif template and domain:
