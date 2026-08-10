@@ -12,7 +12,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 import jwt
 from mcp.server import ServerRequestContext
 from mcp.server.lowlevel import Server
@@ -307,15 +306,18 @@ _WELL_KNOWN_REGISTRATION_PATH = "/.well-known/oauth-registration"
 
 
 async def _fetch_oidc_discovery(authority: str) -> dict[str, Any] | None:
-    """Fetch {authority}/.well-known/openid-configuration, return parsed JSON or None."""
-    url = f"{authority.rstrip('/')}/.well-known/openid-configuration"
+    """Fetch {authority}/.well-known/openid-configuration, return parsed JSON or None.
+
+    Delegates to ``oauth_client`` so URL construction and error handling stay in
+    one place; metadata building is best-effort, so failures become ``None``
+    rather than propagating.
+    """
+    from reporting.services import oauth_client
+
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=5.0)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception:
-        logger.warning("Failed to fetch OIDC discovery from %s", url)
+        return await oauth_client.fetch_discovery_document(authority, timeout=5.0)
+    except oauth_client.OAuthClientError as exc:
+        logger.warning("Failed to fetch OIDC discovery from %s: %s", authority, exc)
         return None
 
 

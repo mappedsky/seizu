@@ -114,7 +114,20 @@ OIDC_AUTHORITY = str_env("OIDC_AUTHORITY", "")
 # In most deployments this equals OIDC_AUTHORITY. Set this when the server
 # cannot reach the public OIDC_AUTHORITY hostname (e.g. docker dev environments
 # with split internal/external hostnames). Defaults to OIDC_AUTHORITY when unset.
+#
+# Both hostnames must present the SAME "issuer" value. Durable Seizu identity is
+# (iss, sub), so an IDP that derives its issuer from the request host hands the
+# same person two user records -- one per authentication path -- and everything
+# owner-scoped (private reports, query history, chat threads, scheduled chats,
+# action confirmations) silently diverges between them. Seizu compares the two
+# discovery documents at startup and logs the mismatch; see AUTH-001 in
+# docs/root/dev/decisions/authentication.md.
 OIDC_INTERNAL_AUTHORITY = str_env("OIDC_INTERNAL_AUTHORITY", "")
+# Make that startup issuer comparison fatal instead of advisory: refuse to start
+# when the internal and external authorities advertise different issuers. Off by
+# default because the mismatch is only reachable with a split-hostname
+# deployment, and a loud log lets an existing one keep running while it is fixed.
+OIDC_REQUIRE_CONSISTENT_ISSUER = bool_env("OIDC_REQUIRE_CONSISTENT_ISSUER", False)
 OIDC_CLIENT_ID = str_env("OIDC_CLIENT_ID", "")
 OIDC_CLIENT_SECRET = str_env("OIDC_CLIENT_SECRET", "")
 OIDC_TOKEN_ENDPOINT_AUTH_METHOD = str_env("OIDC_TOKEN_ENDPOINT_AUTH_METHOD", "none")

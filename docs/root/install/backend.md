@@ -141,6 +141,8 @@ seizu validates JWTs using `PyJWKClient` against any standard OIDC JWKS endpoint
 * ``JWT_AUDIENCE``: optional audience to validate; must match the OIDC client ID when using providers (like Authentik) that always set ``aud``; default: ``""``
 * ``ALLOWED_JWT_ALGORITHMS``: comma-separated list of allowed JWT signing algorithms; default: ``RS256,ES256,ES512``
 * ``OIDC_AUTHORITY``: OIDC provider base URL; passed to the frontend via ``GET /api/v1/config`` and also added to the ``connect-src`` Content-Security-Policy directive so the browser can reach the discovery document and token endpoint; default: ``""``
+* ``OIDC_INTERNAL_AUTHORITY``: authority the *server* uses to fetch discovery and call the token endpoint, for deployments where the public ``OIDC_AUTHORITY`` hostname is not reachable from the backend. Both hostnames must present the same ``issuer`` — see "Split internal and external OIDC hostnames" in the security guidance; default: ``""`` (falls back to ``OIDC_AUTHORITY``)
+* ``OIDC_REQUIRE_CONSISTENT_ISSUER``: refuse to start when the internal and external authorities advertise different issuers, instead of logging the mismatch; default: ``False``
 * ``OIDC_CLIENT_ID``: OIDC client ID; passed to the frontend; default: ``""``
 * ``OIDC_REDIRECT_URI``: OIDC callback URL; passed to the frontend via ``GET /api/v1/config`` but **not used by the frontend** — the browser derives the redirect URI from ``window.location.origin`` so the PKCE callback always returns to the same origin that initiated the flow; default: ``""``
 * ``OIDC_SCOPE``: OIDC scope; ``offline_access`` is required so the IDP issues a refresh token for the BFF flow; default: ``openid email offline_access``

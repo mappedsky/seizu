@@ -141,6 +141,16 @@ On first run, Authentik takes about two minutes to initialize. Once ready, visit
 - **Editor:** `seizu-editor` / `seizu`
 - **Viewer:** `seizu-viewer` / `seizu`
 
+Everything reaches Authentik as `localhost:9000` — the browser and any MCP or
+CLI client directly, and the backend through `scripts/dev_oidc_loopback.py`,
+which the `seizu` container starts alongside gunicorn and which forwards its
+own loopback `:9000` on to `authentik-server:9000`. That is deliberate: Authentik
+derives the `iss` claim from the request's `Host` header, so a backend reaching
+it under a second hostname would mint a different issuer than your MCP client
+gets, and the same login would become two Seizu users with separate reports,
+chat threads and confirmations. See
+[the authentication decisions](../dev/decisions/authentication.md).
+
 To disable auth and return to the default unauthenticated mode:
 
 ```bash

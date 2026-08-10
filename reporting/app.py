@@ -37,7 +37,7 @@ from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
 from reporting.routes import workflows as workflows_routes
-from reporting.services import report_store
+from reporting.services import oauth_client, report_store
 from reporting.services.chat_graph import (
     close_chat_checkpoints,
     initialize_chat_checkpoints,
@@ -266,6 +266,7 @@ class _MCPMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await oauth_client.verify_issuer_consistency()
     should_init = settings.DYNAMODB_CREATE_TABLE or (settings.REPORT_STORE_BACKEND == "sqlmodel")
     if should_init:
         await report_store.initialize()

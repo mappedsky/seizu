@@ -1,6 +1,8 @@
 import base64
+import logging
 import time
 
+import httpx
 import jwt
 import pytest
 from jwt.api_jwk import PyJWK
@@ -295,7 +297,7 @@ async def test_build_authorize_url_appends_extra_params(mocker):
 
 def _introspection_metadata(introspection_endpoint: str | None = "http://idp.test/introspect"):
     return oauth_client.OIDCMetadata(
-        issuer="http://idp.test",
+        issuer="http://localhost:9000/application/o/seizu",
         authorization_endpoint="http://idp.test/authorize",
         token_endpoint="http://idp.test/token",
         end_session_endpoint="http://idp.test/end-session",
@@ -700,3 +702,251 @@ async def test_validate_id_token_requires_jwks_uri(mocker):
 
     with pytest.raises(oauth_client.OAuthClientError, match="no jwks_uri"):
         await oauth_client.validate_id_token(id_token="x.y.z", nonce="n")
+
+
+def _patch_discovery_by_authority(mocker, issuers: dict[str, str | Exception]):
+    """Serve a discovery document per authority host, keyed by the requested URL."""
+
+    class FakeResponse:
+        def __init__(self, issuer: str) -> None:
+            self._issuer = issuer
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "issuer": self._issuer,
+                "authorization_endpoint": f"{self._issuer}/authorize",
+                "token_endpoint": f"{self._issuer}/token",
+                "jwks_uri": f"{self._issuer}/jwks",
+            }
+
+    requested: list[str] = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            requested.append(url)
+            for authority, issuer in issuers.items():
+                if url.startswith(authority):
+                    if isinstance(issuer, Exception):
+                        raise issuer
+                    return FakeResponse(issuer)
+            raise AssertionError(f"unexpected discovery URL: {url}")
+
+    mocker.patch("reporting.services.oauth_client.httpx.AsyncClient", FakeAsyncClient)
+    return requested
+
+
+async def test_verify_issuer_consistency_reports_forked_identities(mocker, caplog):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", False)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "http://authentik-server:9000/application/o/seizu/",
+            "http://localhost:9000": "http://localhost:9000/application/o/seizu/",
+        },
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await oauth_client.verify_issuer_consistency()
+
+    assert "OIDC issuer mismatch" in caplog.text
+    assert "http://authentik-server:9000/application/o/seizu/" in caplog.text
+    assert "http://localhost:9000/application/o/seizu/" in caplog.text
+
+
+async def test_verify_issuer_consistency_fails_startup_when_required(mocker):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "http://authentik-server:9000/application/o/seizu/",
+            "http://localhost:9000": "http://localhost:9000/application/o/seizu/",
+        },
+    )
+
+    with pytest.raises(oauth_client.OAuthClientError, match="OIDC issuer mismatch"):
+        await oauth_client.verify_issuer_consistency()
+
+
+async def test_verify_issuer_consistency_accepts_one_stable_issuer(mocker, caplog):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "https://idp.example.com/application/o/seizu/",
+            "http://localhost:9000": "https://idp.example.com/application/o/seizu/",
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await oauth_client.verify_issuer_consistency()
+
+    assert caplog.text == ""
+
+
+async def test_verify_issuer_consistency_reports_trailing_slash_difference(mocker):
+    """A trailing slash is still two identities: (iss, sub) stores iss verbatim."""
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "https://idp.example.com/application/o/seizu",
+            "http://localhost:9000": "https://idp.example.com/application/o/seizu/",
+        },
+    )
+
+    with pytest.raises(oauth_client.OAuthClientError, match="OIDC issuer mismatch"):
+        await oauth_client.verify_issuer_consistency()
+
+
+async def test_configured_authority_still_matches_advertised_trailing_slash(mocker):
+    """The *config* comparison stays lenient — the dev stack depends on it."""
+    mocker.patch("reporting.settings.OIDC_AUTHORITY", "http://localhost:9000/application/o/seizu")
+    mocker.patch("reporting.settings.OIDC_INTERNAL_AUTHORITY", "")
+    _patch_discovery_by_authority(
+        mocker,
+        {"http://localhost:9000": "http://localhost:9000/application/o/seizu/"},
+    )
+
+    metadata = await oauth_client.get_metadata()
+
+    assert metadata.issuer == "http://localhost:9000/application/o/seizu/"
+
+
+async def test_verify_issuer_consistency_warns_when_discovery_unreachable(mocker, caplog):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_REQUIRE_CONSISTENT_ISSUER", True)
+    _patch_discovery_by_authority(
+        mocker,
+        {
+            "http://authentik-server:9000": "http://authentik-server:9000/application/o/seizu/",
+            "http://localhost:9000": httpx.ConnectError("no route to host"),
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await oauth_client.verify_issuer_consistency()
+
+    assert "Could not verify" in caplog.text
+    assert "http://localhost:9000" in caplog.text
+
+
+async def test_verify_issuer_consistency_skipped_without_split_hostnames(mocker):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", True)
+    mocker.patch("reporting.settings.OIDC_INTERNAL_AUTHORITY", "http://localhost:9000/application/o/seizu/")
+    requested = _patch_discovery_by_authority(mocker, {"http://localhost:9000": "http://localhost:9000/o/seizu"})
+
+    await oauth_client.verify_issuer_consistency()
+
+    assert requested == []
+
+
+async def test_verify_issuer_consistency_skipped_when_auth_disabled(mocker):
+    mocker.patch("reporting.settings.DEVELOPMENT_ONLY_REQUIRE_AUTH", False)
+    requested = _patch_discovery_by_authority(mocker, {"http://": "http://idp.test"})
+
+    await oauth_client.verify_issuer_consistency()
+
+    assert requested == []
+
+
+async def test_id_token_issuer_must_match_discovery_exactly(mocker):
+    """A trailing-slash variant is a different identity, so it is rejected."""
+    mocker.patch(
+        "reporting.services.oauth_client.get_metadata",
+        mocker.AsyncMock(return_value=_introspection_metadata()),
+    )
+    _patch_idtoken_jwks(mocker)
+    now = int(time.time())
+    token = _sign_id_token(
+        iss="http://localhost:9000/application/o/seizu/",
+        aud="seizu",
+        exp=now + 3600,
+        iat=now,
+        nonce="n",
+        sub="user-1",
+    )
+
+    with pytest.raises(oauth_client.OAuthClientError, match="issuer mismatch"):
+        await oauth_client.validate_id_token(id_token=token, nonce="n")
+
+
+async def test_introspection_issuer_must_match_discovery_exactly(mocker):
+    mocker.patch(
+        "reporting.services.oauth_client.get_metadata",
+        mocker.AsyncMock(return_value=_introspection_metadata()),
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "active": True,
+                "sub": "user-1",
+                "iss": "http://localhost:9000/application/o/seizu/",
+                "aud": "seizu",
+            }
+
+    class FakeOAuthClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def client_auth(self, method):
+            return None
+
+        async def introspect_token(self, url, token, token_type_hint, body, auth):
+            return FakeResponse()
+
+    mocker.patch("reporting.services.oauth_client._build_oauth_client", return_value=FakeOAuthClient())
+
+    with pytest.raises(oauth_client.OAuthClientError, match="issuer mismatch"):
+        await oauth_client.introspect_token(token="opaque-token")
+
+
+async def test_discovery_document_with_malformed_json_raises_oauth_error(mocker):
+    """Best-effort callers (MCP metadata) catch OAuthClientError, not ValueError."""
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return FakeResponse()
+
+    mocker.patch("reporting.services.oauth_client.httpx.AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(oauth_client.OAuthClientError, match="not valid JSON"):
+        await oauth_client.fetch_discovery_document("http://idp.test")

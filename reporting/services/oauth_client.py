@@ -34,6 +34,10 @@ from reporting import settings
 logger = logging.getLogger(__name__)
 
 _OIDC_DISCOVERY_TIMEOUT = 10.0
+# The startup consistency check runs per Gunicorn worker and its expected
+# failure mode is an unreachable external hostname, so it gets a tighter budget
+# than a discovery fetch a request is waiting on.
+_OIDC_CONSISTENCY_TIMEOUT = 3.0
 _OIDC_REQUEST_TIMEOUT = 30.0
 
 
@@ -76,10 +80,31 @@ def _authority_for_discovery() -> str:
 
 
 def _normalize_issuer(value: str) -> str:
+    """Trailing-slash-insensitive form, for *configuration* comparisons only.
+
+    Exactly one comparison in this module may be lenient, and it is the one
+    that never touches identity:
+
+    - **A configured authority against the advertised discovery issuer**
+      (this function, via ``_expected_discovery_issuers``). Operators write
+      ``OIDC_AUTHORITY`` by hand and providers vary on the trailing slash — the
+      dev stack's authority has none while Authentik advertises one — so an
+      exact match here rejects a working deployment.
+
+    Every comparison involving an issuer that a *token* carries is exact,
+    because those strings become ``(iss, sub)`` keys verbatim — two spellings
+    are two users — and OIDC requires exact issuer comparison without URL
+    normalization:
+
+    - an ID token's or introspection response's ``iss`` against
+      ``metadata.issuer`` (OIDC Core 3.1.3.7);
+    - the two authorities' advertised issuers against each other
+      (``verify_issuer_consistency``).
+    """
     return value.rstrip("/")
 
 
-def _expected_issuers() -> set[str]:
+def _expected_discovery_issuers() -> set[str]:
     issuers = {
         _normalize_issuer(value)
         for value in (
@@ -118,6 +143,99 @@ def rewrite_to_external_origin(url: str) -> str:
     return url
 
 
+async def fetch_discovery_document(authority: str, *, timeout: float = _OIDC_DISCOVERY_TIMEOUT) -> dict[str, Any]:
+    """Fetch and parse ``{authority}/.well-known/openid-configuration``.
+
+    Shared with the MCP OAuth metadata builder so the two discovery paths can't
+    drift apart on URL construction or error handling.
+    """
+    url = f"{authority.rstrip('/')}/.well-known/openid-configuration"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            doc = resp.json()
+    except httpx.HTTPError as exc:
+        raise OAuthClientError(f"Failed to fetch OIDC discovery from {url}: {exc}") from exc
+    except ValueError as exc:
+        # A 200 carrying HTML (a login page, a proxy error page) parses as
+        # neither JSON nor a discovery document. Callers treating discovery as
+        # best-effort catch OAuthClientError, so this must not escape as a bare
+        # JSONDecodeError.
+        raise OAuthClientError(f"OIDC discovery document at {url} is not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise OAuthClientError(f"OIDC discovery document at {url} is not a JSON object")
+    return doc
+
+
+async def _discovery_issuer(authority: str) -> str:
+    doc = await fetch_discovery_document(authority, timeout=_OIDC_CONSISTENCY_TIMEOUT)
+    issuer = doc.get("issuer")
+    if not isinstance(issuer, str) or not issuer:
+        raise OAuthClientError(f"OIDC discovery document at {authority} advertises no issuer")
+    return issuer
+
+
+async def verify_issuer_consistency() -> None:
+    """Check that the internal and external authorities advertise one issuer.
+
+    Durable Seizu identity is ``(iss, sub)``, so an IDP that derives its issuer
+    from the request Host header forks one human into two user records: the
+    browser BFF authenticates against ``OIDC_INTERNAL_AUTHORITY`` while MCP and
+    CLI clients authenticate against ``OIDC_AUTHORITY``. Nothing downstream can
+    tell those identities apart, so the divergence is silent — see AUTH-001.
+
+    Best-effort by design: the server frequently *cannot* reach the external
+    hostname (that being the reason ``OIDC_INTERNAL_AUTHORITY`` exists), and an
+    unverifiable check must not take the app down. A confirmed mismatch is
+    logged loudly, and raises only under ``OIDC_REQUIRE_CONSISTENT_ISSUER``.
+    """
+    if not settings.DEVELOPMENT_ONLY_REQUIRE_AUTH:
+        return
+    external = settings.OIDC_AUTHORITY.rstrip("/")
+    internal = settings.OIDC_INTERNAL_AUTHORITY.rstrip("/")
+    if not external or not internal or internal == external:
+        return
+
+    results = await asyncio.gather(
+        _discovery_issuer(internal),
+        _discovery_issuer(external),
+        return_exceptions=True,
+    )
+    issuers: list[str] = []
+    for authority, result in zip((internal, external), results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "Could not verify that OIDC_INTERNAL_AUTHORITY and OIDC_AUTHORITY share an issuer "
+                "(discovery for %s failed: %s). If the identity provider derives its issuer from "
+                "the request host, each authentication path creates a separate Seizu user for the "
+                "same person.",
+                authority,
+                result,
+            )
+            return
+        issuers.append(result)
+
+    # Exact, deliberately: these strings are stored as (iss, sub) verbatim, so a
+    # trailing-slash difference is still two users -- and OIDC discovery requires
+    # issuer values to match exactly, without URL normalization.
+    internal_issuer, external_issuer = issuers
+    if internal_issuer == external_issuer:
+        return
+
+    message = (
+        f"OIDC issuer mismatch: OIDC_INTERNAL_AUTHORITY ({internal}) advertises issuer "
+        f"{internal_issuer!r} but OIDC_AUTHORITY ({external}) advertises {external_issuer!r}. "
+        "Seizu identifies users by (iss, sub), so the same person becomes two user records — one "
+        "per authentication path — and private reports, query history, chat threads, scheduled "
+        "chats and MCP action confirmations diverge between them. Configure the identity provider "
+        "to emit one stable issuer for both hostnames, then pin JWT_ISSUER to it."
+    )
+    if settings.OIDC_REQUIRE_CONSISTENT_ISSUER:
+        raise OAuthClientError(message)
+    logger.error("%s Set OIDC_REQUIRE_CONSISTENT_ISSUER=true to make this fatal.", message)
+
+
 def _metadata_is_fresh() -> bool:
     return (
         _metadata_cache is not None
@@ -139,14 +257,7 @@ async def get_metadata() -> OIDCMetadata:
         cached = _metadata_cache
         if cached is not None and _metadata_is_fresh():
             return cached
-        url = f"{_authority_for_discovery()}/.well-known/openid-configuration"
-        try:
-            async with httpx.AsyncClient(timeout=_OIDC_DISCOVERY_TIMEOUT) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                doc = resp.json()
-        except httpx.HTTPError as exc:
-            raise OAuthClientError(f"Failed to fetch OIDC discovery from {url}: {exc}") from exc
+        doc = await fetch_discovery_document(_authority_for_discovery())
 
         try:
             metadata = OIDCMetadata(
@@ -160,7 +271,7 @@ async def get_metadata() -> OIDCMetadata:
             )
         except KeyError as exc:
             raise OAuthClientError(f"OIDC discovery document missing required field: {exc}") from exc
-        expected_issuers = _expected_issuers()
+        expected_issuers = _expected_discovery_issuers()
         if expected_issuers and _normalize_issuer(metadata.issuer) not in expected_issuers:
             raise OAuthClientError(
                 f"OIDC discovery issuer mismatch: got {metadata.issuer!r}, expected one of {sorted(expected_issuers)!r}"
@@ -223,12 +334,11 @@ async def validate_id_token(*, id_token: str, nonce: str | None) -> dict[str, An
     except jwt.PyJWTError as exc:
         raise OAuthClientError(f"ID token validation failed: {exc}") from exc
 
-    expected_issuers = _expected_issuers()
-    token_issuer = _normalize_issuer(str(claims.get("iss", "")))
-    if expected_issuers and token_issuer not in expected_issuers:
-        raise OAuthClientError(
-            f"ID token issuer mismatch: got {claims.get('iss')!r}, expected one of {sorted(expected_issuers)!r}"
-        )
+    # Exact, per OIDC Core 3.1.3.7: the issuer identifier MUST exactly match
+    # the iss claim. Matching the configured authority instead would accept two
+    # spellings of one issuer, and the raw claim is what identity is keyed on.
+    if claims.get("iss") != metadata.issuer:
+        raise OAuthClientError(f"ID token issuer mismatch: got {claims.get('iss')!r}, expected {metadata.issuer!r}")
 
     azp = claims.get("azp")
     if azp is not None and azp != settings.OIDC_CLIENT_ID:
@@ -269,9 +379,10 @@ def _validate_introspection_claims(data: dict[str, Any], metadata: OIDCMetadata)
     issuer = normalized.get(expected_issuer_claim) or normalized.get("iss")
     if not isinstance(issuer, str) or not issuer:
         raise OAuthClientError(f"Introspection response missing required claim: {expected_issuer_claim}")
-    expected_issuers = _expected_issuers()
-    if expected_issuers and _normalize_issuer(issuer) not in expected_issuers:
-        raise OAuthClientError(f"Token issuer mismatch: got {issuer!r}, expected one of {sorted(expected_issuers)!r}")
+    # Exact for the same reason as the ID token: this claim flows straight into
+    # get_or_create_user, so an accepted variant spelling is a second identity.
+    if issuer != metadata.issuer:
+        raise OAuthClientError(f"Token issuer mismatch: got {issuer!r}, expected {metadata.issuer!r}")
 
     expected_audiences = {value for value in (settings.JWT_AUDIENCE, settings.OIDC_CLIENT_ID) if value}
     audiences = set(_claim_list(normalized.get("aud")))

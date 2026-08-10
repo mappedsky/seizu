@@ -38,6 +38,82 @@ OIDC_SCOPE="openid email"
 
 Use `JWT_ISSUER` and `JWT_AUDIENCE` whenever your identity provider can issue stable values. Leaving them empty makes token validation less specific than it should be in production.
 
+### Split internal and external OIDC hostnames
+
+`OIDC_INTERNAL_AUTHORITY` exists for deployments where the backend cannot reach
+the public `OIDC_AUTHORITY` hostname: browsers are sent to the external
+authority, while the server fetches discovery and exchanges codes against the
+internal one.
+
+**Both hostnames must present the same `issuer`.** Seizu's durable identity is
+`(iss, sub)`, so an identity provider that derives its issuer from the request
+host — Authentik does — hands the same person two user records, one per
+authentication path:
+
+```
+external (idp.example.com)  -> https://idp.example.com/application/o/seizu/     <- browser, MCP and CLI clients
+internal (idp.internal)     -> https://idp.internal/application/o/seizu/        <- backend BFF code exchange
+```
+
+Nothing downstream can tell those identities apart, so everything owner-scoped
+diverges silently: private reports, query history, chat sessions and threads,
+scheduled chats, and action confirmations. In particular an MCP-initiated
+confirmation cannot be approved from the browser UI, because the browser is a
+different `user_id` than the MCP client.
+
+Pinning `JWT_ISSUER` does not fix this: it pins exactly one value, so the other
+authentication path then fails validation outright. With two issuers in play
+there is no correct single setting, so the fix belongs at the identity provider
+or in the network. Two shapes work.
+
+**One hostname, two network paths — split-horizon DNS.** `idp.example.com`
+resolves to a private address inside your network and a public one outside.
+Every party uses the same URL, so a host-derived issuer is single-valued by
+construction, the certificate matches the name everyone dials, and
+`OIDC_INTERNAL_AUTHORITY` is not needed at all — leave it unset and point
+`OIDC_AUTHORITY`, `JWKS_URL` and `JWT_ISSUER` at the one name. Where DNS cannot
+be split, an internal reverse proxy holding the same name and certificate is
+the equivalent. This is the shape to prefer, and the one Seizu's own dev stack
+uses (via a loopback forwarder rather than a resolver).
+
+**Two hostnames, with a provider that pins its issuer.** Some providers publish
+a fixed issuer independent of the request host while still adapting the
+backchannel endpoints to whoever asked. Keycloak is the reference case:
+
+```bash
+kc.sh start --hostname https://idp.example.com --hostname-backchannel-dynamic true
+```
+
+The `iss` claim and the browser-facing URLs stay `https://idp.example.com`,
+while a discovery document fetched from inside your network comes back with
+reachable internal token, introspection and JWKS endpoints. Seizu supports this
+directly: set `OIDC_INTERNAL_AUTHORITY` to the internal hostname, and the
+externally-advertised issuer on an internally-fetched document validates
+cleanly. Both authentication paths then carry the same `iss`, and `JWT_ISSUER`
+can be pinned to it.
+
+**What does not work is a host-derived issuer reached under two hostnames.**
+Authentik is the common example — its issuer comes from
+`request.build_absolute_uri()`, and its "issuer mode" setting only chooses the
+URL path, not the host — so no provider-side configuration resolves it and one
+of the two shapes above is required. Forcing a canonical `Host` /
+`X-Forwarded-Host` from a trusted proxy does make the provider stamp one
+issuer, but it then advertises the external endpoints to your internal caller,
+so you need those reachable anyway and have arrived back at split-horizon DNS.
+
+Seizu compares the two discovery documents at startup when
+`OIDC_INTERNAL_AUTHORITY` is set and differs from `OIDC_AUTHORITY`, and logs a
+mismatch at `ERROR`. Set `OIDC_REQUIRE_CONSISTENT_ISSUER=true` to make it a
+startup failure instead. The check is best-effort: when the backend cannot
+reach the external authority at all it logs a warning that consistency could
+not be verified.
+
+Already-forked accounts are not merged automatically. Once the provider emits a
+single issuer, the records created under the retired one keep whatever was
+filed against them — private reports, query history, chat threads, scheduled
+chats — and simply stop being reachable by their owner. Re-create anything
+worth keeping under the surviving identity.
+
 If Seizu is exposed through HTTPS directly, keep `TALISMAN_FORCE_HTTPS=true`. If TLS terminates at a load balancer or ingress, enforce HTTPS and HSTS there and set Seizu's proxy headers correctly for your deployment.
 
 ## RBAC

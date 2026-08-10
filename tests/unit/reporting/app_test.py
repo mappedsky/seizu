@@ -5,6 +5,22 @@ from typing import Any
 from reporting.app import _CSRF_FAILURE_BODY, _TIMEOUT_RESPONSE_BODY, _CSRFMiddleware, _TimeoutMiddleware, lifespan
 
 
+async def test_lifespan_verifies_oidc_issuer_consistency(mocker):
+    mocker.patch("reporting.settings.DYNAMODB_CREATE_TABLE", False)
+    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
+    mocker.patch("reporting.settings.CHAT_ENABLED", False)
+    verify = mocker.patch(
+        "reporting.app.oauth_client.verify_issuer_consistency",
+        new=mocker.AsyncMock(),
+    )
+    app = SimpleNamespace(state=SimpleNamespace(mcp_session_manager=None))
+
+    async with lifespan(app):
+        pass
+
+    verify.assert_awaited_once_with()
+
+
 async def test_lifespan_initializes_and_closes_chat_checkpoints(mocker):
     mocker.patch("reporting.settings.DYNAMODB_CREATE_TABLE", False)
     mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
