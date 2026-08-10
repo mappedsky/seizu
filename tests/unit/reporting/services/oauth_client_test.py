@@ -297,7 +297,7 @@ async def test_build_authorize_url_appends_extra_params(mocker):
 
 def _introspection_metadata(introspection_endpoint: str | None = "http://idp.test/introspect"):
     return oauth_client.OIDCMetadata(
-        issuer="http://idp.test",
+        issuer="http://localhost:9000/application/o/seizu",
         authorization_endpoint="http://idp.test/authorize",
         token_endpoint="http://idp.test/token",
         end_session_endpoint="http://idp.test/end-session",
@@ -863,3 +863,90 @@ async def test_verify_issuer_consistency_skipped_when_auth_disabled(mocker):
     await oauth_client.verify_issuer_consistency()
 
     assert requested == []
+
+
+async def test_id_token_issuer_must_match_discovery_exactly(mocker):
+    """A trailing-slash variant is a different identity, so it is rejected."""
+    mocker.patch(
+        "reporting.services.oauth_client.get_metadata",
+        mocker.AsyncMock(return_value=_introspection_metadata()),
+    )
+    _patch_idtoken_jwks(mocker)
+    now = int(time.time())
+    token = _sign_id_token(
+        iss="http://localhost:9000/application/o/seizu/",
+        aud="seizu",
+        exp=now + 3600,
+        iat=now,
+        nonce="n",
+        sub="user-1",
+    )
+
+    with pytest.raises(oauth_client.OAuthClientError, match="issuer mismatch"):
+        await oauth_client.validate_id_token(id_token=token, nonce="n")
+
+
+async def test_introspection_issuer_must_match_discovery_exactly(mocker):
+    mocker.patch(
+        "reporting.services.oauth_client.get_metadata",
+        mocker.AsyncMock(return_value=_introspection_metadata()),
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "active": True,
+                "sub": "user-1",
+                "iss": "http://localhost:9000/application/o/seizu/",
+                "aud": "seizu",
+            }
+
+    class FakeOAuthClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def client_auth(self, method):
+            return None
+
+        async def introspect_token(self, url, token, token_type_hint, body, auth):
+            return FakeResponse()
+
+    mocker.patch("reporting.services.oauth_client._build_oauth_client", return_value=FakeOAuthClient())
+
+    with pytest.raises(oauth_client.OAuthClientError, match="issuer mismatch"):
+        await oauth_client.introspect_token(token="opaque-token")
+
+
+async def test_discovery_document_with_malformed_json_raises_oauth_error(mocker):
+    """Best-effort callers (MCP metadata) catch OAuthClientError, not ValueError."""
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return FakeResponse()
+
+    mocker.patch("reporting.services.oauth_client.httpx.AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(oauth_client.OAuthClientError, match="not valid JSON"):
+        await oauth_client.fetch_discovery_document("http://idp.test")

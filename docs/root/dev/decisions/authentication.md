@@ -48,13 +48,21 @@ failure, or normalize `iss` anywhere between token validation and
 
 ## AUTH-002 — The dev stack reaches Authentik only as `localhost:9000`
 
-**Applies to:** `scripts/dev_oidc_loopback.py`, the `seizu` service's `command`
+**Applies to:** `scripts/dev_oidc_loopback.py`, `scripts/dev_entrypoint.sh`
 
 The backend container runs a small stdlib forwarder on its own loopback `:9000`,
 pointed at `authentik-server:9000` by `DEV_OIDC_LOOPBACK_TARGET`, so the
 backend's discovery and token exchange use the same URL the browser, MCP clients
 and the CLI use. `OIDC_INTERNAL_AUTHORITY` is therefore unset in dev, and
 `JWKS_URL` points at `localhost:9000` like everything else.
+
+`dev_entrypoint.sh` supervises the forwarder and gunicorn together rather than
+backgrounding one and `exec`ing the other: whichever exits first takes the
+container down, and SIGTERM is forwarded so shutdown isn't a kill-timeout wait.
+Without that, a forwarder that failed to bind or crashed later would leave a
+container passing its port-8080 healthcheck with authentication quietly broken —
+the same silent failure this entry exists to remove. Verified by killing the
+forwarder: gunicorn is signalled and the container exits 137.
 
 **Why:** Authentik has no fixed-issuer setting — `OAuth2Provider.get_issuer()`
 calls `request.build_absolute_uri()`, so `iss` and every advertised endpoint

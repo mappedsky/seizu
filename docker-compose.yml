@@ -490,12 +490,15 @@ services:
       # docs/root/dev/decisions/authentication.md.
       - OIDC_AUTHORITY=http://localhost:9000/application/o/seizu
       # What makes localhost:9000 resolvable in here: scripts/dev_oidc_loopback.py,
-      # started by this service's command and forwarding the container's loopback
-      # to the IDP. Inert without the auth profile (nothing connects to it), and
-      # never set in the production image. It runs in-process rather than as a
-      # sidecar container because a sidecar sharing this network namespace
-      # survives `up --force-recreate seizu` still reporting healthy while
-      # attached to the dead namespace -- see AUTH-002.
+      # started and supervised by scripts/dev_entrypoint.sh (this service's
+      # command) and forwarding the container's loopback to the IDP. Inert
+      # without the auth profile (nothing connects to it), and never set in the
+      # production image. It runs in this container rather than as a sidecar
+      # because a sidecar sharing this network namespace survives
+      # `up --force-recreate seizu` still reporting healthy while attached to
+      # the dead namespace; the entrypoint supervises both processes so a dead
+      # forwarder takes the container down instead of breaking auth quietly.
+      # See AUTH-002.
       - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
       - OIDC_CLIENT_ID=seizu
       # OIDC_REDIRECT_URI intentionally unset: the backend derives the
@@ -639,7 +642,7 @@ services:
     # Start from /run/seizu so the gunicorn arbiter control socket (gunicorn.ctl)
     # is created there instead of in the bind-mounted project volume, which
     # would cause the seizu-node watchpack watcher to trip over the Unix socket.
-    command: bash -c "cd /run/seizu && { python /home/seizu/seizu/scripts/dev_oidc_loopback.py & } && exec gunicorn --config /home/seizu/seizu/gunicorn.conf reporting.asgi:application --reload --workers=2 -k uvicorn.workers.UvicornWorker --access-logfile=- --error-logfile=-"
+    command: bash /home/seizu/seizu/scripts/dev_entrypoint.sh
     networks:
       proxy:
       database:

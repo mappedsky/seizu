@@ -82,24 +82,29 @@ def _authority_for_discovery() -> str:
 def _normalize_issuer(value: str) -> str:
     """Trailing-slash-insensitive form, for *configuration* comparisons only.
 
-    Two different comparisons happen in this module and they need different
-    strictness:
+    Exactly one comparison in this module may be lenient, and it is the one
+    that never touches identity:
 
-    - **A configured authority against an advertised/claimed issuer** (this
-      function). Operators write ``OIDC_AUTHORITY`` by hand and providers vary
-      on the trailing slash — the dev stack's authority has none while
-      Authentik advertises one — so an exact match here would reject a working
-      deployment. Nothing identity-bearing is derived from it:
-      ``get_or_create_user`` always receives the raw ``iss`` off the token.
-    - **Two issuers against each other** (``verify_issuer_consistency``), which
-      is exact. Those strings become ``(iss, sub)`` keys verbatim, so
-      ``https://idp/app`` and ``https://idp/app/`` are two users, and OIDC
-      discovery requires issuer values to match exactly anyway.
+    - **A configured authority against the advertised discovery issuer**
+      (this function, via ``_expected_discovery_issuers``). Operators write
+      ``OIDC_AUTHORITY`` by hand and providers vary on the trailing slash — the
+      dev stack's authority has none while Authentik advertises one — so an
+      exact match here rejects a working deployment.
+
+    Every comparison involving an issuer that a *token* carries is exact,
+    because those strings become ``(iss, sub)`` keys verbatim — two spellings
+    are two users — and OIDC requires exact issuer comparison without URL
+    normalization:
+
+    - an ID token's or introspection response's ``iss`` against
+      ``metadata.issuer`` (OIDC Core 3.1.3.7);
+    - the two authorities' advertised issuers against each other
+      (``verify_issuer_consistency``).
     """
     return value.rstrip("/")
 
 
-def _expected_issuers() -> set[str]:
+def _expected_discovery_issuers() -> set[str]:
     issuers = {
         _normalize_issuer(value)
         for value in (
@@ -152,6 +157,12 @@ async def fetch_discovery_document(authority: str, *, timeout: float = _OIDC_DIS
             doc = resp.json()
     except httpx.HTTPError as exc:
         raise OAuthClientError(f"Failed to fetch OIDC discovery from {url}: {exc}") from exc
+    except ValueError as exc:
+        # A 200 carrying HTML (a login page, a proxy error page) parses as
+        # neither JSON nor a discovery document. Callers treating discovery as
+        # best-effort catch OAuthClientError, so this must not escape as a bare
+        # JSONDecodeError.
+        raise OAuthClientError(f"OIDC discovery document at {url} is not valid JSON: {exc}") from exc
     if not isinstance(doc, dict):
         raise OAuthClientError(f"OIDC discovery document at {url} is not a JSON object")
     return doc
@@ -260,7 +271,7 @@ async def get_metadata() -> OIDCMetadata:
             )
         except KeyError as exc:
             raise OAuthClientError(f"OIDC discovery document missing required field: {exc}") from exc
-        expected_issuers = _expected_issuers()
+        expected_issuers = _expected_discovery_issuers()
         if expected_issuers and _normalize_issuer(metadata.issuer) not in expected_issuers:
             raise OAuthClientError(
                 f"OIDC discovery issuer mismatch: got {metadata.issuer!r}, expected one of {sorted(expected_issuers)!r}"
@@ -323,12 +334,11 @@ async def validate_id_token(*, id_token: str, nonce: str | None) -> dict[str, An
     except jwt.PyJWTError as exc:
         raise OAuthClientError(f"ID token validation failed: {exc}") from exc
 
-    expected_issuers = _expected_issuers()
-    token_issuer = _normalize_issuer(str(claims.get("iss", "")))
-    if expected_issuers and token_issuer not in expected_issuers:
-        raise OAuthClientError(
-            f"ID token issuer mismatch: got {claims.get('iss')!r}, expected one of {sorted(expected_issuers)!r}"
-        )
+    # Exact, per OIDC Core 3.1.3.7: the issuer identifier MUST exactly match
+    # the iss claim. Matching the configured authority instead would accept two
+    # spellings of one issuer, and the raw claim is what identity is keyed on.
+    if claims.get("iss") != metadata.issuer:
+        raise OAuthClientError(f"ID token issuer mismatch: got {claims.get('iss')!r}, expected {metadata.issuer!r}")
 
     azp = claims.get("azp")
     if azp is not None and azp != settings.OIDC_CLIENT_ID:
@@ -369,9 +379,10 @@ def _validate_introspection_claims(data: dict[str, Any], metadata: OIDCMetadata)
     issuer = normalized.get(expected_issuer_claim) or normalized.get("iss")
     if not isinstance(issuer, str) or not issuer:
         raise OAuthClientError(f"Introspection response missing required claim: {expected_issuer_claim}")
-    expected_issuers = _expected_issuers()
-    if expected_issuers and _normalize_issuer(issuer) not in expected_issuers:
-        raise OAuthClientError(f"Token issuer mismatch: got {issuer!r}, expected one of {sorted(expected_issuers)!r}")
+    # Exact for the same reason as the ID token: this claim flows straight into
+    # get_or_create_user, so an accepted variant spelling is a second identity.
+    if issuer != metadata.issuer:
+        raise OAuthClientError(f"Token issuer mismatch: got {issuer!r}, expected {metadata.issuer!r}")
 
     expected_audiences = {value for value in (settings.JWT_AUDIENCE, settings.OIDC_CLIENT_ID) if value}
     audiences = set(_claim_list(normalized.get("aud")))
