@@ -698,6 +698,7 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     sandbox_session.start_sandbox_session(
         resume_sandbox_id=state.get("sandbox_id") or "",
         persist=chat_graph.sandbox_persistence_allowed(config),
+        thread=chat_graph.sandbox_thread_tag(config),
     )
     try:
         update = await _dispatch_batch(state, config)

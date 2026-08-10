@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -792,6 +792,18 @@ class ReportStore(ABC):
     @abstractmethod
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         """Return a chat session for a user, or None if it does not exist."""
+
+    @abstractmethod
+    async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
+        """Interactive sessions last updated before ``idle_before``, oldest first.
+
+        The one session read that spans users, for the reaper
+        (:mod:`reporting.services.session_reaper`). Headless sessions are
+        excluded: they belong to a schedule's run history, are already bounded
+        by it, and never leave a suspended sandbox behind
+        (``sandbox_persistence_allowed`` refuses to persist one for a headless
+        turn).
+        """
 
     @abstractmethod
     async def create_chat_session(

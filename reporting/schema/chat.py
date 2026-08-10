@@ -51,6 +51,19 @@ class ChatSessionItem(BaseModel):
     run_errors: list[str] = Field(default_factory=list)
 
 
+class IdleChatSession(BaseModel):
+    """A session the reaper may collect, with the owner needed to delete it.
+
+    Carries ``user_id`` because every other session read is already scoped to a
+    user, while a sweep starts from no user at all -- and the id is what the
+    thread's checkpoint namespace and its sandbox are keyed by.
+    """
+
+    user_id: str
+    thread_id: str
+    updated_at: str
+
+
 class ChatSessionsResponse(BaseModel):
     sessions: list[ChatSessionItem]
 

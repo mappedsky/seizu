@@ -417,8 +417,16 @@ services:
       - SANDBOX_DOMAIN
       - SANDBOX_ALLOW_INTERNET
       - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_LLM_MODEL
+      # Session reaping — the sweep runs here (and only here), so these have to
+      # reach this service or the settings a deployment sets have no effect.
+      - SEIZU_DEPLOYMENT_ID
+      - CHAT_SESSION_REAP_ENABLED
+      - CHAT_SESSION_REAP_IDLE_SECONDS
+      - CHAT_SESSION_REAP_INTERVAL_SECONDS
+      - SANDBOX_REAP_UNTAGGED
       # CVE dependency remediation — the cve_dependency_remediation activity
       # drives the sandbox directly from this worker; the coding agent phase
       # never sees REMEDIATION_GITHUB_TOKEN. Configured = enabled.
@@ -644,8 +652,13 @@ services:
       - SANDBOX_DOMAIN
       - SANDBOX_ALLOW_INTERNET
       - SANDBOX_TIMEOUT_SECONDS
+      - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_LLM_MODEL
+      # Interactive chat creates the sandboxes the worker later reaps, and the
+      # deployment id is stamped at creation — so it has to match here or the
+      # reaper's ownership filter matches nothing this service made.
+      - SEIZU_DEPLOYMENT_ID
       # The scheduled-query workflow-runs endpoints read run history live
       # from Temporal.
       - TEMPORAL_ADDRESS=temporal:7233

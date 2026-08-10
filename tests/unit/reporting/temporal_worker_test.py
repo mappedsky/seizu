@@ -12,6 +12,7 @@ async def test_run_worker_starts_and_exits_on_shutdown(mocker):
     mocker.patch("reporting.temporal_worker._bootstrap")
     mocker.patch("reporting.temporal_worker.chat_worker_resources", _noop_resources)
     mocker.patch("reporting.temporal_worker.Client.connect", AsyncMock(return_value=MagicMock()))
+    mocker.patch("reporting.temporal_worker.session_reaper_schedule.reconcile", AsyncMock())
 
     mock_worker = AsyncMock()
     mocker.patch("reporting.temporal_worker.Worker", return_value=mock_worker)
@@ -56,41 +57,30 @@ async def test_main_runs_worker_when_enabled(mocker):
     coro.close()  # prevent ResourceWarning
 
 
-async def test_reap_loop_stays_out_of_the_way_when_unconfigured(mocker):
-    """No credentials (or reaping off) means the loop never starts, rather than
-    waking every quarter hour to do nothing."""
+async def test_the_worker_reconciles_the_session_reap_schedule(mocker):
+    """The sweep is a Temporal Schedule, not a task in this process: replicas are
+    ordinary, and a timer in each of them would race over the same deletions.
+    Reconciling from every replica is the idempotent half of that trade."""
+
+    @asynccontextmanager
+    async def _noop_resources():
+        yield
+
+    mocker.patch("reporting.temporal_worker._bootstrap")
+    mocker.patch("reporting.temporal_worker.chat_worker_resources", _noop_resources)
+    mocker.patch("reporting.temporal_worker.Client.connect", AsyncMock(return_value=MagicMock()))
+    mocker.patch("reporting.temporal_worker.Worker", return_value=AsyncMock())
+    reconcile = mocker.patch("reporting.temporal_worker.session_reaper_schedule.reconcile", AsyncMock())
+
     import reporting.temporal_worker as tw
 
-    mocker.patch("reporting.temporal_worker.sandbox_reaper.reaping_configured", return_value=False)
-    reap = mocker.patch("reporting.temporal_worker.sandbox_reaper.reap_abandoned_sandboxes", AsyncMock())
-
-    await tw._reap_loop()
-
-    reap.assert_not_awaited()
-
-
-async def test_a_failed_sweep_does_not_end_the_reap_loop(mocker):
-    """One provider outage must not stop reaping for the life of the process."""
-    import reporting.temporal_worker as tw
-
-    mocker.patch("reporting.temporal_worker.sandbox_reaper.reaping_configured", return_value=True)
-    mocker.patch("reporting.temporal_worker.settings.SANDBOX_REAP_INTERVAL_SECONDS", 0)
-    passes = []
-
-    async def _reap():
-        passes.append(len(passes))
-        if len(passes) == 1:
-            raise RuntimeError("provider down")
-        tw._shutdown_event.set()
-
-    mocker.patch("reporting.temporal_worker.sandbox_reaper.reap_abandoned_sandboxes", _reap)
-
+    tw._shutdown_event.set()
     try:
-        await tw._reap_loop()
+        await tw._run_worker()
     finally:
         tw._shutdown_event.clear()
 
-    assert len(passes) == 2
+    reconcile.assert_awaited_once()
 
 
 async def test_bootstrap_installs_handlers(mocker):

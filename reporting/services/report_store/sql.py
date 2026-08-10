@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlmodel import Field, SQLModel, col, select
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -3120,6 +3120,25 @@ class SQLModelReportStore(ReportStore):
             )
             result = await session.execute(stmt)
             return [_chat_session_from_sql_record(r) for r in result.scalars().all()]
+
+    async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                select(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.origin) == "interactive",
+                    col(ChatSessionRecord.updated_at) < idle_before,
+                )
+                # Oldest first: a sweep bounded by `limit` should collect the
+                # sessions that have been idle longest, not an arbitrary page.
+                .order_by(col(ChatSessionRecord.updated_at).asc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [
+                IdleChatSession(user_id=r.user_id, thread_id=r.thread_id, updated_at=r.updated_at)
+                for r in result.scalars().all()
+            ]
 
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         async with AsyncSession(_get_engine()) as session:

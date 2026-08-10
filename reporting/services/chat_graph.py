@@ -389,7 +389,17 @@ def namespaced_thread_id(current_user: CurrentUser, thread_id: str) -> str:
     The user id prefix is server-derived, so a client cannot reach another
     user's thread by guessing the thread id.
     """
-    return f"user:{current_user.user.user_id}:thread:{thread_id}"
+    return thread_namespace(current_user.user.user_id, thread_id)
+
+
+def thread_namespace(user_id: str, thread_id: str) -> str:
+    """The same namespace, for callers holding an id rather than a request.
+
+    Background work -- the session reaper -- has a stored ``user_id`` and no
+    authenticated user to derive one from. One function so the two can never
+    disagree about where a thread's state lives.
+    """
+    return f"user:{user_id}:thread:{thread_id}"
 
 
 async def load_thread_messages(current_user: CurrentUser, thread_id: str, *, limit: int) -> list[Any]:
@@ -486,11 +496,21 @@ async def _discard_thread_sandbox(graph: Any, namespaced_id: str) -> None:
 
 async def delete_thread_messages(current_user: CurrentUser, thread_id: str) -> None:
     """Permanently delete persisted LangGraph state for a user's chat thread."""
+    await delete_thread_state(current_user.user.user_id, thread_id)
+
+
+async def delete_thread_state(user_id: str, thread_id: str) -> None:
+    """Delete a thread's checkpoint and the sandbox it suspended.
+
+    Takes an id rather than a ``CurrentUser`` so the session reaper, which has
+    no request behind it, deletes a thread by exactly the same path a user's own
+    delete takes -- including killing the sandbox first.
+    """
     graph = get_chat_graph()
     checkpointer = getattr(graph, "checkpointer", None)
     if checkpointer is None:
         raise RuntimeError("Chat graph does not expose a checkpointer")
-    namespaced_id = namespaced_thread_id(current_user, thread_id)
+    namespaced_id = thread_namespace(user_id, thread_id)
     # Before the checkpoint goes: it holds the only record of the thread's
     # suspended sandbox, which would otherwise sit paused, consuming
     # provider-side storage, with nothing left that could resume or find it.
@@ -568,6 +588,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
     sandbox_session.start_sandbox_session(
         resume_sandbox_id=stored_sandbox_id,
         persist=sandbox_persistence_allowed(config),
+        thread=sandbox_thread_tag(config),
     )
     chat_budget.set_current_budget_controller(budget_controller_from_config(config))
 
@@ -3278,6 +3299,16 @@ def _headless_from_config(config: RunnableConfig) -> bool:
     if not isinstance(configurable, dict):
         return False
     return configurable.get("headless") is True
+
+
+def sandbox_thread_tag(config: RunnableConfig) -> str:
+    """The thread to stamp on a sandbox opened for this turn.
+
+    Namespaced (``user:<id>:thread:<id>``), because it is read back by the
+    session reaper, which needs both halves to find the session that owns the
+    sandbox. A sandbox with no thread tag is one no session can claim.
+    """
+    return _thread_id_from_config(config)
 
 
 def sandbox_persistence_allowed(config: RunnableConfig) -> bool:

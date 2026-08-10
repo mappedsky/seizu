@@ -923,6 +923,13 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 # Sandbox delegation (sandbox__delegate chat tool)
 # ---------------------------------------------------------------------------
 
+# Identifies this installation in the metadata of every sandbox it creates, and
+# is the only ownership claim the reaper acts on. Set it whenever the sandbox
+# credentials are shared with another Seizu installation (production and
+# staging on one E2B account, say) -- deployments that leave it unset share one
+# bucket and can therefore collect each other's sandboxes.
+SEIZU_DEPLOYMENT_ID = str_env("SEIZU_DEPLOYMENT_ID", "")
+
 # Set to true to enable the sandbox__delegate tool in the chat agent.
 # Requires SANDBOX_API_KEY when using E2B (https://e2b.dev).
 # For self-hosted sandboxes (e.g. OpenKruise Agents), set SANDBOX_DOMAIN to
@@ -991,27 +998,26 @@ SANDBOX_SESSION_TIMEOUT_SECONDS = int_env("SANDBOX_SESSION_TIMEOUT_SECONDS", 1_8
 # persistence entirely.
 SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 
-# Periodically destroy suspended sandboxes nobody is coming back for -- the
-# chat threads users stop replying to rather than delete. Runs in the Temporal
-# worker (a single process, unlike the web app's workers), so a deployment
-# without that worker does not reap. Only sandboxes Seizu created are touched.
-# Independent of SANDBOX_ENABLED -- turning delegation off is when leftovers
-# most need collecting -- but needs SANDBOX_API_KEY or SANDBOX_DOMAIN to have
-# something to talk to. See SBX-011 in docs/root/dev/decisions/sandbox.md.
-SANDBOX_REAP_ENABLED = bool_env("SANDBOX_REAP_ENABLED", True)
-# How long a suspended sandbox may sit unused before the sweep destroys it.
-# Idle time is inferred from the provider's own timestamps, which may or may not
-# advance when a sandbox is resumed, so treat this as an upper bound on a
-# sandbox's life rather than a precise idle timer -- keep it comfortably longer
-# than a conversation's active span. 0 (or less) disables reaping.
-SANDBOX_REAP_IDLE_SECONDS = int_env("SANDBOX_REAP_IDLE_SECONDS", 86_400)
+# Retire chat sessions nobody has come back to, destroying the suspended
+# sandbox each one holds along with it. THIS DELETES CHAT HISTORY: a session
+# untouched for CHAT_SESSION_REAP_IDLE_SECONDS is removed, transcript included.
+# A sandbox belongs to its thread for as long as the thread exists, so the
+# session is the unit -- reaping the sandbox alone would leave a conversation
+# whose accumulated files silently vanished. Runs as a Temporal Schedule
+# (fixed id, SKIP overlap), so a deployment without a Temporal worker does not
+# reap. See SBX-011 in docs/root/dev/decisions/sandbox.md.
+CHAT_SESSION_REAP_ENABLED = bool_env("CHAT_SESSION_REAP_ENABLED", True)
+# How long a session may sit untouched before it is retired, measured from its
+# last update (not its creation), so an active conversation is never at risk.
+# 0 (or less) disables reaping entirely. Default 30 days.
+CHAT_SESSION_REAP_IDLE_SECONDS = int_env("CHAT_SESSION_REAP_IDLE_SECONDS", 2_592_000)
 # Interval between sweeps.
-SANDBOX_REAP_INTERVAL_SECONDS = int_env("SANDBOX_REAP_INTERVAL_SECONDS", 900)
-# Also reap suspended sandboxes that carry no Seizu tag. Off by default: the
-# listing is account-wide, so untagged sandboxes may belong to another
-# deployment, another tool, or a person. Turn it on only when these credentials
-# are Seizu's alone -- it is also how the sandboxes created before tagging
-# existed get cleaned up.
+CHAT_SESSION_REAP_INTERVAL_SECONDS = int_env("CHAT_SESSION_REAP_INTERVAL_SECONDS", 3_600)
+# Also collect suspended sandboxes tagged for another deployment, or not tagged
+# at all. Off by default: the provider listing is account-wide, so those may
+# belong to a sibling installation, another tool, or a person. Turn it on only
+# when these credentials are this deployment's alone -- it is also how sandboxes
+# created before tagging existed get cleaned up.
 SANDBOX_REAP_UNTAGGED = bool_env("SANDBOX_REAP_UNTAGGED", False)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)

@@ -14,7 +14,7 @@ import botocore.exceptions
 from snowflake import SnowflakeGenerator
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -4060,6 +4060,64 @@ class DynamoDBReportStore(ReportStore):
                 ScanIndexForward=False,
             )
             return [_chat_session_from_item(item) for item in resp.get("Items", [])]
+
+        return await asyncio.to_thread(_op)
+
+    async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
+        # Sessions are partitioned per user and there is no global index over
+        # updated_at, so this walks the user lookup partition and asks each
+        # user's session partition for its old end. The list SK starts with the
+        # timestamp, so "idle" is a key-range condition rather than a scan --
+        # a user with no idle sessions costs one query that returns nothing.
+        cutoff_sk = f"UPDATED#{idle_before}"
+
+        def _op() -> list[IdleChatSession]:
+            table = _get_table()
+            idle: list[IdleChatSession] = []
+            user_kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _PK_USER_LOOKUP},
+                "ProjectionExpression": "user_id",
+            }
+            while len(idle) < limit:
+                users_resp = table.query(**user_kwargs)
+                for user_item in users_resp.get("Items", []):
+                    user_id = str(user_item.get("user_id") or "")
+                    if not user_id:
+                        continue
+                    session_kwargs: dict[str, Any] = {
+                        "KeyConditionExpression": "PK = :pk AND SK < :cutoff",
+                        "FilterExpression": "attribute_not_exists(origin) OR origin = :interactive",
+                        "ExpressionAttributeValues": {
+                            ":pk": _chat_session_list_pk(user_id),
+                            ":cutoff": cutoff_sk,
+                            ":interactive": "interactive",
+                        },
+                        "ProjectionExpression": "thread_id, updated_at",
+                    }
+                    while len(idle) < limit:
+                        sessions_resp = table.query(**session_kwargs)
+                        for item in sessions_resp.get("Items", []):
+                            idle.append(
+                                IdleChatSession(
+                                    user_id=user_id,
+                                    thread_id=str(item["thread_id"]),
+                                    updated_at=str(item["updated_at"]),
+                                )
+                            )
+                            if len(idle) >= limit:
+                                break
+                        session_last_key = sessions_resp.get("LastEvaluatedKey")
+                        if not session_last_key:
+                            break
+                        session_kwargs["ExclusiveStartKey"] = session_last_key
+                    if len(idle) >= limit:
+                        break
+                last_key = users_resp.get("LastEvaluatedKey")
+                if not last_key:
+                    break
+                user_kwargs["ExclusiveStartKey"] = last_key
+            return idle
 
         return await asyncio.to_thread(_op)
 

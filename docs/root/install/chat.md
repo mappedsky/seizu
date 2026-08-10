@@ -277,6 +277,19 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_TOOL_RESULT_MAX_ROWS` | `100` | Maximum rows returned to chat from one tool call (normal MCP calls are unaffected). |
 | `CHAT_TOOL_RESULT_MAX_BYTES` | `200000` | Maximum serialized bytes returned to chat from one tool call. |
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
+| `CHAT_SESSION_REAP_ENABLED` | `true` | Retire sessions nobody has come back to. **Deletes chat history.** |
+| `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
+| `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |
+
+```{warning}
+**Sessions are retired after 30 days of inactivity by default**, transcript
+included, along with the suspended sandbox each one holds. The sweep runs as a
+Temporal Schedule on `seizu-temporal-worker`, so a deployment without that
+worker keeps sessions forever. Raise `CHAT_SESSION_REAP_IDLE_SECONDS` to match
+your retention policy, or set `CHAT_SESSION_REAP_ENABLED=false` — see
+[retiring idle sessions](sandbox.html#retiring-idle-sessions-and-their-sandboxes)
+for why the session and its sandbox are retired together.
+```
 
 Checkpoint storage (`CHAT_CHECKPOINT_*`) is documented in the [backend configuration](backend.html).
 

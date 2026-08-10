@@ -3258,3 +3258,57 @@ async def test_missing_index_is_retried_after_the_backoff(patch_table, store, mo
     assert patch_table.query.call_args_list[0].kwargs["IndexName"] == "space_reports_index"
     assert dynamodb_module._space_reports_index_available is True
     assert [item.report_id for item in result] == ["r1"]
+
+
+# ---------------------------------------------------------------------------
+# Idle chat sessions (the session reaper's one cross-user read, SBX-011)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_idle_chat_sessions_walks_users_then_asks_for_the_old_end(patch_table, store):
+    """Sessions are partitioned per user with no index over updated_at, so the
+    sweep walks the user lookup partition. "Idle" is a key-range condition on
+    the list SK -- a user with nothing old costs one query that returns nothing,
+    rather than a scan of their sessions."""
+    patch_table.query.side_effect = [
+        {"Items": [{"user_id": "u1"}, {"user_id": "u2"}]},
+        {"Items": [{"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"}]},
+        {"Items": []},
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert [(i.user_id, i.thread_id) for i in idle] == [("u1", "t1")]
+    sessions_call = patch_table.query.call_args_list[1].kwargs
+    assert sessions_call["KeyConditionExpression"] == "PK = :pk AND SK < :cutoff"
+    assert sessions_call["ExpressionAttributeValues"][":pk"] == "CHAT_SESSION_LIST#u1"
+    assert sessions_call["ExpressionAttributeValues"][":cutoff"] == "UPDATED#2021-01-01T00:00:00+00:00"
+
+
+async def test_list_idle_chat_sessions_stops_at_the_limit(patch_table, store):
+    """One pass must not delete an unbounded number of sessions; the next sweep
+    picks up where this one stopped."""
+    patch_table.query.side_effect = [
+        {"Items": [{"user_id": "u1"}]},
+        {
+            "Items": [
+                {"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"},
+                {"thread_id": "t2", "updated_at": "2020-01-02T00:00:00+00:00"},
+            ]
+        },
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=1)
+
+    assert [i.thread_id for i in idle] == ["t1"]
+
+
+async def test_list_idle_chat_sessions_excludes_headless_runs(patch_table, store):
+    """Scheduled run sessions belong to a schedule's history and never leave a
+    suspended sandbox behind."""
+    patch_table.query.side_effect = [{"Items": [{"user_id": "u1"}]}, {"Items": []}]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    filter_expression = patch_table.query.call_args_list[1].kwargs["FilterExpression"]
+    assert filter_expression == "attribute_not_exists(origin) OR origin = :interactive"

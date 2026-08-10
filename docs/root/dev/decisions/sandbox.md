@@ -199,9 +199,9 @@ the value and says why.
 **Don't:** assume retention is solved by the session lifecycle.
 `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox, not a paused one,
 and a memory snapshot costs more provider-side storage than a disk-only one. The
-sandbox of a thread that is abandoned rather than deleted is reclaimed by the
-sweep in [SBX-011](#sbx-011), which is a periodic pass in one process — not a
-guarantee the lifecycle itself provides.
+sandbox of a thread that is abandoned rather than deleted is reclaimed only when
+the *thread* is retired by the sweep in [SBX-011](#sbx-011) — a scheduled pass
+on a multi-day threshold, not a guarantee the lifecycle itself provides.
 
 ## SBX-010 — Result files live under `/home/user`, never `/tmp`
 
@@ -300,75 +300,86 @@ checkpoint.
 **Don't:** grant the sub-agent a confirmation-gated tool on the grounds that the
 runtime would catch it. It fails closed there as a backstop, not as the control.
 
-## SBX-011 — Abandoned sandboxes are swept from the provider's listing, not from Seizu's records
+## SBX-011 — The session is what gets reaped; the sandbox goes with it
 
-**Applies to:** `reporting/services/sandbox_reaper.py`,
-`list_paused_sandboxes`/`kill_sandbox` in `sandbox_backend.py`, `_reap_loop` in
-`reporting/temporal_worker.py`
+**Applies to:** `reporting/services/session_reaper.py`,
+`reporting/services/session_reaper_schedule.py`,
+`reporting/temporal_workflows/session_reap.py`, the account-wide helpers in
+`sandbox_backend.py`
 
-**Measured, on one developer's account the day this landed:** 59 suspended
-sandboxes, the oldest six days old, every one of them a chat thread that was
-abandoned rather than deleted. The leak is not theoretical and it does not
-plateau.
+**Measured, on one developer's account:** 59 suspended sandboxes, the oldest six
+days old, every one of them a chat thread abandoned rather than deleted. The
+leak is not theoretical and it does not plateau.
 
-A periodic pass lists the provider's **suspended** sandboxes and destroys the
-ones idle beyond `SANDBOX_REAP_IDLE_SECONDS` (default 24h). Only sandboxes
-carrying Seizu's `seizu_managed` metadata tag are touched, unless
-`SANDBOX_REAP_UNTAGGED` says the credentials are Seizu's alone. Nothing created
-before this landed carries the tag, so clearing an existing backlog needs that
-setting — which is most of why it exists.
+A chat thread's sandbox is destroyed when the thread is deleted (SBX-005), and
+nothing deletes an abandoned thread. `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a
+*running* sandbox, not a paused one, so nothing covered this case.
 
-**Why a provider sweep rather than a walk over checkpoints:** the sandboxes that
-leak worst are the ones no checkpoint points at any more — a trimmed thread, a
-run that died between creating a sandbox and storing its id, a database restored
-from a backup. Anything derived from Seizu's own records can only find sandboxes
-Seizu still remembers, which is precisely the set that was never the problem.
-Deleting a thread already kills its sandbox directly, so the sweep is the
-backstop, not the primary path.
+**The session is the unit of retirement, not the sandbox.** A sandbox belongs to
+its thread for as long as the thread exists, so a sweep that reaped sandboxes on
+their own age would leave live conversations whose accumulated files had
+silently vanished — recoverable (a resume that fails terminally creates a fresh
+sandbox, SBX-006) but a real loss the user never asked for and cannot see
+coming. So the sweep retires *sessions* idle past
+`CHAT_SESSION_REAP_IDLE_SECONDS`, and the sandbox goes with the session through
+the same `delete_thread_state` path a user's own delete takes.
 
-**Why paused only:** a running sandbox has a provider-enforced expiry
-(`SANDBOX_SESSION_TIMEOUT_SECONDS`); a paused one has none. That asymmetry is
-the entire leak. Reaping running sandboxes would also mean racing live turns for
-no benefit.
+**This deletes chat history**, and that is the deliberate consequence of tying
+the two lifetimes together: a resource whose owner may never come back cannot be
+reclaimed without retiring the thing that owns it. Default 30 days from
+`updated_at` — last activity, not creation, so an active conversation is never
+at risk however old it is.
 
-**Idle time is inferred, and the inference is deliberately conservative.** The
-provider offers no way to amend a sandbox's metadata after creation, so there is
-nowhere to stamp a last-used time on resume — a tag written at creation can say
-what a sandbox is *for* and nothing about when it was last used. What a listing
-gives is `started_at` and `end_at`, and whether either advances when a paused
-sandbox is resumed is the provider's behaviour, not something Seizu can pin. So
-the sweep takes the **latest timestamp that is not in the future** and treats it
-as the last known activity:
+**Idle time comes from Seizu's store, not from the provider.** `updated_at` on
+the session record is authoritative and precise. An earlier design inferred
+idleness from the provider's `started_at`/`end_at`, because sandbox metadata
+cannot be amended after creation and there is nowhere to stamp a last-used time
+— but a chat session already records exactly that, in a place that is ours.
+Sandbox metadata is now used only for facts true for the sandbox's whole life:
+who owns it, what it is for, and which thread it serves.
 
-- if a resume refreshes one of them, this is a true idle reap;
-- if it refreshes neither, it degrades to a maximum-age reap.
+**Two passes, because the failure modes differ:**
 
-On E2B today, `end_at` on a suspended sandbox is observed to be the moment it
-was *paused* — seconds to minutes after `started_at` across all 59 sandboxes
-above — so idle time there is measured from the last suspension, which is the
-precise case. That is an observation about one provider's current behaviour, not
-a contract, which is why the rule below stands regardless of it.
+| Pass | Input | Reaps |
+|---|---|---|
+| Idle sessions | the store, `updated_at < cutoff` | the session, its checkpoint, its sandbox |
+| Orphan sandboxes | the provider's paused listing | sandboxes whose thread has no session |
 
-Both are safe. The degraded case costs a still-active conversation its
-accumulated files, and the next turn opens a fresh sandbox — the same outcome a
-terminal resume failure already produces ([SBX-006](#sbx-006)), which the
-sub-agent's own recall already corrects for ([SBX-008](#sbx-008)). Future
-timestamps are **ignored rather than clamped**: `end_at` on a suspended sandbox
-may still carry the expiry it would have had while running, and treating that as
-activity would make the sandbox permanently unreapable.
+The orphan pass is why a *provider* listing is involved at all: a deleted thread
+whose kill failed, a run that died before its session record was written, a
+database restored from a backup. Anything derived from Seizu's own records can
+only find what Seizu still remembers, which is exactly the set that was never
+the problem. An orphan must also be older than `SANDBOX_SESSION_TIMEOUT_SECONDS`
+before it counts — a session record is written by a different call than the
+sandbox it serves, so a sandbox seconds old can genuinely have no session yet.
 
-**Gated on credentials, not on `SANDBOX_ENABLED`.** Turning delegation off is
-the moment a deployment most wants its leftover sandboxes collected; gating on
-the feature flag would stop the collection along with the feature.
+**Ownership is per deployment, not per product.** `seizu_managed` carries
+`SEIZU_DEPLOYMENT_ID`, and only an exact match is an ownership claim. "Some
+Seizu created it" is not one: production and staging on a shared provider
+account would otherwise reap each other. The listing is filtered by that tag
+**provider-side**, which also stops a busy shared account from spending the
+page cap on sandboxes that were never reapable. Deployments that leave the id
+unset share one `default` bucket — set it whenever the credentials are shared.
 
-**Why it runs in the Temporal worker:** it is one process. Every gunicorn worker
-running the same account-wide sweep would multiply provider calls and race over
-the same kills. The cost is that a deployment running no Temporal worker does
-not reap; `SANDBOX_SESSION_PERSIST=false` is the alternative there, and the
-install docs say so.
+**Singleton by Temporal Schedule, not by process.** Worker replicas are
+ordinary, and a timer inside each of them would list the whole account N times
+and race over every deletion. A Schedule with a fixed id and
+`ScheduleOverlapPolicy.SKIP` gives one sweep at a time across every replica, and
+a sweep that outruns its interval is skipped rather than stacked. Every replica
+reconciles the same schedule at startup, which is idempotent. The cost is that a
+deployment running no Temporal worker does not reap;
+`SANDBOX_SESSION_PERSIST=false` is the alternative there.
 
-**Don't:** reap untagged sandboxes by default. The listing is account-wide, so
-an untagged sandbox may belong to another deployment, another tool, or a person.
-**Don't:** treat `SANDBOX_REAP_IDLE_SECONDS=0` as "reap immediately" — it is
-read as off, because immediately includes the sandbox the currently running turn
-is about to resume.
+**Races are narrowed, not eliminated, and the code says so.** A listing is a
+snapshot: between taking it and acting, a user can reply to a session or resume
+a sandbox. Two guards — the session is re-read immediately before it is deleted,
+and a sandbox's paused state is re-checked immediately before it is killed —
+reduce the window to a single API call each. Nothing short of a provider-side
+conditional delete closes it. The residual risk is bounded by what is protecting
+it: a 30-day-idle session resumed in the same second as the sweep.
+
+**Don't:** reap a sandbox whose session is still alive, however old the sandbox
+is. **Don't:** reap untagged or foreign-tagged sandboxes by default. **Don't:**
+read `CHAT_SESSION_REAP_IDLE_SECONDS=0` as "retire immediately" — it means off,
+because immediately would mean every session there is. **Don't:** move the sweep
+back into a worker-local loop; the Schedule is the singleton mechanism.

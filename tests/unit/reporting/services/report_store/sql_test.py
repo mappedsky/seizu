@@ -8,9 +8,9 @@ from datetime import UTC
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
@@ -244,6 +244,49 @@ async def test_chat_session_list_returns_sessions(store, mocker):
     sessions = await store.list_chat_sessions("user-1", limit=10)
     assert len(sessions) == 2
     assert {s.title for s in sessions} == {"First", "Second"}
+
+
+async def _backdate_session(store, thread_id: str, updated_at: str) -> None:
+    """Age a session directly. The store has no API for it -- ``touch`` only ever
+    moves ``updated_at`` forward -- and the reaper's whole question is which
+    sessions are old."""
+    async with AsyncSession(sql_module._get_engine()) as session:
+        result = await session.execute(
+            select(sql_module.ChatSessionRecord).where(sql_module.ChatSessionRecord.thread_id == thread_id)
+        )
+        record = result.scalar_one()
+        record.updated_at = updated_at
+        session.add(record)
+        await session.commit()
+
+
+async def test_list_idle_chat_sessions_selects_only_the_stale_ones(store, mocker):
+    """The reaper's one cross-user read (SBX-011). Anything it returns is about
+    to be deleted, so "recently updated" must never appear in it."""
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        side_effect=["old", "fresh"],
+    )
+    await store.create_chat_session("user-1", title="Old")
+    await store.create_chat_session("user-2", title="Fresh")
+    await _backdate_session(store, "old", "2020-01-01T00:00:00+00:00")
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert [(i.user_id, i.thread_id) for i in idle] == [("user-1", "old")]
+
+
+async def test_list_idle_chat_sessions_ignores_headless_sessions(store, mocker):
+    """Scheduled run sessions belong to a schedule's history, are bounded by it,
+    and never leave a suspended sandbox behind."""
+    mocker.patch(
+        "reporting.services.report_store.sql.generate_report_id",
+        return_value="run-1",
+    )
+    await store.create_chat_session("user-1", title="Run", origin="scheduled", scheduled_chat_id="sc-1")
+    await _backdate_session(store, "run-1", "2020-01-01T00:00:00+00:00")
+
+    assert await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10) == []
 
 
 async def test_chat_session_touch_updates_timestamp(store, mocker):
