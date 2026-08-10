@@ -45,3 +45,39 @@ this shape keeps serving while it is fixed.
 **Don't:** make the check fatal by default, block startup on a discovery fetch
 failure, or normalize `iss` anywhere between token validation and
 `get_or_create_user`.
+
+## AUTH-002 — The dev stack reaches Authentik only as `localhost:9000`
+
+**Applies to:** the `authentik-loopback` service in `docker-compose.yml`
+
+A socat sidecar shares the `seizu` container's network namespace and forwards
+its loopback `:9000` to `authentik-server:9000`, so the backend's discovery and
+token exchange use the same URL the browser, MCP clients and the CLI use.
+`OIDC_INTERNAL_AUTHORITY` is therefore unset in dev, and `JWKS_URL` points at
+`localhost:9000` like everything else.
+
+**Why:** Authentik has no fixed-issuer setting — `OAuth2Provider.get_issuer()`
+calls `request.build_absolute_uri()`, so `iss` and every advertised endpoint
+follow the request `Host`, and `issuer_mode` only selects the path. Reaching it
+under a second hostname is therefore enough to fork one login into two users
+(AUTH-001), which is what made an MCP-initiated confirmation unopenable from the
+dev browser. This is split-horizon DNS in miniature: one name and port, resolved
+differently inside the network than outside, which is how the problem is solved
+in production.
+
+**Rejected — spoofing the `Host` header on the backend's OIDC calls:** httpx
+will do it, but over HTTPS it forces a choice between a certificate valid for
+the internal name and an SNI override for the external one, and any `Host`-
+routing proxy in front of the IDP may answer 421. A dev-only convenience is not
+worth that in the shared auth path.
+
+**Rejected — a DNS name resolving to `127.0.0.1` (`idp.localtest.me`) with a
+docker network alias:** it needs no hosts-file edit and was verified working,
+but the issuer includes the *port*, so any quickstart that forwards the IDP on
+a port other than 9000 (a VM port-forward, say) re-forks it under a new name.
+It also makes first-run depend on public DNS, which fails offline and under
+resolvers with DNS-rebinding protection.
+
+**Don't:** add a second hostname for Authentik to the dev config — including a
+"just for the backend" one. `ipv6only=0` on the listener is load-bearing:
+`localhost` resolves to `::1` first inside the container.
