@@ -135,9 +135,10 @@ turn that loses the race is refused with *"This conversation has been retired"*
 rather than running against state being deleted underneath it.
 
 On DynamoDB each sweep walks a bounded number of users and records where it
-stopped, resuming there next time, so a large deployment takes several passes to
-work through everyone rather than timing out on one. (SQL answers the same
-question globally with a single indexed query.)
+stopped — both which user, and how far into that user's own sessions — resuming
+there next time, so a large deployment takes several passes to work through
+everyone rather than timing out on one. (SQL answers the same question globally
+with a single indexed query.)
 
 **Set `SEIZU_DEPLOYMENT_ID` whenever the sandbox credentials are shared** with
 another Seizu installation (production and staging on one E2B account, say). It

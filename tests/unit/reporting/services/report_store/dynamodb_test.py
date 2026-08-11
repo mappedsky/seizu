@@ -3415,12 +3415,16 @@ async def test_the_idle_sweep_stops_after_its_user_budget_and_saves_its_place(pa
         if call.kwargs["ExpressionAttributeValues"][":pk"].startswith("CHAT_SESSION_LIST#")
     ]
     assert queried == ["CHAT_SESSION_LIST#u1", "CHAT_SESSION_LIST#u2"]
-    assert saved.call_args.args[1] == {"PK": "USER_LOOKUP", "SK": "sk-u2"}
+    assert saved.call_args.args[1].user_key == {"PK": "USER_LOOKUP", "SK": "sk-u2"}
 
 
 async def test_the_next_sweep_resumes_where_the_last_one_stopped(patch_table, store, mocker):
     """Otherwise the users at the end of the partition are never reached."""
-    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value={"PK": "USER_LOOKUP", "SK": "sk-u2"})
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u2"}),
+    )
     mocker.patch.object(dynamodb_module, "_write_reap_cursor")
     patch_table.query.side_effect = [{"Items": [_user("u3")]}, {"Items": []}]
 
@@ -3431,7 +3435,11 @@ async def test_the_next_sweep_resumes_where_the_last_one_stopped(patch_table, st
 
 async def test_reaching_the_last_user_clears_the_cursor(patch_table, store, mocker):
     """The next pass starts from the top rather than resuming past the end."""
-    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value={"PK": "USER_LOOKUP", "SK": "sk-u2"})
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u2"}),
+    )
     saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
     patch_table.query.side_effect = [{"Items": [_user("u3")]}, {"Items": []}]
 
@@ -3469,7 +3477,7 @@ async def test_stopping_mid_page_resumes_at_the_user_it_stopped_on(patch_table, 
 
     await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
 
-    assert saved.call_args.args[1] == {"PK": "USER_LOOKUP", "SK": "sk-u1"}
+    assert saved.call_args.args[1].user_key == {"PK": "USER_LOOKUP", "SK": "sk-u1"}
 
 
 async def test_one_user_cannot_spend_the_whole_pass_on_headless_sessions(patch_table, store, mocker):
@@ -3491,3 +3499,102 @@ async def test_one_user_cannot_spend_the_whole_pass_on_headless_sessions(patch_t
         if call.kwargs["ExpressionAttributeValues"][":pk"].startswith("CHAT_SESSION_LIST#")
     ]
     assert len(session_queries) == 3
+
+
+async def test_hitting_the_session_limit_resumes_after_that_session(patch_table, store, mocker):
+    """The limit is a hard bound on what one pass retires, so resuming after the
+    *page* would hand the next pass a page's worth it already collected -- or,
+    worse, let this one overshoot by a page."""
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        {
+            "Items": [
+                {"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"},
+                {"thread_id": "t2", "updated_at": "2020-01-02T00:00:00+00:00"},
+            ],
+            "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "end-of-page"},
+        },
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=1)
+
+    assert [entry.thread_id for entry in idle] == ["t1"]
+    cursor = saved.call_args.args[1]
+    assert cursor.session_key == {
+        "PK": "CHAT_SESSION_LIST#u1",
+        "SK": dynamodb_module._chat_session_list_sk("2020-01-01T00:00:00+00:00", "t1"),
+    }
+
+
+async def test_a_capped_user_is_resumed_from_where_their_pages_ran_out(patch_table, store, mocker):
+    """The cap alone is a wall: without the inner key every pass rereads the same
+    oldest pages, so an interactive session behind enough headless ones is never
+    returned at all."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_REAP_PAGES_PER_USER", 2)
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        {"Items": [], "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-1"}},
+        {"Items": [], "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}},
+    ]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    cursor = saved.call_args.args[1]
+    assert cursor.user_id == "u1"
+    assert cursor.session_key == {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}
+    assert cursor.user_key == {"PK": "USER_LOOKUP", "SK": "sk-u1"}
+
+
+async def test_the_next_pass_continues_inside_that_user_before_moving_on(patch_table, store, mocker):
+    """Resuming at the user *after* them would skip whatever is left of their
+    list -- the sessions the cap hid in the first place."""
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(
+            user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"},
+            user_id="u1",
+            session_key={"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"},
+        ),
+    )
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        # Their remaining pages, then the walk continues past them.
+        {"Items": [{"thread_id": "t9", "updated_at": "2020-01-01T00:00:00+00:00"}]},
+        {"Items": []},
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    first = patch_table.query.call_args_list[0].kwargs
+    assert first["ExpressionAttributeValues"][":pk"] == "CHAT_SESSION_LIST#u1"
+    assert first["ExclusiveStartKey"] == {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}
+    assert [(entry.user_id, entry.thread_id) for entry in idle] == [("u1", "t9")]
+    # Their list is finished, so the next pass goes back to walking users.
+    assert saved.call_args.args[1] is None or not saved.call_args.args[1].resumes_within_a_user
+
+
+def test_a_cursor_item_round_trips():
+    """Both halves survive storage, and an unrecognized shape reads as "start
+    from the top" rather than resuming somewhere arbitrary."""
+    cursor = dynamodb_module._ReapCursor(
+        user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"},
+        user_id="u1",
+        session_key={"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"},
+    )
+
+    assert dynamodb_module._ReapCursor.from_item(cursor.to_item()) == cursor
+    assert dynamodb_module._ReapCursor.from_item({}) is None
+    assert dynamodb_module._ReapCursor.from_item("nonsense") is None
+
+
+def test_a_cursor_without_a_session_key_does_not_claim_to_resume_within_a_user():
+    cursor = dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"})
+
+    assert cursor.resumes_within_a_user is False
+    assert "session_key" not in cursor.to_item()
