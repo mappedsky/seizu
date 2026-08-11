@@ -3552,7 +3552,6 @@ async def test_a_capped_user_is_resumed_from_where_their_pages_ran_out(patch_tab
 async def test_the_next_pass_continues_inside_that_user_before_moving_on(patch_table, store, mocker):
     """Resuming at the user *after* them would skip whatever is left of their
     list -- the sessions the cap hid in the first place."""
-    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
     mocker.patch.object(
         dynamodb_module,
         "_read_reap_cursor",

@@ -418,9 +418,14 @@ partitioned per user in DynamoDB with no global order on `updated_at`, and
 asking every user in one pass is what makes an hourly sweep unaffordable — 100k
 users is 100k queries, nearly all returning nothing, and a pass that cannot
 finish inside the activity timeout retries from the first page forever, never
-reaching the users at the end. So a pass walks at most
-`CHAT_SESSION_REAP_USERS_PER_PASS` users and records where it stopped; the next
-resumes there and clears the cursor on reaching the end. Bounded work, complete
+reaching the users at the end.
+
+So a pass is bounded in both directions — at most
+`CHAT_SESSION_REAP_USERS_PER_PASS` users, and at most
+`CHAT_SESSION_REAP_PAGES_PER_USER` pages of any one user's session list — and
+records where it stopped in both: **which user, and how far into that user's own
+sessions**. The next pass resumes there, finishing that user before walking on,
+and clears the cursor on reaching the last user. Bounded work, complete
 coverage. Sweeps never overlap (`SKIP`), so the cursor has a single writer, and
 losing it costs a repeated pass rather than skipped users.
 
