@@ -326,9 +326,18 @@ the same `delete_thread_state` path a user's own delete takes.
 
 **This deletes chat history**, and that is the deliberate consequence of tying
 the two lifetimes together: a resource whose owner may never come back cannot be
-reclaimed without retiring the thing that owns it. Default 30 days from
-`updated_at` — last activity, not creation, so an active conversation is never
+reclaimed without retiring the thing that owns it. Idle time is measured from
+`updated_at` — last activity, not creation — so an active conversation is never
 at risk however old it is.
+
+**Which is why it ships off.** `CHAT_SESSION_REAP_ENABLED` defaults to false:
+retention is a policy an operator chooses, and an upgrade that quietly began
+deleting transcripts would be the worst possible way to learn this feature
+exists. The cost is that the leak this fixes persists until someone turns it on,
+which is the right trade — a deployment that never notices its paused sandboxes
+loses money, while one that never notices its retention policy loses data. Note
+the ordering hazard when enabling: the first sweep collects everything already
+past the threshold, so the window has to be set before the switch.
 
 **Idle time comes from Seizu's store, not from the provider.** `updated_at` on
 the session record is authoritative and precise. An earlier design inferred

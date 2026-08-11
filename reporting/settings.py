@@ -1003,10 +1003,17 @@ SANDBOX_SESSION_PERSIST = bool_env("SANDBOX_SESSION_PERSIST", True)
 # untouched for CHAT_SESSION_REAP_IDLE_SECONDS is removed, transcript included.
 # A sandbox belongs to its thread for as long as the thread exists, so the
 # session is the unit -- reaping the sandbox alone would leave a conversation
-# whose accumulated files silently vanished. Runs as a Temporal Schedule
-# (fixed id, SKIP overlap), so a deployment without a Temporal worker does not
-# reap. See SBX-011 in docs/root/dev/decisions/sandbox.md.
-CHAT_SESSION_REAP_ENABLED = bool_env("CHAT_SESSION_REAP_ENABLED", True)
+# whose accumulated files silently vanished.
+#
+# OFF by default, and deliberately so: retention is a policy an operator
+# chooses, not something an upgrade should decide for them. Turning it on is
+# what starts deleting; check CHAT_SESSION_REAP_IDLE_SECONDS first, because the
+# first sweep after it goes on collects everything already past the threshold.
+#
+# Runs as a Temporal Schedule (fixed id, SKIP overlap), so a deployment without
+# a Temporal worker does not reap. See SBX-011 in
+# docs/root/dev/decisions/sandbox.md.
+CHAT_SESSION_REAP_ENABLED = bool_env("CHAT_SESSION_REAP_ENABLED", False)
 # How long a session may sit untouched before it is retired, measured from its
 # last update (not its creation), so an active conversation is never at risk.
 # 0 (or less) disables reaping entirely. Default 30 days.

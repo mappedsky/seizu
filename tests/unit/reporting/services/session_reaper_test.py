@@ -357,6 +357,28 @@ async def test_a_zero_threshold_disables_reaping_rather_than_deleting_everything
         assert not session_reaper.reaping_configured()
 
 
+async def test_reaping_is_off_until_an_operator_turns_it_on() -> None:
+    """The default is a safety property, not a preference: an upgrade must never
+    start deleting transcripts on its own. Retention is the operator's policy.
+
+    Asserted by reloading the settings module with the variable removed from the
+    environment, rather than by reading the attribute -- a developer's own .env
+    would otherwise decide whether this passes.
+    """
+    import importlib
+    import os
+
+    from reporting import settings as settings_module
+
+    environment = {k: v for k, v in os.environ.items() if k != "CHAT_SESSION_REAP_ENABLED"}
+    with patch.dict(os.environ, environment, clear=True):
+        reloaded = importlib.reload(settings_module)
+        try:
+            assert reloaded.CHAT_SESSION_REAP_ENABLED is False
+        finally:
+            importlib.reload(settings_module)
+
+
 async def test_reaping_survives_chat_being_turned_off() -> None:
     """A deployment that disables chat still holds every session and sandbox it
     made while chat was on -- and the flag is not even passed to some services,

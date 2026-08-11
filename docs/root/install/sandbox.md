@@ -98,24 +98,29 @@ bounds a *running* sandbox, not a suspended one, so those would otherwise
 accumulate until the provider's own retention reclaimed them, if it has any.
 
 A sandbox belongs to its thread for as long as the thread exists, so **the
-session is what gets retired, and the sandbox goes with it**. A scheduled sweep
-deletes chat sessions untouched for `CHAT_SESSION_REAP_IDLE_SECONDS`, destroying
-each one's sandbox through the same path a user's own delete takes. A second
+session is what gets retired, and the sandbox goes with it**. Once enabled, a
+scheduled sweep deletes chat sessions untouched for
+`CHAT_SESSION_REAP_IDLE_SECONDS`, destroying each one's sandbox through the same
+path a user's own delete takes. A second
 pass collects *orphans*: suspended sandboxes whose thread has no session left at
 all — a deleted thread whose kill failed, a run that died before its session
 record was written, a restored backup.
 
 ```{warning}
-**This deletes chat history.** A session idle past the threshold is removed,
-transcript included, and it is on by default at 30 days. Set
-`CHAT_SESSION_REAP_IDLE_SECONDS` to suit your retention policy, or
-`CHAT_SESSION_REAP_ENABLED=false` to keep sessions forever — and with them,
-their suspended sandboxes.
+**This deletes chat history, so it is off by default.** A session idle past the
+threshold is removed, transcript included. Retention is a policy you choose:
+set `CHAT_SESSION_REAP_IDLE_SECONDS` to your window *before* setting
+`CHAT_SESSION_REAP_ENABLED=true`, because the first sweep after it goes on
+collects everything already past that threshold.
+
+Left off, sessions and their suspended sandboxes are kept indefinitely — which
+is the accumulation this feature exists to stop, so it is worth enabling
+deliberately rather than leaving alone.
 ```
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CHAT_SESSION_REAP_ENABLED` | `true` | Run the sweep at all. |
+| `CHAT_SESSION_REAP_ENABLED` | `false` | Run the sweep at all. Off by default because it deletes chat history. |
 | `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
 | `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |
 | `SANDBOX_REAP_UNTAGGED` | `false` | Also collect suspended sandboxes tagged for another deployment, or not tagged at all. |
