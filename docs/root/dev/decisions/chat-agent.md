@@ -164,10 +164,11 @@ two share only a turn id, so a client can disconnect and reattach.
 `UvicornWorker` that is a heartbeat watchdog, so a loop blocked past it gets the
 worker `SIGABRT`ed mid-response and the client receives a **truncated body
 rather than an error** (observed three times under the harness, as
-`IncompleteRead` after ~470 bytes). Separately, a dropped connection destroyed
-minutes of work that was still running and still checkpointing, with no way to
-reattach. An explicit `timeout = 300` fixes the first; only detaching the turn
-fixes the second.
+`IncompleteRead` after ~470 bytes). Separately, a dropped connection **destroyed
+the turn**: Starlette cancels a `StreamingResponse` generator on
+`http.disconnect`, so closing the tab killed minutes of work outright. An
+explicit `timeout = 300` fixes the first; only detaching the turn fixes the
+second.
 
 **The producer renders the parts; the reader only replays them.** The log holds
 the exact JSON the live stream sent, so the first delivery and every replay are
@@ -189,11 +190,38 @@ per item, so a poll can return 5 and 7 without 6; taking the gap loses 6
 permanently rather than late. Both backends truncate a page at the first gap,
 and the DynamoDB reads are `ConsistentRead=True` on top of that.
 
-**Note:** a thread has at most one running turn, enforced by a conditional write
-rather than a read-then-write, and the exclusion **expires** — otherwise a
-producer that died mid-turn would wedge that conversation permanently. A second
-caller is told to reconnect instead of starting a rival turn, which would
-interleave two answers into one conversation.
+**Stopping is now an explicit request, because disconnecting no longer stops
+anything.** That cancellation used to be free — Starlette cancelled the
+generator, which cancelled the graph — and detaching the turn took it away, so
+`POST /chat/stream/{thread_id}/cancel` puts it back. It sets a flag on the
+record rather than signalling the task: with several workers the request
+usually lands somewhere other than the producer, so the record is the only
+channel that reaches it. A local registry short-circuits the same-worker case.
+Deleting a conversation cancels first for the same reason — otherwise a producer
+keeps writing into a thread whose checkpoint and logs the cascade just removed.
+
+**`expires_at` is a renewable lease, not a lifetime.** It is heartbeated by the
+running producer, independently of token output, because a turn is quietest
+exactly when it is slowest. Fixed at creation it would lapse mid-turn on any
+turn longer than the retention window, and then: reconnect reports nothing to
+attach to, a second producer may start on the same thread, and the sweep may
+delete the log still being written.
+
+**Don't:** enforce one-running-turn with a read above the insert. A thread has
+at most one running turn, and the *store* is what says so: a partial unique
+index (`status = 'running'`) in SQL, a conditional write in DynamoDB. Under
+read-committed two requests can both observe no running turn and both commit,
+leaving two producers interleaving two answers into one conversation. The loser
+is told to reconnect; the one case it retries instead is a blocker whose lease
+has **expired**, whose producer is gone and which it retires first.
+
+**Testing note:** a concurrency test here needs real connections. The SQL
+store's test fixture uses `StaticPool`, which hands every session the *same*
+connection, so two "concurrent" sessions interleave inside one transaction and
+this race cannot occur — a broken read-then-write passes, with both callers
+reporting success even though only one row lands.
+`test_two_concurrent_creates_cannot_both_win` builds its own file-backed engine
+for that reason.
 
 **Note:** expired logs are swept at the end of each turn, not by a scheduler. A
 log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the

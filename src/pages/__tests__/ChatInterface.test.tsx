@@ -1878,15 +1878,62 @@ describe('ChatInterface', () => {
     const toggle = screen.getByRole('switch');
     expect(toggle).not.toBeChecked();
   });
-  it('asks the SDK to reattach to a turn that outlived the last page view', async () => {
+  it('reattaches only once the real thread id is known, not to the placeholder', async () => {
+    // useChat's resume effect depends on the flag, not on the chat id, so a
+    // hardcoded `true` would fire once against the placeholder id and never
+    // again — reload recovery would silently do nothing.
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
 
-    await waitFor(() => {
-      expect(mockUseChat).toHaveBeenCalledWith(
-        expect.objectContaining({ resume: true }),
-      );
+    const calls = mockUseChat.mock.calls.map(
+      ([options]) => options as { id?: string; resume?: boolean },
+    );
+    const placeholderCalls = calls.filter((c) => c.id === '__pending__');
+    const realCalls = calls.filter((c) => c.id === 'thread-1');
+
+    expect(realCalls.length).toBeGreaterThan(0);
+    expect(placeholderCalls.every((c) => c.resume === false)).toBe(true);
+    expect(realCalls.every((c) => c.resume === true)).toBe(true);
+  });
+
+  it('tells the server to stop the turn, not just the reader', async () => {
+    // The turn runs beside the request now, so closing the stream on its own
+    // leaves it generating and able to run the actions it had queued.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const stop = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop,
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
     });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    fetchMock.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }));
+    await act(async () => {});
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/stream/thread-1/cancel',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(stop).toHaveBeenCalled();
+    fetchMock.mockRestore();
   });
 
   it('authenticates the reconnect request and points it at the thread', async () => {

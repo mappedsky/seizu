@@ -574,6 +574,8 @@ services:
       - CHAT_TURN_RETENTION_SECONDS
       - CHAT_TURN_FLUSH_MS
       - CHAT_TURN_POLL_MS
+      - CHAT_TURN_POLL_MAX_MS
+      - CHAT_TURN_HEARTBEAT_SECONDS
       - CHAT_TURN_TAIL_MAX_SECONDS
       # This worker also reconciles and runs scheduled chats.
       - CHAT_SCHEDULES_ENABLED

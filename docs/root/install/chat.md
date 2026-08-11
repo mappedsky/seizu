@@ -65,6 +65,10 @@ what it has already produced. Coming back replays the turn from its first token
 and then follows it live — the browser reattaches automatically on load, and
 after a dropped connection.
 
+**Stop** ends the turn on the server, not just the stream. That is a separate
+request, because closing the connection no longer stops anything: the turn would
+carry on generating and could still run the actions it had queued.
+
 Two things this does *not* recover:
 
 - **A failed turn is not retried.** An agent turn is expensive and not
@@ -317,7 +321,9 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
 | `CHAT_TURN_RETENTION_SECONDS` | `600` | How long a finished turn stays replayable — the window a client has to reconnect. Not conversation history. |
 | `CHAT_TURN_FLUSH_MS` | `200` | How often a running turn flushes buffered stream parts to its log. |
-| `CHAT_TURN_POLL_MS` | `200` | How often a connected client's request polls that log. Together with the flush interval this is the latency between a token being produced and reaching the browser. |
+| `CHAT_TURN_POLL_MS` | `200` | How often a connected client's request polls that log while output is arriving. Together with the flush interval this is the latency between a token being produced and reaching the browser. |
+| `CHAT_TURN_POLL_MAX_MS` | `1000` | Ceiling the poll backs off to while a turn produces nothing (tool calls, model latency). Resets to the floor as soon as a batch lands. |
+| `CHAT_TURN_HEARTBEAT_SECONDS` | `2` | How often a running turn renews its lease and checks for a stop request. Also the worst-case delay before **Stop** takes effect when the request lands on a replica that did not start the turn. |
 | `CHAT_TURN_TAIL_MAX_SECONDS` | `1800` | Hard bound on how long one request will follow a turn, so a producer that dies without writing a terminal status cannot hold a connection open indefinitely. |
 | `CHAT_SESSION_REAP_ENABLED` | `false` | Retire sessions nobody has come back to. **Deletes chat history.** |
 | `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |

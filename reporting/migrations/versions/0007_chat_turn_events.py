@@ -26,6 +26,12 @@ _TURN_INDEXES = {
     "ix_chat_turns_thread_status": ["user_id", "thread_id", "status"],
     "ix_chat_turns_expires_at": ["expires_at"],
 }
+# One running turn per thread, enforced by the database rather than by a read
+# above the insert -- two concurrent requests can both see no running turn and
+# both commit, leaving two producers on one LangGraph thread. Partial, so the
+# many finished turns a thread accumulates do not collide.
+_RUNNING_TURN_INDEX = "uq_chat_turns_one_running"
+_RUNNING_TURN_WHERE = sa.text("status = 'running'")
 
 
 def _inspector() -> sa.Inspector:
@@ -55,6 +61,7 @@ def upgrade() -> None:
             sa.Column("text_id", sa.String(), nullable=False),
             sa.Column("status", sa.String(), nullable=False, server_default="running"),
             sa.Column("last_seq", sa.Integer(), nullable=True),
+            sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column("created_at", sa.String(), nullable=False),
             sa.Column("updated_at", sa.String(), nullable=False),
             sa.Column("expires_at", sa.String(), nullable=False),
@@ -63,6 +70,15 @@ def upgrade() -> None:
     for name, columns in _TURN_INDEXES.items():
         if name not in turn_indexes:
             op.create_index(name, _TURNS, columns)
+    if _RUNNING_TURN_INDEX not in turn_indexes:
+        op.create_index(
+            _RUNNING_TURN_INDEX,
+            _TURNS,
+            ["user_id", "thread_id"],
+            unique=True,
+            postgresql_where=_RUNNING_TURN_WHERE,
+            sqlite_where=_RUNNING_TURN_WHERE,
+        )
 
     if _EVENTS not in existing:
         op.create_table(
@@ -84,7 +100,7 @@ def downgrade() -> None:
         op.drop_table(_EVENTS)
     if _TURNS in existing:
         turn_indexes = _indexes(_TURNS)
-        for name in _TURN_INDEXES:
+        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX):
             if name in turn_indexes:
                 op.drop_index(name, table_name=_TURNS)
         op.drop_table(_TURNS)

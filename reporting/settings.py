@@ -901,6 +901,16 @@ CHAT_TURN_RETENTION_SECONDS = int_env("CHAT_TURN_RETENTION_SECONDS", 600)
 # volume they imply is one item per flush per turn.
 CHAT_TURN_FLUSH_MS = int_env("CHAT_TURN_FLUSH_MS", 200)
 CHAT_TURN_POLL_MS = int_env("CHAT_TURN_POLL_MS", 200)
+# Ceiling the poll interval backs off to while a turn produces nothing. A turn
+# is quiet for most of its life (tool calls, model latency), and polling at the
+# floor throughout costs the same reads per viewer whether or not anything is
+# arriving. The interval resets to the floor as soon as a batch lands.
+CHAT_TURN_POLL_MAX_MS = int_env("CHAT_TURN_POLL_MAX_MS", 1_000)
+# How often a running turn re-reads its own record: it renews its lease so a
+# long turn is not mistaken for an abandoned one, and picks up a stop request,
+# which is also the worst-case delay before Stop takes effect on a replica that
+# did not start the turn.
+CHAT_TURN_HEARTBEAT_SECONDS = int_env("CHAT_TURN_HEARTBEAT_SECONDS", 2)
 # Hard bound on how long a reader will tail one turn before giving up, so a
 # producer that dies without writing a terminal status cannot hold a request
 # open forever.

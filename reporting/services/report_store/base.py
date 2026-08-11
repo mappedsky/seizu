@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Any
 
 from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    CHAT_TURN_MAX_SEQ,
     ChatSessionItem,
     ChatTurnEventPage,
     ChatTurnItem,
@@ -64,6 +66,20 @@ def require_public_space_member(access: ReportAccess, space_id: str | None) -> N
 def initial_report_config(name: str) -> dict[str, Any]:
     """Return the minimal valid config stored with a newly created report."""
     return {"name": name, "rows": [], "schema_version": 1}
+
+
+def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
+    """Reject a batch no backend could store, before any I/O.
+
+    The byte length is measured rather than the character count: pydantic's
+    ``max_length`` counts characters, so a batch of multi-byte content would
+    pass that and still exceed the DynamoDB item limit.
+    """
+    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
+        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
+    size = len(parts_json.encode("utf-8"))
+    if size > CHAT_TURN_MAX_BATCH_BYTES:
+        raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
 
 
 class ReportStore(ABC):
@@ -947,6 +963,30 @@ class ReportStore(ABC):
         permanently, which is a hole in the replay rather than a delay. Callers
         advance from the last batch actually returned, never from
         ``after_seq + len(batches)``.
+        """
+
+    @abstractmethod
+    async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
+        """Push a running turn's ``expires_at`` forward and return it.
+
+        ``expires_at`` is a lease held by a live producer, not a fixed lifetime.
+        Without renewal a turn that simply takes longer than the retention
+        window would be treated as abandoned *while still running*: reconnect
+        would report nothing to attach to, a second producer could start on the
+        same thread, and the sweep could delete the log being written. Renewal
+        is driven by a heartbeat rather than by output, because a turn is at its
+        quietest exactly when it is doing the slow work.
+
+        Returns None when the turn is gone or no longer running.
+        """
+
+    @abstractmethod
+    async def request_chat_turn_cancel(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        """Ask the thread's running turn to stop, returning it, or None.
+
+        A request, not a signal: the producer may be in another process, so it
+        is told through the record and stops at its next heartbeat. Scoped to
+        the owner so a guessed thread id cannot stop someone else's turn.
         """
 
     @abstractmethod

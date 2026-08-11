@@ -102,6 +102,8 @@ def _chat_turn_log(mocker):
     """
     mocker.patch("reporting.settings.CHAT_TURN_FLUSH_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MS", 1)
+    mocker.patch("reporting.settings.CHAT_TURN_POLL_MAX_MS", 1)
+    mocker.patch("reporting.settings.CHAT_TURN_HEARTBEAT_SECONDS", 1)
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}
@@ -152,6 +154,26 @@ def _chat_turn_log(mocker):
         turns[turn_id] = turn.model_copy(update={"status": status, "last_seq": last_seq})
         return turns[turn_id]
 
+    async def renew_chat_turn_lease(turn_id: str) -> ChatTurnItem | None:
+        turn = turns.get(turn_id)
+        if turn is None or turn.status != "running":
+            return None
+        turns[turn_id] = turn.model_copy(update={"expires_at": "2099-01-01T00:00:00+00:00"})
+        return turns[turn_id]
+
+    async def request_chat_turn_cancel(user_id: str, thread_id: str) -> ChatTurnItem | None:
+        for turn_id, turn in turns.items():
+            if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
+                turns[turn_id] = turn.model_copy(update={"cancel_requested": True})
+                return turns[turn_id]
+        return None
+
+    async def get_chat_turn(turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+        turn = turns.get(turn_id)
+        if turn is None or (user_id is not None and turn.user_id != user_id):
+            return None
+        return turn
+
     async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
@@ -176,6 +198,9 @@ def _chat_turn_log(mocker):
 
     mocker.patch("reporting.services.chat_turns.report_store.list_expired_chat_turns", list_expired_chat_turns)
     mocker.patch("reporting.services.chat_turns.report_store.delete_chat_turn", delete_chat_turn)
+    mocker.patch("reporting.services.chat_turns.report_store.get_chat_turn", get_chat_turn)
+    mocker.patch("reporting.services.chat_turns.report_store.renew_chat_turn_lease", renew_chat_turn_lease)
+    mocker.patch("reporting.routes.chat.report_store.request_chat_turn_cancel", request_chat_turn_cancel)
     mocker.patch("reporting.services.chat_turns.report_store.create_chat_turn", create_chat_turn)
     mocker.patch("reporting.services.chat_turns.report_store.append_chat_turn_events", append_chat_turn_events)
     mocker.patch("reporting.services.chat_turns.report_store.read_chat_turn_events", read_chat_turn_events)
@@ -1266,3 +1291,184 @@ async def test_expired_turn_logs_are_swept_after_a_turn(mocker, _chat_turn_log):
     assert stale.turn_id not in _chat_turn_log
     # The turn that just ran is still inside its reconnect window.
     assert len(_chat_turn_log) == 1
+
+
+# ---------------------------------------------------------------------------
+# Stopping a turn
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_ends_the_turn_and_not_just_the_reader(mocker, _chat_turn_log):
+    """Closing the connection is not enough now that the turn runs beside the
+    request: without an explicit stop it keeps generating and can still run the
+    actions it had lined up."""
+    release = asyncio.Event()
+    reached_second_chunk = False
+
+    class SlowGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            nonlocal reached_second_chunk
+            self.calls.append((input, config, stream_mode))
+            yield {"kind": "token", "content": "Working"}
+            await release.wait()
+            reached_second_chunk = True
+            yield {"kind": "token", "content": " and still going"}
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/chat/stream/{turn.thread_id}/cancel")
+    assert response.status_code == 204
+
+    release.set()
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    assert _chat_turn_log[turn.turn_id].status == "canceled"
+    replay = "".join([frame async for frame in chat_turns.tail_turn(turn.turn_id)])
+    assert '"delta":"Working"' in replay
+    assert " and still going" not in replay
+    assert "data: [DONE]" in replay
+
+
+async def test_cancel_is_idempotent_when_nothing_is_running(mocker, _chat_turn_log):
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream/1001/cancel")
+
+    assert response.status_code == 204
+
+
+async def test_cancel_cannot_reach_another_users_turn(mocker, _chat_turn_log):
+    _patch_chat_sessions(mocker, [("someone-else", "1001")])
+    turn = await chat_turns.report_store.create_chat_turn("someone-else", "1001", "msg_9", "text_9")
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/api/v1/chat/stream/1001/cancel")).status_code == 204
+
+    assert _chat_turn_log[turn.turn_id].cancel_requested is False
+
+
+async def test_cancel_requires_chat_permission(mocker, _chat_turn_log):
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app(_current_user(frozenset()))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream/1001/cancel")
+
+    assert response.status_code == 403
+
+
+async def test_deleting_a_session_stops_its_running_turn_first(mocker, _chat_turn_log):
+    """Deleting first would leave a producer writing into a conversation that no
+    longer exists, recreating checkpoint state behind the cascade."""
+    order: list[str] = []
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    sessions = _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+
+    cancel = chat.report_store.request_chat_turn_cancel
+    delete = chat.report_store.delete_chat_session
+
+    async def _recording_cancel(user_id: str, thread_id: str):
+        order.append("cancel")
+        return await cancel(user_id, thread_id)
+
+    async def _recording_delete(user_id: str, thread_id: str):
+        order.append("delete")
+        return await delete(user_id, thread_id)
+
+    mocker.patch("reporting.routes.chat.report_store.request_chat_turn_cancel", _recording_cancel)
+    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", _recording_delete)
+    mocker.patch("reporting.routes.chat.delete_thread_messages", AsyncMock())
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.delete("/api/v1/chat/sessions/1001")).status_code == 204
+
+    assert order == ["cancel", "delete"]
+    assert _chat_turn_log[turn.turn_id].cancel_requested is True
+    assert sessions == {}
+
+
+async def test_a_long_turn_keeps_its_lease(mocker, _chat_turn_log):
+    """expires_at is a lease held by a live producer, not a fixed lifetime. A
+    turn that simply takes longer than the retention window would otherwise be
+    treated as abandoned while still running."""
+    release = asyncio.Event()
+
+    class SlowGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            self.calls.append((input, config, stream_mode))
+            await release.wait()
+            yield {"kind": "token", "content": "done"}
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    # Its lease is about to lapse while the producer is perfectly healthy.
+    _chat_turn_log[turn.turn_id] = _chat_turn_log[turn.turn_id].model_copy(
+        update={"expires_at": "2024-01-01T00:00:00+00:00"}
+    )
+
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].expires_at > "2090":
+            break
+        await asyncio.sleep(0.01)
+    renewed = _chat_turn_log[turn.turn_id].expires_at
+    release.set()
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    assert renewed > "2090", "the producer let its lease lapse while still running"
+    assert _chat_turn_log[turn.turn_id].status == "completed"
+
+
+async def test_a_locally_cancelled_producer_still_records_its_terminal_state(mocker, _chat_turn_log):
+    """The fast path cancels the task outright. Swallowing that cancellation is
+    not enough: without clearing it, every cleanup await is re-cancelled the
+    moment it suspends and the turn is left reading as running until its lease
+    lapses."""
+    started = asyncio.Event()
+
+    class BlockedGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            self.calls.append((input, config, stream_mode))
+            yield {"kind": "token", "content": "Working"}
+            started.set()
+            # Never returns on its own; only cancellation ends this turn.
+            await asyncio.Event().wait()
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert chat_turns.cancel_local_producer(turn.turn_id) is True
+
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    assert _chat_turn_log[turn.turn_id].status == "canceled"
+    assert _chat_turn_log[turn.turn_id].last_seq is not None
+    replay = "".join([frame async for frame in chat_turns.tail_turn(turn.turn_id)])
+    assert '"delta":"Working"' in replay
+    assert "data: [DONE]" in replay
+
+
+async def test_cancelling_a_producer_that_is_not_here_reports_so(_chat_turn_log):
+    """With several workers the request usually lands somewhere else; the store
+    flag is what reaches the producer there."""
+    assert chat_turns.cancel_local_producer("no-such-turn") is False

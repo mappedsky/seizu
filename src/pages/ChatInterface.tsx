@@ -1028,14 +1028,45 @@ export default function ChatInterface() {
     experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
     onFinish: handleChatFinish,
     transport,
-    // Reattach on mount to a turn that outlived the last page view. Safe
-    // against duplication because the messages present at mount come from
-    // /chat/history, which only returns turns that have finished and
-    // persisted -- there is never a partial one to resume into.
-    resume: true,
+    // Reattach to a turn that outlived the last page view. Gated on the real
+    // thread id rather than hardcoded true: the first render has no session
+    // yet, and useChat's resume effect depends on this flag, not on the chat
+    // id. Passing true up front would fire it once against the placeholder id
+    // and never again once the real one arrived, so reload recovery would
+    // silently do nothing. Flipping false -> true re-runs it against the
+    // recreated chat.
+    //
+    // Safe against duplication: the messages present when it fires come from
+    // /chat/history, which only returns finished, persisted turns, so there is
+    // never a partial one to resume into.
+    resume: activeThreadId !== null,
   });
 
   resumeStreamRef.current = resumeStream;
+
+  const handleStop = useCallback(() => {
+    // Closing the reader is not enough on its own: the turn runs beside the
+    // request, so without telling the server it keeps generating and can still
+    // execute the actions it had queued. Tell it first, then stop reading.
+    if (activeThreadId) {
+      void fetch(
+        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel`,
+        {
+          method: 'POST',
+          headers: {
+            'X-Seizu-Csrf': '1',
+            ...(accessTokenRef.current
+              ? { Authorization: `Bearer ${accessTokenRef.current}` }
+              : {}),
+          },
+        },
+      ).catch(() => {
+        // Best effort. The user asked the stream to stop, and it does; the
+        // server-side turn then ends at its own heartbeat.
+      });
+    }
+    stop();
+  }, [activeThreadId, stop]);
 
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;
@@ -1837,7 +1868,7 @@ export default function ChatInterface() {
           busy={busy}
           disabled={disabled}
           onSubmit={handleSubmit}
-          onStop={stop}
+          onStop={handleStop}
         />
       </Box>
       <ChatConfirmationsPanel

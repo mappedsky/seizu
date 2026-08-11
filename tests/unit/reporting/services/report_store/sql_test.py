@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError, ChatTurnItem
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
@@ -661,6 +661,93 @@ async def test_list_expired_chat_turns_selects_only_expired(store):
 
     assert [e.turn_id for e in expired] == [stale.turn_id]
     assert live.turn_id not in {e.turn_id for e in expired}
+
+
+async def test_two_concurrent_creates_cannot_both_win(tmp_path):
+    """The database is the authority, not a read above the insert: under
+    read-committed two requests can both see no running turn and both commit,
+    putting two producers on one LangGraph thread.
+
+    Uses its own file-backed engine rather than the shared ``store`` fixture.
+    That fixture's ``StaticPool`` hands every session the *same* connection, so
+    two "concurrent" sessions interleave inside one transaction and the race
+    this is about cannot occur -- both callers appear to succeed even though
+    only one row lands. Real connections are the only way to exercise it.
+    """
+    import asyncio
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/turns.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
+            concurrent = SQLModelReportStore()
+            results = await asyncio.gather(
+                concurrent.create_chat_turn("user-1", "1001", "msg_1", "text_1"),
+                concurrent.create_chat_turn("user-1", "1001", "msg_1", "text_1"),
+                return_exceptions=True,
+            )
+
+            assert [isinstance(r, ChatTurnItem) for r in results].count(True) == 1, results
+            assert [isinstance(r, ChatTurnConflictError) for r in results].count(True) == 1, results
+            async with AsyncSession(engine) as session:
+                rows = (await session.execute(select(sql_module.ChatTurnRecord))).scalars().all()
+            assert len(rows) == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_a_new_turn_takes_over_from_an_expired_lease(store):
+    """An expired lease means the producer is gone, so it must not keep holding
+    the thread -- but the unique index would refuse the insert on its own."""
+    stale = await _open_turn(store)
+    await _expire_turn(store, stale.turn_id, "2020-01-01T00:00:00+00:00")
+
+    fresh = await _open_turn(store)
+
+    assert fresh.turn_id != stale.turn_id
+    assert (await store.get_chat_turn(stale.turn_id)).status == "failed"
+
+
+async def test_renewing_a_lease_pushes_expiry_forward(store):
+    turn = await _open_turn(store)
+    await _expire_turn(store, turn.turn_id, "2020-01-01T00:00:00+00:00")
+
+    renewed = await store.renew_chat_turn_lease(turn.turn_id)
+
+    assert renewed is not None
+    assert renewed.expires_at > "2020-01-01T00:00:00+00:00"
+    assert await store.get_active_chat_turn("user-1", "1001") is not None
+
+
+async def test_a_finished_turn_has_no_lease_to_renew(store):
+    turn = await _open_turn(store)
+    await store.finish_chat_turn(turn.turn_id, "completed", 3)
+
+    assert await store.renew_chat_turn_lease(turn.turn_id) is None
+
+
+async def test_requesting_cancel_flags_the_running_turn(store):
+    turn = await _open_turn(store)
+
+    flagged = await store.request_chat_turn_cancel("user-1", "1001")
+
+    assert flagged is not None and flagged.turn_id == turn.turn_id
+    assert flagged.cancel_requested is True
+    assert (await store.get_chat_turn(turn.turn_id)).cancel_requested is True
+
+
+async def test_cancel_is_scoped_to_the_owner(store):
+    await _open_turn(store)
+
+    assert await store.request_chat_turn_cancel("someone-else", "1001") is None
+
+
+async def test_cancel_reports_nothing_when_no_turn_is_running(store):
+    turn = await _open_turn(store)
+    await store.finish_chat_turn(turn.turn_id, "completed", 1)
+
+    assert await store.request_chat_turn_cancel("user-1", "1001") is None
 
 
 # ---------------------------------------------------------------------------

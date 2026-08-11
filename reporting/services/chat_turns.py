@@ -25,7 +25,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -51,8 +51,25 @@ _EXPIRED_TURNS_PER_SWEEP = 25
 
 # Detached producer tasks, held so the event loop keeps a strong reference. A
 # task nobody holds can be garbage collected mid-run, which would look exactly
-# like the failure this module exists to remove.
-_running_producers: set[asyncio.Task[None]] = set()
+# like the failure this module exists to remove. Keyed by turn id so a cancel
+# arriving on this worker can stop one without waiting for its heartbeat.
+_running_producers: dict[str, asyncio.Task[None]] = {}
+
+
+class _TurnCanceled(Exception):
+    """Raised inside the producer when the turn has been asked to stop."""
+
+
+def _expires_within(expires_at: str, window: timedelta) -> bool:
+    """True when the lease runs out inside ``window``.
+
+    An unparsable timestamp counts as expiring: renewing a lease that did not
+    need it costs one write, while failing to renew one that did loses the turn.
+    """
+    try:
+        return datetime.fromisoformat(expires_at) - datetime.now(tz=UTC) <= window
+    except ValueError:
+        return True
 
 
 def sse_frame(part: dict[str, Any]) -> str:
@@ -112,23 +129,32 @@ class ChatTurnPublisher:
         self._seq = 0
         self._lock = asyncio.Lock()
         self._flusher: asyncio.Task[None] | None = None
+        self._heartbeat: asyncio.Task[None] | None = None
+        self._stopped = asyncio.Event()
 
     @property
     def last_seq(self) -> int:
         return self._seq
+
+    @property
+    def stopped(self) -> asyncio.Event:
+        """Set when the turn should stop: cancelled, or its record is gone."""
+        return self._stopped
 
     async def __aenter__(self) -> "ChatTurnPublisher":
         # A periodic flusher rather than flushing only on append: a turn that
         # goes quiet mid-tool-call would otherwise leave its last partial batch
         # sitting in memory, and the viewer would see the stream stall.
         self._flusher = asyncio.create_task(self._flush_loop())
+        self._heartbeat = asyncio.create_task(self._heartbeat_loop())
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        if self._flusher is not None:
-            self._flusher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._flusher
+        for task in (self._flusher, self._heartbeat):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.flush()
 
     async def _flush_loop(self) -> None:
@@ -136,6 +162,34 @@ class ChatTurnPublisher:
         while True:
             await asyncio.sleep(interval)
             await self.flush()
+
+    async def _heartbeat_loop(self) -> None:
+        """Hold the lease and watch for a stop request.
+
+        Both live here because both must happen while the turn is *quiet* — a
+        long tool call is exactly when a lease lapses and when a user reaches
+        for Stop, and neither can be driven by token output. The stop request
+        arrives through the record rather than as a signal because the producer
+        and the request asking it to stop are not necessarily in the same
+        process.
+        """
+        interval = max(settings.CHAT_TURN_HEARTBEAT_SECONDS, 1)
+        # Renew well before expiry so one failed heartbeat does not drop the
+        # lease; a renewal is a single conditional write.
+        renew_after = timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS / 2)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                turn = await report_store.get_chat_turn(self._turn.turn_id)
+                if turn is None or turn.cancel_requested or turn.status != "running":
+                    self._stopped.set()
+                    return
+                if _expires_within(turn.expires_at, renew_after):
+                    await report_store.renew_chat_turn_lease(self._turn.turn_id)
+            except Exception:
+                # A transient store failure must not stop a healthy turn; the
+                # lease has half the retention window of slack for exactly this.
+                logger.warning("Chat turn heartbeat failed", extra={"turn_id": self._turn.turn_id}, exc_info=True)
 
     async def publish(self, parts: list[dict[str, Any]]) -> None:
         if not parts:
@@ -218,9 +272,24 @@ async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnI
         f"text_{uuid.uuid4().hex}",
     )
     task = asyncio.create_task(run_turn_in_process(turn, body, current))
-    _running_producers.add(task)
-    task.add_done_callback(_running_producers.discard)
+    _running_producers[turn.turn_id] = task
+    task.add_done_callback(lambda _t: _running_producers.pop(turn.turn_id, None))
     return turn
+
+
+def cancel_local_producer(turn_id: str) -> bool:
+    """Stop a producer running in *this* process, if it is here.
+
+    A fast path, not the mechanism: with several workers the request asking a
+    turn to stop usually lands somewhere else, and the store flag is what
+    reaches it there. This just spares the common single-worker case a
+    heartbeat interval of delay.
+    """
+    task = _running_producers.get(turn_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
 async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, current: CurrentUser) -> None:
@@ -256,11 +325,27 @@ async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, curre
                     config,
                     stream_mode="custom",
                 ):
+                    if publisher.stopped.is_set():
+                        # Stop was pressed, or the conversation was deleted.
+                        # Breaking out abandons the rest of the turn: no further
+                        # tokens are bought and no queued tool action runs.
+                        raise _TurnCanceled
                     if isinstance(chunk, dict) and chunk.get("kind") == "finish_reason":
                         if chunk.get("finish_reason") == "length":
                             finish_reason = "length"
                         continue
                     await publisher.publish(render_parts(chunk, turn.text_id))
+            except (_TurnCanceled, asyncio.CancelledError):
+                status = "canceled"
+                # Clear the pending cancellation before the cleanup awaits.
+                # Without this every await below -- publishing the closing
+                # frames, flushing, recording the terminal status -- is
+                # re-cancelled the moment it suspends, and the turn would be
+                # left reading as "running" until its lease lapsed.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                await publisher.publish([{"type": "text-end", "id": turn.text_id}, *finish_parts("stop")])
             except Exception:
                 logger.exception("Chat turn failed", extra={"turn_id": turn.turn_id})
                 status = "failed"
@@ -278,7 +363,12 @@ async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, curre
             # final frames while believing it had consumed them all.
             await publisher.flush()
             last_seq = publisher.last_seq
-        await report_store.finish_chat_turn(turn.turn_id, status, last_seq)
+        if await report_store.finish_chat_turn(turn.turn_id, status, last_seq) is None:
+            # The turn record vanished mid-flight -- the conversation was
+            # deleted. Anything published since then is an orphan whose parent
+            # the cascade has already removed, so clear it up rather than leave
+            # rows nothing will ever collect.
+            await report_store.delete_chat_turn(turn.turn_id)
     except Exception:
         # The log is now unfinishable, so nothing will release the thread until
         # the turn expires. Recorded loudly rather than swallowed.
@@ -318,7 +408,14 @@ async def tail_turn(turn_id: str, after_seq: int = 0) -> AsyncIterator[str]:
     """
     cursor = after_seq
     page_limit = 200
-    poll = max(settings.CHAT_TURN_POLL_MS, 1) / 1000
+    # Adaptive: a turn is quiet for most of its life -- tool calls, model
+    # latency -- and a fixed 200ms poll spends the same reads per viewer during
+    # that quiet as it does mid-sentence. Back off while nothing arrives and
+    # snap back the moment it does, so responsiveness costs reads only when
+    # there is something to be responsive to.
+    min_poll = max(settings.CHAT_TURN_POLL_MS, 1) / 1000
+    max_poll = max(settings.CHAT_TURN_POLL_MAX_MS, settings.CHAT_TURN_POLL_MS) / 1000
+    poll = min_poll
     deadline = time.monotonic() + settings.CHAT_TURN_TAIL_MAX_SECONDS
     while True:
         page = await report_store.read_chat_turn_events(turn_id, cursor, limit=page_limit)
@@ -330,6 +427,7 @@ async def tail_turn(turn_id: str, after_seq: int = 0) -> AsyncIterator[str]:
             for part in json.loads(batch.parts_json):
                 yield sse_frame(part)
             cursor = batch.seq
+        poll = min_poll if page.batches else min(poll * 2, max_poll)
         turn = page.turn
         if turn.status != "running" and (turn.last_seq is None or cursor >= turn.last_seq):
             break

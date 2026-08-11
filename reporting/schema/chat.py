@@ -105,13 +105,20 @@ class ChatTurnItem(BaseModel):
     user_id: str
     message_id: str = Field(min_length=1, max_length=128)
     text_id: str = Field(min_length=1, max_length=128)
-    status: Literal["running", "completed", "failed"] = "running"
+    status: Literal["running", "completed", "failed", "canceled"] = "running"
     # None until the turn finishes. A reader may stop only once the status is
     # terminal *and* it has consumed through last_seq: a terminal status on its
     # own races the visibility of the final batches.
     last_seq: int | None = None
+    # Set by Stop, and by deleting the conversation. The producer may be in
+    # another process, so it is asked through the record rather than signalled
+    # directly; it checks on its heartbeat and stops.
+    cancel_requested: bool = False
     created_at: str
     updated_at: str
+    # A *lease*, not a fixed lifetime. While the turn runs its producer pushes
+    # this forward, so a long turn is never mistaken for an abandoned one; once
+    # the turn ends it becomes the reconnect window.
     expires_at: str
 
 

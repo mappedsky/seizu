@@ -15,8 +15,6 @@ from snowflake import SnowflakeGenerator
 
 from reporting import settings
 from reporting.schema.chat import (
-    CHAT_TURN_MAX_BATCH_BYTES,
-    CHAT_TURN_MAX_SEQ,
     ChatSessionItem,
     ChatTurnConflictError,
     ChatTurnEventBatch,
@@ -57,7 +55,12 @@ from reporting.schema.space_config import (
     SpaceListItem,
     SubspaceItem,
 )
-from reporting.services.report_store.base import ReportStore, initial_report_config, require_public_space_member
+from reporting.services.report_store.base import (
+    ReportStore,
+    initial_report_config,
+    require_public_space_member,
+    validate_chat_turn_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +134,11 @@ _PK_CHAT_TURN_THREAD_PREFIX = "CHAT_TURN_THREAD#"
 _PK_CHAT_TURN_LIST = "CHAT_TURN_LIST"
 _SK_CHAT_TURN_ACTIVE = "#ACTIVE"
 _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
+# Per-thread turn index, sharing the pointer's partition. Deleting a session has
+# to find that thread's turns, and without this it would filter the global
+# CHAT_TURN_LIST partition -- making one user's delete cost proportional to
+# every other user's retained turns.
+_SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -431,6 +439,10 @@ def _chat_turn_event_sk(seq: int) -> str:
     return f"{_SK_CHAT_TURN_EVENT_PREFIX}{seq:010d}"  # noqa: E231
 
 
+def _chat_turn_thread_turn_sk(turn_id: str) -> str:
+    return f"{_SK_CHAT_TURN_THREAD_TURN_PREFIX}{turn_id}"
+
+
 def _chat_turn_list_sk(created_at: str, turn_id: str) -> str:
     """Sweep-index sort key.
 
@@ -598,8 +610,9 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         user_id=item["user_id"],
         message_id=item["message_id"],
         text_id=item["text_id"],
-        status=status if status in ("running", "completed", "failed") else "failed",
+        status=status if status in ("running", "completed", "failed", "canceled") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
+        cancel_requested=bool(item.get("cancel_requested", False)),
         created_at=item["created_at"],
         updated_at=item["updated_at"],
         expires_at=item["expires_at"],
@@ -710,20 +723,6 @@ async def _hydrate_action_confirmations(
     return [confirmation for confirmation in confirmations if confirmation is not None]
 
 
-def _validate_chat_turn_batch(seq: int, parts_json: str) -> None:
-    """Reject a batch no backend could store, before any I/O.
-
-    The byte length is measured rather than the character count: pydantic's
-    ``max_length`` counts characters, and a batch of multi-byte content would
-    pass that and still exceed the item limit.
-    """
-    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
-        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
-    size = len(parts_json.encode("utf-8"))
-    if size > CHAT_TURN_MAX_BATCH_BYTES:
-        raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
-
-
 def _get_chat_turn_sync(table: Any, turn_id: str) -> ChatTurnItem | None:
     item = table.get_item(
         Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
@@ -748,6 +747,12 @@ def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
         )
     ]
     keys.append({"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.created_at, turn.turn_id)})
+    keys.append(
+        {
+            "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+            "SK": _chat_turn_thread_turn_sk(turn.turn_id),
+        }
+    )
     with table.batch_writer() as batch:
         for key in keys:
             batch.delete_item(Key=key)
@@ -767,18 +772,17 @@ def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
 def _delete_thread_chat_turns_sync(table: Any, user_id: str, thread_id: str) -> None:
     """Delete every turn log belonging to one thread.
 
-    Reached from ``delete_chat_session``. The pointer names only the most recent
-    turn, so the sweep index is walked for the rest -- a thread that streamed
-    many turns inside the retention window has one partition per turn.
+    Reached from ``delete_chat_session``. Driven by the thread's own turn index
+    rather than by filtering the global sweep partition: that partition holds
+    every user's retained turns, so filtering it would make one user's delete
+    cost proportional to everybody else's chat traffic.
     """
     for item in _query_all_sync(
         table,
-        KeyConditionExpression="PK = :pk",
-        FilterExpression="user_id = :user_id AND thread_id = :thread_id",
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
         ExpressionAttributeValues={
-            ":pk": _PK_CHAT_TURN_LIST,
-            ":user_id": user_id,
-            ":thread_id": thread_id,
+            ":pk": _chat_turn_thread_pk(user_id, thread_id),
+            ":prefix": _SK_CHAT_TURN_THREAD_TURN_PREFIX,
         },
         ProjectionExpression="turn_id",
     ):
@@ -4702,6 +4706,11 @@ class DynamoDBReportStore(ReportStore):
             "user_id": user_id,
             "thread_id": thread_id,
         }
+        thread_index_item = {
+            "PK": _chat_turn_thread_pk(user_id, thread_id),
+            "SK": _chat_turn_thread_turn_sk(turn_id),
+            "turn_id": turn_id,
+        }
 
         def _op() -> ChatTurnItem:
             table = _get_table()
@@ -4725,6 +4734,7 @@ class DynamoDBReportStore(ReportStore):
                         },
                         {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": metadata_item}},
                         {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": list_item}},
+                        {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": thread_index_item}},
                     ]
                 )
             except botocore.exceptions.ClientError as exc:
@@ -4767,7 +4777,7 @@ class DynamoDBReportStore(ReportStore):
         return await asyncio.to_thread(_op)
 
     async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
-        _validate_chat_turn_batch(seq, parts_json)
+        validate_chat_turn_batch(seq, parts_json)
         item = {
             "PK": _chat_turn_pk(turn_id),
             "SK": _chat_turn_event_sk(seq),
@@ -4824,6 +4834,85 @@ class DynamoDBReportStore(ReportStore):
                 batches.append(ChatTurnEventBatch(seq=seq, parts_json=str(item["parts_json"])))
                 expected += 1
             return ChatTurnEventPage(turn=turn, batches=batches)
+
+        return await asyncio.to_thread(_op)
+
+    async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
+        now = datetime.now(tz=UTC)
+        now_iso = now.isoformat()
+        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+
+        def _op() -> ChatTurnItem | None:
+            table = _get_table()
+            try:
+                resp = table.update_item(
+                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                    UpdateExpression="SET updated_at = :now, expires_at = :expires_at",
+                    ConditionExpression="attribute_exists(PK) AND #s = :running",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":now": now_iso,
+                        ":expires_at": expires_at,
+                        ":running": "running",
+                    },
+                    ReturnValues="ALL_NEW",
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return None
+                raise
+            turn = _chat_turn_from_item(resp["Attributes"])
+            # The pointer carries its own copy because the "is this thread free"
+            # condition can only read the item it writes. Renewing one without
+            # the other would let a second producer start on a live thread.
+            try:
+                table.update_item(
+                    Key={
+                        "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+                        "SK": _SK_CHAT_TURN_ACTIVE,
+                    },
+                    UpdateExpression="SET expires_at = :expires_at",
+                    ConditionExpression="turn_id = :turn_id",
+                    ExpressionAttributeValues={":expires_at": expires_at, ":turn_id": turn_id},
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+            return turn
+
+        return await asyncio.to_thread(_op)
+
+    async def request_chat_turn_cancel(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        def _op() -> ChatTurnItem | None:
+            table = _get_table()
+            pointer = table.get_item(
+                Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE},
+                ConsistentRead=True,
+            ).get("Item")
+            if not pointer or pointer.get("status") != "running":
+                return None
+            turn_id = str(pointer["turn_id"])
+            try:
+                resp = table.update_item(
+                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                    UpdateExpression="SET cancel_requested = :true, updated_at = :now",
+                    # Scoped to the owner in the key path already, but re-checked
+                    # here so a stale pointer cannot redirect the write.
+                    ConditionExpression="attribute_exists(PK) AND #s = :running AND user_id = :user_id",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":true": True,
+                        ":now": datetime.now(tz=UTC).isoformat(),
+                        ":running": "running",
+                        ":user_id": user_id,
+                    },
+                    ReturnValues="ALL_NEW",
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return None
+                raise
+            return _chat_turn_from_item(resp["Attributes"])
 
         return await asyncio.to_thread(_op)
 

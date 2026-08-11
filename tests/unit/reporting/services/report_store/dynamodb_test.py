@@ -3769,3 +3769,68 @@ async def test_deleting_a_turn_batches_rather_than_transacts(patch_table, store)
 
     patch_table.batch_writer.assert_called_once()
     patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_renewing_a_lease_moves_both_the_record_and_the_pointer(patch_table, store):
+    """The pointer carries its own expiry because the "is this thread free"
+    condition can only read the item it writes. Renewing one without the other
+    would let a second producer start on a live thread."""
+    patch_table.update_item.return_value = {"Attributes": _turn_item()}
+
+    await store.renew_chat_turn_lease("turn-1")
+
+    keys = [call.kwargs["Key"] for call in patch_table.update_item.call_args_list]
+    assert keys[0] == {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"}
+    assert keys[1] == {"PK": "CHAT_TURN_THREAD#u1#THREAD#1001", "SK": "#ACTIVE"}
+    assert patch_table.update_item.call_args_list[1].kwargs["ConditionExpression"] == "turn_id = :turn_id"
+
+
+async def test_a_finished_turn_has_no_lease_to_renew(patch_table, store):
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+    )
+
+    assert await store.renew_chat_turn_lease("turn-1") is None
+
+
+async def test_cancel_flags_the_running_turn_for_its_owner(patch_table, store):
+    patch_table.get_item.return_value = {"Item": {"turn_id": "turn-1", "status": "running"}}
+    patch_table.update_item.return_value = {"Attributes": _turn_item(cancel_requested=True)}
+
+    flagged = await store.request_chat_turn_cancel("u1", "1001")
+
+    assert flagged is not None and flagged.cancel_requested is True
+    kwargs = patch_table.update_item.call_args.kwargs
+    # Owner re-checked on the write, so a stale pointer cannot redirect it.
+    assert ":user_id" in kwargs["ExpressionAttributeValues"]
+    assert "user_id = :user_id" in kwargs["ConditionExpression"]
+
+
+async def test_cancel_reports_nothing_when_no_turn_is_running(patch_table, store):
+    patch_table.get_item.return_value = {"Item": {"turn_id": "turn-1", "status": "completed"}}
+
+    assert await store.request_chat_turn_cancel("u1", "1001") is None
+    patch_table.update_item.assert_not_called()
+
+
+async def test_a_turn_is_indexed_under_its_own_thread(patch_table, store):
+    """Deleting a session must find that thread's turns without filtering the
+    global turn partition, whose size depends on every other user's traffic."""
+    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    index_item = items[3]["Put"]["Item"]
+    assert index_item["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
+    assert index_item["SK"].startswith("TURN#")
+
+
+async def test_deleting_a_threads_turns_queries_only_that_thread(patch_table, store):
+    patch_table.query.return_value = {"Items": []}
+
+    dynamodb_module._delete_thread_chat_turns_sync(patch_table, "u1", "1001")
+
+    kwargs = patch_table.query.call_args.kwargs
+    assert kwargs["KeyConditionExpression"] == "PK = :pk AND begins_with(SK, :prefix)"
+    assert kwargs["ExpressionAttributeValues"][":pk"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
+    # Not a filtered scan of the shared partition.
+    assert "FilterExpression" not in kwargs

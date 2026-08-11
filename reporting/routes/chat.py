@@ -174,6 +174,26 @@ async def reconnect_chat_stream(
     return _stream_response(chat_turns.tail_turn(turn.turn_id))
 
 
+@router.post("/api/v1/chat/stream/{thread_id}/cancel", status_code=204)
+async def cancel_chat_stream(
+    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
+) -> Response:
+    """Stop the thread's running turn.
+
+    Closing the SSE connection is not enough: the turn is produced beside the
+    request, so a client that only hangs up leaves it running -- still spending
+    tokens and still able to execute the actions it had lined up. Stop has to
+    say so explicitly. Idempotent: no running turn is a 204, not an error.
+    """
+    turn = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id)
+    if turn is not None:
+        # Fast path when the producer is on this worker; otherwise the flag
+        # above reaches it at its next heartbeat.
+        chat_turns.cancel_local_producer(turn.turn_id)
+    return Response(status_code=204)
+
+
 @router.get("/api/v1/chat/history", response_model=ChatHistoryResponse)
 async def chat_history(
     thread_id: str = Query(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
@@ -369,6 +389,16 @@ async def delete_chat_session(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> None:
     """Delete a chat session."""
+    # Stop the turn before removing what it is writing into. Deleting first
+    # would leave a producer running against a conversation that no longer
+    # exists, recreating checkpoint state and appending batches behind the
+    # cascade that just ran.
+    try:
+        canceled = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id)
+        if canceled is not None:
+            chat_turns.cancel_local_producer(canceled.turn_id)
+    except Exception:
+        logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
     try:
         deleted = await report_store.delete_chat_session(current.user.user_id, thread_id)
     except Exception as exc:

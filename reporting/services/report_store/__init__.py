@@ -882,6 +882,14 @@ async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int) -> Cha
     return await get_store().read_chat_turn_events(turn_id, after_seq, limit)
 
 
+async def renew_chat_turn_lease(turn_id: str) -> ChatTurnItem | None:
+    return await get_store().renew_chat_turn_lease(turn_id)
+
+
+async def request_chat_turn_cancel(user_id: str, thread_id: str) -> ChatTurnItem | None:
+    return await get_store().request_chat_turn_cancel(user_id, thread_id)
+
+
 async def finish_chat_turn(turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
     return await get_store().finish_chat_turn(turn_id, status, last_seq)
 

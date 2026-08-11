@@ -102,6 +102,8 @@ def mock_store():
         "get_chat_turn": None,
         "append_chat_turn_events": True,
         "read_chat_turn_events": None,
+        "renew_chat_turn_lease": None,
+        "request_chat_turn_cancel": None,
         "finish_chat_turn": None,
         "delete_chat_turn": True,
         "list_expired_chat_turns": [],
@@ -653,6 +655,12 @@ async def test_scheduled_chat_facade_delegates(mock_store):
 
     await report_store.read_chat_turn_events("turn-1", 0, 200)
     mock_store.read_chat_turn_events.assert_awaited_once_with("turn-1", 0, 200)
+
+    await report_store.renew_chat_turn_lease("turn-1")
+    mock_store.renew_chat_turn_lease.assert_awaited_once_with("turn-1")
+
+    await report_store.request_chat_turn_cancel("u1", "thread-1")
+    mock_store.request_chat_turn_cancel.assert_awaited_once_with("u1", "thread-1")
 
     await report_store.finish_chat_turn("turn-1", "completed", 4)
     mock_store.finish_chat_turn.assert_awaited_once_with("turn-1", "completed", 4)
