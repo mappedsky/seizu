@@ -860,8 +860,6 @@ CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_
 CHAT_CHECKPOINT_TABLE_NAME = str_env("CHAT_CHECKPOINT_TABLE_NAME", "seizu-chat-checkpoints")
 # When true, create/migrate the configured LangGraph checkpoint storage at startup.
 CHAT_CHECKPOINT_CREATE_TABLE = bool_env("CHAT_CHECKPOINT_CREATE_TABLE", False)
-# DynamoDB-only optional checkpoint TTL in seconds. Empty/0 disables automatic expiry.
-CHAT_CHECKPOINT_TTL_SECONDS = int_env("CHAT_CHECKPOINT_TTL_SECONDS", 0)
 # DynamoDB-only compression for serialized checkpoint payloads.
 CHAT_CHECKPOINT_ENABLE_COMPRESSION = bool_env("CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
 # S3 bucket used by langgraph-checkpoint-aws for payloads larger than 350KB.

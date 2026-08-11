@@ -438,6 +438,33 @@ created while they were on. That also removes a failure mode that shipped once �
 `CHAT_ENABLED` was not in the Temporal worker's compose environment, so the
 worker read chat as disabled and deleted its own schedule.
 
+**`CHAT_CHECKPOINT_TTL_SECONDS` was removed rather than tuned.** A checkpoint
+TTL is stamped on every item at write time, including a thread's *latest*
+checkpoint, and nothing marks a checkpoint as superseded — an idle conversation
+simply stops being written to and ages out. Its session record has no expiry, so
+what survives is a conversation still listed in the sidebar that opens empty,
+with nothing anywhere to explain it. Raising the value does not fix that; it
+moves the cliff.
+
+Which leaves a setting that is only safe when it never fires — when reaping is
+enabled and retires the session first. A TTL that must never fire earns nothing,
+and when it does fire it is retirement without any of the things retirement
+does: no sandbox reclaimed, no session record removed, no way to tell afterwards
+that anything was deleted. So conversations are retired in exactly one place.
+
+Two consequences worth stating rather than discovering:
+
+- **Superseded per-turn checkpoints now accumulate until a thread is retired.**
+  `put()` never deletes a prior checkpoint and the saver exposes no retention
+  knob, so this was the TTL's one genuine job. It is a storage cost, bounded per
+  item by `CHAT_MAX_PERSISTED_MESSAGES` and compression, and reclaimed in full
+  when the session goes. If it ever needs paying down, the answer is a pruning
+  pass over superseded checkpoints — not an expiry on the current one.
+- **Existing items keep the expiry already stamped on them.** Removing the
+  setting stops new writes carrying one; a deployment that had a TTL configured
+  must disable it on the table itself to stop DynamoDB collecting what is
+  already marked.
+
 **Don't:** reap a sandbox whose session is still alive, however old the sandbox
 is. **Don't:** reap untagged or foreign-tagged sandboxes by default. **Don't:**
 read `CHAT_SESSION_REAP_IDLE_SECONDS=0` as "retire immediately" — it means off,

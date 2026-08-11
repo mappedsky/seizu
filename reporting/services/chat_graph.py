@@ -3823,7 +3823,6 @@ def _build_dynamodb_checkpointer() -> DynamoDBSaver:
     # langgraph-checkpoint-aws), but its async methods wrap the sync calls in
     # run_in_executor, so checkpoint I/O is offloaded to a threadpool and does
     # not block the event loop — keep using it under the async graph.
-    ttl_seconds = settings.CHAT_CHECKPOINT_TTL_SECONDS or None
     s3_offload_config = None
     if settings.CHAT_CHECKPOINT_S3_BUCKET:
         s3_offload_config = {
@@ -3836,7 +3835,13 @@ def _build_dynamodb_checkpointer() -> DynamoDBSaver:
         region_name=settings.DYNAMODB_REGION,
         endpoint_url=settings.DYNAMODB_ENDPOINT_URL or None,
         boto_config=_aws_config(),
-        ttl_seconds=ttl_seconds,
+        # No ttl_seconds, deliberately. A checkpoint TTL is stamped on every
+        # item at write time, including a thread's *latest* checkpoint, and
+        # nothing marks a checkpoint as superseded -- so an idle conversation
+        # ages out while its session record, which has no expiry, stays in the
+        # sidebar pointing at nothing. Retiring a conversation is the session
+        # reaper's job, which removes the record, the checkpoint and the
+        # sandbox together. See SBX-011.
         enable_checkpoint_compression=settings.CHAT_CHECKPOINT_ENABLE_COMPRESSION,
         s3_offload_config=s3_offload_config,
     )
@@ -3959,20 +3964,6 @@ def _initialize_chat_checkpoints_sync() -> None:
                 raise
         waiter = client.get_waiter("table_exists")
         waiter.wait(TableName=table_name)
-
-    if settings.CHAT_CHECKPOINT_TTL_SECONDS:
-        try:
-            client.update_time_to_live(
-                TableName=table_name,
-                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
-            )
-        except ClientError as ttl_exc:
-            error = ttl_exc.response["Error"]
-            message = error.get("Message", "")
-            if error["Code"] != "ValidationException" or (
-                "already enabled" not in message and "being enabled" not in message
-            ):
-                raise
 
 
 def _aws_config() -> botocore.config.Config:

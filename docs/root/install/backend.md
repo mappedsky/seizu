@@ -105,7 +105,16 @@ LangGraph chat history can use DynamoDB or PostgreSQL independently of the repor
 Used when ``CHAT_CHECKPOINT_BACKEND=dynamodb``. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).
 
 * ``CHAT_CHECKPOINT_TABLE_NAME``: name of the DynamoDB checkpoint table; default: ``seizu-chat-checkpoints``
-* ``CHAT_CHECKPOINT_TTL_SECONDS``: checkpoint lifetime in seconds. Set to ``0`` to disable automatic expiration; default: ``0``
+* ``CHAT_CHECKPOINT_TTL_SECONDS``: **removed.** A checkpoint TTL expired a
+  thread's latest checkpoint as readily as a superseded one, so any conversation
+  idle longer than it lost its transcript while its session stayed listed in the
+  sidebar — retirement without any of the things retirement does. Conversations
+  are now retired whole by :doc:`session reaping <sandbox>`, which removes the
+  session record, its checkpoint and its sandbox together. Deployments that set
+  a TTL should also disable it on the checkpoint table (``aws dynamodb
+  update-time-to-live --table-name <table> --time-to-live-specification
+  Enabled=false``): Seizu stops stamping new items, but items written earlier
+  keep the expiry they already carry.
 * ``CHAT_CHECKPOINT_ENABLE_COMPRESSION``: compress serialized checkpoint payloads; default: ``true``
 * ``CHAT_CHECKPOINT_S3_BUCKET``: S3 bucket used to offload checkpoint payloads larger than 350 KB; default: ``""``
 * ``CHAT_CHECKPOINT_S3_ENDPOINT_URL``: override the S3 endpoint URL (for example, ``http://minio:9000`` for local development); default: ``""`` (uses the AWS endpoint)

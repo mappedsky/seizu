@@ -64,6 +64,14 @@ def test_the_worker_receives_the_chat_feature_flags() -> None:
     assert set(_WORKER_CHAT_FLAGS) <= env
 
 
+def test_no_service_configures_a_checkpoint_ttl() -> None:
+    """The setting is gone (SBX-011): a checkpoint TTL empties conversations that
+    still exist, which is retirement without any of the things retirement does.
+    Compose used to pin 30 days on both services, colliding exactly with the
+    reaper's own default."""
+    assert "CHAT_CHECKPOINT_TTL_SECONDS" not in _COMPOSE.read_text()
+
+
 def test_both_sandbox_creating_services_agree_on_the_deployment_id() -> None:
     """Interactive chat creates the sandboxes the worker reaps. If the id is set
     in one service and not the other, every sandbox is tagged for a deployment

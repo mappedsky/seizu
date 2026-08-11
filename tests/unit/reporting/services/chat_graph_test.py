@@ -3154,10 +3154,12 @@ def test_legacy_provider_api_key_prefers_gemini_then_google(mocker):
     assert chat_graph._legacy_provider_api_key("unknown") == ""
 
 
-def test_build_dynamodb_checkpointer_forwards_ttl_and_s3_offload_settings(mocker):
+def test_build_dynamodb_checkpointer_forwards_s3_offload_settings_and_no_ttl(mocker):
+    """No ttl_seconds, deliberately: a checkpoint TTL expires a thread's latest
+    checkpoint as readily as a superseded one, emptying conversations that still
+    exist. Retiring them is the session reaper's job (SBX-011)."""
     saver = object()
     saver_factory = mocker.patch("reporting.services.chat_graph.DynamoDBSaver", return_value=saver)
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 3600)
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_BUCKET", "chat-checkpoints")
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://minio:9000")
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_KEY_PREFIX", "threads/")
@@ -3172,7 +3174,6 @@ def test_build_dynamodb_checkpointer_forwards_ttl_and_s3_offload_settings(mocker
         region_name="us-east-1",
         endpoint_url="http://dynamodb:8000",
         boto_config=mocker.ANY,
-        ttl_seconds=3600,
         enable_checkpoint_compression=True,
         s3_offload_config={
             "bucket_name": "chat-checkpoints",
@@ -3360,18 +3361,14 @@ def test_initialize_chat_checkpoints_creates_missing_table_and_ttl(mocker):
         return_value=type("_Saver", (), {"client": client})(),
     )
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 3600)
 
     chat_graph._initialize_chat_checkpoints_sync()
 
     assert client.created[0]["TableName"] == "chat-table"
     assert client.waiter.calls == [{"TableName": "chat-table"}]
-    assert client.ttl == [
-        {
-            "TableName": "chat-table",
-            "TimeToLiveSpecification": {"Enabled": True, "AttributeName": "ttl"},
-        }
-    ]
+    # Never enabled: nothing writes a ttl attribute, so a table-level expiry
+    # would only be a trap for whoever set one by hand.
+    assert client.ttl == []
 
 
 def test_initialize_chat_checkpoints_accepts_existing_table(mocker):
@@ -3381,7 +3378,6 @@ def test_initialize_chat_checkpoints_accepts_existing_table(mocker):
         return_value=type("_Saver", (), {"client": client})(),
     )
     mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TTL_SECONDS", 0)
 
     chat_graph._initialize_chat_checkpoints_sync()
 
