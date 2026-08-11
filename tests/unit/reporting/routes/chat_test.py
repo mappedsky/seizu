@@ -208,9 +208,11 @@ async def test_chat_stream_records_activity_before_running_the_turn(mocker):
     assert order[:2] == ["touch", "stream"]
 
 
-async def test_a_store_failure_does_not_block_the_turn(mocker):
-    """Chat kept working when this was a background task that failed unseen;
-    making it awaited must not turn a store blip into an outage."""
+async def test_a_store_failure_refuses_the_turn_rather_than_guessing(mocker):
+    """This write is the turn's half of the retirement handshake, so a failure
+    means we do not know whether the session was already claimed. Proceeding on
+    "probably fine" is exactly the case where a turn runs against a checkpoint
+    being deleted underneath it; refusing costs a retry."""
     fake_graph = FakeChatGraph()
     mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
@@ -223,7 +225,11 @@ async def test_a_store_failure_does_not_block_the_turn(mocker):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
 
-    assert '"finishReason":"stop"' in response.text
+    assert '"finishReason":"error"' in response.text
+    # Distinguishable from retirement: this one is worth retrying.
+    assert "try again" in response.text
+    assert "retired" not in response.text
+    assert fake_graph.calls == []
 
 
 async def test_chat_stream_success(mocker):

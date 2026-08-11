@@ -49,25 +49,27 @@ _CONTINUE_RESPONSE_PROMPT = (
 )
 
 
-async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> bool:
+async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> str:
     """Record the turn's activity before it starts, and report whether it may.
 
     Awaited rather than fired into a background task: the timestamp this writes
     is what stops the session reaper retiring the conversation
     (:mod:`reporting.services.session_reaper`), and a task that has not run yet
-    protects nothing. ``touch_chat_session`` returns None when the session is
-    gone *or* has already been claimed for retirement -- in both cases its
-    checkpoint and sandbox are going away, so the turn must not start.
+    protects nothing.
 
-    A store failure is not treated as a refusal: chat continues to work when
-    the session store is briefly unavailable, exactly as it did when this was a
-    background task that could fail unseen.
+    Three outcomes, and the last is why this cannot fail open. A successful
+    write is the turn's half of the retirement handshake; ``None`` means the
+    session is gone or already claimed, so its checkpoint and sandbox are being
+    deleted. **A store failure means we do not know which** -- and proceeding on
+    "probably fine" is exactly the case where a turn runs against state being
+    torn down underneath it. Refusing costs a retry; guessing costs the
+    conversation.
     """
     try:
-        return await report_store.touch_chat_session(user_id, thread_id) is not None
+        return "ok" if await report_store.touch_chat_session(user_id, thread_id) else "retired"
     except Exception:
         logger.exception("Failed to update chat session timestamp", extra={"thread_id": thread_id})
-        return True
+        return "unavailable"
 
 
 @router.post(
@@ -122,8 +124,21 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
             yield _sse_data({"type": "finish", "finishReason": "error"})
             yield "data: [DONE]\n\n"
             return
-        if not await _claim_chat_session_for_turn(current.user.user_id, body.thread_id):
-            yield _sse_data({"type": "error", "errorText": "This conversation has been retired"})
+        admission = await _claim_chat_session_for_turn(current.user.user_id, body.thread_id)
+        if admission != "ok":
+            # Retryable when the store was unreachable; permanent when the
+            # session is being retired. The wording is the only thing telling
+            # the user which, so it has to differ.
+            yield _sse_data(
+                {
+                    "type": "error",
+                    "errorText": (
+                        "This conversation has been retired"
+                        if admission == "retired"
+                        else "Could not start this turn; please try again"
+                    ),
+                }
+            )
             yield _sse_data({"type": "finish", "finishReason": "error"})
             yield "data: [DONE]\n\n"
             return

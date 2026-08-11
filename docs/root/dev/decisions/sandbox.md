@@ -413,16 +413,20 @@ be re-taken. The interactive delete route keeps the opposite order for the
 opposite reason: it should vanish from the UI at once, and a user watching it
 can retry.
 
-**Finding idle sessions is a rotation, not an index.** Sessions are partitioned
-per user in DynamoDB with no global order on `updated_at`, and asking every user
-every sweep is what makes an hourly pass unaffordable — 100k users is 100k
-queries, nearly all returning nothing. Each pass therefore takes one bucket of
-users (`CHAT_SESSION_USER_BUCKETS`, stable hash), chosen from the clock, so
-consecutive sweeps rotate with no cursor to keep, contend over, or lose when a
-worker dies. Coverage costs latency: a session becomes visible up to
-`interval × buckets` after it goes idle (a day at the defaults, against a
-thirty-day threshold), and `warn_if_coverage_is_too_slow` says so when a
-configuration makes that lag material.
+**Finding idle sessions is a resumable walk, not an index.** Sessions are
+partitioned per user in DynamoDB with no global order on `updated_at`, and
+asking every user in one pass is what makes an hourly sweep unaffordable — 100k
+users is 100k queries, nearly all returning nothing, and a pass that cannot
+finish inside the activity timeout retries from the first page forever, never
+reaching the users at the end. So a pass walks at most
+`CHAT_SESSION_REAP_USERS_PER_PASS` users and records where it stopped; the next
+resumes there and clears the cursor on reaching the end. Bounded work, complete
+coverage. Sweeps never overlap (`SKIP`), so the cursor has a single writer, and
+losing it costs a repeated pass rather than skipped users.
+
+A clock-derived bucket rotation was tried first and is not enough: it bounds the
+per-user session queries but not the walk over the user partition itself, which
+stays O(all users) per pass.
 
 A global index keyed on `updated_at` was the obvious alternative and is worse
 here: it costs a write on every chat turn into one hot partition, and it could
@@ -454,12 +458,18 @@ that anything was deleted. So conversations are retired in exactly one place.
 
 Two consequences worth stating rather than discovering:
 
-- **Superseded per-turn checkpoints now accumulate until a thread is retired.**
-  `put()` never deletes a prior checkpoint and the saver exposes no retention
-  knob, so this was the TTL's one genuine job. It is a storage cost, bounded per
-  item by `CHAT_MAX_PERSISTED_MESSAGES` and compression, and reclaimed in full
-  when the session goes. If it ever needs paying down, the answer is a pruning
-  pass over superseded checkpoints — not an expiry on the current one.
+- **Superseded per-turn checkpoints now accumulate until a thread is retired,
+  and that is accepted.** `put()` never deletes a prior checkpoint and the saver
+  exposes no retention knob, so this was the TTL's one genuine job. Reviewed and
+  waived twice, deliberately. There is no ceiling in the strict sense --
+  retirement is opt-in, and a periodically active thread never becomes idle
+  enough to retire -- so the judgement is about proportion rather than bounds:
+  such threads are a minority and hold little data between them. Worth
+  revisiting, not worth solving now. It is bounded per item by
+  `CHAT_MAX_PERSISTED_MESSAGES` and compression, and reclaimed in full when the
+  session goes. If it ever does need paying down, the answer is a pruning pass
+  over *superseded* checkpoints that keeps the latest — not an expiry on the
+  current one, which is the thing that emptied live conversations.
 - **Existing items keep the expiry already stamped on them.** Removing the
   setting stops new writes carrying one; a deployment that had a TTL configured
   must disable it on the table itself to stop DynamoDB collecting what is

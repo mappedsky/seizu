@@ -312,6 +312,22 @@ async def test_a_claimed_session_refuses_further_use(store, mocker):
     assert await store.complete_chat_session_run("user-1", "t1", "success", []) is None
 
 
+async def test_a_claimed_session_is_left_untouched_by_concurrent_writes(store, mocker):
+    """Not just refused -- unmodified. The guard is evaluated by the database as
+    part of the write, so there is no window where a claim lands between a read
+    and its update and the update commits anyway."""
+    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
+    created = await store.create_chat_session("user-1", title="Test")
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+
+    assert await store.touch_chat_session("user-1", "t1") is None
+    assert await store.update_chat_session_title("user-1", "t1", "renamed") is None
+
+    unchanged = await store.get_chat_session("user-1", "t1")
+    assert unchanged is not None
+    assert (unchanged.updated_at, unchanged.title) == (created.updated_at, "Test")
+
+
 async def test_a_claim_can_be_retried_after_a_failed_sweep(store, mocker):
     """A pass that died between claiming and finishing has to be resumable, or
     the session is stuck claimed and its transcript is never collected."""

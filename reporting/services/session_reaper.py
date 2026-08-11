@@ -74,41 +74,6 @@ def reaping_configured() -> bool:
     return settings.CHAT_SESSION_REAP_INTERVAL_SECONDS > 0
 
 
-def coverage_lag_seconds() -> int:
-    """How long a full rotation over every user takes on the DynamoDB backend.
-
-    That backend visits one bucket of users per sweep rather than all of them
-    (see ``dynamodb.list_idle_chat_sessions``), so a session becomes *visible*
-    to the sweep up to this long after it goes idle. SQL answers globally and
-    has no such lag; reporting the DynamoDB figure regardless keeps the warning
-    conservative rather than backend-dependent.
-    """
-    from reporting.services.report_store.dynamodb import CHAT_SESSION_USER_BUCKETS
-
-    return settings.CHAT_SESSION_REAP_INTERVAL_SECONDS * CHAT_SESSION_USER_BUCKETS
-
-
-def warn_if_coverage_is_too_slow() -> None:
-    """Say so when the rotation is slow enough to matter against the threshold.
-
-    A long interval makes each session's *effective* retention its idle window
-    plus a rotation. That is harmless at the defaults (a day against thirty)
-    and misleading at, say, a six-hour interval against a two-day threshold --
-    the kind of configuration whose symptom is "sessions live much longer than
-    I set", with nothing anywhere to explain it.
-    """
-    lag = coverage_lag_seconds()
-    idle = settings.CHAT_SESSION_REAP_IDLE_SECONDS
-    if idle > 0 and lag > idle // 4:
-        logger.warning(
-            "Session reap sweeps take %ds to visit every user, against a %ds idle threshold; "
-            "sessions may persist that much longer than configured. Shorten "
-            "CHAT_SESSION_REAP_INTERVAL_SECONDS or lengthen CHAT_SESSION_REAP_IDLE_SECONDS.",
-            lag,
-            idle,
-        )
-
-
 async def reap(*, now: datetime | None = None) -> ReapSummary:
     """Run both passes. Best effort: a failing pass is logged, never raised."""
     summary = ReapSummary()

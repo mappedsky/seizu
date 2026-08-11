@@ -108,6 +108,8 @@ _PK_ROLE_LIST = "ROLE_LIST"
 # by user and sorted by updated_at for the sidebar.
 _PK_CHAT_SESSION_METADATA_PREFIX = "CHAT_SESSION#"
 _PK_CHAT_SESSION_LIST_PREFIX = "CHAT_SESSION_LIST#"
+# Where the last session-reap pass stopped walking the user lookup partition.
+_PK_CHAT_SESSION_REAP_CURSOR = "CHAT_SESSION_REAP_CURSOR"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -115,11 +117,15 @@ _SK_QUERY_HISTORY_PREFIX = "HISTORY#"
 # Maximum history items fetched from DynamoDB per user (caps scan size).
 _QUERY_HISTORY_MAX = 500
 _CHAT_SESSION_LIST_MAX = 500
-#: How many sweeps it takes the session reaper to visit every user once. Higher
-#: means a cheaper pass and a slower rotation; the product with the sweep
-#: interval has to stay well inside the idle threshold, which
-#: ``session_reaper.coverage_lag_seconds`` checks at startup.
-CHAT_SESSION_USER_BUCKETS = 24
+#: Pages of one user's session list a pass will read. ``origin`` is a post-read
+#: filter, so a user with many old headless sessions can return nothing per page;
+#: without this, one such user could spend the whole activity timeout.
+CHAT_SESSION_REAP_PAGES_PER_USER = 5
+
+#: Users one session-reap pass will walk before stopping and saving its place.
+#: Bounds the pass in queries and in wall time; the next pass resumes where this
+#: one stopped, so coverage is complete rather than immediate.
+CHAT_SESSION_REAP_USERS_PER_PASS = 2_000
 _CHAT_SESSION_TRANSACTION_RETRIES = 3
 _ACTION_CONFIRMATION_SESSION_QUERY_MAX = 500
 _T = TypeVar("_T")
@@ -386,28 +392,88 @@ def _chat_session_list_sk(updated_at: str, thread_id: str) -> str:
     return f"UPDATED#{updated_at}#THREAD#{thread_id}"
 
 
-def _user_bucket(user_id: str) -> int:
-    """Which sweep visits this user's sessions.
+def _collect_idle_sessions(
+    table: Any,
+    user_id: str,
+    cutoff_sk: str,
+    limit: int,
+    idle: list[IdleChatSession],
+) -> None:
+    """Append one user's idle sessions, up to the pass's remaining room.
 
-    A stable hash, not ``hash()``: PYTHONHASHSEED randomizes that per process,
-    so two workers would disagree about whose turn it is and some users would
-    be visited twice while others were skipped for as long as the processes
-    lived.
+    The list SK starts with the timestamp, so "idle" is a key-range condition
+    rather than a scan: a user with nothing old costs one query returning
+    nothing.
+
+    Bounded to ``CHAT_SESSION_REAP_PAGES_PER_USER`` pages, because ``origin`` is
+    a post-read filter: a user with many old *headless* sessions -- scheduled
+    runs share this partition and are never retired -- would otherwise read
+    page after page finding nothing to return, and one such user could spend the
+    whole activity timeout. Anything past the cap waits for a later pass.
+
+    The residual is that a user whose oldest sessions are overwhelmingly
+    headless can keep interactive ones hidden behind the cap. Retiring the
+    interactive ones does not shrink that front, so the fix if it ever bites is
+    a separate partition (or index) for headless sessions rather than a bigger
+    cap.
     """
-    digest = hashlib.blake2b(user_id.encode(), digest_size=8).digest()
-    return int.from_bytes(digest, "big") % CHAT_SESSION_USER_BUCKETS
+    pages = 0
+    session_kwargs: dict[str, Any] = {
+        "KeyConditionExpression": "PK = :pk AND SK < :cutoff",
+        "FilterExpression": "attribute_not_exists(origin) OR origin = :interactive",
+        "ExpressionAttributeValues": {
+            ":pk": _chat_session_list_pk(user_id),
+            ":cutoff": cutoff_sk,
+            ":interactive": "interactive",
+        },
+        "ProjectionExpression": "thread_id, updated_at",
+    }
+    while len(idle) < limit and pages < CHAT_SESSION_REAP_PAGES_PER_USER:
+        resp = table.query(**session_kwargs)
+        pages += 1
+        for item in resp.get("Items", []):
+            idle.append(
+                IdleChatSession(
+                    user_id=user_id,
+                    thread_id=str(item["thread_id"]),
+                    updated_at=str(item["updated_at"]),
+                )
+            )
+            if len(idle) >= limit:
+                return
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return
+        session_kwargs["ExclusiveStartKey"] = last_key
 
 
-def _user_bucket_for_now(now: datetime | None = None) -> int:
-    """The bucket this sweep owns, derived from the clock.
+def _read_reap_cursor(table: Any) -> dict[str, Any] | None:
+    """Where the last session-reap pass stopped walking users, if anywhere."""
+    try:
+        resp = table.get_item(Key={"PK": _PK_CHAT_SESSION_REAP_CURSOR, "SK": _SK_METADATA})
+    except Exception:
+        # A pass that cannot read its cursor starts from the top: it repeats
+        # work rather than skipping users, which is the harmless direction.
+        logger.warning("could not read the session reap cursor; starting from the first user", exc_info=True)
+        return None
+    item = resp.get("Item") or {}
+    cursor = item.get("cursor")
+    return dict(cursor) if isinstance(cursor, dict) and cursor else None
 
-    Advancing by elapsed *intervals* rather than by hour means the rotation
-    still covers everyone whatever the sweep interval is, and needs no stored
-    cursor -- so a worker dying mid-pass loses nothing but that pass.
+
+def _write_reap_cursor(table: Any, cursor: dict[str, Any] | None) -> None:
+    """Record where the next pass should resume, or clear it at the end.
+
+    Best effort: losing the cursor costs a pass that starts over, which is why
+    the sweep is bounded by users rather than trusting this to be durable.
     """
-    interval = max(1, settings.CHAT_SESSION_REAP_INTERVAL_SECONDS)
-    elapsed = (now or datetime.now(tz=UTC)).timestamp()
-    return int(elapsed // interval) % CHAT_SESSION_USER_BUCKETS
+    try:
+        if cursor:
+            table.put_item(Item={"PK": _PK_CHAT_SESSION_REAP_CURSOR, "SK": _SK_METADATA, "cursor": cursor})
+        else:
+            table.delete_item(Key={"PK": _PK_CHAT_SESSION_REAP_CURSOR, "SK": _SK_METADATA})
+    except Exception:
+        logger.warning("could not record the session reap cursor", exc_info=True)
 
 
 def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
@@ -4137,70 +4203,64 @@ class DynamoDBReportStore(ReportStore):
     async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
         # Sessions are partitioned per user and there is no global index over
         # updated_at, so finding idle ones means asking users. Asking *every*
-        # user every sweep is what makes that unaffordable: at 100k users an
-        # hourly pass is 100k queries, nearly all of them returning nothing.
+        # user in one pass is what makes that unaffordable: at 100k users it is
+        # 100k queries, nearly all returning nothing, and a pass that cannot
+        # finish inside the activity timeout retries from the first page
+        # forever, never reaching the users at the end.
         #
-        # So each pass takes one bucket of users, chosen by the clock rather
-        # than by stored progress -- consecutive sweeps advance through the
-        # buckets on their own, with no cursor to keep, contend over, or lose
-        # when a worker dies mid-pass. Every user is visited once per
-        # _USER_BUCKETS sweeps, which the reaper checks stays far inside the
-        # idle threshold (see session_reaper.coverage_lag_seconds).
+        # So a pass walks at most CHAT_SESSION_REAP_USERS_PER_PASS users and
+        # stores where it stopped; the next resumes there, and clears the cursor
+        # on reaching the end. Bounded work, complete coverage, and no reliance
+        # on a global index -- which would cost a write on every chat turn into
+        # one hot partition and could never see the sessions that already exist,
+        # the very population an abandoned-session sweep is for.
         #
-        # The alternative, a global index keyed on updated_at, costs a write on
-        # every chat turn into a single hot partition, and could never see the
-        # sessions that already exist -- which, since abandoned sessions are by
-        # definition never touched again, is exactly the population this
-        # feature is for.
+        # Sweeps do not overlap (the Temporal Schedule uses SKIP), so the cursor
+        # has a single writer.
         cutoff_sk = f"UPDATED#{idle_before}"
-        bucket = _user_bucket_for_now()
 
         def _op() -> list[IdleChatSession]:
             table = _get_table()
             idle: list[IdleChatSession] = []
+            users_seen = 0
             user_kwargs: dict[str, Any] = {
                 "KeyConditionExpression": "PK = :pk",
                 "ExpressionAttributeValues": {":pk": _PK_USER_LOOKUP},
-                "ProjectionExpression": "user_id",
+                # SK as well as user_id: the cursor is built from it, and a
+                # projection that omits it leaves nothing to resume from.
+                "ProjectionExpression": "SK, user_id",
             }
-            while len(idle) < limit:
+            resume_key = _read_reap_cursor(table)
+            if resume_key:
+                user_kwargs["ExclusiveStartKey"] = resume_key
+            # The key of the last user actually *processed*, which is not the
+            # same as the end of the page it was on: stopping mid-page and
+            # saving the page's LastEvaluatedKey would resume past users this
+            # pass never looked at, and they would never be examined again.
+            processed_key: dict[str, Any] | None = None
+            exhausted = False
+            while True:
                 users_resp = table.query(**user_kwargs)
+                stopped_mid_page = False
                 for user_item in users_resp.get("Items", []):
+                    processed_key = {"PK": _PK_USER_LOOKUP, "SK": user_item["SK"]}
+                    users_seen += 1
                     user_id = str(user_item.get("user_id") or "")
-                    if not user_id or _user_bucket(user_id) != bucket:
-                        continue
-                    session_kwargs: dict[str, Any] = {
-                        "KeyConditionExpression": "PK = :pk AND SK < :cutoff",
-                        "FilterExpression": "attribute_not_exists(origin) OR origin = :interactive",
-                        "ExpressionAttributeValues": {
-                            ":pk": _chat_session_list_pk(user_id),
-                            ":cutoff": cutoff_sk,
-                            ":interactive": "interactive",
-                        },
-                        "ProjectionExpression": "thread_id, updated_at",
-                    }
-                    while len(idle) < limit:
-                        sessions_resp = table.query(**session_kwargs)
-                        for item in sessions_resp.get("Items", []):
-                            idle.append(
-                                IdleChatSession(
-                                    user_id=user_id,
-                                    thread_id=str(item["thread_id"]),
-                                    updated_at=str(item["updated_at"]),
-                                )
-                            )
-                            if len(idle) >= limit:
-                                break
-                        session_last_key = sessions_resp.get("LastEvaluatedKey")
-                        if not session_last_key:
-                            break
-                        session_kwargs["ExclusiveStartKey"] = session_last_key
-                    if len(idle) >= limit:
+                    if user_id:
+                        _collect_idle_sessions(table, user_id, cutoff_sk, limit, idle)
+                    if len(idle) >= limit or users_seen >= CHAT_SESSION_REAP_USERS_PER_PASS:
+                        stopped_mid_page = True
                         break
                 last_key = users_resp.get("LastEvaluatedKey")
+                if stopped_mid_page:
+                    break
                 if not last_key:
+                    exhausted = True
                     break
                 user_kwargs["ExclusiveStartKey"] = last_key
+            # Only a pass that reached the last user starts the next one from the
+            # top; anything else resumes at the user it stopped on.
+            _write_reap_cursor(table, None if exhausted else processed_key)
             return idle
 
         return await asyncio.to_thread(_op)

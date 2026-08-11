@@ -78,7 +78,6 @@ async def reconcile(client: Client | None = None) -> None:
         except Exception:
             logger.debug("no session reap schedule to remove", exc_info=True)
         return
-    session_reaper.warn_if_coverage_is_too_slow()
     schedule = build_schedule()
     try:
         await temporal.create_schedule(SCHEDULE_ID, schedule)

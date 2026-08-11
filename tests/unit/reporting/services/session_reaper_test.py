@@ -385,19 +385,3 @@ async def test_reaping_survives_chat_being_turned_off() -> None:
     which is how the gate silently disabled the sweep everywhere."""
     with _settings(), patch("reporting.settings.CHAT_ENABLED", False):
         assert session_reaper.reaping_configured()
-
-
-async def test_a_slow_rotation_against_a_short_threshold_warns(caplog) -> None:
-    """Each session's effective retention is its idle window plus one rotation;
-    silence would leave "sessions live longer than I set" unexplained."""
-    with _settings(CHAT_SESSION_REAP_INTERVAL_SECONDS=21_600, CHAT_SESSION_REAP_IDLE_SECONDS=172_800):
-        session_reaper.warn_if_coverage_is_too_slow()
-
-    assert "visit every user" in caplog.text
-
-
-async def test_the_default_cadence_does_not_warn(caplog) -> None:
-    with _settings():
-        session_reaper.warn_if_coverage_is_too_slow()
-
-    assert "visit every user" not in caplog.text

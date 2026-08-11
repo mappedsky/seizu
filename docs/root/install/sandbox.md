@@ -134,11 +134,10 @@ first act is a conditional activity write, so exactly one of the two commits. A
 turn that loses the race is refused with *"This conversation has been retired"*
 rather than running against state being deleted underneath it.
 
-On DynamoDB each sweep visits one bucket of users rather than all of them, so a
-session becomes visible to the sweep up to `interval × 24` after it goes idle —
-a day at the defaults, against a thirty-day threshold. Seizu logs a warning at
-startup if your interval makes that lag material against your threshold. (SQL
-answers the same question globally with one indexed query.)
+On DynamoDB each sweep walks a bounded number of users and records where it
+stopped, resuming there next time, so a large deployment takes several passes to
+work through everyone rather than timing out on one. (SQL answers the same
+question globally with a single indexed query.)
 
 **Set `SEIZU_DEPLOYMENT_ID` whenever the sandbox credentials are shared** with
 another Seizu installation (production and staging on one E2B account, say). It
