@@ -12,6 +12,7 @@ async def test_run_worker_starts_and_exits_on_shutdown(mocker):
     mocker.patch("reporting.temporal_worker._bootstrap")
     mocker.patch("reporting.temporal_worker.chat_worker_resources", _noop_resources)
     mocker.patch("reporting.temporal_worker.Client.connect", AsyncMock(return_value=MagicMock()))
+    mocker.patch("reporting.temporal_worker.session_reaper_schedule.reconcile", AsyncMock())
 
     mock_worker = AsyncMock()
     mocker.patch("reporting.temporal_worker.Worker", return_value=mock_worker)
@@ -54,6 +55,32 @@ async def test_main_runs_worker_when_enabled(mocker):
     assert hasattr(coro, "cr_code")
     assert "_run_worker" in coro.cr_code.co_qualname
     coro.close()  # prevent ResourceWarning
+
+
+async def test_the_worker_reconciles_the_session_reap_schedule(mocker):
+    """The sweep is a Temporal Schedule, not a task in this process: replicas are
+    ordinary, and a timer in each of them would race over the same deletions.
+    Reconciling from every replica is the idempotent half of that trade."""
+
+    @asynccontextmanager
+    async def _noop_resources():
+        yield
+
+    mocker.patch("reporting.temporal_worker._bootstrap")
+    mocker.patch("reporting.temporal_worker.chat_worker_resources", _noop_resources)
+    mocker.patch("reporting.temporal_worker.Client.connect", AsyncMock(return_value=MagicMock()))
+    mocker.patch("reporting.temporal_worker.Worker", return_value=AsyncMock())
+    reconcile = mocker.patch("reporting.temporal_worker.session_reaper_schedule.reconcile", AsyncMock())
+
+    import reporting.temporal_worker as tw
+
+    tw._shutdown_event.set()
+    try:
+        await tw._run_worker()
+    finally:
+        tw._shutdown_event.clear()
+
+    reconcile.assert_awaited_once()
 
 
 async def test_bootstrap_installs_handlers(mocker):

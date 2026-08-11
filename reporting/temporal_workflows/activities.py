@@ -27,6 +27,7 @@ from reporting.services import (
     github_checks,
     report_store,
     sandbox_remediation,
+    session_reaper,
     workflow_schedules,
 )
 from reporting.services import (
@@ -62,6 +63,7 @@ from reporting.temporal_workflows.shared import (
     ScheduledChatDefinition,
     ScheduledChatInvocation,
     ScheduledChatRunResult,
+    SessionReapResult,
     TriggerConfiguredWorkflowsRequest,
 )
 
@@ -414,6 +416,24 @@ async def record_configured_workflow_result(input: dict[str, str | None]) -> Non
         str(input["workflow_id"]),
         str(input["status"]),
         error=str(input["error"]) if input.get("error") else None,
+    )
+
+
+@activity.defn
+async def reap_idle_sessions() -> SessionReapResult:
+    """Retire idle chat sessions and the sandboxes they hold.
+
+    All the I/O of the sweep lives here rather than in the workflow, which only
+    decides that it is time for one.
+    """
+    summary = await session_reaper.reap()
+    return SessionReapResult(
+        sessions_seen=summary.sessions_seen,
+        sessions_reaped=summary.sessions_reaped,
+        sessions_kept=summary.sessions_kept,
+        sandboxes_seen=summary.sandboxes_seen,
+        orphans_reaped=summary.orphans_reaped,
+        failed=summary.failed,
     )
 
 

@@ -16,7 +16,7 @@ from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
-from reporting.services import chat_schedules, workflow_schedules
+from reporting.services import chat_schedules, session_reaper_schedule, workflow_schedules
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     check_configured_workflow_watch,
@@ -27,6 +27,7 @@ from reporting.temporal_workflows.activities import (
     load_configured_workflow,
     load_scheduled_chat,
     normalize_code_workflow_output,
+    reap_idle_sessions,
     record_configured_workflow_result,
     record_scheduled_chat_run_result,
     run_agent_chat_session,
@@ -47,6 +48,7 @@ from reporting.temporal_workflows.configured_workflow import (
 from reporting.temporal_workflows.cve_dependency_remediation import CveDependencyRemediationWorkflow
 from reporting.temporal_workflows.cve_repo_report import CveRepoReportWorkflow
 from reporting.temporal_workflows.scheduled_chat import ScheduledChatWatchPoll, ScheduledChatWorkflow
+from reporting.temporal_workflows.session_reap import SessionReapWorkflow
 from reporting.worker_bootstrap import chat_worker_resources, install_shutdown_handlers
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,7 @@ async def _run_worker() -> None:
                 ScheduledChatWorkflow,
                 ScheduledChatWatchPoll,
                 AgentChatWorkflow,
+                SessionReapWorkflow,
             ],
             activities=[
                 load_configured_workflow,
@@ -97,6 +100,7 @@ async def _run_worker() -> None:
                 run_scheduled_chat_session,
                 record_scheduled_chat_run_result,
                 run_agent_chat_session,
+                reap_idle_sessions,
             ],
         )
         logger.info(
@@ -108,6 +112,12 @@ async def _run_worker() -> None:
             },
         )
         async with worker:
+            # A Temporal Schedule, not a task in this process: worker replicas
+            # are ordinary, and a local timer in each of them would run the
+            # sweep N times over and race over the same deletions. Reconciling
+            # it from every replica is safe -- the id is fixed and the call is
+            # idempotent.
+            await session_reaper_schedule.reconcile()
             reconcile_task = asyncio.create_task(_reconcile_loop())
             try:
                 await _shutdown_event.wait()

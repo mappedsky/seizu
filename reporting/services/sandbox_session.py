@@ -23,10 +23,9 @@ import logging
 from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
 
 from reporting import settings
-from reporting.services.sandbox_backend import SandboxBackend, open_backend
+from reporting.services.sandbox_backend import SandboxBackend, kill_sandbox, open_backend
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +54,14 @@ class SandboxSession:
     turn ends, and ``sandbox_id`` is the handle the next turn resumes it by.
     """
 
-    def __init__(self, *, resume_sandbox_id: str | None = None, persist: bool = False) -> None:
+    def __init__(self, *, resume_sandbox_id: str | None = None, persist: bool = False, thread: str = "") -> None:
         self._stack: AsyncExitStack | None = None
         self._backend: SandboxBackend | None = None
         self._lock = asyncio.Lock()
         self._closed = False
         self._resume_sandbox_id = resume_sandbox_id or ""
         self._persist = persist
+        self._thread = thread
         self._sandbox_id = ""
         # Decided at close, not at open: whether the sandbox is worth keeping
         # depends on how the turn ended.
@@ -103,6 +103,12 @@ class SandboxSession:
                         resume_sandbox_id=self._resume_sandbox_id or None,
                         suspend_on_exit=self._suspend_on_exit,
                         on_teardown=self._record_teardown,
+                        # The one kind of sandbox that outlives the run that
+                        # created it, so the one the reaper exists for -- and
+                        # the thread tag is how the reaper finds the session
+                        # whose lifetime it now shares.
+                        purpose="chat-session",
+                        thread=self._thread,
                     )
                 )
                 # Publish all three together, so the stack can never belong to a
@@ -190,17 +196,25 @@ class SandboxSession:
 _current_sandbox_session: ContextVar[SandboxSession | None] = ContextVar("_current_sandbox_session", default=None)
 
 
-def start_sandbox_session(*, resume_sandbox_id: str | None = None, persist: bool | None = None) -> SandboxSession:
+def start_sandbox_session(
+    *,
+    resume_sandbox_id: str | None = None,
+    persist: bool | None = None,
+    thread: str = "",
+) -> SandboxSession:
     """Make a fresh session ambient for the current turn.
 
     ``resume_sandbox_id`` is the id a previous turn suspended, read back out of
     the thread's checkpoint. ``persist`` defaults to ``SANDBOX_SESSION_PERSIST``;
     callers outside a conversation turn pass ``False``, because there is no
     thread to store the id in and a paused sandbox with no resume id is a leak.
+    ``thread`` is the namespaced chat thread the sandbox belongs to, stamped on
+    it so the session reaper can tell whose it is.
     """
     session = SandboxSession(
         resume_sandbox_id=resume_sandbox_id,
         persist=settings.SANDBOX_SESSION_PERSIST if persist is None else persist,
+        thread=thread,
     )
     _current_sandbox_session.set(session)
     return session
@@ -243,21 +257,14 @@ async def discard_sandbox(sandbox_id: str) -> None:
     """Destroy a suspended sandbox nobody will resume (best effort).
 
     Deleting a thread drops the only record of its sandbox id, so without this
-    the sandbox stays paused -- consuming provider-side storage -- until the
-    provider's own retention reaps it.
+    the sandbox stays paused -- consuming provider-side storage -- until
+    :mod:`reporting.services.session_reaper` picks it up as an orphan, which is
+    a scheduled pass rather than the immediate cleanup a deletion deserves.
     """
     if not sandbox_id:
         return
     try:
-        from e2b_code_interpreter import AsyncSandbox
-
-        kwargs: dict[str, Any] = {}
-        if settings.SANDBOX_API_KEY:
-            kwargs["api_key"] = settings.SANDBOX_API_KEY
-        if settings.SANDBOX_DOMAIN:
-            kwargs["domain"] = settings.SANDBOX_DOMAIN
-            kwargs["validate_api_key"] = False
-        await AsyncSandbox.kill(sandbox_id, **kwargs)
+        await kill_sandbox(sandbox_id)
     except Exception:
         # Warning, not info: the id is about to stop being recorded anywhere,
         # so this line is the only thing that can lead an operator to the

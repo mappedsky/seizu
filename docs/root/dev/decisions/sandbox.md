@@ -23,6 +23,11 @@ across providers, and tests need no E2B package.
 **Don't:** widen the protocol to expose provider features. A sixth operation is
 a sixth thing every future backend must implement.
 
+Account-wide operations that belong to no open sandbox — `kill_sandbox` and
+`list_paused_sandboxes`, which the reaper ([SBX-011](#sbx-011)) runs on — live
+in the same module for the same reason, and return the provider-agnostic
+`SandboxSnapshot` rather than a provider response.
+
 **Note:** `@runtime_checkable` `isinstance` reads members with `getattr_static`,
 so a `MagicMock` standing in for a backend must have **every** member explicitly
 assigned — an auto-created attribute does not satisfy the check.
@@ -191,10 +196,12 @@ than treated as temporary.
 **Don't:** "tidy" this back to `keep_memory=False` for isolation. A test pins
 the value and says why.
 
-**Don't:** assume retention is solved. Nothing reaps a sandbox whose thread is
-abandoned rather than deleted; `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a
-*running* sandbox, not a paused one. A TTL/sweep is planned separately. A
-memory snapshot also costs more provider-side storage than a disk-only one.
+**Don't:** assume retention is solved by the session lifecycle.
+`SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox, not a paused one,
+and a memory snapshot costs more provider-side storage than a disk-only one. The
+sandbox of a thread that is abandoned rather than deleted is reclaimed only when
+the *thread* is retired by the sweep in [SBX-011](#sbx-011) — a scheduled pass
+on a multi-day threshold, not a guarantee the lifecycle itself provides.
 
 ## SBX-010 — Result files live under `/home/user`, never `/tmp`
 
@@ -292,3 +299,192 @@ checkpoint.
 
 **Don't:** grant the sub-agent a confirmation-gated tool on the grounds that the
 runtime would catch it. It fails closed there as a backstop, not as the control.
+
+## SBX-011 — The session is what gets reaped; the sandbox goes with it
+
+**Applies to:** `reporting/services/session_reaper.py`,
+`reporting/services/session_reaper_schedule.py`,
+`reporting/temporal_workflows/session_reap.py`, the account-wide helpers in
+`sandbox_backend.py`
+
+**Measured, on one developer's account:** 59 suspended sandboxes, the oldest six
+days old, every one of them a chat thread abandoned rather than deleted. The
+leak is not theoretical and it does not plateau.
+
+A chat thread's sandbox is destroyed when the thread is deleted (SBX-005), and
+nothing deletes an abandoned thread. `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a
+*running* sandbox, not a paused one, so nothing covered this case.
+
+**The session is the unit of retirement, not the sandbox.** A sandbox belongs to
+its thread for as long as the thread exists, so a sweep that reaped sandboxes on
+their own age would leave live conversations whose accumulated files had
+silently vanished — recoverable (a resume that fails terminally creates a fresh
+sandbox, SBX-006) but a real loss the user never asked for and cannot see
+coming. So the sweep retires *sessions* idle past
+`CHAT_SESSION_REAP_IDLE_SECONDS`, and the sandbox goes with the session through
+the same `delete_thread_state` path a user's own delete takes.
+
+**This deletes chat history**, and that is the deliberate consequence of tying
+the two lifetimes together: a resource whose owner may never come back cannot be
+reclaimed without retiring the thing that owns it. Idle time is measured from
+`updated_at` — last activity, not creation — so an active conversation is never
+at risk however old it is.
+
+**Which is why it ships off.** `CHAT_SESSION_REAP_ENABLED` defaults to false:
+retention is a policy an operator chooses, and an upgrade that quietly began
+deleting transcripts would be the worst possible way to learn this feature
+exists. The cost is that the leak this fixes persists until someone turns it on,
+which is the right trade — a deployment that never notices its paused sandboxes
+loses money, while one that never notices its retention policy loses data. Note
+the ordering hazard when enabling: the first sweep collects everything already
+past the threshold, so the window has to be set before the switch.
+
+**Idle time comes from Seizu's store, not from the provider.** `updated_at` on
+the session record is authoritative and precise. An earlier design inferred
+idleness from the provider's `started_at`/`end_at`, because sandbox metadata
+cannot be amended after creation and there is nowhere to stamp a last-used time
+— but a chat session already records exactly that, in a place that is ours.
+Sandbox metadata is now used only for facts true for the sandbox's whole life:
+who owns it, what it is for, and which thread it serves.
+
+**Two passes, because the failure modes differ:**
+
+| Pass | Input | Reaps |
+|---|---|---|
+| Idle sessions | the store, `updated_at < cutoff` | the session, its checkpoint, its sandbox |
+| Orphan sandboxes | the provider's paused listing | sandboxes whose thread has no session |
+
+The orphan pass is why a *provider* listing is involved at all: a deleted thread
+whose kill failed, a run that died before its session record was written, a
+database restored from a backup. Anything derived from Seizu's own records can
+only find what Seizu still remembers, which is exactly the set that was never
+the problem. An orphan must also be older than `SANDBOX_SESSION_TIMEOUT_SECONDS`
+before it counts — a session record is written by a different call than the
+sandbox it serves, so a sandbox seconds old can genuinely have no session yet.
+
+**Ownership is per deployment, not per product.** `seizu_managed` carries
+`SEIZU_DEPLOYMENT_ID`, and only an exact match is an ownership claim. "Some
+Seizu created it" is not one: production and staging on a shared provider
+account would otherwise reap each other. The listing is filtered by that tag
+**provider-side**, which also stops a busy shared account from spending the
+page cap on sandboxes that were never reapable. Deployments that leave the id
+unset share one `default` bucket — set it whenever the credentials are shared.
+
+**Singleton by Temporal Schedule, not by process.** Worker replicas are
+ordinary, and a timer inside each of them would list the whole account N times
+and race over every deletion. A Schedule with a fixed id and
+`ScheduleOverlapPolicy.SKIP` gives one sweep at a time across every replica, and
+a sweep that outruns its interval is skipped rather than stacked. Every replica
+reconciles the same schedule at startup, which is idempotent. The cost is that a
+deployment running no Temporal worker does not reap;
+`SANDBOX_SESSION_PERSIST=false` is the alternative there.
+
+**A returning user wins, decided by one conditional write.** A listing is a
+snapshot, and re-reading before an unconditional delete only narrows the window
+— the owner can pass the re-read, start streaming, and have the sweep delete the
+session out from under the turn. So retirement pivots on a **claim**:
+`claim_chat_session_for_retirement` sets `retiring_at` conditioned on the
+`updated_at` the sweep listed. The stream route awaits its own activity write
+before any graph work, and that write is conditioned on `attribute_not_exists`
+/`IS NULL` for `retiring_at`. Exactly one of the two commits:
+
+- user first → the claim's condition fails → the session is kept;
+- claim first → the turn's write fails → the route refuses with *"This
+  conversation has been retired"*.
+
+The condition lives in the **write**, not in a read above it, because a claim
+does not move `updated_at` and would otherwise slip between a read and its
+write. The activity write is awaited rather than fired into a background task
+for the same reason: a task that has not run yet protects nothing.
+
+Sandboxes get the weaker treatment they can afford: a paused-state re-check
+immediately before the kill, which narrows but does not close. That asymmetry is
+deliberate — losing a sandbox costs a turn's cached files, losing a session
+costs the conversation.
+
+**Retirement deletes the session record last.** It is the only thing that makes
+a thread findable, so deleting it first turns a failed checkpoint deletion into
+a transcript stored forever with nothing left to retry from — worst on
+PostgreSQL checkpoints, which have no TTL to catch it later. Last, it is its own
+tombstone: a pass that dies part-way leaves a claimed, still-idle session that
+the next sweep re-claims and finishes, and every step is idempotent. A claim is
+therefore conditioned only on `updated_at`, never on being unclaimed, so it can
+be re-taken. The interactive delete route keeps the opposite order for the
+opposite reason: it should vanish from the UI at once, and a user watching it
+can retry.
+
+**Finding idle sessions is a resumable walk, not an index.** Sessions are
+partitioned per user in DynamoDB with no global order on `updated_at`, and
+asking every user in one pass is what makes an hourly sweep unaffordable — 100k
+users is 100k queries, nearly all returning nothing, and a pass that cannot
+finish inside the activity timeout retries from the first page forever, never
+reaching the users at the end.
+
+So a pass is bounded in both directions — at most
+`CHAT_SESSION_REAP_USERS_PER_PASS` users, and at most
+`CHAT_SESSION_REAP_PAGES_PER_USER` pages of any one user's session list — and
+records where it stopped in both: **which user, and how far into that user's own
+sessions**. The next pass resumes there, finishing that user before walking on,
+and clears the cursor on reaching the last user. Bounded work, complete
+coverage. Sweeps never overlap (`SKIP`), so the cursor has a single writer, and
+losing it costs a repeated pass rather than skipped users.
+
+A clock-derived bucket rotation was tried first and is not enough: it bounds the
+per-user session queries but not the walk over the user partition itself, which
+stays O(all users) per pass.
+
+A global index keyed on `updated_at` was the obvious alternative and is worse
+here: it costs a write on every chat turn into one hot partition, and it could
+never see the sessions that *already exist* — which, since an abandoned session
+is by definition never touched again, is precisely the population this feature
+is for. SQL has no such problem and gets the real thing: a composite
+`(origin, updated_at)` index, added by migration `0006` and declared on the
+model so fresh databases get it from `create_all`.
+
+**The sweep is gated on its own settings only.** Not on `CHAT_ENABLED`, not on
+`SANDBOX_ENABLED`: a deployment that turns either off still holds everything it
+created while they were on. That also removes a failure mode that shipped once —
+`CHAT_ENABLED` was not in the Temporal worker's compose environment, so the
+worker read chat as disabled and deleted its own schedule.
+
+**`CHAT_CHECKPOINT_TTL_SECONDS` was removed rather than tuned.** A checkpoint
+TTL is stamped on every item at write time, including a thread's *latest*
+checkpoint, and nothing marks a checkpoint as superseded — an idle conversation
+simply stops being written to and ages out. Its session record has no expiry, so
+what survives is a conversation still listed in the sidebar that opens empty,
+with nothing anywhere to explain it. Raising the value does not fix that; it
+moves the cliff.
+
+Which leaves a setting that is only safe when it never fires — when reaping is
+enabled and retires the session first. A TTL that must never fire earns nothing,
+and when it does fire it is retirement without any of the things retirement
+does: no sandbox reclaimed, no session record removed, no way to tell afterwards
+that anything was deleted. So conversations are retired in exactly one place.
+
+Two consequences worth stating rather than discovering:
+
+- **Superseded per-turn checkpoints now accumulate until a thread is retired,
+  and that is accepted.** `put()` never deletes a prior checkpoint and the saver
+  exposes no retention knob, so this was the TTL's one genuine job. Reviewed and
+  waived twice, deliberately. There is no ceiling in the strict sense --
+  retirement is opt-in, and a periodically active thread never becomes idle
+  enough to retire -- so the judgement is about proportion rather than bounds:
+  such threads are a minority and hold little data between them. Worth
+  revisiting, not worth solving now. It is bounded per item by
+  `CHAT_MAX_PERSISTED_MESSAGES` and compression, and reclaimed in full when the
+  session goes. If it ever does need paying down, the answer is a pruning pass
+  over *superseded* checkpoints that keeps the latest — not an expiry on the
+  current one, which is the thing that emptied live conversations.
+- **Existing items keep the expiry already stamped on them.** Removing the
+  setting stops new writes carrying one; a deployment that had a TTL configured
+  must disable it on the table itself to stop DynamoDB collecting what is
+  already marked.
+
+**Don't:** reap a sandbox whose session is still alive, however old the sandbox
+is. **Don't:** reap untagged or foreign-tagged sandboxes by default. **Don't:**
+read `CHAT_SESSION_REAP_IDLE_SECONDS=0` as "retire immediately" — it means off,
+because immediately would mean every session there is. **Don't:** move the sweep
+back into a worker-local loop; the Schedule is the singleton mechanism.
+**Don't:** delete the session record before its checkpoint, or let a schedule
+failure propagate out of worker startup — both were review findings, and both
+trade a housekeeping sweep for something much larger.

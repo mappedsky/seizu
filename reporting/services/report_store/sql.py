@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlmodel import Field, SQLModel, col, select
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -315,7 +315,13 @@ class QueryHistoryRecord(SQLModel, table=True):  # type: ignore
 
 class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     __tablename__ = "chat_sessions"
-    __table_args__ = (UniqueConstraint("user_id", "thread_id"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "thread_id"),
+        # The reaper's sweep filters on origin and orders by updated_at across
+        # every user, which is a full scan without this. Same order as the
+        # query; migration 0006 adds it to existing databases.
+        Index("ix_chat_sessions_origin_updated_at", "origin", "updated_at"),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
     thread_id: str
@@ -326,6 +332,9 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     scheduled_chat_id: str | None = Field(default=None, index=True)
     run_status: str | None = None
     run_errors: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    # Set by the reaper's claim (SBX-011); a claimed session is closed to every
+    # other writer until its checkpoint and sandbox are gone.
+    retiring_at: str | None = None
 
 
 class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
@@ -3121,6 +3130,49 @@ class SQLModelReportStore(ReportStore):
             result = await session.execute(stmt)
             return [_chat_session_from_sql_record(r) for r in result.scalars().all()]
 
+    async def claim_chat_session_for_retirement(
+        self,
+        user_id: str,
+        thread_id: str,
+        expected_updated_at: str,
+    ) -> bool:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            # A conditional UPDATE, not read-then-write: the row must not have
+            # moved since the sweep listed it, and the database is the only
+            # thing that can decide that without a race.
+            stmt = (
+                update(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.user_id) == user_id,
+                    col(ChatSessionRecord.thread_id) == thread_id,
+                    col(ChatSessionRecord.updated_at) == expected_updated_at,
+                )
+                .values(retiring_at=now)
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                select(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.origin) == "interactive",
+                    col(ChatSessionRecord.updated_at) < idle_before,
+                )
+                # Oldest first: a sweep bounded by `limit` should collect the
+                # sessions that have been idle longest, not an arbitrary page.
+                .order_by(col(ChatSessionRecord.updated_at).asc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [
+                IdleChatSession(user_id=r.user_id, thread_id=r.thread_id, updated_at=r.updated_at)
+                for r in result.scalars().all()
+            ]
+
     async def get_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
         async with AsyncSession(_get_engine()) as session:
             stmt = select(ChatSessionRecord).where(
@@ -3187,19 +3239,41 @@ class SQLModelReportStore(ReportStore):
             return [_chat_session_from_sql_record(r) for r in result.scalars().all()]
 
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
+        return await self._update_unretired_chat_session(user_id, thread_id, {})
+
+    async def _update_unretired_chat_session(
+        self,
+        user_id: str,
+        thread_id: str,
+        values: dict[str, Any],
+    ) -> ChatSessionItem | None:
+        """Update a session and stamp its activity, unless it is being retired.
+
+        One conditional statement, never read-then-write. The reaper's claim can
+        land between a SELECT and its UPDATE without moving ``updated_at``, so a
+        guard evaluated in Python commits anyway, and a turn proceeds against a
+        session whose checkpoint and sandbox are already being deleted. The
+        database has to evaluate ``retiring_at IS NULL`` as part of the write.
+
+        Returns None when the row is missing or claimed -- indistinguishable on
+        purpose, since both mean the conversation is gone as far as callers are
+        concerned.
+        """
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
-            stmt = select(ChatSessionRecord).where(
-                col(ChatSessionRecord.user_id) == user_id,
-                col(ChatSessionRecord.thread_id) == thread_id,
+            stmt = (
+                update(ChatSessionRecord)
+                .where(
+                    col(ChatSessionRecord.user_id) == user_id,
+                    col(ChatSessionRecord.thread_id) == thread_id,
+                    col(ChatSessionRecord.retiring_at).is_(None),
+                )
+                .values(updated_at=now, **values)
+                .returning(ChatSessionRecord)
             )
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
-            if row is None:
-                return None
-            row.updated_at = now
-            session.add(row)
-            item = _chat_session_from_sql_record(row)
+            item = _chat_session_from_sql_record(row) if row else None
             await session.commit()
             return item
 
@@ -3210,41 +3284,14 @@ class SQLModelReportStore(ReportStore):
         status: str,
         errors: list[str],
     ) -> ChatSessionItem | None:
-        now = datetime.now(tz=UTC).isoformat()
-        async with AsyncSession(_get_engine()) as session:
-            stmt = select(ChatSessionRecord).where(
-                col(ChatSessionRecord.user_id) == user_id,
-                col(ChatSessionRecord.thread_id) == thread_id,
-            )
-            result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            if row is None:
-                return None
-            row.updated_at = now
-            row.run_status = status
-            row.run_errors = list(errors)
-            session.add(row)
-            item = _chat_session_from_sql_record(row)
-            await session.commit()
-            return item
+        return await self._update_unretired_chat_session(
+            user_id,
+            thread_id,
+            {"run_status": status, "run_errors": list(errors)},
+        )
 
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
-        now = datetime.now(tz=UTC).isoformat()
-        async with AsyncSession(_get_engine()) as session:
-            stmt = select(ChatSessionRecord).where(
-                col(ChatSessionRecord.user_id) == user_id,
-                col(ChatSessionRecord.thread_id) == thread_id,
-            )
-            result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            if row is None:
-                return None
-            row.title = title
-            row.updated_at = now
-            session.add(row)
-            item = _chat_session_from_sql_record(row)
-            await session.commit()
-            return item
+        return await self._update_unretired_chat_session(user_id, thread_id, {"title": title})
 
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:

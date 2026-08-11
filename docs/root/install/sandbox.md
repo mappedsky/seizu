@@ -90,13 +90,78 @@ the provider call fails — an orphan is logged with its id. Lifecycle rationale
 (turn-level scope, resume failures, error paths) is in
 [SBX-005 through SBX-007](../dev/decisions/sandbox.md).
 
+### Retiring idle sessions and their sandboxes
+
+A conversation a user simply stops replying to is never deleted, so nothing
+tells Seizu its sandbox is finished with. `SANDBOX_SESSION_TIMEOUT_SECONDS`
+bounds a *running* sandbox, not a suspended one, so those would otherwise
+accumulate until the provider's own retention reclaimed them, if it has any.
+
+A sandbox belongs to its thread for as long as the thread exists, so **the
+session is what gets retired, and the sandbox goes with it**. Once enabled, a
+scheduled sweep deletes chat sessions untouched for
+`CHAT_SESSION_REAP_IDLE_SECONDS`, destroying each one's sandbox through the same
+path a user's own delete takes. A second
+pass collects *orphans*: suspended sandboxes whose thread has no session left at
+all — a deleted thread whose kill failed, a run that died before its session
+record was written, a restored backup.
+
 ```{warning}
-**Nothing reaps an abandoned sandbox.** Cleanup happens on thread deletion, so a
-conversation a user simply stops replying to leaves a suspended sandbox until
-the provider's own retention reclaims it, and a deployment with many chat users
-accumulates those. `SANDBOX_SESSION_TIMEOUT_SECONDS` bounds a *running* sandbox,
-not a paused one. Until a TTL or sweep lands, watch that growth or set
-`SANDBOX_SESSION_PERSIST=false`.
+**This deletes chat history, so it is off by default.** A session idle past the
+threshold is removed, transcript included. Retention is a policy you choose:
+set `CHAT_SESSION_REAP_IDLE_SECONDS` to your window *before* setting
+`CHAT_SESSION_REAP_ENABLED=true`, because the first sweep after it goes on
+collects everything already past that threshold.
+
+Left off, sessions and their suspended sandboxes are kept indefinitely — which
+is the accumulation this feature exists to stop, so it is worth enabling
+deliberately rather than leaving alone.
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `CHAT_SESSION_REAP_ENABLED` | `false` | Run the sweep at all. Off by default because it deletes chat history. |
+| `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
+| `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |
+| `SANDBOX_REAP_UNTAGGED` | `false` | Also collect suspended sandboxes tagged for another deployment, or not tagged at all. |
+| `SEIZU_DEPLOYMENT_ID` | `""` | This installation's identity in sandbox metadata. |
+
+Idle time comes from the session's own `updated_at`, so it is exact — an active
+conversation is never at risk however old it is, and no provider timestamp is
+involved. **A user who returns while a sweep is running wins**: retirement takes
+a claim on the session conditioned on the timestamp it listed, and a turn's
+first act is a conditional activity write, so exactly one of the two commits. A
+turn that loses the race is refused with *"This conversation has been retired"*
+rather than running against state being deleted underneath it.
+
+On DynamoDB each sweep walks a bounded number of users and records where it
+stopped — both which user, and how far into that user's own sessions — resuming
+there next time, so a large deployment takes several passes to work through
+everyone rather than timing out on one. (SQL answers the same question globally
+with a single indexed query.)
+
+**Set `SEIZU_DEPLOYMENT_ID` whenever the sandbox credentials are shared** with
+another Seizu installation (production and staging on one E2B account, say). It
+is written into every sandbox's metadata and is the only ownership claim the
+sweep acts on; installations that leave it unset share one bucket and can
+therefore collect each other's sandboxes. It must be identical on the web
+service and the Temporal worker — one creates the sandboxes, the other reaps
+them.
+
+**Sandboxes created before this feature carry no tag**, so an existing backlog
+is not cleared by upgrading. Set `SANDBOX_REAP_UNTAGGED=true` for a while to
+collect it, and only when these credentials belong to this deployment alone.
+
+```{warning}
+**The sweep runs as a Temporal Schedule** (`seizu-session-reap`) on the
+`seizu-temporal-worker` task queue — a fixed workflow id with `SKIP` overlap, so
+exactly one sweep runs at a time no matter how many worker replicas there are.
+A deployment that runs no Temporal worker does not reap: set
+`SANDBOX_SESSION_PERSIST=false` there, which destroys the sandbox at the end of
+every turn.
+
+Details, and the races the two re-reads narrow but do not close, are in
+[SBX-011](../dev/decisions/sandbox.md).
 ```
 
 ### Session memory

@@ -3258,3 +3258,342 @@ async def test_missing_index_is_retried_after_the_backoff(patch_table, store, mo
     assert patch_table.query.call_args_list[0].kwargs["IndexName"] == "space_reports_index"
     assert dynamodb_module._space_reports_index_available is True
     assert [item.report_id for item in result] == ["r1"]
+
+
+def _user(user_id: str) -> dict[str, str]:
+    """A USER_LOOKUP row as the sweep projects it: the id, and the key it resumes from."""
+    return {"SK": f"sk-{user_id}", "user_id": user_id}
+
+
+@pytest.fixture()
+def no_reap_cursor(mocker):
+    """Start the sweep from the first user and ignore where it saves its place.
+
+    Tests here assert on which sessions a pass finds; the cursor's own behaviour
+    has its own tests below.
+    """
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+
+
+# ---------------------------------------------------------------------------
+# Idle chat sessions (the session reaper's one cross-user read, SBX-011)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_idle_chat_sessions_walks_users_then_asks_for_the_old_end(patch_table, store, no_reap_cursor):
+    """Sessions are partitioned per user with no index over updated_at, so the
+    sweep walks the user lookup partition. "Idle" is a key-range condition on
+    the list SK -- a user with nothing old costs one query that returns nothing,
+    rather than a scan of their sessions."""
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1"), _user("u2")]},
+        {"Items": [{"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"}]},
+        {"Items": []},
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert [(i.user_id, i.thread_id) for i in idle] == [("u1", "t1")]
+    sessions_call = patch_table.query.call_args_list[1].kwargs
+    assert sessions_call["KeyConditionExpression"] == "PK = :pk AND SK < :cutoff"
+    assert sessions_call["ExpressionAttributeValues"][":pk"] == "CHAT_SESSION_LIST#u1"
+    assert sessions_call["ExpressionAttributeValues"][":cutoff"] == "UPDATED#2021-01-01T00:00:00+00:00"
+
+
+async def test_list_idle_chat_sessions_stops_at_the_limit(patch_table, store, no_reap_cursor):
+    """One pass must not delete an unbounded number of sessions; the next sweep
+    picks up where this one stopped."""
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        {
+            "Items": [
+                {"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"},
+                {"thread_id": "t2", "updated_at": "2020-01-02T00:00:00+00:00"},
+            ]
+        },
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=1)
+
+    assert [i.thread_id for i in idle] == ["t1"]
+
+
+async def test_list_idle_chat_sessions_excludes_headless_runs(patch_table, store, no_reap_cursor):
+    """Scheduled run sessions belong to a schedule's history and never leave a
+    suspended sandbox behind."""
+    patch_table.query.side_effect = [{"Items": [_user("u1")]}, {"Items": []}]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    filter_expression = patch_table.query.call_args_list[1].kwargs["FilterExpression"]
+    assert filter_expression == "attribute_not_exists(origin) OR origin = :interactive"
+
+
+# ---------------------------------------------------------------------------
+# Retirement claims (SBX-011)
+# ---------------------------------------------------------------------------
+
+
+async def test_claiming_a_session_is_conditional_on_its_timestamp(patch_table, store):
+    """One conditional write, not the read-then-retry the other mutators use --
+    that helper re-reads and retries, which for a claim would mean "the session
+    was just used, so try harder to delete it"."""
+    assert await store.claim_chat_session_for_retirement("u1", "t1", "2020-01-01T00:00:00+00:00") is True
+
+    kwargs = patch_table.update_item.call_args.kwargs
+    assert kwargs["ConditionExpression"] == "attribute_exists(PK) AND updated_at = :expected"
+    assert kwargs["ExpressionAttributeValues"][":expected"] == "2020-01-01T00:00:00+00:00"
+    assert kwargs["Key"] == {"PK": dynamodb_module._chat_session_metadata_pk("u1"), "SK": "t1"}
+
+
+async def test_claiming_a_session_that_moved_reports_failure(patch_table, store):
+    """A conflict means keep, never retry: the user came back."""
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+    )
+
+    assert await store.claim_chat_session_for_retirement("u1", "t1", "2020-01-01T00:00:00+00:00") is False
+
+
+async def test_touching_a_claimed_session_returns_none(patch_table, store):
+    """A claimed session is losing its checkpoint and sandbox, so a turn must not
+    start against it -- and the retry loop must stop rather than spin."""
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "CHAT_SESSION_METADATA#u1",
+            "SK": "t1",
+            "thread_id": "t1",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "updated_at": "2020-01-01T00:00:00+00:00",
+            "retiring_at": "2026-08-11T00:00:00+00:00",
+        }
+    }
+
+    assert await store.touch_chat_session("u1", "t1") is None
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_a_session_update_cannot_commit_after_a_claim_lands(patch_table, store):
+    """The read above the write is not enough: a claim can land between the two
+    and does not move updated_at, so the guard has to be in the condition."""
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "CHAT_SESSION_METADATA#u1",
+            "SK": "t1",
+            "thread_id": "t1",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        }
+    }
+
+    await store.touch_chat_session("u1", "t1")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    condition = items[0]["Update"]["ConditionExpression"]
+    assert condition == "updated_at = :old_updated_at AND attribute_not_exists(retiring_at)"
+
+
+async def test_the_idle_sweep_stops_after_its_user_budget_and_saves_its_place(patch_table, store, mocker):
+    """Walking every user in one pass is what makes an hourly sweep unaffordable
+    at scale -- and a pass that cannot finish inside the activity timeout retries
+    from the first page forever, never reaching the users at the end."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_REAP_USERS_PER_PASS", 2)
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1"), _user("u2")], "LastEvaluatedKey": {"PK": "USER_LOOKUP", "SK": "sk-u2"}},
+        {"Items": []},
+        {"Items": []},
+    ]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    queried = [
+        call.kwargs["ExpressionAttributeValues"][":pk"]
+        for call in patch_table.query.call_args_list
+        if call.kwargs["ExpressionAttributeValues"][":pk"].startswith("CHAT_SESSION_LIST#")
+    ]
+    assert queried == ["CHAT_SESSION_LIST#u1", "CHAT_SESSION_LIST#u2"]
+    assert saved.call_args.args[1].user_key == {"PK": "USER_LOOKUP", "SK": "sk-u2"}
+
+
+async def test_the_next_sweep_resumes_where_the_last_one_stopped(patch_table, store, mocker):
+    """Otherwise the users at the end of the partition are never reached."""
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u2"}),
+    )
+    mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [{"Items": [_user("u3")]}, {"Items": []}]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert patch_table.query.call_args_list[0].kwargs["ExclusiveStartKey"] == {"PK": "USER_LOOKUP", "SK": "sk-u2"}
+
+
+async def test_reaching_the_last_user_clears_the_cursor(patch_table, store, mocker):
+    """The next pass starts from the top rather than resuming past the end."""
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u2"}),
+    )
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [{"Items": [_user("u3")]}, {"Items": []}]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert saved.call_args.args[1] is None
+
+
+def test_an_unreadable_cursor_starts_from_the_first_user(patch_table):
+    """Repeating work is the harmless direction; skipping users is not."""
+    patch_table.get_item.side_effect = RuntimeError("boom")
+
+    assert dynamodb_module._read_reap_cursor(patch_table) is None
+
+
+def test_clearing_the_cursor_deletes_its_item(patch_table):
+    dynamodb_module._write_reap_cursor(patch_table, None)
+
+    patch_table.delete_item.assert_called_once()
+
+
+async def test_stopping_mid_page_resumes_at_the_user_it_stopped_on(patch_table, store, mocker):
+    """Saving the page's LastEvaluatedKey instead would resume *after* users this
+    pass never looked at, and nothing would ever come back for them."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_REAP_USERS_PER_PASS", 1)
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {
+            "Items": [_user("u1"), _user("u2"), _user("u3")],
+            "LastEvaluatedKey": {"PK": "USER_LOOKUP", "SK": "sk-u3"},
+        },
+        {"Items": []},
+    ]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert saved.call_args.args[1].user_key == {"PK": "USER_LOOKUP", "SK": "sk-u1"}
+
+
+async def test_one_user_cannot_spend_the_whole_pass_on_headless_sessions(patch_table, store, mocker):
+    """origin is a post-read filter, so a user with many old scheduled sessions
+    returns empty pages forever; without a cap they exhaust the activity."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_REAP_PAGES_PER_USER", 3)
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        *[{"Items": [], "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": f"page-{n}"}} for n in range(10)],
+    ]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    session_queries = [
+        call
+        for call in patch_table.query.call_args_list
+        if call.kwargs["ExpressionAttributeValues"][":pk"].startswith("CHAT_SESSION_LIST#")
+    ]
+    assert len(session_queries) == 3
+
+
+async def test_hitting_the_session_limit_resumes_after_that_session(patch_table, store, mocker):
+    """The limit is a hard bound on what one pass retires, so resuming after the
+    *page* would hand the next pass a page's worth it already collected -- or,
+    worse, let this one overshoot by a page."""
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        {
+            "Items": [
+                {"thread_id": "t1", "updated_at": "2020-01-01T00:00:00+00:00"},
+                {"thread_id": "t2", "updated_at": "2020-01-02T00:00:00+00:00"},
+            ],
+            "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "end-of-page"},
+        },
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=1)
+
+    assert [entry.thread_id for entry in idle] == ["t1"]
+    cursor = saved.call_args.args[1]
+    assert cursor.session_key == {
+        "PK": "CHAT_SESSION_LIST#u1",
+        "SK": dynamodb_module._chat_session_list_sk("2020-01-01T00:00:00+00:00", "t1"),
+    }
+
+
+async def test_a_capped_user_is_resumed_from_where_their_pages_ran_out(patch_table, store, mocker):
+    """The cap alone is a wall: without the inner key every pass rereads the same
+    oldest pages, so an interactive session behind enough headless ones is never
+    returned at all."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_REAP_PAGES_PER_USER", 2)
+    mocker.patch.object(dynamodb_module, "_read_reap_cursor", return_value=None)
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        {"Items": [_user("u1")]},
+        {"Items": [], "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-1"}},
+        {"Items": [], "LastEvaluatedKey": {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}},
+    ]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    cursor = saved.call_args.args[1]
+    assert cursor.user_id == "u1"
+    assert cursor.session_key == {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}
+    assert cursor.user_key == {"PK": "USER_LOOKUP", "SK": "sk-u1"}
+
+
+async def test_the_next_pass_continues_inside_that_user_before_moving_on(patch_table, store, mocker):
+    """Resuming at the user *after* them would skip whatever is left of their
+    list -- the sessions the cap hid in the first place."""
+    mocker.patch.object(
+        dynamodb_module,
+        "_read_reap_cursor",
+        return_value=dynamodb_module._ReapCursor(
+            user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"},
+            user_id="u1",
+            session_key={"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"},
+        ),
+    )
+    saved = mocker.patch.object(dynamodb_module, "_write_reap_cursor")
+    patch_table.query.side_effect = [
+        # Their remaining pages, then the walk continues past them.
+        {"Items": [{"thread_id": "t9", "updated_at": "2020-01-01T00:00:00+00:00"}]},
+        {"Items": []},
+    ]
+
+    idle = await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    first = patch_table.query.call_args_list[0].kwargs
+    assert first["ExpressionAttributeValues"][":pk"] == "CHAT_SESSION_LIST#u1"
+    assert first["ExclusiveStartKey"] == {"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"}
+    assert [(entry.user_id, entry.thread_id) for entry in idle] == [("u1", "t9")]
+    # Their list is finished, so the next pass goes back to walking users.
+    assert saved.call_args.args[1] is None or not saved.call_args.args[1].resumes_within_a_user
+
+
+def test_a_cursor_item_round_trips():
+    """Both halves survive storage, and an unrecognized shape reads as "start
+    from the top" rather than resuming somewhere arbitrary."""
+    cursor = dynamodb_module._ReapCursor(
+        user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"},
+        user_id="u1",
+        session_key={"PK": "CHAT_SESSION_LIST#u1", "SK": "page-2"},
+    )
+
+    assert dynamodb_module._ReapCursor.from_item(cursor.to_item()) == cursor
+    assert dynamodb_module._ReapCursor.from_item({}) is None
+    assert dynamodb_module._ReapCursor.from_item("nonsense") is None
+
+
+def test_a_cursor_without_a_session_key_does_not_claim_to_resume_within_a_user():
+    cursor = dynamodb_module._ReapCursor(user_key={"PK": "USER_LOOKUP", "SK": "sk-u1"})
+
+    assert cursor.resumes_within_a_user is False
+    assert "session_key" not in cursor.to_item()

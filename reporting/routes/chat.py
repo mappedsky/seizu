@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import uuid
@@ -50,11 +49,27 @@ _CONTINUE_RESPONSE_PROMPT = (
 )
 
 
-async def _touch_chat_session_later(user_id: str, thread_id: str) -> None:
+async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> str:
+    """Record the turn's activity before it starts, and report whether it may.
+
+    Awaited rather than fired into a background task: the timestamp this writes
+    is what stops the session reaper retiring the conversation
+    (:mod:`reporting.services.session_reaper`), and a task that has not run yet
+    protects nothing.
+
+    Three outcomes, and the last is why this cannot fail open. A successful
+    write is the turn's half of the retirement handshake; ``None`` means the
+    session is gone or already claimed, so its checkpoint and sandbox are being
+    deleted. **A store failure means we do not know which** -- and proceeding on
+    "probably fine" is exactly the case where a turn runs against state being
+    torn down underneath it. Refusing costs a retry; guessing costs the
+    conversation.
+    """
     try:
-        await report_store.touch_chat_session(user_id, thread_id)
+        return "ok" if await report_store.touch_chat_session(user_id, thread_id) else "retired"
     except Exception:
         logger.exception("Failed to update chat session timestamp", extra={"thread_id": thread_id})
+        return "unavailable"
 
 
 @router.post(
@@ -109,7 +124,24 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
             yield _sse_data({"type": "finish", "finishReason": "error"})
             yield "data: [DONE]\n\n"
             return
-        asyncio.create_task(_touch_chat_session_later(current.user.user_id, body.thread_id))
+        admission = await _claim_chat_session_for_turn(current.user.user_id, body.thread_id)
+        if admission != "ok":
+            # Retryable when the store was unreachable; permanent when the
+            # session is being retired. The wording is the only thing telling
+            # the user which, so it has to differ.
+            yield _sse_data(
+                {
+                    "type": "error",
+                    "errorText": (
+                        "This conversation has been retired"
+                        if admission == "retired"
+                        else "Could not start this turn; please try again"
+                    ),
+                }
+            )
+            yield _sse_data({"type": "finish", "finishReason": "error"})
+            yield "data: [DONE]\n\n"
+            return
         yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True

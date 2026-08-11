@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### ⚠️ Breaking changes
 
+- **`CHAT_CHECKPOINT_TTL_SECONDS` is removed.** A checkpoint TTL was stamped on
+  every item at write time, including a thread's *latest* checkpoint, so any
+  conversation idle longer than it lost its transcript while its session stayed
+  listed in the sidebar — retirement without any of the things retirement does.
+  Retention now belongs to session reaping (below), which removes the session
+  record, its checkpoint and its sandbox together. Seizu stops stamping new
+  items, but **items written earlier keep the expiry they already carry**, so a
+  deployment that set a TTL should also disable it on the checkpoint table (the
+  attribute name is required even when disabling):
+
+  ```shell
+  aws dynamodb update-time-to-live --table-name seizu-chat-checkpoints \
+    --time-to-live-specification 'Enabled=false,AttributeName=ttl'
+  ```
+
+  Superseded per-turn checkpoints now accumulate until a thread is retired; that
+  is an accepted trade, recorded in
+  [SBX-011](dev/decisions/sandbox.md).
+
 - **Scheduled chats now require Temporal.** The `seizu-scheduled-chats` worker
   (`python -m reporting.scheduled_chats`), its Compose service, and its
   `seizu-scheduled-chats` console script are removed; the
@@ -21,6 +40,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   polling is `WORKFLOW_WATCH_POLL_SECONDS`, both shared with workflows.
 
 ### Added
+
+- **Session reaping** — chat sessions nobody has come back to can be retired
+  automatically, and the suspended sandbox each one holds goes with it. **Off by
+  default** (`CHAT_SESSION_REAP_ENABLED=false`), because it deletes chat
+  history: set `CHAT_SESSION_REAP_IDLE_SECONDS` (default 30 days, measured from
+  the session's last update) to your retention policy *before* enabling it, as
+  the first sweep collects everything already past the threshold. A second pass
+  collects orphan sandboxes — suspended sandboxes whose thread no longer has a
+  session — which is what finally reclaims the ones a failed delete or a lost
+  checkpoint left behind.
+
+  The sweep runs as a Temporal Schedule (`seizu-session-reap`, fixed workflow id,
+  `SKIP` overlap) on `seizu-temporal-worker`, so a deployment without that worker
+  does not reap. A session in use is never retired: retirement takes a claim
+  conditioned on the timestamp it observed, and a turn starting in the same
+  moment either wins or is refused. Set `SEIZU_DEPLOYMENT_ID` when the sandbox
+  credentials are shared with another Seizu installation — it is written into
+  every sandbox's metadata and is the only ownership claim the sweep acts on.
+  Settings: `CHAT_SESSION_REAP_ENABLED`, `CHAT_SESSION_REAP_IDLE_SECONDS`,
+  `CHAT_SESSION_REAP_INTERVAL_SECONDS`, `SANDBOX_REAP_UNTAGGED`,
+  `SEIZU_DEPLOYMENT_ID` (migration `0006_chat_session_retirement`). Rationale:
+  [SBX-011](dev/decisions/sandbox.md).
 
 - **Spaces** — group reports into named spaces, with optional sub-spaces for
   organizing within a space. A **Spaces** entry in the sidebar lists them; the

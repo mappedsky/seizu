@@ -329,6 +329,23 @@ class ScheduledChatRunResult:
 
 
 @dataclass
+class SessionReapResult:
+    """What one session-reap sweep did, carried back into workflow history.
+
+    Temporal keeps it, so the last sweeps are readable in the UI without
+    grepping worker logs -- the usual question after a surprise ("what did it
+    delete, and when") has an answer that outlives a log retention window.
+    """
+
+    sessions_seen: int = 0
+    sessions_reaped: int = 0
+    sessions_kept: int = 0
+    sandboxes_seen: int = 0
+    orphans_reaped: int = 0
+    failed: int = 0
+
+
+@dataclass
 class AgentChatInput:
     """Input for the ``agent_chat`` workflow module."""
 

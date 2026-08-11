@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -794,6 +794,18 @@ class ReportStore(ABC):
         """Return a chat session for a user, or None if it does not exist."""
 
     @abstractmethod
+    async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
+        """Interactive sessions last updated before ``idle_before``, oldest first.
+
+        The one session read that spans users, for the reaper
+        (:mod:`reporting.services.session_reaper`). Headless sessions are
+        excluded: they belong to a schedule's run history, are already bounded
+        by it, and never leave a suspended sandbox behind
+        (``sandbox_persistence_allowed`` refuses to persist one for a headless
+        turn).
+        """
+
+    @abstractmethod
     async def create_chat_session(
         self,
         user_id: str,
@@ -819,7 +831,34 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def touch_chat_session(self, user_id: str, thread_id: str) -> ChatSessionItem | None:
-        """Update a session's updated_at. Returns None if the session is not found."""
+        """Update a session's updated_at.
+
+        Returns None when the session is not found **or has been claimed for
+        retirement** — a claimed session is about to lose its checkpoint and
+        sandbox, so a turn must not start against it. Callers that can tell the
+        two apart should treat both as "this conversation is gone".
+        """
+
+    @abstractmethod
+    async def claim_chat_session_for_retirement(
+        self,
+        user_id: str,
+        thread_id: str,
+        expected_updated_at: str,
+    ) -> bool:
+        """Mark a session as being retired, if it has not been touched since.
+
+        The reaper's atomic pivot (SBX-011). Fails — returning False — when the
+        session has been used since ``expected_updated_at`` was observed, or has
+        already been deleted, so a conversation the owner came back to is never
+        destroyed by a sweep that read it a moment earlier.
+
+        A claim is deliberately **re-claimable**: it is conditioned only on
+        ``updated_at``, so a sweep that died between claiming and finishing can
+        be resumed by the next one. It is the caller's job to delete the record
+        *last*, after the checkpoint and sandbox are gone, so nothing becomes
+        unfindable before its dependents are.
+        """
 
     @abstractmethod
     async def complete_chat_session_run(

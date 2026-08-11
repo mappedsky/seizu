@@ -13,9 +13,35 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+#: Metadata key stamped on every sandbox Seizu creates. Its value is the
+#: *deployment* id, because a sweep has to tell this installation's sandboxes
+#: from a sibling installation's on a shared API key -- "created by some Seizu"
+#: is not an ownership claim any reaper may act on.
+MANAGED_METADATA_KEY = "seizu_managed"
+
+#: What the sandbox is for. Diagnostics only; nothing branches on it.
+PURPOSE_METADATA_KEY = "seizu_purpose"
+
+#: The chat thread a sandbox belongs to, namespaced (``user:<id>:thread:<id>``).
+#: This is what makes a sandbox's session findable, and therefore what lets the
+#: reaper distinguish a sandbox with a live session from an orphan.
+THREAD_METADATA_KEY = "seizu_thread"
+
+#: Deployment id written when ``SEIZU_DEPLOYMENT_ID`` is unset. Deployments that
+#: leave it unset share this bucket and can reap each other; the setting exists
+#: to be set whenever the provider credentials are shared.
+DEFAULT_DEPLOYMENT_ID = "default"
+
+#: Pages a single listing will walk before giving up. A provider that keeps
+#: handing out a next-token would otherwise spin here forever; at the default
+#: page size this is far more sandboxes than any deployment holds.
+_MAX_LIST_PAGES = 200
 
 
 @runtime_checkable
@@ -186,6 +212,145 @@ class _E2BSandboxBackend:
         return str(getattr(self._sandbox, "sandbox_id", "") or "")
 
 
+def _api_params(api_key: str, domain: str) -> dict[str, Any]:
+    """Connection options every provider call shares."""
+    params: dict[str, Any] = {}
+    if api_key:
+        params["api_key"] = api_key
+    if domain:
+        # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
+        # to https://api.<domain>; disable client-side key-format validation
+        # because non-E2B deployments issue tokens that don't match "e2b_*".
+        params["domain"] = domain
+        params["validate_api_key"] = False
+    return params
+
+
+def _account_api_params() -> dict[str, Any]:
+    """Connection options for account-wide calls, which have no open sandbox."""
+    from reporting import settings as _settings
+
+    return _api_params(_settings.SANDBOX_API_KEY, _settings.SANDBOX_DOMAIN)
+
+
+def deployment_id() -> str:
+    """This installation's identity in sandbox metadata."""
+    from reporting import settings as _settings
+
+    return _settings.SEIZU_DEPLOYMENT_ID or DEFAULT_DEPLOYMENT_ID
+
+
+@dataclass(frozen=True)
+class SandboxSnapshot:
+    """What the provider's listing says about one sandbox, provider-agnostically.
+
+    Deliberately thin: an id, who owns it, what thread it belongs to, and the
+    timestamps a sweep can date it by. Anything richer would put provider
+    response shapes back in front of callers, which is the thing
+    :class:`SandboxBackend` exists to prevent (SBX-001).
+    """
+
+    sandbox_id: str
+    #: The deployment tag, or ``""`` for a sandbox Seizu did not create (or
+    #: created before tagging existed).
+    owner: str = ""
+    purpose: str = ""
+    #: Namespaced thread id, or ``""`` for a sandbox belonging to no chat thread.
+    thread: str = ""
+    started_at: datetime | None = None
+    end_at: datetime | None = None
+
+    @property
+    def ours(self) -> bool:
+        return bool(self.owner) and self.owner == deployment_id()
+
+
+def _as_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _snapshot(info: Any) -> SandboxSnapshot:
+    metadata = getattr(info, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return SandboxSnapshot(
+        sandbox_id=str(getattr(info, "sandbox_id", "") or ""),
+        owner=str(metadata.get(MANAGED_METADATA_KEY) or ""),
+        purpose=str(metadata.get(PURPOSE_METADATA_KEY) or ""),
+        thread=str(metadata.get(THREAD_METADATA_KEY) or ""),
+        started_at=_as_utc(getattr(info, "started_at", None)),
+        end_at=_as_utc(getattr(info, "end_at", None)),
+    )
+
+
+async def list_paused_sandboxes(*, all_owners: bool = False) -> list[SandboxSnapshot]:
+    """Every *suspended* sandbox this deployment can see.
+
+    Paused only, because a running sandbox already has an expiry the provider
+    enforces, while a paused one has none — that asymmetry is the whole reason
+    a sweep exists.
+
+    Filtered **provider-side** to this deployment's tag by default, so a shared
+    account's other sandboxes are never paged through: an unfiltered listing on
+    a busy account can spend the page cap on sandboxes that were never
+    reapable, and leave this deployment's own permanently unseen.
+    ``all_owners`` drops the filter for the one caller that needs the untagged
+    ones too, and pays that cost knowingly.
+    """
+    from e2b import SandboxQuery, SandboxState
+    from e2b_code_interpreter import AsyncSandbox
+
+    query = SandboxQuery(
+        state=[SandboxState.PAUSED],
+        metadata=None if all_owners else {MANAGED_METADATA_KEY: deployment_id()},
+    )
+    paginator = AsyncSandbox.list(query=query, **_account_api_params())
+    snapshots: list[SandboxSnapshot] = []
+    pages = 0
+    while paginator.has_next:
+        if pages >= _MAX_LIST_PAGES:
+            logger.warning("stopped listing sandboxes after %d pages; some were not seen", pages)
+            break
+        snapshots.extend(_snapshot(info) for info in await paginator.next_items())
+        pages += 1
+    return snapshots
+
+
+async def sandbox_is_paused(sandbox_id: str) -> bool:
+    """Whether the sandbox is *still* suspended, asked immediately before a kill.
+
+    A listing is a snapshot, and between taking it and acting on it a user can
+    resume the sandbox — turning a reap of dead storage into the destruction of
+    a live delegation. This does not close that window (nothing short of a
+    provider-side conditional delete would), it narrows it to the width of one
+    API call. A sandbox that cannot be inspected reports ``False``: the caller's
+    job is reclaiming storage, and skipping one is cheaper than being wrong.
+    """
+    from e2b import SandboxState
+    from e2b_code_interpreter import AsyncSandbox
+
+    try:
+        info = await AsyncSandbox.get_info(sandbox_id, **_account_api_params())
+    except Exception:
+        logger.info("could not read sandbox %s state; leaving it alone", sandbox_id, exc_info=True)
+        return False
+    return bool(getattr(info, "state", None) == SandboxState.PAUSED)
+
+
+async def kill_sandbox(sandbox_id: str) -> None:
+    """Destroy a sandbox by id, running or suspended.
+
+    Raises whatever the provider raises: the two callers want opposite things
+    from a failure (one logs an orphan and carries on, the other counts it), so
+    neither gets to have the decision made here.
+    """
+    from e2b_code_interpreter import AsyncSandbox
+
+    await AsyncSandbox.kill(sandbox_id, **_account_api_params())
+
+
 def _terminal_resume_errors() -> tuple[type[BaseException], ...]:
     """Exceptions that mean the sandbox is gone rather than briefly unreachable."""
     try:
@@ -208,6 +373,8 @@ async def open_backend(
     resume_sandbox_id: str | None = None,
     suspend_on_exit: bool | Callable[[], bool] = False,
     on_teardown: Callable[[bool], None] | None = None,
+    purpose: str = "sandbox",
+    thread: str = "",
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -250,6 +417,14 @@ async def open_backend(
     ``True`` as a fallback for CLIs that can't, where access is then gated by the
     service's own auth (a budget-capped virtual key) instead of the E2B token.
 
+    Three things go into the sandbox's provider-side metadata: this
+    deployment's id (:data:`MANAGED_METADATA_KEY`), which is the only ownership
+    claim the reaper acts on; ``purpose``, for diagnostics; and ``thread`` — the
+    namespaced chat thread this sandbox belongs to, which is how
+    :mod:`reporting.services.session_reaper` finds the session that owns it and
+    tells a live sandbox from an orphan. A sandbox with no thread belongs to no
+    session and outlives nothing.
+
     ``resume_sandbox_id`` reconnects to an existing sandbox — resuming it if it
     was suspended — instead of creating one.  Only *terminal* failures yield a
     fresh sandbox (the caller detects that by comparing
@@ -268,16 +443,17 @@ async def open_backend(
 
     from reporting import settings as _settings
 
-    api_kwargs: dict[str, Any] = {}
-    if api_key:
-        api_kwargs["api_key"] = api_key
-    if domain:
-        # Custom endpoint (e.g. OpenKruise Agents): domain sets the API base URL
-        # to https://api.<domain>; disable client-side key-format validation
-        # because non-E2B deployments issue tokens that don't match "e2b_*".
-        api_kwargs["domain"] = domain
-        api_kwargs["validate_api_key"] = False
+    api_kwargs = _api_params(api_key, domain)
     create_kwargs: dict[str, Any] = dict(api_kwargs)
+    # Set at creation and never afterwards -- the provider has no way to amend a
+    # sandbox's metadata -- so everything here must be true for the sandbox's
+    # whole life. Ownership and the owning thread are; "when it was last used"
+    # would not be, which is why the reaper asks the session store instead.
+    create_kwargs["metadata"] = {
+        MANAGED_METADATA_KEY: deployment_id(),
+        PURPOSE_METADATA_KEY: purpose,
+        **({THREAD_METADATA_KEY: thread} if thread else {}),
+    }
     if template and not domain:
         create_kwargs["template"] = template
     elif template and domain:
