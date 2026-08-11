@@ -1942,6 +1942,12 @@ describe('ChatInterface', () => {
       id: 'chat-id',
       messages: [
         { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        {
+          id: 'a1',
+          role: 'assistant',
+          metadata: { turn_id: 'turn-42' },
+          parts: [{ type: 'text', text: 'Working' }],
+        },
       ],
       sendMessage: jest.fn(),
       regenerate: jest.fn(),
@@ -1963,9 +1969,11 @@ describe('ChatInterface', () => {
     fireEvent.click(screen.getByRole('button', { name: /stop/i }));
     await act(async () => {});
 
+    // Addressed at the turn being watched, not at the thread: this request can
+    // be retried, and by then the thread may be running a different turn.
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/stream/thread-1/cancel',
-      expect.objectContaining({ method: 'POST' }),
+      '/api/v1/chat/stream/thread-1/cancel?turn_id=turn-42',
+      expect.objectContaining({ method: 'POST', keepalive: true }),
     );
     expect(stop).toHaveBeenCalled();
     fetchMock.mockRestore();

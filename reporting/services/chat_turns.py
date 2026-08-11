@@ -58,6 +58,9 @@ _TURN_STOP_POLL_SECONDS = 0.05
 # like the failure this module exists to remove. Keyed by turn id so a cancel
 # arriving on this worker can stop one without waiting for its heartbeat.
 _running_producers: dict[str, asyncio.Task[None]] = {}
+# Turns whose local cancellation has already been requested. See
+# :func:`cancel_local_producer` for why a second request must not land.
+_cancelling: set[str] = set()
 
 
 class _TurnCanceled(Exception):
@@ -218,8 +221,9 @@ class ChatTurnPublisher:
         would also let the tool's side effects happen first.
         """
         self._stopped.set()
-        if self._producer is not None and not self._producer.done():
-            self._producer.cancel()
+        # Through the shared guard rather than cancelling the task directly, so
+        # this and a concurrent request cannot both interrupt the same producer.
+        cancel_local_producer(self._turn.turn_id)
 
     async def publish(self, parts: list[dict[str, Any]]) -> None:
         if not parts:
@@ -303,7 +307,12 @@ async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnI
     )
     task = asyncio.create_task(run_turn_in_process(turn, body, current))
     _running_producers[turn.turn_id] = task
-    task.add_done_callback(lambda _t: _running_producers.pop(turn.turn_id, None))
+
+    def _forget(_task: "asyncio.Task[None]") -> None:
+        _running_producers.pop(turn.turn_id, None)
+        _cancelling.discard(turn.turn_id)
+
+    task.add_done_callback(_forget)
     return turn
 
 
@@ -314,10 +323,18 @@ def cancel_local_producer(turn_id: str) -> bool:
     turn to stop usually lands somewhere else, and the store flag is what
     reaches it there. This just spares the common single-worker case a
     heartbeat interval of delay.
+
+    **First writer wins.** Cancelling twice is not harmless: the producer clears
+    its own cancellation before running its terminal cleanup, so a second
+    ``cancel()`` -- from a retried request, or from the heartbeat noticing the
+    flag the first one set -- lands *inside* that cleanup and leaves the turn
+    recorded as running forever. Being idempotent over HTTP is not enough; it
+    has to be idempotent here.
     """
     task = _running_producers.get(turn_id)
-    if task is None or task.done():
+    if task is None or task.done() or turn_id in _cancelling:
         return False
+    _cancelling.add(turn_id)
     task.cancel()
     return True
 
@@ -356,7 +373,16 @@ async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, curre
         async with ChatTurnPublisher(turn) as publisher:
             try:
                 opening: list[dict[str, Any]] = [
-                    {"type": "start", "messageId": turn.message_id},
+                    # The turn id rides on the opening frame so the client can
+                    # address a stop at *this* turn. A stop can be delayed or
+                    # retried, and by the time it lands this turn may have
+                    # finished and a successor started; naming the thread alone
+                    # would stop the wrong one.
+                    {
+                        "type": "start",
+                        "messageId": turn.message_id,
+                        "messageMetadata": {"turn_id": turn.turn_id},
+                    },
                     {"type": "text-start", "id": turn.text_id},
                 ]
                 if body.continue_response:

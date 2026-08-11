@@ -743,6 +743,25 @@ async def test_cancel_is_scoped_to_the_owner(store):
     assert await store.request_chat_turn_cancel("someone-else", "1001") is None
 
 
+async def test_cancel_named_at_a_finished_turn_leaves_its_successor_alone(store):
+    """A stop request can be delayed or retried; by the time it lands the turn
+    it named may have finished and another started."""
+    first = await _open_turn(store)
+    await store.finish_chat_turn(first.turn_id, "completed", 1)
+    second = await _open_turn(store)
+
+    assert await store.request_chat_turn_cancel("user-1", "1001", first.turn_id) is None
+    assert (await store.get_chat_turn(second.turn_id)).cancel_requested is False
+
+
+async def test_cancel_named_at_the_running_turn_flags_it(store):
+    turn = await _open_turn(store)
+
+    flagged = await store.request_chat_turn_cancel("user-1", "1001", turn.turn_id)
+
+    assert flagged is not None and flagged.cancel_requested is True
+
+
 async def test_cancel_reports_nothing_when_no_turn_is_running(store):
     turn = await _open_turn(store)
     await store.finish_chat_turn(turn.turn_id, "completed", 1)

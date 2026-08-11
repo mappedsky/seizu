@@ -3502,21 +3502,21 @@ class SQLModelReportStore(ReportStore):
             record = await session.get(ChatTurnRecord, turn_id)
             return _chat_turn_from_record(record) if record else None
 
-    async def request_chat_turn_cancel(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+    async def request_chat_turn_cancel(
+        self,
+        user_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> ChatTurnItem | None:
         async with AsyncSession(_get_engine()) as session:
-            record = (
-                (
-                    await session.execute(
-                        select(ChatTurnRecord).where(
-                            col(ChatTurnRecord.user_id) == user_id,
-                            col(ChatTurnRecord.thread_id) == thread_id,
-                            col(ChatTurnRecord.status) == "running",
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
+            conditions = [
+                col(ChatTurnRecord.user_id) == user_id,
+                col(ChatTurnRecord.thread_id) == thread_id,
+                col(ChatTurnRecord.status) == "running",
+            ]
+            if turn_id is not None:
+                conditions.append(col(ChatTurnRecord.turn_id) == turn_id)
+            record = (await session.execute(select(ChatTurnRecord).where(*conditions))).scalars().first()
             if record is None:
                 return None
             record.cancel_requested = True

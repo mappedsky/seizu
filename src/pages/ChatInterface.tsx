@@ -140,6 +140,11 @@ type SeizuChatMessage = UIMessage<
     created_at?: string;
     // Set by useChatHistory on messages read back from the checkpoint.
     seizu_persisted?: boolean;
+    // Server-side id of the turn that produced this message, carried on the
+    // stream's opening frame. Stop is addressed at this rather than at the
+    // thread: a delayed or retried request could otherwise stop a turn the
+    // user started afterwards.
+    turn_id?: string;
   },
   {
     'seizu-detail': SeizuChatDetail;
@@ -1056,8 +1061,16 @@ export default function ChatInterface() {
     // the user navigating away in the same gesture, and it is retried once —
     // otherwise a single dropped request leaves the user looking at a stopped
     // response while the turn runs to completion behind it.
-    if (activeThreadId) {
-      const url = `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel`;
+    // Only the turn we are actually watching, and only if it has announced
+    // itself. Before the opening frame arrives there is nothing to name, and
+    // guessing "whatever is running" is what would stop the wrong turn.
+    const streaming = messagesRef.current.at(-1);
+    const turnId =
+      streaming?.role === 'assistant' ? streaming.metadata?.turn_id : undefined;
+    if (activeThreadId && turnId) {
+      const url =
+        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel` +
+        `?turn_id=${encodeURIComponent(turnId)}`;
       const options: RequestInit = {
         method: 'POST',
         keepalive: true,

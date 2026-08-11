@@ -207,13 +207,31 @@ captures `asyncio.current_task()` in `__aenter__`, which is the producer's task,
 so the cross-worker path behaves like the same-worker one rather than degrading
 into a wait.
 
-**Deleting a conversation cancels, then waits.** Cascading while the producer
-still runs lets it append batches and recreate checkpoint state behind the
-delete. A failed cancel is a 503 rather than a best-effort log — without knowing
-the turn stopped, deleting is the race this exists to avoid. The wait is bounded
-(`CHAT_TURN_STOP_WAIT_SECONDS`) and falling through it is safe, because
-`delete_chat_turn` collects batches **whether or not the header is still
-there**: a producer that outlived its conversation is the only thing that
+**Stop names the turn, not the thread.** The request can be delayed or retried,
+and by the time it lands the turn it was aimed at may have finished and the user
+started another — a thread-addressed stop would then kill the successor. The
+turn id rides on the stream's opening frame so the client has one to name.
+
+**Don't:** let a second local cancel through. The producer clears its own
+cancellation before running its terminal cleanup, so a repeat — a retried
+request, or the heartbeat seeing the flag the first one set — lands *inside*
+that cleanup and leaves the turn recorded as running forever. Cancellation is
+first-writer-wins in-process (`_cancelling`), not merely idempotent over HTTP.
+
+**Deleting a conversation closes it first, then stops the turn, then cascades.**
+Cancelling alone is not enough: the cancelled turn releases its mutex when it
+stops, and another tab can start a successor before the cascade runs. The gate
+is the reaper's own claim (`claim_chat_session_for_retirement`,
+[SBX-011](sandbox.md#sbx-011)), which makes `touch_chat_session` fail atomically
+— one mechanism for "this conversation is going away", not a second one.
+
+Every uncertainty on that path is a **503**, never a delete: a failed cancel, a
+lost claim, or a turn that does not stop within `CHAT_TURN_STOP_WAIT_SECONDS`.
+The claim is re-claimable by design, so the session stays closed and the retry
+is a plain repeat; a conversation half-removed from under a live producer cannot
+be put back, and no cleanup undoes checkpoint state it recreates afterwards.
+`delete_chat_turn` still collects batches **whether or not the header is
+there** — a producer that outlived its conversation is the only thing that
 creates headerless batches, so gating that cleanup on the header skipped the
 only rows worth collecting.
 
@@ -238,7 +256,12 @@ merely additive:
   is keyed by `created_at`, so a long-running turn that keeps renewing sits at
   the head of the partition forever; a pass that stopped there would re-read and
   skip the same entries every time while everything behind them accumulated. It
-  reads *past* live entries instead, bounded by pages.
+  reads *past* live entries, and **persists where it got to**, so more pages of
+  live entries than one pass can walk delays the ones behind rather than
+  starving them. Reaching the end clears the cursor, which is what brings it
+  back to entries that were live last time. Queries carry an explicit `Limit`,
+  or one turn's completion could pull a megabyte of index and a `GetItem` per
+  entry in it.
 
 **Don't:** enforce one-running-turn with a read above the insert. A thread has
 at most one running turn, and the *store* is what says so: a partial unique

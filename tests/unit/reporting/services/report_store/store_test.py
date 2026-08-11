@@ -659,8 +659,8 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     await report_store.renew_chat_turn_lease("turn-1")
     mock_store.renew_chat_turn_lease.assert_awaited_once_with("turn-1")
 
-    await report_store.request_chat_turn_cancel("u1", "thread-1")
-    mock_store.request_chat_turn_cancel.assert_awaited_once_with("u1", "thread-1")
+    await report_store.request_chat_turn_cancel("u1", "thread-1", "turn-1")
+    mock_store.request_chat_turn_cancel.assert_awaited_once_with("u1", "thread-1", "turn-1")
 
     await report_store.finish_chat_turn("turn-1", "completed", 4)
     mock_store.finish_chat_turn.assert_awaited_once_with("turn-1", "completed", 4)

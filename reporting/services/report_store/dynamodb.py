@@ -143,6 +143,14 @@ _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
 # expiry order (a running turn renews its lease), so a pass has to be able to
 # step over them to reach the expired ones behind.
 _CHAT_TURN_SWEEP_MAX_PAGES = 5
+# Entries read per sweep query. Without an explicit Limit a single pass can
+# pull a megabyte of index and issue a GetItem for every entry in it.
+_CHAT_TURN_SWEEP_PAGE_SIZE = 50
+# Where the last sweep stopped. The index is in creation order and a running
+# turn renews its lease, so live entries sit at the head indefinitely; without
+# a durable cursor every pass re-reads them and anything behind them is never
+# reached. Mirrors the session reaper's cursor for the same reason.
+_PK_CHAT_TURN_SWEEP_CURSOR = "CHAT_TURN_SWEEP_CURSOR"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -794,6 +802,37 @@ def _delete_thread_chat_turns_sync(table: Any, user_id: str, thread_id: str) -> 
         if turn is not None:
             _delete_chat_turn_sync(table, turn)
     table.delete_item(Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE})
+
+
+def _chat_turn_sweep_cursor_sync(table: Any) -> dict[str, Any] | None:
+    """Where the last sweep pass stopped, or None to start from the head."""
+    item = table.get_item(
+        Key={"PK": _PK_CHAT_TURN_SWEEP_CURSOR, "SK": _SK_METADATA},
+        ConsistentRead=True,
+    ).get("Item")
+    key = item.get("start_key") if item else None
+    return dict(key) if isinstance(key, dict) and key else None
+
+
+def _save_chat_turn_sweep_cursor_sync(table: Any, start_key: dict[str, Any] | None) -> None:
+    """Record where the next pass should resume; ``None`` means the head.
+
+    Best effort: losing a cursor costs a pass that re-reads what it already
+    read, which is the behaviour this replaces, not a correctness failure.
+    """
+    try:
+        if start_key:
+            table.put_item(
+                Item={
+                    "PK": _PK_CHAT_TURN_SWEEP_CURSOR,
+                    "SK": _SK_METADATA,
+                    "start_key": start_key,
+                }
+            )
+        else:
+            table.delete_item(Key={"PK": _PK_CHAT_TURN_SWEEP_CURSOR, "SK": _SK_METADATA})
+    except botocore.exceptions.ClientError:
+        logger.warning("Failed to record the chat turn sweep cursor", exc_info=True)
 
 
 def _transaction_cancelled(exc: botocore.exceptions.ClientError) -> bool:
@@ -4901,7 +4940,12 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def request_chat_turn_cancel(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+    async def request_chat_turn_cancel(
+        self,
+        user_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> ChatTurnItem | None:
         def _op() -> ChatTurnItem | None:
             table = _get_table()
             pointer = table.get_item(
@@ -4910,10 +4954,14 @@ class DynamoDBReportStore(ReportStore):
             ).get("Item")
             if not pointer or pointer.get("status") != "running":
                 return None
-            turn_id = str(pointer["turn_id"])
+            running_turn_id = str(pointer["turn_id"])
+            if turn_id is not None and turn_id != running_turn_id:
+                # The turn this was aimed at has already finished and another
+                # has taken the thread. Stopping that one is not what was asked.
+                return None
             try:
                 resp = table.update_item(
-                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                    Key={"PK": _chat_turn_pk(running_turn_id), "SK": _SK_METADATA},
                     UpdateExpression="SET cancel_requested = :true, updated_at = :now",
                     # Scoped to the owner in the key path already, but re-checked
                     # here so a stale pointer cannot redirect the write.
@@ -5035,7 +5083,12 @@ class DynamoDBReportStore(ReportStore):
                 "KeyConditionExpression": "PK = :pk",
                 "ExpressionAttributeValues": {":pk": _PK_CHAT_TURN_LIST},
                 "ScanIndexForward": True,
+                "Limit": _CHAT_TURN_SWEEP_PAGE_SIZE,
             }
+            start_key = _chat_turn_sweep_cursor_sync(table)
+            if start_key:
+                kwargs["ExclusiveStartKey"] = start_key
+            last_key: dict[str, Any] | None = start_key
             for _ in range(_CHAT_TURN_SWEEP_MAX_PAGES):
                 resp = table.query(**kwargs)
                 for item in resp.get("Items", []):
@@ -5056,11 +5109,19 @@ class DynamoDBReportStore(ReportStore):
                         )
                     )
                     if len(expired) >= limit:
+                        _save_chat_turn_sweep_cursor_sync(table, resp.get("LastEvaluatedKey"))
                         return expired
                 last_key = resp.get("LastEvaluatedKey")
                 if not last_key:
+                    # Reached the end; the next pass starts from the head again,
+                    # where entries that were live during this one now sit.
+                    _save_chat_turn_sweep_cursor_sync(table, None)
                     return expired
                 kwargs["ExclusiveStartKey"] = last_key
+            # Ran out of pages with live entries still ahead. Saving where we got
+            # to is what stops the next pass re-reading them and lets it reach
+            # whatever is behind.
+            _save_chat_turn_sweep_cursor_sync(table, last_key)
             return expired
 
         return await asyncio.to_thread(_op)

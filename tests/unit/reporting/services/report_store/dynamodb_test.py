@@ -3895,3 +3895,60 @@ async def test_the_sweep_reads_past_turns_that_are_still_live(patch_table, store
     expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
 
     assert [entry.turn_id for entry in expired] == ["dead"]
+
+
+async def test_the_sweep_resumes_where_the_last_pass_stopped(patch_table, store):
+    """The index is in creation order and a running turn renews its lease, so
+    live entries sit at the head indefinitely. Without a durable cursor every
+    pass re-reads them and anything behind them is never reached."""
+    patch_table.get_item.side_effect = lambda Key, **kw: (
+        {"Item": {"start_key": {"PK": "CHAT_TURN_LIST", "SK": "CREATED#z"}}}
+        if Key["PK"] == "CHAT_TURN_SWEEP_CURSOR"
+        else {"Item": _turn_item(expires_at="2099-01-01T00:00:00+00:00")}
+    )
+    patch_table.query.return_value = {"Items": []}
+
+    await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
+
+    kwargs = patch_table.query.call_args.kwargs
+    assert kwargs["ExclusiveStartKey"] == {"PK": "CHAT_TURN_LIST", "SK": "CREATED#z"}
+    # And bounded, so one turn's completion cannot read a megabyte of index.
+    assert kwargs["Limit"] == dynamodb_module._CHAT_TURN_SWEEP_PAGE_SIZE
+
+
+async def test_reaching_the_end_of_the_index_restarts_the_next_pass(patch_table, store):
+    """Entries that were live during this pass have to be revisited, so
+    exhausting the partition clears the cursor rather than pinning it."""
+    patch_table.get_item.return_value = {}
+    patch_table.query.return_value = {"Items": []}
+
+    await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
+
+    patch_table.delete_item.assert_called_once_with(Key={"PK": "CHAT_TURN_SWEEP_CURSOR", "SK": "#METADATA"})
+
+
+async def test_a_pass_that_runs_out_of_pages_records_where_it_got_to(patch_table, store):
+    """This is the starvation case: pages of live entries ahead of expired ones."""
+    patch_table.get_item.side_effect = lambda Key, **kw: (
+        {} if Key["PK"] == "CHAT_TURN_SWEEP_CURSOR" else {"Item": _turn_item(expires_at="2099-01-01T00:00:00+00:00")}
+    )
+    patch_table.query.return_value = {
+        "Items": [{"PK": "CHAT_TURN_LIST", "SK": "CREATED#a", "turn_id": "live"}],
+        "LastEvaluatedKey": {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a"},
+    }
+
+    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
+
+    assert expired == []
+    saved = patch_table.put_item.call_args.kwargs["Item"]
+    assert saved["PK"] == "CHAT_TURN_SWEEP_CURSOR"
+    assert saved["start_key"] == {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a"}
+
+
+async def test_cancel_named_at_a_finished_turn_leaves_its_successor_alone(patch_table, store):
+    """The pointer names whichever turn holds the thread now, which is not
+    necessarily the one a delayed stop was aimed at."""
+    patch_table.get_item.return_value = {"Item": {"turn_id": "successor", "status": "running"}}
+
+    assert await store.request_chat_turn_cancel("u1", "1001", "the-one-that-finished") is None
+    patch_table.update_item.assert_not_called()

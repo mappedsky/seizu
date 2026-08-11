@@ -104,6 +104,7 @@ def _chat_turn_log(mocker):
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MAX_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_HEARTBEAT_SECONDS", 1)
+    mocker.patch("reporting.settings.CHAT_TURN_STOP_WAIT_SECONDS", 0.3)
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}
@@ -161,11 +162,18 @@ def _chat_turn_log(mocker):
         turns[turn_id] = turn.model_copy(update={"expires_at": "2099-01-01T00:00:00+00:00"})
         return turns[turn_id]
 
-    async def request_chat_turn_cancel(user_id: str, thread_id: str) -> ChatTurnItem | None:
-        for turn_id, turn in turns.items():
-            if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
-                turns[turn_id] = turn.model_copy(update={"cancel_requested": True})
-                return turns[turn_id]
+    async def request_chat_turn_cancel(
+        user_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> ChatTurnItem | None:
+        for running_id, turn in turns.items():
+            if turn.user_id != user_id or turn.thread_id != thread_id or turn.status != "running":
+                continue
+            if turn_id is not None and turn_id != running_id:
+                return None
+            turns[running_id] = turn.model_copy(update={"cancel_requested": True})
+            return turns[running_id]
         return None
 
     async def get_chat_turn(turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
@@ -276,12 +284,20 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     async def delete_chat_session(user_id: str, thread_id: str) -> bool:
         return sessions.pop((user_id, thread_id), None) is not None
 
+    async def claim_chat_session_for_retirement(user_id: str, thread_id: str, expected_updated_at: str) -> bool:
+        existing_session = sessions.get((user_id, thread_id))
+        return existing_session is not None and existing_session.updated_at == expected_updated_at
+
     mocker.patch("reporting.routes.chat.report_store.list_chat_sessions", list_chat_sessions)
     mocker.patch("reporting.routes.chat.report_store.get_chat_session", get_chat_session)
     mocker.patch("reporting.routes.chat.report_store.create_chat_session", create_chat_session)
     mocker.patch("reporting.routes.chat.report_store.touch_chat_session", touch_chat_session)
     mocker.patch("reporting.routes.chat.report_store.update_chat_session_title", update_chat_session_title)
     mocker.patch("reporting.routes.chat.report_store.delete_chat_session", delete_chat_session)
+    mocker.patch(
+        "reporting.routes.chat.report_store.claim_chat_session_for_retirement",
+        claim_chat_session_for_retirement,
+    )
     return sessions
 
 
@@ -1320,7 +1336,7 @@ async def test_stop_ends_the_turn_and_not_just_the_reader(mocker, _chat_turn_log
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(f"/api/v1/chat/stream/{turn.thread_id}/cancel")
+        response = await client.post(f"/api/v1/chat/stream/{turn.thread_id}/cancel?turn_id={turn.turn_id}")
     assert response.status_code == 204
 
     release.set()
@@ -1341,7 +1357,7 @@ async def test_cancel_is_idempotent_when_nothing_is_running(mocker, _chat_turn_l
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream/1001/cancel")
+        response = await client.post("/api/v1/chat/stream/1001/cancel?turn_id=turn-gone")
 
     assert response.status_code == 204
 
@@ -1352,7 +1368,8 @@ async def test_cancel_cannot_reach_another_users_turn(mocker, _chat_turn_log):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        assert (await client.post("/api/v1/chat/stream/1001/cancel")).status_code == 204
+        response = await client.post(f"/api/v1/chat/stream/1001/cancel?turn_id={turn.turn_id}")
+        assert response.status_code == 204
 
     assert _chat_turn_log[turn.turn_id].cancel_requested is False
 
@@ -1362,30 +1379,35 @@ async def test_cancel_requires_chat_permission(mocker, _chat_turn_log):
 
     app = _make_app(_current_user(frozenset()))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream/1001/cancel")
+        response = await client.post("/api/v1/chat/stream/1001/cancel?turn_id=turn-1")
 
     assert response.status_code == 403
 
 
-async def test_deleting_a_session_stops_its_running_turn_first(mocker, _chat_turn_log):
-    """Deleting first would leave a producer writing into a conversation that no
-    longer exists, recreating checkpoint state behind the cascade."""
+async def test_deleting_a_session_closes_it_to_new_turns_first(mocker, _chat_turn_log):
+    """Cancelling alone is not enough: the cancelled turn releases its mutex
+    when it stops, and another tab can start a successor before the cascade
+    runs. The retirement claim (SBX-011) shuts the door atomically."""
     order: list[str] = []
-    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
-    sessions = _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
 
+    claim = chat.report_store.claim_chat_session_for_retirement
     cancel = chat.report_store.request_chat_turn_cancel
     delete = chat.report_store.delete_chat_session
 
-    async def _recording_cancel(user_id: str, thread_id: str):
+    async def _recording_claim(user_id: str, thread_id: str, expected_updated_at: str):
+        order.append("claim")
+        return await claim(user_id, thread_id, expected_updated_at)
+
+    async def _recording_cancel(user_id: str, thread_id: str, turn_id: str | None = None):
         order.append("cancel")
-        return await cancel(user_id, thread_id)
+        return await cancel(user_id, thread_id, turn_id)
 
     async def _recording_delete(user_id: str, thread_id: str):
         order.append("delete")
         return await delete(user_id, thread_id)
 
+    mocker.patch("reporting.routes.chat.report_store.claim_chat_session_for_retirement", _recording_claim)
     mocker.patch("reporting.routes.chat.report_store.request_chat_turn_cancel", _recording_cancel)
     mocker.patch("reporting.routes.chat.report_store.delete_chat_session", _recording_delete)
     mocker.patch("reporting.routes.chat.delete_thread_messages", AsyncMock())
@@ -1394,9 +1416,44 @@ async def test_deleting_a_session_stops_its_running_turn_first(mocker, _chat_tur
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.delete("/api/v1/chat/sessions/1001")).status_code == 204
 
-    assert order == ["cancel", "delete"]
-    assert _chat_turn_log[turn.turn_id].cancel_requested is True
-    assert sessions == {}
+    assert order == ["claim", "cancel", "delete"]
+
+
+async def test_deletion_refuses_when_the_turn_will_not_stop(mocker, _chat_turn_log):
+    """Deleting anyway leaves the producer recreating checkpoint state behind
+    the cascade, which no cleanup undoes. The session stays claimed, so nothing
+    new can start and the retry is a plain repeat."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    # A turn with no producer: nothing will ever move it out of "running".
+    await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    deleted = AsyncMock()
+    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.delete("/api/v1/chat/sessions/1001")
+
+    assert response.status_code == 503
+    deleted.assert_not_awaited()
+
+
+async def test_deletion_refuses_when_a_turn_starts_under_the_claim(mocker, _chat_turn_log):
+    """The claim is conditional on the timestamp read a moment earlier, so a
+    turn that started in between makes it fail rather than delete over it."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    deleted = AsyncMock()
+    mocker.patch(
+        "reporting.routes.chat.report_store.claim_chat_session_for_retirement",
+        AsyncMock(return_value=False),
+    )
+    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.delete("/api/v1/chat/sessions/1001")
+
+    assert response.status_code == 503
+    deleted.assert_not_awaited()
 
 
 async def test_a_long_turn_keeps_its_lease(mocker, _chat_turn_log):
@@ -1560,3 +1617,70 @@ async def test_deletion_refuses_rather_than_racing_when_cancel_fails(mocker, _ch
 
     assert response.status_code == 503
     deleted.assert_not_awaited()
+
+
+async def test_a_stale_stop_cannot_cancel_a_successor_turn(mocker, _chat_turn_log):
+    """A Stop can be delayed or retried. By the time it lands the turn it was
+    aimed at may have finished and the user started another, so naming the
+    thread alone would stop the wrong one."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    first = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_1", "text_1")
+    await chat_turns.report_store.finish_chat_turn(first.turn_id, "completed", 1)
+    second = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_2", "text_2")
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # The retry of the stop aimed at the *first* turn finally arrives.
+        response = await client.post(f"/api/v1/chat/stream/1001/cancel?turn_id={first.turn_id}")
+
+    assert response.status_code == 204
+    assert _chat_turn_log[second.turn_id].cancel_requested is False
+
+
+async def test_the_turn_id_is_on_the_opening_frame(mocker, _chat_turn_log):
+    """The client can only address a stop at a turn it has been told about."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+
+    turn = next(iter(_chat_turn_log.values()))
+    first_frame = json.loads(response.text.splitlines()[0].removeprefix("data: "))
+    assert first_frame["type"] == "start"
+    assert first_frame["messageMetadata"]["turn_id"] == turn.turn_id
+
+
+async def test_a_repeated_local_cancel_cannot_interrupt_terminal_cleanup(mocker, _chat_turn_log):
+    """The producer clears its own cancellation before its cleanup runs, so a
+    second cancel -- from a retried request, or the heartbeat noticing the flag
+    the first one set -- would land inside that cleanup and leave the turn
+    recorded as running forever."""
+    started = asyncio.Event()
+
+    class BlockedGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            self.calls.append((input, config, stream_mode))
+            yield {"kind": "token", "content": "Working"}
+            started.set()
+            await asyncio.sleep(30)
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    assert chat_turns.cancel_local_producer(turn.turn_id) is True
+    # Every repeat, from whatever source, must be refused while the first is
+    # still unwinding.
+    assert chat_turns.cancel_local_producer(turn.turn_id) is False
+    assert chat_turns.cancel_local_producer(turn.turn_id) is False
+
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    assert _chat_turn_log[turn.turn_id].status == "canceled"
+    assert _chat_turn_log[turn.turn_id].last_seq is not None

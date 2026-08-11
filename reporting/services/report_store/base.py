@@ -981,12 +981,24 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
-    async def request_chat_turn_cancel(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
-        """Ask the thread's running turn to stop, returning it, or None.
+    async def request_chat_turn_cancel(
+        self,
+        user_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> ChatTurnItem | None:
+        """Ask a running turn to stop, returning it, or None.
 
         A request, not a signal: the producer may be in another process, so it
         is told through the record and stops at its next heartbeat. Scoped to
         the owner so a guessed thread id cannot stop someone else's turn.
+
+        ``turn_id`` names *which* turn, and callers acting for a user must pass
+        it. A stop request can be delayed or retried, and by the time it lands
+        the turn it was aimed at may have finished and a successor started —
+        addressing the thread alone would then stop the wrong turn. Omitting it
+        means "whichever turn is running", which is only safe for a caller that
+        has already closed the thread to new turns.
         """
 
     @abstractmethod

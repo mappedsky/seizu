@@ -177,16 +177,23 @@ async def reconnect_chat_stream(
 @router.post("/api/v1/chat/stream/{thread_id}/cancel", status_code=204)
 async def cancel_chat_stream(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    turn_id: str = Query(min_length=1, max_length=64),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
-    """Stop the thread's running turn.
+    """Stop a specific running turn.
 
     Closing the SSE connection is not enough: the turn is produced beside the
     request, so a client that only hangs up leaves it running -- still spending
     tokens and still able to execute the actions it had lined up. Stop has to
-    say so explicitly. Idempotent: no running turn is a 204, not an error.
+    say so explicitly.
+
+    ``turn_id`` is required rather than implied by the thread. This request can
+    be delayed or retried, and by the time it lands the turn it was aimed at may
+    have finished and the user started another -- addressing the thread alone
+    would stop that one instead. Clients read the id from the stream's opening
+    frame. Idempotent: a turn that is already gone is a 204, not an error.
     """
-    turn = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id)
+    turn = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id, turn_id)
     if turn is not None:
         # Fast path when the producer is on this worker; otherwise the flag
         # above reaches it at its next heartbeat.
@@ -383,35 +390,61 @@ async def update_chat_session(
     return result
 
 
+async def _close_session_for_deletion(user_id: str, thread_id: str) -> None:
+    """Claim a session and stop its turn, so deletion cannot race a producer.
+
+    Raises 503 rather than proceeding on any uncertainty. The claim is
+    re-claimable by design, so a caller that gets one can simply retry the
+    delete; a conversation half-removed from under a running producer cannot be
+    put back.
+    """
+    session = await report_store.get_chat_session(user_id, thread_id)
+    if session is None:
+        return
+    try:
+        claimed = await report_store.claim_chat_session_for_retirement(user_id, thread_id, session.updated_at)
+    except Exception as exc:
+        logger.exception("Failed to close a session for deletion", extra={"thread_id": thread_id})
+        raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
+    if not claimed:
+        # A turn started between the read and the claim. Retrying picks up the
+        # new timestamp; deleting now would race that turn.
+        raise HTTPException(status_code=503, detail="Conversation is in use; try again")
+
+    try:
+        canceled = await report_store.request_chat_turn_cancel(user_id, thread_id)
+    except Exception as exc:
+        logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
+        raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
+    if canceled is None:
+        return
+    chat_turns.cancel_local_producer(canceled.turn_id)
+    if not await chat_turns.await_turn_stopped(canceled.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
+        # Deleting now would leave the producer recreating checkpoint state
+        # behind the cascade, which no cleanup can undo. The session stays
+        # claimed, so nothing new can start and the retry is a plain repeat.
+        logger.warning(
+            "Chat turn did not stop in time for deletion",
+            extra={"thread_id": thread_id, "turn_id": canceled.turn_id},
+        )
+        raise HTTPException(status_code=503, detail="Conversation is still running; try again")
+
+
 @router.delete("/api/v1/chat/sessions/{thread_id}", status_code=204)
 async def delete_chat_session(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> None:
     """Delete a chat session."""
-    # Stop the turn, and wait for it to have stopped, before removing what it
-    # is writing into. Deleting first leaves a producer running against a
-    # conversation that no longer exists, recreating checkpoint state and
-    # appending batches behind the cascade that just ran.
+    # Close the conversation to new turns, stop the one running, and only then
+    # remove what it was writing into.
     #
-    # A failure here is *not* swallowed: without knowing the turn is stopped,
-    # deleting is the race this exists to avoid, and a retryable error is a
-    # better outcome than a half-deleted conversation.
-    try:
-        canceled = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id)
-    except Exception as exc:
-        logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
-        raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
-    if canceled is not None:
-        chat_turns.cancel_local_producer(canceled.turn_id)
-        if not await chat_turns.await_turn_stopped(canceled.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
-            # It has been told and has not stopped yet. Deleting anyway is
-            # what the user asked for, and the producer collects the batches
-            # it wrote in the meantime once it finds its header gone.
-            logger.warning(
-                "Deleting a session whose turn has not stopped yet",
-                extra={"thread_id": thread_id, "turn_id": canceled.turn_id},
-            )
+    # The claim is the same one the reaper uses (SBX-011): it makes
+    # touch_chat_session fail atomically, so no turn can start while this runs.
+    # Cancelling without it is not enough -- the cancelled turn releases its
+    # mutex when it stops, and another tab can start a successor in the window
+    # between that and the cascade.
+    await _close_session_for_deletion(current.user.user_id, thread_id)
     try:
         deleted = await report_store.delete_chat_session(current.user.user_id, thread_id)
     except Exception as exc:

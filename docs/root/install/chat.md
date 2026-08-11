@@ -69,8 +69,12 @@ after a dropped connection.
 request, because closing the connection no longer stops anything: the turn would
 carry on generating and could still run the actions it had queued. It takes
 effect immediately, including while the turn is blocked on a slow model call or
-tool. Deleting a conversation stops its running turn first, and fails rather
-than deleting if it cannot.
+tool.
+
+Deleting a conversation closes it to new turns, stops the one running, and only
+then removes anything. If the turn cannot be stopped, the delete **fails with a
+503 and changes nothing** — the conversation stays closed, so retrying is safe
+and is a plain repeat.
 
 Two things this does *not* recover:
 
