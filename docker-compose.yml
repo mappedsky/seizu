@@ -420,6 +420,11 @@ services:
       - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
       - SANDBOX_LLM_MODEL
+      # Chat feature flags. The worker reads these for scheduled-chat schedule
+      # reconciliation; without them it treats chat as disabled and reconciles
+      # nothing, however the web service is configured.
+      - CHAT_ENABLED
+      - CHAT_SCHEDULES_ENABLED
       # Session reaping — the sweep runs here (and only here), so these have to
       # reach this service or the settings a deployment sets have no effect.
       - SEIZU_DEPLOYMENT_ID

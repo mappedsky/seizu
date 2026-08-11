@@ -78,6 +78,7 @@ async def reconcile(client: Client | None = None) -> None:
         except Exception:
             logger.debug("no session reap schedule to remove", exc_info=True)
         return
+    session_reaper.warn_if_coverage_is_too_slow()
     schedule = build_schedule()
     try:
         await temporal.create_schedule(SCHEDULE_ID, schedule)
@@ -93,3 +94,9 @@ async def reconcile(client: Client | None = None) -> None:
             await handle.update(lambda _input: ScheduleUpdate(schedule=schedule))
         except Exception:
             logger.warning("could not update the session reap schedule", exc_info=True)
+    except Exception:
+        # A transient schedule-API failure must not take the worker down with
+        # it. This runs during startup, before the worker serves anything, so
+        # letting it propagate would trade every workflow in the deployment for
+        # one housekeeping sweep. The next restart reconciles again.
+        logger.warning("could not create the session reap schedule", exc_info=True)

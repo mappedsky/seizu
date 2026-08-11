@@ -80,6 +80,27 @@ async def test_a_missing_schedule_is_not_an_error_when_disabled() -> None:
         await session_reaper_schedule.reconcile(client)
 
 
+async def test_a_failed_creation_does_not_stop_the_worker() -> None:
+    """This is awaited during worker startup, before it serves anything, so a
+    transient schedule-API failure would trade every workflow in the deployment
+    for one housekeeping sweep."""
+    client = _client()
+    client.create_schedule = AsyncMock(side_effect=RuntimeError("schedule service unavailable"))
+    with _settings():
+        await session_reaper_schedule.reconcile(client)
+
+
+async def test_a_zero_interval_removes_the_schedule_instead_of_building_one() -> None:
+    """A schedule with a non-positive interval is not a valid spec, and reading
+    it as "sweep constantly" would be worse than reading it as off."""
+    client = _client()
+    with _settings(CHAT_SESSION_REAP_INTERVAL_SECONDS=0):
+        await session_reaper_schedule.reconcile(client)
+
+    client.create_schedule.assert_not_awaited()
+    client.get_schedule_handle.return_value.delete.assert_awaited_once()
+
+
 async def test_an_unreachable_temporal_does_not_stop_the_worker() -> None:
     """Reconciling is startup work; a worker that cannot do it must still serve
     workflows, and the next restart reconciles again."""

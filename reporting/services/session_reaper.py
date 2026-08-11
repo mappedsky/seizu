@@ -60,15 +60,53 @@ class ReapSummary:
 def reaping_configured() -> bool:
     """Whether a sweep can run at all, so the schedule need not exist.
 
-    Deliberately *not* gated on ``SANDBOX_ENABLED``: a deployment that turns
-    delegation off still has the sessions and sandboxes it created while it was
-    on, and that is the moment they most need collecting.
+    Deliberately *not* gated on ``CHAT_ENABLED`` or ``SANDBOX_ENABLED``. A
+    deployment that turns either off still holds every session and sandbox it
+    created while they were on, and that is exactly when they most need
+    collecting -- gating on the feature flag would strand them for good. It also
+    removes a failure mode that already bit once: the flag being absent from the
+    worker's environment silently disabled the sweep everywhere.
 
     A threshold of zero reads as **off**, not as "retire everything now".
     """
     if not settings.CHAT_SESSION_REAP_ENABLED or settings.CHAT_SESSION_REAP_IDLE_SECONDS <= 0:
         return False
-    return bool(settings.CHAT_ENABLED)
+    return settings.CHAT_SESSION_REAP_INTERVAL_SECONDS > 0
+
+
+def coverage_lag_seconds() -> int:
+    """How long a full rotation over every user takes on the DynamoDB backend.
+
+    That backend visits one bucket of users per sweep rather than all of them
+    (see ``dynamodb.list_idle_chat_sessions``), so a session becomes *visible*
+    to the sweep up to this long after it goes idle. SQL answers globally and
+    has no such lag; reporting the DynamoDB figure regardless keeps the warning
+    conservative rather than backend-dependent.
+    """
+    from reporting.services.report_store.dynamodb import CHAT_SESSION_USER_BUCKETS
+
+    return settings.CHAT_SESSION_REAP_INTERVAL_SECONDS * CHAT_SESSION_USER_BUCKETS
+
+
+def warn_if_coverage_is_too_slow() -> None:
+    """Say so when the rotation is slow enough to matter against the threshold.
+
+    A long interval makes each session's *effective* retention its idle window
+    plus a rotation. That is harmless at the defaults (a day against thirty)
+    and misleading at, say, a six-hour interval against a two-day threshold --
+    the kind of configuration whose symptom is "sessions live much longer than
+    I set", with nothing anywhere to explain it.
+    """
+    lag = coverage_lag_seconds()
+    idle = settings.CHAT_SESSION_REAP_IDLE_SECONDS
+    if idle > 0 and lag > idle // 4:
+        logger.warning(
+            "Session reap sweeps take %ds to visit every user, against a %ds idle threshold; "
+            "sessions may persist that much longer than configured. Shorten "
+            "CHAT_SESSION_REAP_INTERVAL_SECONDS or lengthen CHAT_SESSION_REAP_IDLE_SECONDS.",
+            lag,
+            idle,
+        )
 
 
 async def reap(*, now: datetime | None = None) -> ReapSummary:
@@ -103,20 +141,23 @@ async def reap_idle_sessions(summary: ReapSummary, *, now: datetime) -> None:
         return
     summary.sessions_seen = len(idle)
     for session in idle:
-        # Re-read immediately before deleting. The listing is a snapshot, and a
-        # session the owner replied to while this pass was working through the
-        # ones before it is no longer idle -- this is the check that keeps a
-        # sweep from deleting a conversation that came back to life during it.
+        # Claim before touching anything. The listing is a snapshot, and a
+        # re-read followed by an unconditional delete is a race with a window as
+        # wide as the sweep: the owner can return, pass the check, and start a
+        # turn against a session this loop then deletes. The claim is a single
+        # conditional write on ``updated_at``, so exactly one of the two wins,
+        # and a turn that wins is refused by the store afterwards instead.
         try:
-            current = await report_store.get_chat_session(session.user_id, session.thread_id)
+            claimed = await report_store.claim_chat_session_for_retirement(
+                session.user_id, session.thread_id, session.updated_at
+            )
         except Exception:
             summary.failed += 1
-            logger.warning("could not re-read chat session before reaping it", exc_info=True)
+            logger.warning("could not claim chat session for retirement", exc_info=True)
             continue
-        if current is None:
-            # Already gone; its sandbox, if any, is the orphan pass's problem.
-            continue
-        if current.updated_at >= cutoff:
+        if not claimed:
+            # Used since it was listed, or already deleted. Its sandbox, if it
+            # left one behind, is the orphan pass's problem.
             summary.sessions_kept += 1
             continue
         try:
@@ -124,7 +165,7 @@ async def reap_idle_sessions(summary: ReapSummary, *, now: datetime) -> None:
         except Exception:
             summary.failed += 1
             logger.warning(
-                "could not reap idle chat session",
+                "could not finish retiring chat session; it stays claimed for the next sweep",
                 extra={"thread_id": session.thread_id},
                 exc_info=True,
             )
@@ -132,22 +173,31 @@ async def reap_idle_sessions(summary: ReapSummary, *, now: datetime) -> None:
         summary.sessions_reaped += 1
         logger.info(
             "Reaped idle chat session",
-            extra={"thread_id": session.thread_id, "updated_at": current.updated_at},
+            extra={"thread_id": session.thread_id, "updated_at": session.updated_at},
         )
 
 
 async def _delete_session(user_id: str, thread_id: str) -> None:
-    """Delete the record, then the checkpoint and the sandbox with it.
+    """Destroy the sandbox and checkpoint first; delete the record last.
 
-    Same order as the user-facing delete route: the record first, so a failure
-    part-way through leaves a session that is gone from the UI and a checkpoint
-    the next pass will collect, rather than a session pointing at state that no
-    longer exists.
+    **The opposite order from the user-facing delete route, deliberately.** The
+    session record is the only thing that makes a thread findable: delete it
+    first and a failed checkpoint deletion leaves a transcript stored forever,
+    with nothing left to retry from — the retention promise quietly broken, and
+    worst on PostgreSQL checkpoints, which have no TTL to catch it later.
+    Deleting it last makes the record its own tombstone. A pass that dies
+    part-way leaves a claimed, still-idle session that the next sweep re-claims
+    and finishes; every step is idempotent (a dead sandbox id kills nothing, a
+    missing checkpoint deletes nothing).
+
+    The route keeps the other order for the opposite reason: an interactive
+    delete should disappear from the UI immediately, and a user watching it can
+    retry themselves.
     """
     from reporting.services.chat_graph import delete_thread_state
 
-    await report_store.delete_chat_session(user_id, thread_id)
     await delete_thread_state(user_id, thread_id)
+    await report_store.delete_chat_session(user_id, thread_id)
 
 
 async def reap_orphan_sandboxes(summary: ReapSummary, *, now: datetime) -> None:

@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import uuid
@@ -50,11 +49,25 @@ _CONTINUE_RESPONSE_PROMPT = (
 )
 
 
-async def _touch_chat_session_later(user_id: str, thread_id: str) -> None:
+async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> bool:
+    """Record the turn's activity before it starts, and report whether it may.
+
+    Awaited rather than fired into a background task: the timestamp this writes
+    is what stops the session reaper retiring the conversation
+    (:mod:`reporting.services.session_reaper`), and a task that has not run yet
+    protects nothing. ``touch_chat_session`` returns None when the session is
+    gone *or* has already been claimed for retirement -- in both cases its
+    checkpoint and sandbox are going away, so the turn must not start.
+
+    A store failure is not treated as a refusal: chat continues to work when
+    the session store is briefly unavailable, exactly as it did when this was a
+    background task that could fail unseen.
+    """
     try:
-        await report_store.touch_chat_session(user_id, thread_id)
+        return await report_store.touch_chat_session(user_id, thread_id) is not None
     except Exception:
         logger.exception("Failed to update chat session timestamp", extra={"thread_id": thread_id})
+        return True
 
 
 @router.post(
@@ -109,7 +122,11 @@ async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -
             yield _sse_data({"type": "finish", "finishReason": "error"})
             yield "data: [DONE]\n\n"
             return
-        asyncio.create_task(_touch_chat_session_later(current.user.user_id, body.thread_id))
+        if not await _claim_chat_session_for_turn(current.user.user_id, body.thread_id):
+            yield _sse_data({"type": "error", "errorText": "This conversation has been retired"})
+            yield _sse_data({"type": "finish", "finishReason": "error"})
+            yield "data: [DONE]\n\n"
+            return
         yield _sse_data({"type": "start", "messageId": message_id})
         yield _sse_data({"type": "text-start", "id": text_id})
         text_started = True

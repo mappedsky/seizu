@@ -21,6 +21,10 @@ _REAPER_SETTINGS = (
     "SANDBOX_SESSION_TIMEOUT_SECONDS",
 )
 
+# Read by the worker's own reconcile loop, which skips scheduled chats entirely
+# when it believes chat is off.
+_WORKER_CHAT_FLAGS = ("CHAT_ENABLED", "CHAT_SCHEDULES_ENABLED")
+
 
 def _service_environment(service: str) -> set[str]:
     """Env var names in one service's block, without a YAML dependency.
@@ -51,6 +55,13 @@ def test_the_worker_receives_every_reaper_setting() -> None:
     """The sweep runs only here, so this is the one service that must have them."""
     env = _service_environment("seizu-temporal-worker")
     assert set(_REAPER_SETTINGS) <= env
+
+
+def test_the_worker_receives_the_chat_feature_flags() -> None:
+    """The worker's reconcile loop skips scheduled chats when it believes chat is
+    off, and it believes that whenever the flag is absent from its environment."""
+    env = _service_environment("seizu-temporal-worker")
+    assert set(_WORKER_CHAT_FLAGS) <= env
 
 
 def test_both_sandbox_creating_services_agree_on_the_deployment_id() -> None:

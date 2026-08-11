@@ -285,8 +285,11 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 **Sessions are retired after 30 days of inactivity by default**, transcript
 included, along with the suspended sandbox each one holds. The sweep runs as a
 Temporal Schedule on `seizu-temporal-worker`, so a deployment without that
-worker keeps sessions forever. Raise `CHAT_SESSION_REAP_IDLE_SECONDS` to match
-your retention policy, or set `CHAT_SESSION_REAP_ENABLED=false` — see
+worker keeps sessions forever. A session is never retired while it is in use: a
+sweep claims it first, and a turn that starts in the same moment either wins the
+claim or is refused with "This conversation has been retired". Raise
+`CHAT_SESSION_REAP_IDLE_SECONDS` to match your retention policy, or set
+`CHAT_SESSION_REAP_ENABLED=false` — see
 [retiring idle sessions](sandbox.html#retiring-idle-sessions-and-their-sandboxes)
 for why the session and its sandbox are retired together.
 ```

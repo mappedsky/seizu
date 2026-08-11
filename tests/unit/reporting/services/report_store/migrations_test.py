@@ -80,3 +80,53 @@ async def test_spaces_migration_adds_columns_to_a_pre_existing_reports_table(tmp
         assert row.subspace_id is None
     finally:
         await engine.dispose()
+
+
+async def test_retirement_migration_adds_the_column_and_index_to_an_existing_table(tmp_path):
+    """The upgrade path for 0006: ``chat_sessions`` already exists, so the
+    baseline's ``create_all`` leaves it alone and the revision has to add both
+    the claim column and the index the reaper's sweep depends on."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat-upgrade.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "CREATE TABLE chat_sessions ("
+                    "id INTEGER PRIMARY KEY, user_id VARCHAR, thread_id VARCHAR, title VARCHAR,"
+                    " created_at VARCHAR, updated_at VARCHAR, origin VARCHAR,"
+                    " scheduled_chat_id VARCHAR, run_status VARCHAR, run_errors JSON)"
+                )
+            )
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO chat_sessions VALUES "
+                    "(1, 'u1', 't1', 'Old', 'then', 'then', 'interactive', NULL, NULL, '[]')"
+                )
+            )
+
+        await run_schema_migrations(engine)
+
+        columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("chat_sessions")})
+        assert "retiring_at" in columns
+        indexes = await _inspect(engine, lambda i: {x["name"] for x in i.get_indexes("chat_sessions")})
+        assert "ix_chat_sessions_origin_updated_at" in indexes
+
+        # The pre-existing session survives, unclaimed.
+        async with engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT thread_id, retiring_at FROM chat_sessions"))).one()
+        assert (row.thread_id, row.retiring_at) == ("t1", None)
+    finally:
+        await engine.dispose()
+
+
+async def test_a_fresh_database_gets_the_reaper_index_from_the_model(tmp_path):
+    """0006 returns early on a fresh database, so the index has to come from the
+    model's table args -- otherwise new installs sweep without one."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh-chat.db'}")
+    try:
+        await run_schema_migrations(engine)
+
+        indexes = await _inspect(engine, lambda i: {x["name"] for x in i.get_indexes("chat_sessions")})
+        assert "ix_chat_sessions_origin_updated_at" in indexes
+    finally:
+        await engine.dispose()

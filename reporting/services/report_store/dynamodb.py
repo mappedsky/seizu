@@ -115,6 +115,11 @@ _SK_QUERY_HISTORY_PREFIX = "HISTORY#"
 # Maximum history items fetched from DynamoDB per user (caps scan size).
 _QUERY_HISTORY_MAX = 500
 _CHAT_SESSION_LIST_MAX = 500
+#: How many sweeps it takes the session reaper to visit every user once. Higher
+#: means a cheaper pass and a slower rotation; the product with the sweep
+#: interval has to stay well inside the idle threshold, which
+#: ``session_reaper.coverage_lag_seconds`` checks at startup.
+CHAT_SESSION_USER_BUCKETS = 24
 _CHAT_SESSION_TRANSACTION_RETRIES = 3
 _ACTION_CONFIRMATION_SESSION_QUERY_MAX = 500
 _T = TypeVar("_T")
@@ -381,6 +386,30 @@ def _chat_session_list_sk(updated_at: str, thread_id: str) -> str:
     return f"UPDATED#{updated_at}#THREAD#{thread_id}"
 
 
+def _user_bucket(user_id: str) -> int:
+    """Which sweep visits this user's sessions.
+
+    A stable hash, not ``hash()``: PYTHONHASHSEED randomizes that per process,
+    so two workers would disagree about whose turn it is and some users would
+    be visited twice while others were skipped for as long as the processes
+    lived.
+    """
+    digest = hashlib.blake2b(user_id.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % CHAT_SESSION_USER_BUCKETS
+
+
+def _user_bucket_for_now(now: datetime | None = None) -> int:
+    """The bucket this sweep owns, derived from the clock.
+
+    Advancing by elapsed *intervals* rather than by hour means the rotation
+    still covers everyone whatever the sweep interval is, and needs no stored
+    cursor -- so a worker dying mid-pass loses nothing but that pass.
+    """
+    interval = max(1, settings.CHAT_SESSION_REAP_INTERVAL_SECONDS)
+    elapsed = (now or datetime.now(tz=UTC)).timestamp()
+    return int(elapsed // interval) % CHAT_SESSION_USER_BUCKETS
+
+
 def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
     origin = item.get("origin", "interactive")
     return ChatSessionItem(
@@ -538,7 +567,11 @@ def _chat_session_update_transactions(
             **expression_attribute_values,
             ":old_updated_at": existing["updated_at"],
         },
-        "ConditionExpression": "updated_at = :old_updated_at",
+        # The retirement guard is part of the *condition*, not just the read
+        # above it: a reaper's claim can land between that read and this write,
+        # and it does not move updated_at, so without this the write would still
+        # commit and a turn would start against a session about to be deleted.
+        "ConditionExpression": "updated_at = :old_updated_at AND attribute_not_exists(retiring_at)",
     }
     if expression_attribute_names:
         update_op["ExpressionAttributeNames"] = expression_attribute_names
@@ -577,6 +610,12 @@ def _retry_chat_session_transaction(  # noqa: UP047 - mypy in this repo does not
         existing_resp = table.get_item(Key={"PK": metadata_pk, "SK": thread_id})
         existing = existing_resp.get("Item")
         if existing is None:
+            return None
+        if existing.get("retiring_at"):
+            # Claimed by the reaper: its checkpoint and sandbox are going away,
+            # so the session is gone as far as every caller is concerned. Ends
+            # the retry loop too -- retrying cannot make a claim go away, and
+            # the loop would otherwise spin to its limit and raise.
             return None
         result, transact_items = build_transaction(existing)
         try:
@@ -4063,13 +4102,58 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
+    async def claim_chat_session_for_retirement(
+        self,
+        user_id: str,
+        thread_id: str,
+        expected_updated_at: str,
+    ) -> bool:
+        metadata_pk = _chat_session_metadata_pk(user_id)
+        now = datetime.now(tz=UTC).isoformat()
+
+        def _op() -> bool:
+            table = _get_table()
+            try:
+                # A single conditional write, not the read-then-write retry the
+                # other mutators use: that helper re-reads and retries against
+                # whatever it finds, which for a claim would mean "the session
+                # was just used, so try harder to delete it".
+                table.update_item(
+                    Key={"PK": metadata_pk, "SK": thread_id},
+                    UpdateExpression="SET retiring_at = :now",
+                    ConditionExpression="attribute_exists(PK) AND updated_at = :expected",
+                    ExpressionAttributeValues={":now": now, ":expected": expected_updated_at},
+                )
+                return True
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    # Used since it was listed, or already deleted. Either way
+                    # it is not this sweep's to retire.
+                    return False
+                raise
+
+        return await asyncio.to_thread(_op)
+
     async def list_idle_chat_sessions(self, idle_before: str, limit: int) -> list[IdleChatSession]:
         # Sessions are partitioned per user and there is no global index over
-        # updated_at, so this walks the user lookup partition and asks each
-        # user's session partition for its old end. The list SK starts with the
-        # timestamp, so "idle" is a key-range condition rather than a scan --
-        # a user with no idle sessions costs one query that returns nothing.
+        # updated_at, so finding idle ones means asking users. Asking *every*
+        # user every sweep is what makes that unaffordable: at 100k users an
+        # hourly pass is 100k queries, nearly all of them returning nothing.
+        #
+        # So each pass takes one bucket of users, chosen by the clock rather
+        # than by stored progress -- consecutive sweeps advance through the
+        # buckets on their own, with no cursor to keep, contend over, or lose
+        # when a worker dies mid-pass. Every user is visited once per
+        # _USER_BUCKETS sweeps, which the reaper checks stays far inside the
+        # idle threshold (see session_reaper.coverage_lag_seconds).
+        #
+        # The alternative, a global index keyed on updated_at, costs a write on
+        # every chat turn into a single hot partition, and could never see the
+        # sessions that already exist -- which, since abandoned sessions are by
+        # definition never touched again, is exactly the population this
+        # feature is for.
         cutoff_sk = f"UPDATED#{idle_before}"
+        bucket = _user_bucket_for_now()
 
         def _op() -> list[IdleChatSession]:
             table = _get_table()
@@ -4083,7 +4167,7 @@ class DynamoDBReportStore(ReportStore):
                 users_resp = table.query(**user_kwargs)
                 for user_item in users_resp.get("Items", []):
                     user_id = str(user_item.get("user_id") or "")
-                    if not user_id:
+                    if not user_id or _user_bucket(user_id) != bucket:
                         continue
                     session_kwargs: dict[str, Any] = {
                         "KeyConditionExpression": "PK = :pk AND SK < :cutoff",

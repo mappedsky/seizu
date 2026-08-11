@@ -1,4 +1,5 @@
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -3260,12 +3261,25 @@ async def test_missing_index_is_retried_after_the_backoff(patch_table, store, mo
     assert [item.report_id for item in result] == ["r1"]
 
 
+@pytest.fixture()
+def every_user_in_this_bucket(mocker):
+    """Pin the user rotation so a test can assert on the sweep's queries.
+
+    Which bucket a sweep owns comes from the clock, so without this the sessions
+    a test sets up are visited or skipped depending on when it runs.
+    """
+    mocker.patch.object(dynamodb_module, "_user_bucket", return_value=0)
+    mocker.patch.object(dynamodb_module, "_user_bucket_for_now", return_value=0)
+
+
 # ---------------------------------------------------------------------------
 # Idle chat sessions (the session reaper's one cross-user read, SBX-011)
 # ---------------------------------------------------------------------------
 
 
-async def test_list_idle_chat_sessions_walks_users_then_asks_for_the_old_end(patch_table, store):
+async def test_list_idle_chat_sessions_walks_users_then_asks_for_the_old_end(
+    patch_table, store, every_user_in_this_bucket
+):
     """Sessions are partitioned per user with no index over updated_at, so the
     sweep walks the user lookup partition. "Idle" is a key-range condition on
     the list SK -- a user with nothing old costs one query that returns nothing,
@@ -3285,7 +3299,7 @@ async def test_list_idle_chat_sessions_walks_users_then_asks_for_the_old_end(pat
     assert sessions_call["ExpressionAttributeValues"][":cutoff"] == "UPDATED#2021-01-01T00:00:00+00:00"
 
 
-async def test_list_idle_chat_sessions_stops_at_the_limit(patch_table, store):
+async def test_list_idle_chat_sessions_stops_at_the_limit(patch_table, store, every_user_in_this_bucket):
     """One pass must not delete an unbounded number of sessions; the next sweep
     picks up where this one stopped."""
     patch_table.query.side_effect = [
@@ -3303,7 +3317,7 @@ async def test_list_idle_chat_sessions_stops_at_the_limit(patch_table, store):
     assert [i.thread_id for i in idle] == ["t1"]
 
 
-async def test_list_idle_chat_sessions_excludes_headless_runs(patch_table, store):
+async def test_list_idle_chat_sessions_excludes_headless_runs(patch_table, store, every_user_in_this_bucket):
     """Scheduled run sessions belong to a schedule's history and never leave a
     suspended sandbox behind."""
     patch_table.query.side_effect = [{"Items": [{"user_id": "u1"}]}, {"Items": []}]
@@ -3312,3 +3326,103 @@ async def test_list_idle_chat_sessions_excludes_headless_runs(patch_table, store
 
     filter_expression = patch_table.query.call_args_list[1].kwargs["FilterExpression"]
     assert filter_expression == "attribute_not_exists(origin) OR origin = :interactive"
+
+
+# ---------------------------------------------------------------------------
+# Retirement claims (SBX-011)
+# ---------------------------------------------------------------------------
+
+
+async def test_claiming_a_session_is_conditional_on_its_timestamp(patch_table, store):
+    """One conditional write, not the read-then-retry the other mutators use --
+    that helper re-reads and retries, which for a claim would mean "the session
+    was just used, so try harder to delete it"."""
+    assert await store.claim_chat_session_for_retirement("u1", "t1", "2020-01-01T00:00:00+00:00") is True
+
+    kwargs = patch_table.update_item.call_args.kwargs
+    assert kwargs["ConditionExpression"] == "attribute_exists(PK) AND updated_at = :expected"
+    assert kwargs["ExpressionAttributeValues"][":expected"] == "2020-01-01T00:00:00+00:00"
+    assert kwargs["Key"] == {"PK": dynamodb_module._chat_session_metadata_pk("u1"), "SK": "t1"}
+
+
+async def test_claiming_a_session_that_moved_reports_failure(patch_table, store):
+    """A conflict means keep, never retry: the user came back."""
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+    )
+
+    assert await store.claim_chat_session_for_retirement("u1", "t1", "2020-01-01T00:00:00+00:00") is False
+
+
+async def test_touching_a_claimed_session_returns_none(patch_table, store):
+    """A claimed session is losing its checkpoint and sandbox, so a turn must not
+    start against it -- and the retry loop must stop rather than spin."""
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "CHAT_SESSION_METADATA#u1",
+            "SK": "t1",
+            "thread_id": "t1",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "updated_at": "2020-01-01T00:00:00+00:00",
+            "retiring_at": "2026-08-11T00:00:00+00:00",
+        }
+    }
+
+    assert await store.touch_chat_session("u1", "t1") is None
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_a_session_update_cannot_commit_after_a_claim_lands(patch_table, store):
+    """The read above the write is not enough: a claim can land between the two
+    and does not move updated_at, so the guard has to be in the condition."""
+    patch_table.get_item.return_value = {
+        "Item": {
+            "PK": "CHAT_SESSION_METADATA#u1",
+            "SK": "t1",
+            "thread_id": "t1",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        }
+    }
+
+    await store.touch_chat_session("u1", "t1")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    condition = items[0]["Update"]["ConditionExpression"]
+    assert condition == "updated_at = :old_updated_at AND attribute_not_exists(retiring_at)"
+
+
+async def test_the_idle_sweep_visits_one_bucket_of_users_per_pass(patch_table, store, mocker):
+    """Querying every user every sweep is what makes an hourly pass unaffordable
+    at scale; the rotation is what keeps it bounded without a stored cursor."""
+    mocker.patch.object(dynamodb_module, "CHAT_SESSION_USER_BUCKETS", 2)
+    users = [{"user_id": "u1"}, {"user_id": "u2"}, {"user_id": "u3"}]
+    mocker.patch.object(dynamodb_module, "_user_bucket", side_effect=lambda uid: {"u1": 0, "u2": 1, "u3": 0}[uid])
+    mocker.patch.object(dynamodb_module, "_user_bucket_for_now", return_value=0)
+    patch_table.query.side_effect = [{"Items": users}, {"Items": []}, {"Items": []}]
+
+    await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10)
+
+    queried = [
+        call.kwargs["ExpressionAttributeValues"][":pk"]
+        for call in patch_table.query.call_args_list
+        if call.kwargs["ExpressionAttributeValues"][":pk"].startswith("CHAT_SESSION_LIST#")
+    ]
+    assert queried == ["CHAT_SESSION_LIST#u1", "CHAT_SESSION_LIST#u3"]
+
+
+def test_user_buckets_are_stable_across_processes():
+    """PYTHONHASHSEED randomizes hash(); two workers would then disagree about
+    whose turn it is, visiting some users twice and skipping others."""
+    assert dynamodb_module._user_bucket("user-1") == dynamodb_module._user_bucket("user-1")
+    assert dynamodb_module._user_bucket("user-1") < dynamodb_module.CHAT_SESSION_USER_BUCKETS
+
+
+def test_the_sweep_bucket_advances_with_the_clock(mocker):
+    """Consecutive sweeps take consecutive buckets, so the rotation completes
+    without anything having to remember where the last one stopped."""
+    mocker.patch("reporting.settings.CHAT_SESSION_REAP_INTERVAL_SECONDS", 3_600)
+    first = datetime(2026, 8, 11, 1, 0, tzinfo=UTC)
+    assert dynamodb_module._user_bucket_for_now(first) != dynamodb_module._user_bucket_for_now(
+        first + timedelta(hours=1)
+    )

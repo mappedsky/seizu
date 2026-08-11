@@ -370,16 +370,70 @@ reconciles the same schedule at startup, which is idempotent. The cost is that a
 deployment running no Temporal worker does not reap;
 `SANDBOX_SESSION_PERSIST=false` is the alternative there.
 
-**Races are narrowed, not eliminated, and the code says so.** A listing is a
-snapshot: between taking it and acting, a user can reply to a session or resume
-a sandbox. Two guards — the session is re-read immediately before it is deleted,
-and a sandbox's paused state is re-checked immediately before it is killed —
-reduce the window to a single API call each. Nothing short of a provider-side
-conditional delete closes it. The residual risk is bounded by what is protecting
-it: a 30-day-idle session resumed in the same second as the sweep.
+**A returning user wins, decided by one conditional write.** A listing is a
+snapshot, and re-reading before an unconditional delete only narrows the window
+— the owner can pass the re-read, start streaming, and have the sweep delete the
+session out from under the turn. So retirement pivots on a **claim**:
+`claim_chat_session_for_retirement` sets `retiring_at` conditioned on the
+`updated_at` the sweep listed. The stream route awaits its own activity write
+before any graph work, and that write is conditioned on `attribute_not_exists`
+/`IS NULL` for `retiring_at`. Exactly one of the two commits:
+
+- user first → the claim's condition fails → the session is kept;
+- claim first → the turn's write fails → the route refuses with *"This
+  conversation has been retired"*.
+
+The condition lives in the **write**, not in a read above it, because a claim
+does not move `updated_at` and would otherwise slip between a read and its
+write. The activity write is awaited rather than fired into a background task
+for the same reason: a task that has not run yet protects nothing.
+
+Sandboxes get the weaker treatment they can afford: a paused-state re-check
+immediately before the kill, which narrows but does not close. That asymmetry is
+deliberate — losing a sandbox costs a turn's cached files, losing a session
+costs the conversation.
+
+**Retirement deletes the session record last.** It is the only thing that makes
+a thread findable, so deleting it first turns a failed checkpoint deletion into
+a transcript stored forever with nothing left to retry from — worst on
+PostgreSQL checkpoints, which have no TTL to catch it later. Last, it is its own
+tombstone: a pass that dies part-way leaves a claimed, still-idle session that
+the next sweep re-claims and finishes, and every step is idempotent. A claim is
+therefore conditioned only on `updated_at`, never on being unclaimed, so it can
+be re-taken. The interactive delete route keeps the opposite order for the
+opposite reason: it should vanish from the UI at once, and a user watching it
+can retry.
+
+**Finding idle sessions is a rotation, not an index.** Sessions are partitioned
+per user in DynamoDB with no global order on `updated_at`, and asking every user
+every sweep is what makes an hourly pass unaffordable — 100k users is 100k
+queries, nearly all returning nothing. Each pass therefore takes one bucket of
+users (`CHAT_SESSION_USER_BUCKETS`, stable hash), chosen from the clock, so
+consecutive sweeps rotate with no cursor to keep, contend over, or lose when a
+worker dies. Coverage costs latency: a session becomes visible up to
+`interval × buckets` after it goes idle (a day at the defaults, against a
+thirty-day threshold), and `warn_if_coverage_is_too_slow` says so when a
+configuration makes that lag material.
+
+A global index keyed on `updated_at` was the obvious alternative and is worse
+here: it costs a write on every chat turn into one hot partition, and it could
+never see the sessions that *already exist* — which, since an abandoned session
+is by definition never touched again, is precisely the population this feature
+is for. SQL has no such problem and gets the real thing: a composite
+`(origin, updated_at)` index, added by migration `0006` and declared on the
+model so fresh databases get it from `create_all`.
+
+**The sweep is gated on its own settings only.** Not on `CHAT_ENABLED`, not on
+`SANDBOX_ENABLED`: a deployment that turns either off still holds everything it
+created while they were on. That also removes a failure mode that shipped once —
+`CHAT_ENABLED` was not in the Temporal worker's compose environment, so the
+worker read chat as disabled and deleted its own schedule.
 
 **Don't:** reap a sandbox whose session is still alive, however old the sandbox
 is. **Don't:** reap untagged or foreign-tagged sandboxes by default. **Don't:**
 read `CHAT_SESSION_REAP_IDLE_SECONDS=0` as "retire immediately" — it means off,
 because immediately would mean every session there is. **Don't:** move the sweep
 back into a worker-local loop; the Schedule is the singleton mechanism.
+**Don't:** delete the session record before its checkpoint, or let a schedule
+failure propagate out of worker startup — both were review findings, and both
+trade a housekeeping sweep for something much larger.

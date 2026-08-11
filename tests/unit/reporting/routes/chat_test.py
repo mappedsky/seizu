@@ -1,6 +1,7 @@
 import json
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -154,6 +155,75 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     mocker.patch("reporting.routes.chat.report_store.update_chat_session_title", update_chat_session_title)
     mocker.patch("reporting.routes.chat.report_store.delete_chat_session", delete_chat_session)
     return sessions
+
+
+async def test_chat_stream_refuses_a_session_claimed_for_retirement(mocker):
+    """The reaper claims a session before destroying its checkpoint and sandbox,
+    and a claimed session reports as untouchable. Starting the turn anyway would
+    run it against state that is being deleted underneath it."""
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    mocker.patch("reporting.routes.chat.report_store.touch_chat_session", AsyncMock(return_value=None))
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001"},
+        )
+
+    assert response.status_code == 200
+    assert "retired" in response.text
+    assert '"finishReason":"error"' in response.text
+    assert fake_graph.calls == []
+
+
+async def test_chat_stream_records_activity_before_running_the_turn(mocker):
+    """Awaited, not fired into a background task: this timestamp is what stops
+    the reaper retiring the conversation, and a task that has not run yet
+    protects nothing."""
+    order: list[str] = []
+    fake_graph = FakeChatGraph()
+    original_stream = fake_graph.astream
+
+    def _recording_astream(*args, **kwargs):
+        order.append("stream")
+        return original_stream(*args, **kwargs)
+
+    fake_graph.astream = _recording_astream  # type: ignore[method-assign]
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    async def _touch(user_id: str, thread_id: str):
+        order.append("touch")
+        return ChatSessionItem(thread_id=thread_id, title="", created_at="", updated_at="")
+
+    mocker.patch("reporting.routes.chat.report_store.touch_chat_session", _touch)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+
+    assert order[:2] == ["touch", "stream"]
+
+
+async def test_a_store_failure_does_not_block_the_turn(mocker):
+    """Chat kept working when this was a background task that failed unseen;
+    making it awaited must not turn a store blip into an outage."""
+    fake_graph = FakeChatGraph()
+    mocker.patch("reporting.routes.chat.get_chat_graph", return_value=fake_graph)
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    mocker.patch(
+        "reporting.routes.chat.report_store.touch_chat_session",
+        AsyncMock(side_effect=RuntimeError("store down")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+
+    assert '"finishReason":"stop"' in response.text
 
 
 async def test_chat_stream_success(mocker):

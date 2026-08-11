@@ -123,8 +123,17 @@ their suspended sandboxes.
 
 Idle time comes from the session's own `updated_at`, so it is exact — an active
 conversation is never at risk however old it is, and no provider timestamp is
-involved. A session the owner replies to *while a sweep is running* is re-read
-and spared before anything is deleted.
+involved. **A user who returns while a sweep is running wins**: retirement takes
+a claim on the session conditioned on the timestamp it listed, and a turn's
+first act is a conditional activity write, so exactly one of the two commits. A
+turn that loses the race is refused with *"This conversation has been retired"*
+rather than running against state being deleted underneath it.
+
+On DynamoDB each sweep visits one bucket of users rather than all of them, so a
+session becomes visible to the sweep up to `interval × 24` after it goes idle —
+a day at the defaults, against a thirty-day threshold. Seizu logs a warning at
+startup if your interval makes that lag material against your threshold. (SQL
+answers the same question globally with one indexed query.)
 
 **Set `SEIZU_DEPLOYMENT_ID` whenever the sandbox credentials are shared** with
 another Seizu installation (production and staging on one E2B account, say). It

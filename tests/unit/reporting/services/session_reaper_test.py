@@ -19,8 +19,8 @@ IDLE_SECONDS = 2_592_000  # 30 days
 
 def _settings(**overrides: Any) -> ExitStack:
     values: dict[str, Any] = {
-        "CHAT_ENABLED": True,
         "CHAT_SESSION_REAP_ENABLED": True,
+        "CHAT_SESSION_REAP_INTERVAL_SECONDS": 3_600,
         "CHAT_SESSION_REAP_IDLE_SECONDS": IDLE_SECONDS,
         "SANDBOX_REAP_UNTAGGED": False,
         "SANDBOX_SESSION_TIMEOUT_SECONDS": 1_800,
@@ -64,6 +64,7 @@ def _patch_store(
     sessions: dict[tuple[str, str], ChatSessionItem] | None = None,
     delete_session: Any = None,
     delete_state: Any = None,
+    claim: Any = None,
 ) -> ExitStack:
     known = sessions or {}
     stack = ExitStack()
@@ -71,6 +72,12 @@ def _patch_store(
         patch(
             "reporting.services.report_store.list_idle_chat_sessions",
             AsyncMock(return_value=idle or []),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "reporting.services.report_store.claim_chat_session_for_retirement",
+            claim if claim is not None else AsyncMock(return_value=True),
         )
     )
     stack.enter_context(
@@ -124,25 +131,70 @@ async def test_an_idle_session_is_deleted_with_its_sandbox() -> None:
     assert summary.sessions_reaped == 1
 
 
-async def test_a_session_replied_to_during_the_sweep_is_spared() -> None:
-    """The listing is a snapshot. Without the re-read, a sweep working through a
-    long backlog would delete a conversation that came back to life while it ran."""
+async def test_a_session_used_since_it_was_listed_is_spared() -> None:
+    """The listing is a snapshot, and the claim is what settles the race: a
+    conditional write on updated_at, so a conversation the owner came back to
+    cannot be deleted by a sweep that read it a moment earlier."""
     idle = [IdleChatSession(user_id="u1", thread_id="t1", updated_at=_age(24 * 40))]
     delete_state = AsyncMock()
     with (
         _settings(),
-        _patch_store(
-            idle=idle,
-            # Re-read shows a session touched a minute ago.
-            sessions={("u1", "t1"): _session("t1", idle_hours=0.02)},
-            delete_state=delete_state,
-        ),
+        _patch_store(idle=idle, claim=AsyncMock(return_value=False), delete_state=delete_state),
         _patch_provider(),
     ):
         summary = await session_reaper.reap(now=NOW)
 
     delete_state.assert_not_awaited()
     assert (summary.sessions_reaped, summary.sessions_kept) == (0, 1)
+
+
+async def test_the_claim_is_conditioned_on_the_timestamp_that_was_listed() -> None:
+    """Anything else -- a fresh read, no condition at all -- reopens the window
+    between deciding to delete and deleting."""
+    idle = [IdleChatSession(user_id="u1", thread_id="t1", updated_at=_age(24 * 40))]
+    claim = AsyncMock(return_value=True)
+    with _settings(), _patch_store(idle=idle, claim=claim), _patch_provider():
+        await session_reaper.reap(now=NOW)
+
+    claim.assert_awaited_once_with("u1", "t1", _age(24 * 40))
+
+
+async def test_the_session_record_is_deleted_last() -> None:
+    """The record is the only thing that makes a thread findable, so it is its
+    own tombstone: delete it first and a failed checkpoint deletion strands a
+    transcript with nothing left to retry from."""
+    idle = [IdleChatSession(user_id="u1", thread_id="t1", updated_at=_age(24 * 40))]
+    order: list[str] = []
+    delete_state = AsyncMock(side_effect=lambda *_a: order.append("state"))
+    delete_session = AsyncMock(side_effect=lambda *_a: order.append("record"))
+    with (
+        _settings(),
+        _patch_store(idle=idle, delete_state=delete_state, delete_session=delete_session),
+        _patch_provider(),
+    ):
+        await session_reaper.reap(now=NOW)
+
+    assert order == ["state", "record"]
+
+
+async def test_a_half_finished_retirement_leaves_the_session_findable() -> None:
+    """A checkpoint deletion that fails must not take the record with it, or the
+    next sweep has nothing to resume from."""
+    idle = [IdleChatSession(user_id="u1", thread_id="t1", updated_at=_age(24 * 40))]
+    delete_session = AsyncMock()
+    with (
+        _settings(),
+        _patch_store(
+            idle=idle,
+            delete_state=AsyncMock(side_effect=RuntimeError("checkpoint store down")),
+            delete_session=delete_session,
+        ),
+        _patch_provider(),
+    ):
+        summary = await session_reaper.reap(now=NOW)
+
+    delete_session.assert_not_awaited()
+    assert (summary.sessions_reaped, summary.failed) == (0, 1)
 
 
 async def test_one_failed_deletion_does_not_stop_the_sweep() -> None:
@@ -167,9 +219,9 @@ async def test_one_failed_deletion_does_not_stop_the_sweep() -> None:
     assert (summary.sessions_reaped, summary.failed) == (1, 1)
 
 
-async def test_a_session_that_vanished_before_deletion_is_not_an_error() -> None:
+async def test_a_session_that_vanished_before_the_claim_is_not_an_error() -> None:
     idle = [IdleChatSession(user_id="u1", thread_id="t1", updated_at=_age(24 * 40))]
-    with _settings(), _patch_store(idle=idle, sessions={}), _patch_provider():
+    with _settings(), _patch_store(idle=idle, claim=AsyncMock(return_value=False)), _patch_provider():
         summary = await session_reaper.reap(now=NOW)
 
     assert (summary.sessions_reaped, summary.failed) == (0, 0)
@@ -305,6 +357,25 @@ async def test_a_zero_threshold_disables_reaping_rather_than_deleting_everything
         assert not session_reaper.reaping_configured()
 
 
-async def test_reaping_is_off_when_chat_is() -> None:
-    with _settings(CHAT_ENABLED=False):
-        assert not session_reaper.reaping_configured()
+async def test_reaping_survives_chat_being_turned_off() -> None:
+    """A deployment that disables chat still holds every session and sandbox it
+    made while chat was on -- and the flag is not even passed to some services,
+    which is how the gate silently disabled the sweep everywhere."""
+    with _settings(), patch("reporting.settings.CHAT_ENABLED", False):
+        assert session_reaper.reaping_configured()
+
+
+async def test_a_slow_rotation_against_a_short_threshold_warns(caplog) -> None:
+    """Each session's effective retention is its idle window plus one rotation;
+    silence would leave "sessions live longer than I set" unexplained."""
+    with _settings(CHAT_SESSION_REAP_INTERVAL_SECONDS=21_600, CHAT_SESSION_REAP_IDLE_SECONDS=172_800):
+        session_reaper.warn_if_coverage_is_too_slow()
+
+    assert "visit every user" in caplog.text
+
+
+async def test_the_default_cadence_does_not_warn(caplog) -> None:
+    with _settings():
+        session_reaper.warn_if_coverage_is_too_slow()
+
+    assert "visit every user" not in caplog.text

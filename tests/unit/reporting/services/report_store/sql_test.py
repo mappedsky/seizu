@@ -289,6 +289,39 @@ async def test_list_idle_chat_sessions_ignores_headless_sessions(store, mocker):
     assert await store.list_idle_chat_sessions("2021-01-01T00:00:00+00:00", limit=10) == []
 
 
+async def test_claiming_a_session_that_moved_reports_failure(store, mocker):
+    """A conflict means keep, not retry: the conditional UPDATE is the only
+    thing standing between a sweep and a conversation its owner just returned
+    to."""
+    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
+    created = await store.create_chat_session("user-1", title="Test")
+
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", "1999-01-01T00:00:00+00:00") is False
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+
+
+async def test_a_claimed_session_refuses_further_use(store, mocker):
+    """Its checkpoint and sandbox are going away, so a turn must not start
+    against it -- and it must not be renamed into looking alive either."""
+    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
+    created = await store.create_chat_session("user-1", title="Test")
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+
+    assert await store.touch_chat_session("user-1", "t1") is None
+    assert await store.update_chat_session_title("user-1", "t1", "new") is None
+    assert await store.complete_chat_session_run("user-1", "t1", "success", []) is None
+
+
+async def test_a_claim_can_be_retried_after_a_failed_sweep(store, mocker):
+    """A pass that died between claiming and finishing has to be resumable, or
+    the session is stuck claimed and its transcript is never collected."""
+    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="t1")
+    created = await store.create_chat_session("user-1", title="Test")
+
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+    assert await store.claim_chat_session_for_retirement("user-1", "t1", created.updated_at) is True
+
+
 async def test_chat_session_touch_updates_timestamp(store, mocker):
     mocker.patch(
         "reporting.services.report_store.sql.generate_report_id",

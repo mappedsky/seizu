@@ -806,6 +806,10 @@ async def list_idle_chat_sessions(idle_before: str, limit: int) -> list[IdleChat
     return await get_store().list_idle_chat_sessions(idle_before, limit)
 
 
+async def claim_chat_session_for_retirement(user_id: str, thread_id: str, expected_updated_at: str) -> bool:
+    return await get_store().claim_chat_session_for_retirement(user_id, thread_id, expected_updated_at)
+
+
 async def create_chat_session(
     user_id: str,
     title: str,
