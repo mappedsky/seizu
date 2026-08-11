@@ -1472,3 +1472,91 @@ async def test_cancelling_a_producer_that_is_not_here_reports_so(_chat_turn_log)
     """With several workers the request usually lands somewhere else; the store
     flag is what reaches the producer there."""
     assert chat_turns.cancel_local_producer("no-such-turn") is False
+
+
+async def test_cancel_interrupts_a_turn_blocked_mid_call(mocker, _chat_turn_log):
+    """A turn is most likely to be stopped exactly while it is blocked on a slow
+    model call or tool. Only checking the flag between chunks would let that call
+    finish first -- side effects included -- and on another worker the flag is
+    the only channel, so it has to interrupt rather than ask."""
+    started = asyncio.Event()
+    tool_completed = False
+
+    class BlockedGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            nonlocal tool_completed
+            self.calls.append((input, config, stream_mode))
+            yield {"kind": "token", "content": "Calling a tool"}
+            started.set()
+            # Stands in for a long tool call that yields nothing while it runs.
+            await asyncio.sleep(30)
+            tool_completed = True
+            yield {"kind": "token", "content": " done"}
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    # Flag only: no local task cancel, which is what another worker sees.
+    await chat_turns.report_store.request_chat_turn_cancel("test-user-id", "1001")
+
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+
+    assert _chat_turn_log[turn.turn_id].status == "canceled"
+    assert tool_completed is False, "the blocked call was allowed to finish first"
+
+
+async def test_deleting_a_session_waits_for_the_turn_to_stop(mocker, _chat_turn_log):
+    """Cascading while the producer is still running lets it append batches and
+    recreate checkpoint state behind the delete that just ran."""
+    observed: list[str] = []
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+
+    delete = chat.report_store.delete_chat_session
+
+    async def _recording_delete(user_id: str, thread_id: str):
+        observed.append(_chat_turn_log[turn.turn_id].status)
+        return await delete(user_id, thread_id)
+
+    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", _recording_delete)
+    mocker.patch("reporting.routes.chat.delete_thread_messages", AsyncMock())
+
+    # Nothing is producing this turn, so it only reaches a terminal state
+    # because something else finishes it -- stand in for the producer noticing.
+    async def _finish_soon() -> None:
+        await asyncio.sleep(0.05)
+        await chat_turns.report_store.finish_chat_turn(turn.turn_id, "canceled", 0)
+
+    finisher = asyncio.create_task(_finish_soon())
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.delete("/api/v1/chat/sessions/1001")).status_code == 204
+    await finisher
+
+    assert observed == ["canceled"], "the cascade ran while the turn was still running"
+
+
+async def test_deletion_refuses_rather_than_racing_when_cancel_fails(mocker, _chat_turn_log):
+    """Without knowing the turn is stopped, deleting is the race this exists to
+    avoid; a retryable error beats a half-deleted conversation."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    deleted = AsyncMock()
+    mocker.patch(
+        "reporting.routes.chat.report_store.request_chat_turn_cancel",
+        AsyncMock(side_effect=RuntimeError("store down")),
+    )
+    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.delete("/api/v1/chat/sessions/1001")
+
+    assert response.status_code == 503
+    deleted.assert_not_awaited()

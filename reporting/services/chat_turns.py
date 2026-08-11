@@ -49,6 +49,10 @@ _CONTINUE_RESPONSE_PROMPT = (
 # passes rather than one long one at the end of somebody's turn.
 _EXPIRED_TURNS_PER_SWEEP = 25
 
+# How often a caller waiting for a turn to stop re-reads it. The local fast
+# path is immediate; a producer on another worker takes until its heartbeat.
+_TURN_STOP_POLL_SECONDS = 0.05
+
 # Detached producer tasks, held so the event loop keeps a strong reference. A
 # task nobody holds can be garbage collected mid-run, which would look exactly
 # like the failure this module exists to remove. Keyed by turn id so a cancel
@@ -131,6 +135,7 @@ class ChatTurnPublisher:
         self._flusher: asyncio.Task[None] | None = None
         self._heartbeat: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
+        self._producer: asyncio.Task[Any] | None = None
 
     @property
     def last_seq(self) -> int:
@@ -142,6 +147,10 @@ class ChatTurnPublisher:
         return self._stopped
 
     async def __aenter__(self) -> "ChatTurnPublisher":
+        # Entered from inside the producer, so this *is* the producer's task --
+        # which is what lets the heartbeat interrupt it rather than only ask it
+        # to notice.
+        self._producer = asyncio.current_task()
         # A periodic flusher rather than flushing only on append: a turn that
         # goes quiet mid-tool-call would otherwise leave its last partial batch
         # sitting in memory, and the viewer would see the stream stall.
@@ -182,14 +191,35 @@ class ChatTurnPublisher:
             try:
                 turn = await report_store.get_chat_turn(self._turn.turn_id)
                 if turn is None or turn.cancel_requested or turn.status != "running":
-                    self._stopped.set()
+                    self._stop_producer()
                     return
-                if _expires_within(turn.expires_at, renew_after):
-                    await report_store.renew_chat_turn_lease(self._turn.turn_id)
+                if _expires_within(turn.expires_at, renew_after) and (
+                    await report_store.renew_chat_turn_lease(self._turn.turn_id) is None
+                ):
+                    # The lease is gone: the thread has been taken, or the turn
+                    # is no longer running. Carrying on would mean two producers
+                    # writing one conversation.
+                    logger.warning("Chat turn lost its lease", extra={"turn_id": self._turn.turn_id})
+                    self._stop_producer()
+                    return
             except Exception:
                 # A transient store failure must not stop a healthy turn; the
                 # lease has half the retention window of slack for exactly this.
                 logger.warning("Chat turn heartbeat failed", extra={"turn_id": self._turn.turn_id}, exc_info=True)
+
+    def _stop_producer(self) -> None:
+        """End the turn now, wherever it happens to be.
+
+        Setting the flag is not enough on its own: the producer only reads it
+        between chunks, and a turn is most likely to be stopped precisely while
+        it is blocked on a slow model call or tool. Cancelling the task
+        interrupts that, so a Stop landing on another worker behaves like one
+        landing on this one instead of waiting for the call to finish -- which
+        would also let the tool's side effects happen first.
+        """
+        self._stopped.set()
+        if self._producer is not None and not self._producer.done():
+            self._producer.cancel()
 
     async def publish(self, parts: list[dict[str, Any]]) -> None:
         if not parts:
@@ -290,6 +320,27 @@ def cancel_local_producer(turn_id: str) -> bool:
         return False
     task.cancel()
     return True
+
+
+async def await_turn_stopped(turn_id: str, timeout_seconds: float) -> bool:
+    """Wait for a turn to reach a terminal state, or give up.
+
+    Cancelling a turn is a request, and on another worker it takes until that
+    producer's next heartbeat. A caller about to delete what the producer is
+    writing into has to know it has actually stopped, not just been asked to.
+
+    Returns False on timeout; the caller decides whether to proceed. Proceeding
+    is safe but not free: the producer will find its header gone and clean up
+    the batches it wrote in the meantime.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        turn = await report_store.get_chat_turn(turn_id)
+        if turn is None or turn.status != "running":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_TURN_STOP_POLL_SECONDS)
 
 
 async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, current: CurrentUser) -> None:

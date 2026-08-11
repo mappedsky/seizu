@@ -911,6 +911,10 @@ CHAT_TURN_POLL_MAX_MS = int_env("CHAT_TURN_POLL_MAX_MS", 1_000)
 # which is also the worst-case delay before Stop takes effect on a replica that
 # did not start the turn.
 CHAT_TURN_HEARTBEAT_SECONDS = int_env("CHAT_TURN_HEARTBEAT_SECONDS", 2)
+# How long deleting a conversation waits for its running turn to actually
+# stop before cascading. Bounded by the heartbeat above: a producer on another
+# replica cannot notice sooner than that.
+CHAT_TURN_STOP_WAIT_SECONDS = float_env("CHAT_TURN_STOP_WAIT_SECONDS", 10.0)
 # Hard bound on how long a reader will tail one turn before giving up, so a
 # producer that dies without writing a terminal status cannot hold a request
 # open forever.

@@ -139,6 +139,10 @@ _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 # CHAT_TURN_LIST partition -- making one user's delete cost proportional to
 # every other user's retained turns.
 _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
+# Pages of the sweep index one pass will read past. Live entries are not in
+# expiry order (a running turn renews its lease), so a pass has to be able to
+# step over them to reach the expired ones behind.
+_CHAT_TURN_SWEEP_MAX_PAGES = 5
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -4844,41 +4848,56 @@ class DynamoDBReportStore(ReportStore):
 
         def _op() -> ChatTurnItem | None:
             table = _get_table()
+            turn = _get_chat_turn_sync(table, turn_id)
+            if turn is None or turn.status != "running":
+                return None
+            # Both halves in one transaction. The pointer carries its own copy
+            # because the "is this thread free" condition can only read the item
+            # it writes, so the two must move together: renewing the record
+            # alone leaves a producer believing it holds a thread whose pointer
+            # a successor has already taken.
             try:
-                resp = table.update_item(
-                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
-                    UpdateExpression="SET updated_at = :now, expires_at = :expires_at",
-                    ConditionExpression="attribute_exists(PK) AND #s = :running",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={
-                        ":now": now_iso,
-                        ":expires_at": expires_at,
-                        ":running": "running",
-                    },
-                    ReturnValues="ALL_NEW",
+                table.meta.client.transact_write_items(
+                    TransactItems=[
+                        {
+                            "Update": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Key": {"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                                "UpdateExpression": "SET updated_at = :now, expires_at = :expires_at",
+                                "ConditionExpression": "attribute_exists(PK) AND #s = :running",
+                                "ExpressionAttributeNames": {"#s": "status"},
+                                "ExpressionAttributeValues": {
+                                    ":now": now_iso,
+                                    ":expires_at": expires_at,
+                                    ":running": "running",
+                                },
+                            }
+                        },
+                        {
+                            "Update": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Key": {
+                                    "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+                                    "SK": _SK_CHAT_TURN_ACTIVE,
+                                },
+                                "UpdateExpression": "SET expires_at = :expires_at",
+                                "ConditionExpression": "turn_id = :turn_id",
+                                "ExpressionAttributeValues": {
+                                    ":expires_at": expires_at,
+                                    ":turn_id": turn_id,
+                                },
+                            }
+                        },
+                    ]
                 )
             except botocore.exceptions.ClientError as exc:
-                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                if _transaction_cancelled(exc):
+                    # Lost the thread, or the turn is no longer running. Either
+                    # way this producer no longer holds the lease and must stop
+                    # rather than carry on believing it does.
                     return None
                 raise
-            turn = _chat_turn_from_item(resp["Attributes"])
-            # The pointer carries its own copy because the "is this thread free"
-            # condition can only read the item it writes. Renewing one without
-            # the other would let a second producer start on a live thread.
-            try:
-                table.update_item(
-                    Key={
-                        "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
-                        "SK": _SK_CHAT_TURN_ACTIVE,
-                    },
-                    UpdateExpression="SET expires_at = :expires_at",
-                    ConditionExpression="turn_id = :turn_id",
-                    ExpressionAttributeValues={":expires_at": expires_at, ":turn_id": turn_id},
-                )
-            except botocore.exceptions.ClientError as exc:
-                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                    raise
-            return turn
+            return turn.model_copy(update={"updated_at": now_iso, "expires_at": expires_at})
 
         return await asyncio.to_thread(_op)
 
@@ -4971,9 +4990,28 @@ class DynamoDBReportStore(ReportStore):
         def _op() -> bool:
             table = _get_table()
             turn = _get_chat_turn_sync(table, turn_id)
-            if turn is None:
+            if turn is not None:
+                _delete_chat_turn_sync(table, turn)
+                return True
+            # No header, but its batches may still be there: a producer that
+            # kept writing after its conversation was deleted leaves exactly
+            # that, and it is the only thing that would ever collect them.
+            # The pointer and sweep entries are keyed on values only the header
+            # carried, so this clears the partition and nothing else.
+            keys = [
+                {"PK": item["PK"], "SK": item["SK"]}
+                for item in _query_all_sync(
+                    table,
+                    KeyConditionExpression="PK = :pk",
+                    ExpressionAttributeValues={":pk": _chat_turn_pk(turn_id)},
+                    ProjectionExpression="PK, SK",
+                )
+            ]
+            if not keys:
                 return False
-            _delete_chat_turn_sync(table, turn)
+            with table.batch_writer() as batch:
+                for key in keys:
+                    batch.delete_item(Key=key)
             return True
 
         return await asyncio.to_thread(_op)
@@ -4982,33 +5020,47 @@ class DynamoDBReportStore(ReportStore):
         def _op() -> list[ExpiredChatTurn]:
             table = _get_table()
             expired: list[ExpiredChatTurn] = []
-            # The sweep index is ordered by created_at, and expires_at is always
-            # created_at plus a fixed retention, so the oldest-created turns are
-            # also the first to expire. Reading a bounded page of them and
-            # filtering on the live expires_at costs one query plus a GetItem
-            # per candidate, with no second index.
-            for item in table.query(
-                KeyConditionExpression="PK = :pk",
-                ExpressionAttributeValues={":pk": _PK_CHAT_TURN_LIST},
-                ScanIndexForward=True,
-                Limit=limit,
-            ).get("Items", []):
-                turn = _get_chat_turn_sync(table, str(item["turn_id"]))
-                if turn is None:
-                    # The turn is gone but its sweep entry survived — delete the
-                    # stray so the pass cannot stall on it forever.
-                    table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-                    continue
-                if turn.expires_at > expired_before:
-                    continue
-                expired.append(
-                    ExpiredChatTurn(
-                        turn_id=turn.turn_id,
-                        user_id=turn.user_id,
-                        thread_id=turn.thread_id,
-                        expires_at=turn.expires_at,
+            # The sweep index is ordered by created_at, which is *not* expiry
+            # order: a running turn renews its lease, so the oldest-created turn
+            # can be the last to expire. A pass therefore reads *past* entries
+            # that are still live rather than stopping at them -- otherwise a
+            # handful of long-running turns at the head of the partition would
+            # be re-read and skipped by every pass while everything behind them
+            # accumulated forever.
+            #
+            # Bounded by pages rather than by entries so the walk is still
+            # cheap: the live entries it steps over are the currently running
+            # turns, which is bounded by concurrent chat volume.
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": "PK = :pk",
+                "ExpressionAttributeValues": {":pk": _PK_CHAT_TURN_LIST},
+                "ScanIndexForward": True,
+            }
+            for _ in range(_CHAT_TURN_SWEEP_MAX_PAGES):
+                resp = table.query(**kwargs)
+                for item in resp.get("Items", []):
+                    turn = _get_chat_turn_sync(table, str(item["turn_id"]))
+                    if turn is None:
+                        # The turn is gone but its sweep entry survived — delete
+                        # the stray so the pass cannot stall on it forever.
+                        table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+                        continue
+                    if turn.expires_at > expired_before:
+                        continue
+                    expired.append(
+                        ExpiredChatTurn(
+                            turn_id=turn.turn_id,
+                            user_id=turn.user_id,
+                            thread_id=turn.thread_id,
+                            expires_at=turn.expires_at,
+                        )
                     )
-                )
+                    if len(expired) >= limit:
+                        return expired
+                last_key = resp.get("LastEvaluatedKey")
+                if not last_key:
+                    return expired
+                kwargs["ExclusiveStartKey"] = last_key
             return expired
 
         return await asyncio.to_thread(_op)

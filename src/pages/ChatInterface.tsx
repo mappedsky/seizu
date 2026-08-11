@@ -1028,18 +1028,20 @@ export default function ChatInterface() {
     experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
     onFinish: handleChatFinish,
     transport,
-    // Reattach to a turn that outlived the last page view. Gated on the real
-    // thread id rather than hardcoded true: the first render has no session
-    // yet, and useChat's resume effect depends on this flag, not on the chat
-    // id. Passing true up front would fire it once against the placeholder id
-    // and never again once the real one arrived, so reload recovery would
-    // silently do nothing. Flipping false -> true re-runs it against the
-    // recreated chat.
+    // Reattach to a turn that outlived the last page view.
     //
-    // Safe against duplication: the messages present when it fires come from
-    // /chat/history, which only returns finished, persisted turns, so there is
-    // never a partial one to resume into.
-    resume: activeThreadId !== null,
+    // Gated on the real thread id rather than hardcoded true: useChat's resume
+    // effect depends on this flag, not on the chat id, so passing true up front
+    // would fire it once against the placeholder id and never again once the
+    // real one arrived — reload recovery would silently do nothing.
+    //
+    // Gated on hydration too, because history is fetched concurrently. Resuming
+    // first lets the replay start building the assistant message into an empty
+    // chat, and applyHistory then overwrites it when the history it fetched
+    // turns out to be longer. Waiting means the messages present when resume
+    // fires are the persisted ones, which only ever contain finished turns —
+    // so there is never a partial message to resume into.
+    resume: activeThreadId !== null && !historyLoading,
   });
 
   resumeStreamRef.current = resumeStream;
@@ -1047,23 +1049,38 @@ export default function ChatInterface() {
   const handleStop = useCallback(() => {
     // Closing the reader is not enough on its own: the turn runs beside the
     // request, so without telling the server it keeps generating and can still
-    // execute the actions it had queued. Tell it first, then stop reading.
+    // execute the actions it had queued.
+    //
+    // The reader is stopped immediately so the button stays responsive, which
+    // means the request has to be the durable half. `keepalive` lets it survive
+    // the user navigating away in the same gesture, and it is retried once —
+    // otherwise a single dropped request leaves the user looking at a stopped
+    // response while the turn runs to completion behind it.
     if (activeThreadId) {
-      void fetch(
-        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel`,
-        {
-          method: 'POST',
-          headers: {
-            'X-Seizu-Csrf': '1',
-            ...(accessTokenRef.current
-              ? { Authorization: `Bearer ${accessTokenRef.current}` }
-              : {}),
-          },
+      const url = `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel`;
+      const options: RequestInit = {
+        method: 'POST',
+        keepalive: true,
+        headers: {
+          'X-Seizu-Csrf': '1',
+          ...(accessTokenRef.current
+            ? { Authorization: `Bearer ${accessTokenRef.current}` }
+            : {}),
         },
-      ).catch(() => {
-        // Best effort. The user asked the stream to stop, and it does; the
-        // server-side turn then ends at its own heartbeat.
-      });
+      };
+      const cancel = async (): Promise<void> => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const res = await fetch(url, options);
+            if (res.ok) return;
+          } catch {
+            // Retried below.
+          }
+        }
+        // Nothing further we can do from here; the turn ends on its own.
+        console.warn('Failed to stop the chat turn on the server');
+      };
+      void cancel();
     }
     stop();
   }, [activeThreadId, stop]);

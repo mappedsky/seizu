@@ -196,9 +196,26 @@ generator, which cancelled the graph — and detaching the turn took it away, so
 `POST /chat/stream/{thread_id}/cancel` puts it back. It sets a flag on the
 record rather than signalling the task: with several workers the request
 usually lands somewhere other than the producer, so the record is the only
-channel that reaches it. A local registry short-circuits the same-worker case.
-Deleting a conversation cancels first for the same reason — otherwise a producer
-keeps writing into a thread whose checkpoint and logs the cascade just removed.
+channel that reaches it.
+
+**Don't:** make the producer notice a stop only between chunks. It reads the
+flag on its heartbeat and **cancels its own task**, because a turn is most
+likely to be stopped precisely while it is blocked on a slow model call or
+tool — where no chunk arrives for as long as the call takes, and where letting
+the call finish first means its side effects happen anyway. The publisher
+captures `asyncio.current_task()` in `__aenter__`, which is the producer's task,
+so the cross-worker path behaves like the same-worker one rather than degrading
+into a wait.
+
+**Deleting a conversation cancels, then waits.** Cascading while the producer
+still runs lets it append batches and recreate checkpoint state behind the
+delete. A failed cancel is a 503 rather than a best-effort log — without knowing
+the turn stopped, deleting is the race this exists to avoid. The wait is bounded
+(`CHAT_TURN_STOP_WAIT_SECONDS`) and falling through it is safe, because
+`delete_chat_turn` collects batches **whether or not the header is still
+there**: a producer that outlived its conversation is the only thing that
+creates headerless batches, so gating that cleanup on the header skipped the
+only rows worth collecting.
 
 **`expires_at` is a renewable lease, not a lifetime.** It is heartbeated by the
 running producer, independently of token output, because a turn is quietest
@@ -206,6 +223,22 @@ exactly when it is slowest. Fixed at creation it would lapse mid-turn on any
 turn longer than the retention window, and then: reconnect reports nothing to
 attach to, a second producer may start on the same thread, and the sweep may
 delete the log still being written.
+
+Three things follow from expiry being mutable, and each was wrong when it was
+merely additive:
+
+- **Renewal moves the record and the pointer together**, in one transaction.
+  Separately, a successor can take the pointer between the two writes and the
+  old producer carries on believing it holds the thread. **A failed renewal
+  stops the producer** rather than being ignored.
+- **Taking over an expired lease re-checks expiry in the update**, not just in
+  the read above it. The producer can renew in between, and retiring a live
+  turn puts a second producer on the thread.
+- **The DynamoDB sweep cannot assume creation order is expiry order.** Its index
+  is keyed by `created_at`, so a long-running turn that keeps renewing sits at
+  the head of the partition forever; a pass that stopped there would re-read and
+  skip the same entries every time while everything behind them accumulated. It
+  reads *past* live entries instead, bounded by pages.
 
 **Don't:** enforce one-running-turn with a read above the insert. A thread has
 at most one running turn, and the *store* is what says so: a partial unique
@@ -222,6 +255,12 @@ this race cannot occur — a broken read-then-write passes, with both callers
 reporting success even though only one row lands.
 `test_two_concurrent_creates_cannot_both_win` builds its own file-backed engine
 for that reason.
+
+**Testing note:** these races are easy to write tests *around* rather than
+*for*, and three tests here passed against the broken code before being fixed.
+Check a new one fails against the version without the fix — in particular, a
+lease renewal injected before the blocking row is read is caught by the read
+guard and never reaches the update guard it was meant to exercise.
 
 **Note:** expired logs are swept at the end of each turn, not by a scheduler. A
 log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the

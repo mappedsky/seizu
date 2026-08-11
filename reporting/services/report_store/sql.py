@@ -3464,18 +3464,25 @@ class SQLModelReportStore(ReportStore):
                     continue
                 if blocking.expires_at > now_iso or attempt == 1:
                     raise ChatTurnConflictError("This conversation already has a turn in progress")
-                # An expired lease means the producer is gone. Retire the turn so
-                # the thread becomes usable; the status guard means only one of
-                # several racing callers does it.
-                await session.execute(
+                # An expired lease means the producer is gone, so retire the turn
+                # and try again. ``expires_at`` is re-checked *in the update*,
+                # not just in the read above it: the producer may have renewed
+                # in between, and retiring a live turn would put a second
+                # producer on the thread -- the exact thing the index prevents.
+                retired = await session.execute(
                     update(ChatTurnRecord)
                     .where(
                         col(ChatTurnRecord.turn_id) == blocking.turn_id,
                         col(ChatTurnRecord.status) == "running",
+                        col(ChatTurnRecord.expires_at) <= now_iso,
                     )
                     .values(status="failed", updated_at=now_iso)
                 )
                 await session.commit()
+                if retired.rowcount == 0:
+                    # Renewed under us, or retired by a concurrent caller that
+                    # will take the thread. Either way it is not ours to take.
+                    raise ChatTurnConflictError("This conversation already has a turn in progress")
         raise ChatTurnConflictError("This conversation already has a turn in progress")
 
     async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
@@ -3622,10 +3629,15 @@ class SQLModelReportStore(ReportStore):
     async def delete_chat_turn(self, turn_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
             result = await session.execute(delete(ChatTurnRecord).where(col(ChatTurnRecord.turn_id) == turn_id))
-            if result.rowcount > 0:
-                await session.execute(delete(ChatTurnEventRecord).where(col(ChatTurnEventRecord.turn_id) == turn_id))
+            # Batches are deleted whether or not the header was still there.
+            # A producer that kept writing after its conversation was deleted is
+            # exactly the case that leaves headerless batches, and gating this
+            # on the header would skip the only rows worth collecting.
+            events = await session.execute(
+                delete(ChatTurnEventRecord).where(col(ChatTurnEventRecord.turn_id) == turn_id)
+            )
             await session.commit()
-            return result.rowcount > 0
+            return result.rowcount > 0 or events.rowcount > 0
 
     async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
         async with AsyncSession(_get_engine()) as session:

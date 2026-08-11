@@ -1891,9 +1891,44 @@ describe('ChatInterface', () => {
     const placeholderCalls = calls.filter((c) => c.id === '__pending__');
     const realCalls = calls.filter((c) => c.id === 'thread-1');
 
+    // The placeholder must never resume; the real thread must end up resuming.
+    // Early real-thread renders legitimately carry false while history loads —
+    // see the hydration test below — so this asserts where it settles, not
+    // every intermediate value.
     expect(realCalls.length).toBeGreaterThan(0);
     expect(placeholderCalls.every((c) => c.resume === false)).toBe(true);
-    expect(realCalls.every((c) => c.resume === true)).toBe(true);
+    expect(realCalls.at(-1)?.resume).toBe(true);
+  });
+
+  it('waits for history before reattaching, so hydration cannot overwrite it', async () => {
+    // History is fetched concurrently. Resuming first lets the replay start
+    // building the assistant message into an empty chat, and applyHistory then
+    // overwrites it once the history it fetched turns out to be longer.
+    let releaseHistory: (messages: never[]) => void = () => {};
+    mockUseChatHistory.mockReturnValue(
+      () =>
+        new Promise((resolve) => {
+          releaseHistory = resolve as (messages: never[]) => void;
+        }),
+    );
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const resumeWhileLoading = mockUseChat.mock.calls
+      .map(([options]) => options as { id?: string; resume?: boolean })
+      .filter((c) => c.id === 'thread-1');
+    expect(resumeWhileLoading.length).toBeGreaterThan(0);
+    expect(resumeWhileLoading.every((c) => c.resume === false)).toBe(true);
+
+    await act(async () => {
+      releaseHistory([]);
+    });
+
+    const after = mockUseChat.mock.calls
+      .map(([options]) => options as { id?: string; resume?: boolean })
+      .filter((c) => c.id === 'thread-1');
+    expect(after.at(-1)?.resume).toBe(true);
   });
 
   it('tells the server to stop the turn, not just the reader', async () => {

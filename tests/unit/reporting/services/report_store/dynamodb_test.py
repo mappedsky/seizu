@@ -3771,26 +3771,11 @@ async def test_deleting_a_turn_batches_rather_than_transacts(patch_table, store)
     patch_table.meta.client.transact_write_items.assert_not_called()
 
 
-async def test_renewing_a_lease_moves_both_the_record_and_the_pointer(patch_table, store):
-    """The pointer carries its own expiry because the "is this thread free"
-    condition can only read the item it writes. Renewing one without the other
-    would let a second producer start on a live thread."""
-    patch_table.update_item.return_value = {"Attributes": _turn_item()}
-
-    await store.renew_chat_turn_lease("turn-1")
-
-    keys = [call.kwargs["Key"] for call in patch_table.update_item.call_args_list]
-    assert keys[0] == {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"}
-    assert keys[1] == {"PK": "CHAT_TURN_THREAD#u1#THREAD#1001", "SK": "#ACTIVE"}
-    assert patch_table.update_item.call_args_list[1].kwargs["ConditionExpression"] == "turn_id = :turn_id"
-
-
 async def test_a_finished_turn_has_no_lease_to_renew(patch_table, store):
-    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
-        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
-    )
+    patch_table.get_item.return_value = {"Item": _turn_item(status="completed")}
 
     assert await store.renew_chat_turn_lease("turn-1") is None
+    patch_table.meta.client.transact_write_items.assert_not_called()
 
 
 async def test_cancel_flags_the_running_turn_for_its_owner(patch_table, store):
@@ -3834,3 +3819,79 @@ async def test_deleting_a_threads_turns_queries_only_that_thread(patch_table, st
     assert kwargs["ExpressionAttributeValues"][":pk"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
     # Not a filtered scan of the shared partition.
     assert "FilterExpression" not in kwargs
+
+
+async def test_lease_renewal_moves_both_halves_in_one_transaction(patch_table, store):
+    """Two separate writes leave a window where the record is renewed but the
+    pointer has already been taken by a successor -- the old producer would then
+    believe it still holds a thread it has lost."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+
+    renewed = await store.renew_chat_turn_lease("turn-1")
+
+    assert renewed is not None
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    keys = [item["Update"]["Key"] for item in items]
+    assert keys == [
+        {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"},
+        {"PK": "CHAT_TURN_THREAD#u1#THREAD#1001", "SK": "#ACTIVE"},
+    ]
+    patch_table.update_item.assert_not_called()
+
+
+async def test_losing_the_pointer_reports_renewal_failure(patch_table, store):
+    """The producer has to be told, or it carries on writing a conversation a
+    second producer now owns."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": "None"}, {"Code": "ConditionalCheckFailed"}],
+        },
+        "TransactWriteItems",
+    )
+
+    assert await store.renew_chat_turn_lease("turn-1") is None
+
+
+async def test_deleting_a_turn_collects_batches_whose_header_is_gone(patch_table, store):
+    """A producer that kept writing after its conversation was deleted leaves
+    headerless batches; refusing to look for them left the only rows worth
+    collecting behind."""
+    patch_table.get_item.return_value = {}
+    patch_table.query.return_value = {"Items": [{"PK": "CHAT_TURN#turn-1", "SK": "EVENT#0000000001"}]}
+
+    assert await store.delete_chat_turn("turn-1") is True
+
+    patch_table.batch_writer.assert_called_once()
+
+
+async def test_deleting_an_unknown_turn_reports_nothing_to_do(patch_table, store):
+    patch_table.get_item.return_value = {}
+    patch_table.query.return_value = {"Items": []}
+
+    assert await store.delete_chat_turn("turn-1") is False
+
+
+async def test_the_sweep_reads_past_turns_that_are_still_live(patch_table, store):
+    """Renewal broke the assumption that creation order is expiry order: a few
+    long-running turns at the head of the partition would otherwise be re-read
+    and skipped by every pass while everything behind them accumulated."""
+    patch_table.query.return_value = {
+        "Items": [
+            {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a#TURN#live", "turn_id": "live"},
+            {"PK": "CHAT_TURN_LIST", "SK": "CREATED#b#TURN#dead", "turn_id": "dead"},
+        ]
+    }
+
+    def _get_item(Key, **kwargs):
+        if Key["PK"] == "CHAT_TURN#live":
+            # Still running, lease renewed well into the future.
+            return {"Item": _turn_item("live", expires_at="2099-01-01T00:00:00+00:00")}
+        return {"Item": _turn_item("dead", status="completed", expires_at="2020-01-01T00:00:00+00:00")}
+
+    patch_table.get_item.side_effect = _get_item
+
+    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
+
+    assert [entry.turn_id for entry in expired] == ["dead"]

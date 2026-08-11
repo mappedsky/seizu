@@ -4,6 +4,7 @@ Uses an in-memory async SQLite database (aiosqlite + StaticPool) so all
 sessions within a test share the same underlying connection.
 """
 
+import asyncio
 from datetime import UTC
 from unittest.mock import patch
 
@@ -674,7 +675,6 @@ async def test_two_concurrent_creates_cannot_both_win(tmp_path):
     this is about cannot occur -- both callers appear to succeed even though
     only one row lands. Real connections are the only way to exercise it.
     """
-    import asyncio
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/turns.db")
     async with engine.begin() as conn:
@@ -748,6 +748,103 @@ async def test_cancel_reports_nothing_when_no_turn_is_running(store):
     await store.finish_chat_turn(turn.turn_id, "completed", 1)
 
     assert await store.request_chat_turn_cancel("user-1", "1001") is None
+
+
+async def test_takeover_does_not_retire_a_lease_renewed_since_it_was_read(mocker, tmp_path):
+    """A producer can renew between the read that sees an expired lease and the
+    update that retires it. Retiring anyway would put a second producer on a
+    live thread -- exactly what the index exists to prevent.
+
+    The renewal is injected *into* that window -- after the blocking row is
+    read, before the update that retires it -- so what is under test is the
+    condition on the update, not the read above it. Injecting any earlier is
+    caught by the read, which already worked.
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/takeover.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
+            store = SQLModelReportStore()
+            stale = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
+            async with AsyncSession(engine) as session:
+                record = await session.get(sql_module.ChatTurnRecord, stale.turn_id)
+                record.expires_at = "2020-01-01T00:00:00+00:00"
+                session.add(record)
+                await session.commit()
+
+            renewed = False
+            real_session = sql_module.AsyncSession
+
+            class _RenewingSession(real_session):
+                async def execute(self, statement, *args, **kwargs):
+                    nonlocal renewed
+                    text = str(statement)
+                    result = await super().execute(statement, *args, **kwargs)
+                    # Renew *after* the blocking row has been read and *before*
+                    # the update that retires it. Renewing any earlier is caught
+                    # by the read, which is the guard that already worked.
+                    if not renewed and text.upper().startswith("SELECT") and "chat_turns" in text:
+                        renewed = True
+                        await super().execute(
+                            sql_module.update(sql_module.ChatTurnRecord)
+                            .where(sql_module.col(sql_module.ChatTurnRecord.turn_id) == stale.turn_id)
+                            .values(expires_at="2099-01-01T00:00:00+00:00")
+                            .execution_options(synchronize_session=False)
+                        )
+                    return result
+
+            mocker.patch.object(sql_module, "AsyncSession", _RenewingSession)
+
+            with pytest.raises(ChatTurnConflictError):
+                await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
+
+            assert renewed, "the renewal was never injected, so the race was not exercised"
+
+        async with AsyncSession(engine) as session:
+            blocking = await session.get(sql_module.ChatTurnRecord, stale.turn_id)
+            assert blocking.status == "running", "a renewed lease was retired anyway"
+            running = (
+                (
+                    await session.execute(
+                        select(sql_module.ChatTurnRecord).where(sql_module.ChatTurnRecord.status == "running")
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(running) == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_deleting_a_turn_collects_batches_whose_header_is_gone(store):
+    """A producer that kept writing after its conversation was deleted leaves
+    headerless batches. Gating the batch delete on the header meant the only
+    rows worth collecting were the ones that were skipped."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    async with AsyncSession(sql_module._get_engine()) as session:
+        await session.execute(
+            sql_module.delete(sql_module.ChatTurnRecord).where(
+                sql_module.col(sql_module.ChatTurnRecord.turn_id) == turn.turn_id
+            )
+        )
+        await session.commit()
+
+    assert await store.delete_chat_turn(turn.turn_id) is True
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        remaining = (
+            (
+                await session.execute(
+                    select(sql_module.ChatTurnEventRecord).where(sql_module.ChatTurnEventRecord.turn_id == turn.turn_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert remaining == []
 
 
 # ---------------------------------------------------------------------------

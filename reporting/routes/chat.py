@@ -389,16 +389,29 @@ async def delete_chat_session(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> None:
     """Delete a chat session."""
-    # Stop the turn before removing what it is writing into. Deleting first
-    # would leave a producer running against a conversation that no longer
-    # exists, recreating checkpoint state and appending batches behind the
-    # cascade that just ran.
+    # Stop the turn, and wait for it to have stopped, before removing what it
+    # is writing into. Deleting first leaves a producer running against a
+    # conversation that no longer exists, recreating checkpoint state and
+    # appending batches behind the cascade that just ran.
+    #
+    # A failure here is *not* swallowed: without knowing the turn is stopped,
+    # deleting is the race this exists to avoid, and a retryable error is a
+    # better outcome than a half-deleted conversation.
     try:
         canceled = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id)
-        if canceled is not None:
-            chat_turns.cancel_local_producer(canceled.turn_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
+        raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
+    if canceled is not None:
+        chat_turns.cancel_local_producer(canceled.turn_id)
+        if not await chat_turns.await_turn_stopped(canceled.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
+            # It has been told and has not stopped yet. Deleting anyway is
+            # what the user asked for, and the producer collects the batches
+            # it wrote in the meantime once it finds its header gone.
+            logger.warning(
+                "Deleting a session whose turn has not stopped yet",
+                extra={"thread_id": thread_id, "turn_id": canceled.turn_id},
+            )
     try:
         deleted = await report_store.delete_chat_session(current.user.user_id, thread_id)
     except Exception as exc:
