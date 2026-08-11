@@ -891,6 +891,21 @@ MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
 
+# How long a finished chat turn's event log stays replayable. This is the window
+# a client has to reconnect and replay a turn; it is not conversation history
+# (that lives in the checkpoint), so it can be short.
+CHAT_TURN_RETENTION_SECONDS = int_env("CHAT_TURN_RETENTION_SECONDS", 600)
+# How often the producer flushes buffered stream parts to the event log, and how
+# often a tailing reader polls it. Together these set the added latency between
+# a token being produced and reaching the browser, so keep them small; the write
+# volume they imply is one item per flush per turn.
+CHAT_TURN_FLUSH_MS = int_env("CHAT_TURN_FLUSH_MS", 200)
+CHAT_TURN_POLL_MS = int_env("CHAT_TURN_POLL_MS", 200)
+# Hard bound on how long a reader will tail one turn before giving up, so a
+# producer that dies without writing a terminal status cannot hold a request
+# open forever.
+CHAT_TURN_TAIL_MAX_SECONDS = int_env("CHAT_TURN_TAIL_MAX_SECONDS", 1800)
+
 # Optional public browser origin used when MCP clients need to show a user an
 # approval URL. When unset, Seizu derives the origin from MCP_RESOURCE_URL.
 SEIZU_PUBLIC_URL = str_env("SEIZU_PUBLIC_URL", "")

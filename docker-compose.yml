@@ -569,6 +569,12 @@ services:
       # Chat assistant — set CHAT_ENABLED=true in .env to enable the feature
       # (routes + checkpoint init + UI). Defaults to false when unset.
       - CHAT_ENABLED
+      # Chat turns run beside the request rather than inside it, so the
+      # event log they stream through is read by this service.
+      - CHAT_TURN_RETENTION_SECONDS
+      - CHAT_TURN_FLUSH_MS
+      - CHAT_TURN_POLL_MS
+      - CHAT_TURN_TAIL_MAX_SECONDS
       # This worker also reconciles and runs scheduled chats.
       - CHAT_SCHEDULES_ENABLED
       - CHAT_SCHEDULE_TIMEOUT_SECONDS

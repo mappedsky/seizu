@@ -1,15 +1,27 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from snowflake import SnowflakeGenerator
-from sqlalchemy import JSON, Column, Index, UniqueConstraint, and_, delete, null, nullslast, text, update
+from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    CHAT_TURN_MAX_SEQ,
+    ChatSessionItem,
+    ChatTurnConflictError,
+    ChatTurnEventBatch,
+    ChatTurnEventPage,
+    ChatTurnItem,
+    ExpiredChatTurn,
+    IdleChatSession,
+    ScheduledChatItem,
+    ScheduledChatVersion,
+)
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -337,6 +349,42 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     retiring_at: str | None = None
 
 
+class ChatTurnRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "chat_turns"
+    __table_args__ = (
+        # get_active_chat_turn, keyed the way it is queried.
+        Index("ix_chat_turns_thread_status", "user_id", "thread_id", "status"),
+        # The expiry sweep spans every user, which is a full scan without this.
+        Index("ix_chat_turns_expires_at", "expires_at"),
+    )
+    turn_id: str = Field(primary_key=True)
+    user_id: str
+    thread_id: str
+    message_id: str
+    text_id: str
+    status: str = "running"
+    # None until the turn finishes; see ChatTurnItem for why a reader needs it.
+    last_seq: int | None = None
+    created_at: str
+    updated_at: str
+    expires_at: str
+
+
+class ChatTurnEventRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "chat_turn_events"
+    # (turn_id, seq) is both the reader's index and the append's idempotency
+    # key, so turn_id needs no index of its own.
+    __table_args__ = (UniqueConstraint("turn_id", "seq", name="uq_chat_turn_events_turn_seq"),)
+    id: int | None = Field(default=None, primary_key=True)
+    turn_id: str
+    seq: int
+    # Text rather than JSON: the value has to come back byte-identical to what
+    # the live stream sent, and a JSON column round-trips through Python and
+    # renormalises it. Nothing ever queries into it.
+    parts_json: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str
+
+
 class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     __tablename__ = "scheduled_chats"
     scheduled_chat_id: str = Field(primary_key=True)
@@ -591,6 +639,37 @@ def _subspace_from_record(record: SubspaceRecord) -> SubspaceItem:
         created_by=record.created_by,
         updated_by=record.updated_by,
     )
+
+
+def _chat_turn_from_record(record: ChatTurnRecord) -> ChatTurnItem:
+    return ChatTurnItem.model_validate(
+        {
+            "turn_id": record.turn_id,
+            "thread_id": record.thread_id,
+            "user_id": record.user_id,
+            "message_id": record.message_id,
+            "text_id": record.text_id,
+            "status": record.status,
+            "last_seq": record.last_seq,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "expires_at": record.expires_at,
+        }
+    )
+
+
+def _validate_chat_turn_batch(seq: int, parts_json: str) -> None:
+    """Reject a batch no backend could store, before any I/O.
+
+    The byte length is measured rather than the character count: pydantic's
+    ``max_length`` counts characters, so a batch of multi-byte content would
+    pass that and still exceed the DynamoDB item limit.
+    """
+    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
+        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
+    size = len(parts_json.encode("utf-8"))
+    if size > CHAT_TURN_MAX_BATCH_BYTES:
+        raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
 
 
 def _action_confirmation_from_record(record: ActionConfirmationRecord) -> ActionConfirmation:
@@ -3300,8 +3379,209 @@ class SQLModelReportStore(ReportStore):
                 col(ChatSessionRecord.thread_id) == thread_id,
             )
             result = await session.execute(stmt)
+            if result.rowcount > 0:
+                # A turn log is only reachable through its session; deleting one
+                # without the other leaves rows nothing will ever look for.
+                turn_ids = (
+                    (
+                        await session.execute(
+                            select(col(ChatTurnRecord.turn_id)).where(
+                                col(ChatTurnRecord.user_id) == user_id,
+                                col(ChatTurnRecord.thread_id) == thread_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if turn_ids:
+                    await session.execute(
+                        delete(ChatTurnEventRecord).where(col(ChatTurnEventRecord.turn_id).in_(turn_ids))
+                    )
+                    await session.execute(delete(ChatTurnRecord).where(col(ChatTurnRecord.turn_id).in_(turn_ids)))
             await session.commit()
             return result.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # Chat turn event log
+    # ------------------------------------------------------------------
+
+    async def create_chat_turn(
+        self,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        text_id: str,
+    ) -> ChatTurnItem:
+        now = datetime.now(tz=UTC)
+        now_iso = now.isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            # One running, unexpired turn per thread. Unlike DynamoDB there is no
+            # conditional put to lean on, so the check is a read inside the same
+            # transaction the insert commits in.
+            existing = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord).where(
+                            col(ChatTurnRecord.user_id) == user_id,
+                            col(ChatTurnRecord.thread_id) == thread_id,
+                            col(ChatTurnRecord.status) == "running",
+                            col(ChatTurnRecord.expires_at) > now_iso,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is not None:
+                raise ChatTurnConflictError("This conversation already has a turn in progress")
+            record = ChatTurnRecord(
+                turn_id=generate_report_id(),
+                user_id=user_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                text_id=text_id,
+                status="running",
+                created_at=now_iso,
+                updated_at=now_iso,
+                expires_at=(now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _chat_turn_from_record(record)
+
+    async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        now_iso = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord)
+                        .where(
+                            col(ChatTurnRecord.user_id) == user_id,
+                            col(ChatTurnRecord.thread_id) == thread_id,
+                            col(ChatTurnRecord.status) == "running",
+                            # An expired running turn has no producer left to finish
+                            # it, so there is nothing to reconnect to.
+                            col(ChatTurnRecord.expires_at) > now_iso,
+                        )
+                        .order_by(col(ChatTurnRecord.created_at).desc())
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            return _chat_turn_from_record(record) if record else None
+
+    async def get_chat_turn(self, turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ChatTurnRecord, turn_id)
+            if record is None or (user_id is not None and record.user_id != user_id):
+                return None
+            return _chat_turn_from_record(record)
+
+    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
+        _validate_chat_turn_batch(seq, parts_json)
+        async with AsyncSession(_get_engine()) as session:
+            session.add(
+                ChatTurnEventRecord(
+                    turn_id=turn_id,
+                    seq=seq,
+                    parts_json=parts_json,
+                    created_at=datetime.now(tz=UTC).isoformat(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                # The unique (turn_id, seq) constraint fired: this batch was
+                # already written by an earlier attempt of the same producer.
+                # Rewriting it would change bytes a reader may already have
+                # replayed, so this is a no-op success.
+                await session.rollback()
+                return False
+            return True
+
+    async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+        async with AsyncSession(_get_engine()) as session:
+            # Events before status, so a status read cannot overtake the final
+            # batches and end the stream mid-answer.
+            rows = (
+                (
+                    await session.execute(
+                        select(ChatTurnEventRecord)
+                        .where(
+                            col(ChatTurnEventRecord.turn_id) == turn_id,
+                            col(ChatTurnEventRecord.seq) > after_seq,
+                        )
+                        .order_by(col(ChatTurnEventRecord.seq))
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            record = await session.get(ChatTurnRecord, turn_id)
+            if record is None:
+                return None
+            batches: list[ChatTurnEventBatch] = []
+            expected = after_seq + 1
+            for row in rows:
+                # Truncate at the first gap rather than skipping it: a reader
+                # that advanced past a missing batch would never come back for it.
+                if row.seq != expected:
+                    break
+                batches.append(ChatTurnEventBatch(seq=row.seq, parts_json=row.parts_json))
+                expected += 1
+            return ChatTurnEventPage(turn=_chat_turn_from_record(record), batches=batches)
+
+    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+        now = datetime.now(tz=UTC)
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ChatTurnRecord, turn_id)
+            if record is None:
+                return None
+            record.status = status
+            record.last_seq = last_seq
+            record.updated_at = now.isoformat()
+            record.expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _chat_turn_from_record(record)
+
+    async def delete_chat_turn(self, turn_id: str) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(delete(ChatTurnRecord).where(col(ChatTurnRecord.turn_id) == turn_id))
+            if result.rowcount > 0:
+                await session.execute(delete(ChatTurnEventRecord).where(col(ChatTurnEventRecord.turn_id) == turn_id))
+            await session.commit()
+            return result.rowcount > 0
+
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+        async with AsyncSession(_get_engine()) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord)
+                        .where(col(ChatTurnRecord.expires_at) <= expired_before)
+                        .order_by(col(ChatTurnRecord.expires_at))
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                ExpiredChatTurn(
+                    turn_id=row.turn_id,
+                    user_id=row.user_id,
+                    thread_id=row.thread_id,
+                    expires_at=row.expires_at,
+                )
+                for row in rows
+            ]
 
     # ------------------------------------------------------------------
     # Action confirmations

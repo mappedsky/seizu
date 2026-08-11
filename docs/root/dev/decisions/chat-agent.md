@@ -148,3 +148,70 @@ Schedule rather than deleting it. Monthly specs over-fire on days 28–31, and
 `load_scheduled_chat` drops the non-matching firings via `schedule_due`.
 `POST /chat/schedules/<id>/run` is keyed on `run_requested_at` so a recovering
 reconcile pass is idempotent.
+
+## AGT-008 — An interactive turn is detached from the connection watching it
+
+**Applies to:** `reporting/services/chat_turns.py`,
+`reporting/routes/chat.py`, `reporting/services/report_store` (chat turn log)
+
+A turn used to *be* the HTTP request: `graph.astream` was iterated inside the
+`StreamingResponse` generator. Now a turn is a **producer** writing an
+append-only log of stream parts, and the request is a **reader** tailing it. The
+two share only a turn id, so a client can disconnect and reattach.
+
+**Why:** two failures come from the old shape, and both are structural.
+`gunicorn.conf` set no `timeout`, so the 30s default applied — and under
+`UvicornWorker` that is a heartbeat watchdog, so a loop blocked past it gets the
+worker `SIGABRT`ed mid-response and the client receives a **truncated body
+rather than an error** (observed three times under the harness, as
+`IncompleteRead` after ~470 bytes). Separately, a dropped connection destroyed
+minutes of work that was still running and still checkpointing, with no way to
+reattach. An explicit `timeout = 300` fixes the first; only detaching the turn
+fixes the second.
+
+**The producer renders the parts; the reader only replays them.** The log holds
+the exact JSON the live stream sent, so the first delivery and every replay are
+byte-identical and there is no second rendering path that can drift. It is also
+what lets `POST /chat/stream` and the reconnecting
+`GET /chat/stream/{thread_id}` share one reader. `message_id` and `text_id` live
+on the turn record for the same reason — a replay that minted fresh ids would
+read to the client as a *second* assistant message, not the same one being
+rebuilt.
+
+**A reader stops on two conditions, not one:** a terminal status *and* a cursor
+that has reached `last_seq`. Status alone races the visibility of the final
+batches and cuts the answer off mid-sentence, which is why `finish_chat_turn`
+takes `last_seq` rather than deriving it (that would mean rewriting the metadata
+item on every flush).
+
+**Don't:** advance a reader's cursor past a gap in `seq`. Store propagation is
+per item, so a poll can return 5 and 7 without 6; taking the gap loses 6
+permanently rather than late. Both backends truncate a page at the first gap,
+and the DynamoDB reads are `ConsistentRead=True` on top of that.
+
+**Note:** a thread has at most one running turn, enforced by a conditional write
+rather than a read-then-write, and the exclusion **expires** — otherwise a
+producer that died mid-turn would wedge that conversation permanently. A second
+caller is told to reconnect instead of starting a rival turn, which would
+interleave two answers into one conversation.
+
+**Note:** expired logs are swept at the end of each turn, not by a scheduler. A
+log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the
+turns of a conversation nobody deletes would accumulate. Hanging the sweep off
+the producer rate-limits it to chat traffic, keeps it off the request, and keeps
+it working in deployments that run no Temporal worker (unlike session
+retirement, [SBX-011](sandbox.md#sbx-011)).
+
+**Note:** the retirement handshake is unchanged and still comes first.
+`touch_chat_session` is awaited *before* the turn is created, not beside it, for
+the reason in [SBX-011](sandbox.md#sbx-011): a turn that started before that
+write landed could be running against state being torn down.
+
+**Still open:** the producer is a detached task in the web process, so a restart
+of `seizu` still ends the turns it was running — the client is now told, rather
+than silently truncated. Moving the producer to the Temporal worker is the
+remaining half, and `chat_turns.start_turn` is the seam for it. Note that a
+retry there would be wrong for the same reason it is wrong for scheduled chats
+([AGT-007](#agt-007)): a turn is expensive and not idempotent, and retrying
+would append a second answer to the same log. The durability on offer is
+reconnect and surviving a web-process restart, not automatic retry.

@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypeVar
 
@@ -14,7 +14,19 @@ import botocore.exceptions
 from snowflake import SnowflakeGenerator
 
 from reporting import settings
-from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    CHAT_TURN_MAX_SEQ,
+    ChatSessionItem,
+    ChatTurnConflictError,
+    ChatTurnEventBatch,
+    ChatTurnEventPage,
+    ChatTurnItem,
+    ExpiredChatTurn,
+    IdleChatSession,
+    ScheduledChatItem,
+    ScheduledChatVersion,
+)
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -110,6 +122,15 @@ _PK_CHAT_SESSION_METADATA_PREFIX = "CHAT_SESSION#"
 _PK_CHAT_SESSION_LIST_PREFIX = "CHAT_SESSION_LIST#"
 # Where the last session-reap pass stopped walking the user lookup partition.
 _PK_CHAT_SESSION_REAP_CURSOR = "CHAT_SESSION_REAP_CURSOR"
+# Chat turn event log — one partition per turn holding the turn's #METADATA item
+# and its EVENT# batches, plus a per-thread pointer to the running turn and a
+# created_at-ordered sweep index. The pointer's PK is what makes "one running
+# turn per thread" a conditional write rather than a read-then-write.
+_PK_CHAT_TURN_PREFIX = "CHAT_TURN#"
+_PK_CHAT_TURN_THREAD_PREFIX = "CHAT_TURN_THREAD#"
+_PK_CHAT_TURN_LIST = "CHAT_TURN_LIST"
+_SK_CHAT_TURN_ACTIVE = "#ACTIVE"
+_SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -392,6 +413,34 @@ def _chat_session_list_sk(updated_at: str, thread_id: str) -> str:
     return f"UPDATED#{updated_at}#THREAD#{thread_id}"
 
 
+def _chat_turn_pk(turn_id: str) -> str:
+    return f"{_PK_CHAT_TURN_PREFIX}{turn_id}"
+
+
+def _chat_turn_thread_pk(user_id: str, thread_id: str) -> str:
+    return f"{_PK_CHAT_TURN_THREAD_PREFIX}{user_id}#THREAD#{thread_id}"
+
+
+def _chat_turn_event_sk(seq: int) -> str:
+    """Zero-pad the sequence so lexicographic sort matches numeric sort.
+
+    Without the padding ``EVENT#10`` sorts before ``EVENT#2`` and a replay comes
+    back scrambled. The metadata item shares this partition safely because ``#``
+    sorts before ``E``, so a ``SK > :after`` range never returns it.
+    """
+    return f"{_SK_CHAT_TURN_EVENT_PREFIX}{seq:010d}"  # noqa: E231
+
+
+def _chat_turn_list_sk(created_at: str, turn_id: str) -> str:
+    """Sweep-index sort key.
+
+    Keyed on ``created_at``, not ``expires_at``: an immutable key means
+    finishing a turn is a single metadata update rather than a
+    delete-old-SK/put-new-SK dance on every state change.
+    """
+    return f"CREATED#{created_at}#TURN#{turn_id}"
+
+
 @dataclass(frozen=True)
 class _ReapCursor:
     """Where the last session-reap pass stopped, in both dimensions.
@@ -540,6 +589,23 @@ def _chat_session_from_item(item: dict[str, Any]) -> ChatSessionItem:
     )
 
 
+def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
+    status = item.get("status", "running")
+    last_seq = item.get("last_seq")
+    return ChatTurnItem(
+        turn_id=item["turn_id"],
+        thread_id=item["thread_id"],
+        user_id=item["user_id"],
+        message_id=item["message_id"],
+        text_id=item["text_id"],
+        status=status if status in ("running", "completed", "failed") else "failed",
+        last_seq=int(last_seq) if last_seq is not None else None,
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+        expires_at=item["expires_at"],
+    )
+
+
 def _action_confirmation_pk(confirmation_id: str) -> str:
     return f"{_PK_ACTION_CONFIRMATION_PREFIX}{confirmation_id}"
 
@@ -642,6 +708,84 @@ async def _hydrate_action_confirmations(
 ) -> list[ActionConfirmation]:
     confirmations = await asyncio.gather(*(get_confirmation(confirmation_id) for confirmation_id in confirmation_ids))
     return [confirmation for confirmation in confirmations if confirmation is not None]
+
+
+def _validate_chat_turn_batch(seq: int, parts_json: str) -> None:
+    """Reject a batch no backend could store, before any I/O.
+
+    The byte length is measured rather than the character count: pydantic's
+    ``max_length`` counts characters, and a batch of multi-byte content would
+    pass that and still exceed the item limit.
+    """
+    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
+        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
+    size = len(parts_json.encode("utf-8"))
+    if size > CHAT_TURN_MAX_BATCH_BYTES:
+        raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
+
+
+def _get_chat_turn_sync(table: Any, turn_id: str) -> ChatTurnItem | None:
+    item = table.get_item(
+        Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+        ConsistentRead=True,
+    ).get("Item")
+    return _chat_turn_from_item(item) if item else None
+
+
+def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
+    """Delete a turn's whole partition, its pointer and its sweep entry.
+
+    Batched rather than transactional: a transaction caps at 100 items and a
+    turn of any length has many more batches than that.
+    """
+    keys = [
+        {"PK": item["PK"], "SK": item["SK"]}
+        for item in _query_all_sync(
+            table,
+            KeyConditionExpression="PK = :pk",
+            ExpressionAttributeValues={":pk": _chat_turn_pk(turn.turn_id)},
+            ProjectionExpression="PK, SK",
+        )
+    ]
+    keys.append({"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.created_at, turn.turn_id)})
+    with table.batch_writer() as batch:
+        for key in keys:
+            batch.delete_item(Key=key)
+    # The pointer is deleted on its own and conditionally: a newer turn on the
+    # same thread owns it by then, and clearing that would let two turns run.
+    try:
+        table.delete_item(
+            Key={"PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id), "SK": _SK_CHAT_TURN_ACTIVE},
+            ConditionExpression="turn_id = :turn_id",
+            ExpressionAttributeValues={":turn_id": turn.turn_id},
+        )
+    except botocore.exceptions.ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+
+
+def _delete_thread_chat_turns_sync(table: Any, user_id: str, thread_id: str) -> None:
+    """Delete every turn log belonging to one thread.
+
+    Reached from ``delete_chat_session``. The pointer names only the most recent
+    turn, so the sweep index is walked for the rest -- a thread that streamed
+    many turns inside the retention window has one partition per turn.
+    """
+    for item in _query_all_sync(
+        table,
+        KeyConditionExpression="PK = :pk",
+        FilterExpression="user_id = :user_id AND thread_id = :thread_id",
+        ExpressionAttributeValues={
+            ":pk": _PK_CHAT_TURN_LIST,
+            ":user_id": user_id,
+            ":thread_id": thread_id,
+        },
+        ProjectionExpression="turn_id",
+    ):
+        turn = _get_chat_turn_sync(table, str(item["turn_id"]))
+        if turn is not None:
+            _delete_chat_turn_sync(table, turn)
+    table.delete_item(Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE})
 
 
 def _transaction_cancelled(exc: botocore.exceptions.ClientError) -> bool:
@@ -4506,7 +4650,277 @@ class DynamoDBReportStore(ReportStore):
 
         def _op() -> bool:
             table = _get_table()
-            return _retry_chat_session_delete(table, metadata_pk, list_pk, thread_id)
+            deleted = _retry_chat_session_delete(table, metadata_pk, list_pk, thread_id)
+            if deleted:
+                # The thread's turn logs are only reachable through this
+                # session; leaving them behind orphans a whole partition that
+                # nothing but the expiry sweep would ever find.
+                _delete_thread_chat_turns_sync(table, user_id, thread_id)
+            return deleted
+
+        return await asyncio.to_thread(_op)
+
+    # ------------------------------------------------------------------
+    # Chat turn event log
+    # ------------------------------------------------------------------
+
+    async def create_chat_turn(
+        self,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        text_id: str,
+    ) -> ChatTurnItem:
+        turn_id = generate_report_id()
+        now = datetime.now(tz=UTC)
+        now_iso = now.isoformat()
+        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+        metadata_item = {
+            "PK": _chat_turn_pk(turn_id),
+            "SK": _SK_METADATA,
+            "turn_id": turn_id,
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "message_id": message_id,
+            "text_id": text_id,
+            "status": "running",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "expires_at": expires_at,
+        }
+        pointer_item = {
+            "PK": _chat_turn_thread_pk(user_id, thread_id),
+            "SK": _SK_CHAT_TURN_ACTIVE,
+            "turn_id": turn_id,
+            "status": "running",
+            "expires_at": expires_at,
+        }
+        list_item = {
+            "PK": _PK_CHAT_TURN_LIST,
+            "SK": _chat_turn_list_sk(now_iso, turn_id),
+            "turn_id": turn_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+        }
+
+        def _op() -> ChatTurnItem:
+            table = _get_table()
+            try:
+                table.meta.client.transact_write_items(
+                    TransactItems=[
+                        {
+                            "Put": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Item": pointer_item,
+                                # One running turn per thread. The expiry clause
+                                # is not optional: without it a producer that
+                                # died mid-turn wedges the conversation until
+                                # someone deletes the pointer by hand.
+                                "ConditionExpression": (
+                                    "attribute_not_exists(PK) OR #s <> :running OR expires_at <= :now"
+                                ),
+                                "ExpressionAttributeNames": {"#s": "status"},
+                                "ExpressionAttributeValues": {":running": "running", ":now": now_iso},
+                            },
+                        },
+                        {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": metadata_item}},
+                        {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": list_item}},
+                    ]
+                )
+            except botocore.exceptions.ClientError as exc:
+                if _first_item_condition_failed(exc):
+                    raise ChatTurnConflictError("This conversation already has a turn in progress") from exc
+                raise
+            return _chat_turn_from_item(metadata_item)
+
+        return await asyncio.to_thread(_op)
+
+    async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        pointer_pk = _chat_turn_thread_pk(user_id, thread_id)
+
+        def _op() -> ChatTurnItem | None:
+            table = _get_table()
+            pointer = table.get_item(
+                Key={"PK": pointer_pk, "SK": _SK_CHAT_TURN_ACTIVE},
+                ConsistentRead=True,
+            ).get("Item")
+            if not pointer or pointer.get("status") != "running":
+                return None
+            turn = _get_chat_turn_sync(table, str(pointer["turn_id"]))
+            if turn is None or turn.status != "running":
+                return None
+            # An expired running turn has no producer left to finish it, so it
+            # is not something a client can usefully reconnect to.
+            if turn.expires_at <= datetime.now(tz=UTC).isoformat():
+                return None
+            return turn
+
+        return await asyncio.to_thread(_op)
+
+    async def get_chat_turn(self, turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+        def _op() -> ChatTurnItem | None:
+            turn = _get_chat_turn_sync(_get_table(), turn_id)
+            if turn is None or (user_id is not None and turn.user_id != user_id):
+                return None
+            return turn
+
+        return await asyncio.to_thread(_op)
+
+    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
+        _validate_chat_turn_batch(seq, parts_json)
+        item = {
+            "PK": _chat_turn_pk(turn_id),
+            "SK": _chat_turn_event_sk(seq),
+            "seq": seq,
+            "parts_json": parts_json,
+            # Nothing reads this yet; it is here so the payload can be
+            # compressed later without a data migration.
+            "encoding": "json",
+            "created_at": datetime.now(tz=UTC).isoformat(),
+        }
+
+        def _op() -> bool:
+            table = _get_table()
+            try:
+                table.put_item(Item=item, ConditionExpression="attribute_not_exists(SK)")
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    # Already written by an earlier attempt of the same producer.
+                    # Rewriting it would change bytes a reader may already have
+                    # replayed, so this is a no-op success, not an error.
+                    return False
+                raise
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+        def _op() -> ChatTurnEventPage | None:
+            table = _get_table()
+            # Events before status: a status read that overtook the final
+            # batches would end the stream mid-answer.
+            resp = table.query(
+                KeyConditionExpression="PK = :pk AND SK > :after",
+                ExpressionAttributeValues={
+                    ":pk": _chat_turn_pk(turn_id),
+                    ":after": _chat_turn_event_sk(after_seq),
+                },
+                ScanIndexForward=True,
+                Limit=limit,
+                # Eventually-consistent Query propagation is per item, so a poll
+                # could return seq 5 and 7 but not 6 -- and a reader that
+                # accepted that gap would advance past 6 forever.
+                ConsistentRead=True,
+            )
+            turn = _get_chat_turn_sync(table, turn_id)
+            if turn is None:
+                return None
+            batches: list[ChatTurnEventBatch] = []
+            expected = after_seq + 1
+            for item in resp.get("Items", []):
+                seq = int(item["seq"])
+                if seq != expected:
+                    break
+                batches.append(ChatTurnEventBatch(seq=seq, parts_json=str(item["parts_json"])))
+                expected += 1
+            return ChatTurnEventPage(turn=turn, batches=batches)
+
+        return await asyncio.to_thread(_op)
+
+    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+        now = datetime.now(tz=UTC)
+        now_iso = now.isoformat()
+        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+
+        def _op() -> ChatTurnItem | None:
+            table = _get_table()
+            turn = _get_chat_turn_sync(table, turn_id)
+            if turn is None:
+                return None
+            try:
+                resp = table.update_item(
+                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                    UpdateExpression=(
+                        "SET #s = :status, last_seq = :last_seq, updated_at = :now, expires_at = :expires_at"
+                    ),
+                    ConditionExpression="attribute_exists(PK)",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":status": status,
+                        ":last_seq": last_seq,
+                        ":now": now_iso,
+                        ":expires_at": expires_at,
+                    },
+                    ReturnValues="ALL_NEW",
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    return None
+                raise
+            # Release the thread so the next turn can start. Conditioned on this
+            # turn's id so a turn that already lost the pointer to a successor
+            # cannot clear it out from under them.
+            try:
+                table.update_item(
+                    Key={
+                        "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+                        "SK": _SK_CHAT_TURN_ACTIVE,
+                    },
+                    UpdateExpression="SET #s = :status",
+                    ConditionExpression="turn_id = :turn_id",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":status": status, ":turn_id": turn_id},
+                )
+            except botocore.exceptions.ClientError as exc:
+                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                    raise
+            return _chat_turn_from_item(resp["Attributes"])
+
+        return await asyncio.to_thread(_op)
+
+    async def delete_chat_turn(self, turn_id: str) -> bool:
+        def _op() -> bool:
+            table = _get_table()
+            turn = _get_chat_turn_sync(table, turn_id)
+            if turn is None:
+                return False
+            _delete_chat_turn_sync(table, turn)
+            return True
+
+        return await asyncio.to_thread(_op)
+
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+        def _op() -> list[ExpiredChatTurn]:
+            table = _get_table()
+            expired: list[ExpiredChatTurn] = []
+            # The sweep index is ordered by created_at, and expires_at is always
+            # created_at plus a fixed retention, so the oldest-created turns are
+            # also the first to expire. Reading a bounded page of them and
+            # filtering on the live expires_at costs one query plus a GetItem
+            # per candidate, with no second index.
+            for item in table.query(
+                KeyConditionExpression="PK = :pk",
+                ExpressionAttributeValues={":pk": _PK_CHAT_TURN_LIST},
+                ScanIndexForward=True,
+                Limit=limit,
+            ).get("Items", []):
+                turn = _get_chat_turn_sync(table, str(item["turn_id"]))
+                if turn is None:
+                    # The turn is gone but its sweep entry survived — delete the
+                    # stray so the pass cannot stall on it forever.
+                    table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+                    continue
+                if turn.expires_at > expired_before:
+                    continue
+                expired.append(
+                    ExpiredChatTurn(
+                        turn_id=turn.turn_id,
+                        user_id=turn.user_id,
+                        thread_id=turn.thread_id,
+                        expires_at=turn.expires_at,
+                    )
+                )
+            return expired
 
         return await asyncio.to_thread(_op)
 

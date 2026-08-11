@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
@@ -470,6 +471,196 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
     assert item is not None
     assert item.last_run_status == "partial"
     assert item.last_errors == []
+
+
+# ---------------------------------------------------------------------------
+# Chat turn event log
+# ---------------------------------------------------------------------------
+
+
+async def _open_turn(store, user_id: str = "user-1", thread_id: str = "1001"):
+    return await store.create_chat_turn(user_id, thread_id, "msg_1", "text_1")
+
+
+async def test_chat_turn_round_trips_a_batch(store):
+    turn = await _open_turn(store)
+    assert await store.append_chat_turn_events(turn.turn_id, 1, '[{"type":"start"}]') is True
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert [(b.seq, b.parts_json) for b in page.batches] == [(1, '[{"type":"start"}]')]
+    assert page.turn.status == "running"
+
+
+async def test_chat_turn_events_are_returned_verbatim(store):
+    """The stored text is what the live stream sent. Re-encoding it -- which a
+    JSON column would do -- makes a replay differ from the original delivery."""
+    turn = await _open_turn(store)
+    parts = '[{"type":"data-seizu-detail","id":"d1","data":{"body":null,"ratio":0.5}}]'
+    await store.append_chat_turn_events(turn.turn_id, 1, parts)
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert page.batches[0].parts_json == parts
+
+
+async def test_chat_turn_append_is_idempotent_per_seq(store):
+    """A producer that is retried must not rewrite a batch a reader may already
+    have replayed, so a duplicate seq is a no-op rather than an overwrite."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["first"]')
+
+    assert await store.append_chat_turn_events(turn.turn_id, 1, '["second"]') is False
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+    assert page is not None
+    assert page.batches[0].parts_json == '["first"]'
+
+
+async def test_chat_turn_read_truncates_at_the_first_gap(store):
+    """A reader advances its cursor to the last batch it received. Handing it
+    seq 3 while 2 is missing would move the cursor past 2 forever."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    await store.append_chat_turn_events(turn.turn_id, 3, '["three"]')
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert [b.seq for b in page.batches] == [1]
+
+
+async def test_chat_turn_read_resumes_from_a_cursor(store):
+    turn = await _open_turn(store)
+    for seq in (1, 2, 3):
+        await store.append_chat_turn_events(turn.turn_id, seq, f'["{seq}"]')
+
+    page = await store.read_chat_turn_events(turn.turn_id, 1, limit=10)
+
+    assert page is not None
+    assert [b.seq for b in page.batches] == [2, 3]
+
+
+async def test_chat_turn_rejects_an_oversized_batch(store):
+    turn = await _open_turn(store)
+    with pytest.raises(ValueError):
+        await store.append_chat_turn_events(turn.turn_id, 1, "x" * (CHAT_TURN_MAX_BATCH_BYTES + 1))
+
+
+async def test_chat_turn_refuses_a_second_running_turn(store):
+    """Two producers on one thread would interleave two answers into the same
+    conversation; the second caller is told to reconnect instead."""
+    await _open_turn(store)
+    with pytest.raises(ChatTurnConflictError):
+        await _open_turn(store)
+
+
+async def test_chat_turn_allows_a_new_turn_once_the_last_finished(store):
+    first = await _open_turn(store)
+    await store.finish_chat_turn(first.turn_id, "completed", 4)
+
+    second = await _open_turn(store)
+
+    assert second.turn_id != first.turn_id
+
+
+async def test_expired_running_turn_stops_blocking_the_thread(store):
+    """A producer can die without ever finishing its turn. If the exclusion did
+    not expire, that conversation would be unusable until someone intervened."""
+    first = await _open_turn(store)
+    await _expire_turn(store, first.turn_id, "2020-01-01T00:00:00+00:00")
+
+    assert await store.get_active_chat_turn("user-1", "1001") is None
+    assert (await _open_turn(store)).turn_id != first.turn_id
+
+
+async def _expire_turn(store, turn_id: str, expires_at: str) -> None:
+    """Age a turn directly; the store only ever pushes expiry forward."""
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = await session.get(sql_module.ChatTurnRecord, turn_id)
+        record.expires_at = expires_at
+        session.add(record)
+        await session.commit()
+
+
+async def test_finish_chat_turn_records_the_final_sequence(store):
+    """last_seq is what lets a reader tell "finished" from "finished, and you
+    have seen all of it"."""
+    turn = await _open_turn(store)
+    finished = await store.finish_chat_turn(turn.turn_id, "completed", 7)
+
+    assert finished is not None
+    assert (finished.status, finished.last_seq) == ("completed", 7)
+
+
+async def test_get_active_chat_turn_ignores_finished_turns(store):
+    turn = await _open_turn(store)
+    assert await store.get_active_chat_turn("user-1", "1001") is not None
+    await store.finish_chat_turn(turn.turn_id, "completed", 1)
+    assert await store.get_active_chat_turn("user-1", "1001") is None
+
+
+async def test_get_chat_turn_is_scoped_to_its_owner(store):
+    turn = await _open_turn(store)
+    assert await store.get_chat_turn(turn.turn_id, user_id="user-1") is not None
+    assert await store.get_chat_turn(turn.turn_id, user_id="someone-else") is None
+
+
+async def test_delete_chat_turn_removes_its_batches(store):
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+
+    assert await store.delete_chat_turn(turn.turn_id) is True
+
+    assert await store.read_chat_turn_events(turn.turn_id, 0, limit=10) is None
+    async with AsyncSession(sql_module._get_engine()) as session:
+        remaining = (
+            (
+                await session.execute(
+                    select(sql_module.ChatTurnEventRecord).where(sql_module.ChatTurnEventRecord.turn_id == turn.turn_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert remaining == []
+
+
+async def test_deleting_a_session_deletes_its_turn_logs(store, mocker):
+    """A turn log is only reachable through its session, so one that outlived
+    its session is a row nothing will ever look for again."""
+    mocker.patch("reporting.services.report_store.sql.generate_report_id", return_value="1001")
+    await store.create_chat_session("user-1", title="Session")
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+
+    assert await store.delete_chat_session("user-1", "1001") is True
+
+    assert await store.get_chat_turn(turn.turn_id) is None
+    async with AsyncSession(sql_module._get_engine()) as session:
+        remaining = (
+            (
+                await session.execute(
+                    select(sql_module.ChatTurnEventRecord).where(sql_module.ChatTurnEventRecord.turn_id == turn.turn_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert remaining == []
+
+
+async def test_list_expired_chat_turns_selects_only_expired(store):
+    live = await _open_turn(store)
+    stale = await store.create_chat_turn("user-2", "2002", "msg_2", "text_2")
+    await _expire_turn(store, stale.turn_id, "2020-01-01T00:00:00+00:00")
+
+    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert [e.turn_id for e in expired] == [stale.turn_id]
+    assert live.turn_id not in {e.turn_id for e in expired}
 
 
 # ---------------------------------------------------------------------------

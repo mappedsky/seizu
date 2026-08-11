@@ -1878,4 +1878,93 @@ describe('ChatInterface', () => {
     const toggle = screen.getByRole('switch');
     expect(toggle).not.toBeChecked();
   });
+  it('asks the SDK to reattach to a turn that outlived the last page view', async () => {
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await waitFor(() => {
+      expect(mockUseChat).toHaveBeenCalledWith(
+        expect.objectContaining({ resume: true }),
+      );
+    });
+  });
+
+  it('authenticates the reconnect request and points it at the thread', async () => {
+    // The SDK's default reconnect carries only the transport's static headers,
+    // which would be an unauthenticated GET.
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
+    if (!transportOptions) throw new Error('missing transport options');
+
+    const prepared = transportOptions.prepareReconnectToStreamRequest?.({
+      id: 'thread-1',
+      requestMetadata: undefined,
+      body: undefined,
+      credentials: 'same-origin',
+      headers: transportOptions.headers as HeadersInit,
+      api: '/api/v1/chat/stream',
+    }) as { api: string; headers: Record<string, string> } | undefined;
+
+    expect(prepared?.api).toBe('/api/v1/chat/stream/thread-1');
+    expect(prepared?.headers).toEqual({
+      Authorization: 'Bearer token-123',
+      'X-Seizu-Csrf': '1',
+    });
+  });
+
+  it('drops the partial reply before resuming after a dropped connection', async () => {
+    // The replay starts at the turn's first frame and text-start pushes a fresh
+    // part, so keeping the partial message would render the answer twice.
+    const setMessages = jest.fn();
+    const resumeStream = jest.fn().mockResolvedValue(undefined);
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream,
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages,
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+      | { onFinish?: ChatOnFinishCallback<UIMessage> }
+      | undefined;
+    await act(async () => {
+      chatOptions?.onFinish?.({
+        message: { id: 'partial', role: 'assistant', parts: [] },
+        messages: [],
+        isAbort: false,
+        isDisconnect: true,
+        isError: true,
+        finishReason: undefined,
+      });
+    });
+
+    expect(resumeStream).toHaveBeenCalled();
+    const trim = setMessages.mock.calls.at(-1)?.[0] as (
+      messages: UIMessage[],
+    ) => UIMessage[];
+    expect(
+      trim([
+        { id: 'user-1', role: 'user', parts: [] },
+        { id: 'partial', role: 'assistant', parts: [] },
+      ]),
+    ).toEqual([{ id: 'user-1', role: 'user', parts: [] }]);
+    // A turn that dropped before any assistant text arrived has nothing to trim.
+    expect(trim([{ id: 'user-1', role: 'user', parts: [] }])).toEqual([
+      { id: 'user-1', role: 'user', parts: [] },
+    ]);
+  });
 });

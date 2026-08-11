@@ -78,6 +78,66 @@ class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+# A batch has to fit one DynamoDB item (400KB hard limit), with room left for the
+# keys and the rest of the item. The producer splits rather than the store, so
+# this is a validation bound, not a chunking hint.
+CHAT_TURN_MAX_BATCH_BYTES = 320_000
+# Ceiling on batches per turn, so a runaway producer cannot write without bound.
+CHAT_TURN_MAX_SEQ = 5_000
+
+
+class ChatTurnConflictError(Exception):
+    """Raised when a thread already has a running turn."""
+
+
+class ChatTurnItem(BaseModel):
+    """The header of one in-flight chat turn's replayable event log.
+
+    Ephemeral: retained only long enough for a dropped SSE connection to come
+    back, then swept by ``expires_at``. ``message_id``/``text_id`` live here
+    rather than being minted per delivery because a replay has to reproduce the
+    ids the first delivery used -- a fresh id reads to the client as a second
+    assistant message rather than the same one.
+    """
+
+    turn_id: str
+    thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
+    user_id: str
+    message_id: str = Field(min_length=1, max_length=128)
+    text_id: str = Field(min_length=1, max_length=128)
+    status: Literal["running", "completed", "failed"] = "running"
+    # None until the turn finishes. A reader may stop only once the status is
+    # terminal *and* it has consumed through last_seq: a terminal status on its
+    # own races the visibility of the final batches.
+    last_seq: int | None = None
+    created_at: str
+    updated_at: str
+    expires_at: str
+
+
+class ChatTurnEventBatch(BaseModel):
+    """One flush: the exact JSON array text the live stream sent."""
+
+    seq: int = Field(ge=1, le=CHAT_TURN_MAX_SEQ)
+    parts_json: str
+
+
+class ChatTurnEventPage(BaseModel):
+    """A tail read: the turn's current state plus the batches after a cursor."""
+
+    turn: ChatTurnItem
+    batches: list[ChatTurnEventBatch] = Field(default_factory=list)
+
+
+class ExpiredChatTurn(BaseModel):
+    """A turn the sweeper may collect, with the owner needed to scope the delete."""
+
+    turn_id: str
+    user_id: str
+    thread_id: str
+    expires_at: str
+
+
 class ChatScheduleSpec(ScheduleSpec):
     """When a scheduled chat runs: a ``ScheduleSpec`` limited to hourly
     granularity (no ``interval`` type and no minute-of-hour offset)."""

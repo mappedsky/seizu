@@ -402,6 +402,36 @@ def thread_namespace(user_id: str, thread_id: str) -> str:
     return f"user:{user_id}:thread:{thread_id}"
 
 
+def build_turn_config(
+    current_user: CurrentUser,
+    thread_id: str,
+    *,
+    budget_controller: Any,
+    headless: bool = False,
+    bypass_confirmations: bool = False,
+) -> dict[str, Any]:
+    """Build the ``configurable`` a turn runs under.
+
+    One builder for every surface that drives the graph -- the interactive turn
+    and the headless one -- so the two cannot drift on what a turn is given.
+    Notably ``thread_id`` is namespaced here rather than by the caller, which is
+    what stops a surface from accidentally running against a raw client id
+    (AGT-004).
+    """
+    return {
+        "configurable": {
+            "current_user": current_user,
+            "thread_id": namespaced_thread_id(current_user, thread_id),
+            "client_thread_id": thread_id,
+            "headless": headless,
+            # Re-checked on every bypassed call inside mcp_runtime; this only
+            # says the caller asked for it.
+            "bypass_confirmations": bypass_confirmations,
+            "budget_controller": budget_controller,
+        }
+    }
+
+
 async def load_thread_messages(current_user: CurrentUser, thread_id: str, *, limit: int) -> list[Any]:
     """Return the persisted LangChain messages for a user's chat thread.
 

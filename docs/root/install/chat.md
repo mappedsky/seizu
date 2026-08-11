@@ -56,6 +56,44 @@ Assistant turns include an expandable details section showing thinking and tool 
 
 Sessions created by scheduled chats are excluded from the sidebar and are read-only; see [scheduled chats](chat-schedules.html).
 
+## Turns outlive the connection watching them
+
+A turn does not run inside its HTTP request. Starting one opens a short-lived
+**turn event log** and the request becomes a reader over that log, so closing
+the tab, losing the network, or navigating away neither stops the turn nor loses
+what it has already produced. Coming back replays the turn from its first token
+and then follows it live — the browser reattaches automatically on load, and
+after a dropped connection.
+
+Two things this does *not* recover:
+
+- **A failed turn is not retried.** An agent turn is expensive and not
+  idempotent, so a failure is reported rather than repeated.
+- **A restart of the `seizu` process ends the turns it was running.** The
+  producer lives in that process today. What the log guarantees is that the
+  client is told the turn ended, instead of receiving a silently truncated
+  answer.
+
+Turn logs are deleted `CHAT_TURN_RETENTION_SECONDS` after the turn finishes, and
+immediately when the session is deleted. Expired logs are collected at the end
+of each turn, in small batches — there is no scheduler to run and no dependency
+on the Temporal worker. They are not conversation history: that lives in the
+checkpoint and is served by `/api/v1/chat/history`.
+
+### Deployment requirement: set a gunicorn timeout
+
+Gunicorn's `timeout` defaults to **30 seconds**, and Seizu's `gunicorn.conf` now
+sets it to `300`. **If you run Seizu under your own gunicorn configuration or
+override the timeout, keep it well above 30 seconds when chat is enabled.**
+
+Under `UvicornWorker` this is a worker heartbeat watchdog rather than a request
+deadline, so a healthy long-lived stream is never cut short by it. What it kills
+is a worker whose event loop is blocked past the deadline — and because the
+arbiter's `SIGABRT` lands mid-response, the client receives a **truncated body
+rather than an error**. Raising the timeout does not make a blocked loop
+faster; it stops a transient block from silently truncating every stream on that
+worker.
+
 ## Orchestration and run budgets
 
 For multi-step requests, chat can route a turn through a plan → dispatch → verify orchestration instead of the single-agent path. A cheap router classifies each turn; simple turns take the direct path with no extra LLM call, while complex ones get a planner, scoped sub-agent workers (run in parallel when steps are independent), and a verify gate with bounded retry. This is on by default and controlled by the `CHAT_ORCHESTRATOR_*` settings below.
@@ -277,6 +315,10 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_TOOL_RESULT_MAX_ROWS` | `100` | Maximum rows returned to chat from one tool call (normal MCP calls are unaffected). |
 | `CHAT_TOOL_RESULT_MAX_BYTES` | `200000` | Maximum serialized bytes returned to chat from one tool call. |
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
+| `CHAT_TURN_RETENTION_SECONDS` | `600` | How long a finished turn stays replayable — the window a client has to reconnect. Not conversation history. |
+| `CHAT_TURN_FLUSH_MS` | `200` | How often a running turn flushes buffered stream parts to its log. |
+| `CHAT_TURN_POLL_MS` | `200` | How often a connected client's request polls that log. Together with the flush interval this is the latency between a token being produced and reaching the browser. |
+| `CHAT_TURN_TAIL_MAX_SECONDS` | `1800` | Hard bound on how long one request will follow a turn, so a producer that dies without writing a terminal status cannot hold a connection open indefinitely. |
 | `CHAT_SESSION_REAP_ENABLED` | `false` | Retire sessions nobody has come back to. **Deletes chat history.** |
 | `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
 | `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |

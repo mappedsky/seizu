@@ -746,6 +746,9 @@ export default function ChatInterface() {
   const chatIdRef = useRef('__pending__');
   const resumeConfirmationIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
+  // resumeStream comes back from useChat, which is declared after the onFinish
+  // callback that needs it.
+  const resumeStreamRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const [
     pendingContinuationTargetMessageId,
     setPendingContinuationTargetMessageId,
@@ -957,6 +960,21 @@ export default function ChatInterface() {
             },
           };
         },
+        // Reconnecting to a running turn. The bearer token has to be injected
+        // here too -- the SDK's default reconnect request carries only the
+        // transport's static headers, which would be an unauthenticated GET.
+        prepareReconnectToStreamRequest: ({ headers }) => {
+          const currentToken = accessTokenRef.current;
+          return {
+            api: `/api/v1/chat/stream/${encodeURIComponent(chatIdRef.current)}`,
+            headers: {
+              ...headers,
+              ...(currentToken
+                ? { Authorization: `Bearer ${currentToken}` }
+                : {}),
+            },
+          };
+        },
       }),
     [],
   );
@@ -970,11 +988,24 @@ export default function ChatInterface() {
   } = useConfirmationsApi(activeThreadId);
 
   const handleChatFinish = useCallback<ChatOnFinishCallback<SeizuChatMessage>>(
-    ({ message }) => {
+    ({ message, isDisconnect }) => {
       if (message.role === 'assistant') {
         setPendingContinuationTargetMessageId((current) =>
           current === message.id ? null : current,
         );
+      }
+      if (isDisconnect) {
+        // The turn is still running on the server; only our connection to it
+        // died. Reconnecting replays the turn from its first frame, so the
+        // partial assistant message has to go first: the SDK resumes *into*
+        // the last assistant message and text-start pushes a fresh part, so
+        // keeping it would show the answer twice.
+        setMessagesRef.current((current) => {
+          const last = current.at(-1);
+          return last?.role === 'assistant' ? current.slice(0, -1) : current;
+        });
+        void resumeStreamRef.current();
+        return;
       }
       if (!activeThreadId) return;
       window.setTimeout(() => {
@@ -984,13 +1015,27 @@ export default function ChatInterface() {
     [activeThreadId, fetchConfirmations],
   );
 
-  const { messages, sendMessage, setMessages, status, stop, error } =
-    useChat<SeizuChatMessage>({
-      id: chatId,
-      experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
-      onFinish: handleChatFinish,
-      transport,
-    });
+  const {
+    messages,
+    sendMessage,
+    setMessages,
+    status,
+    stop,
+    error,
+    resumeStream,
+  } = useChat<SeizuChatMessage>({
+    id: chatId,
+    experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
+    onFinish: handleChatFinish,
+    transport,
+    // Reattach on mount to a turn that outlived the last page view. Safe
+    // against duplication because the messages present at mount come from
+    // /chat/history, which only returns turns that have finished and
+    // persisted -- there is never a partial one to resume into.
+    resume: true,
+  });
+
+  resumeStreamRef.current = resumeStream;
 
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;

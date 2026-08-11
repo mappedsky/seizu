@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import botocore.exceptions
 import pytest
 
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion
@@ -3597,3 +3598,174 @@ def test_a_cursor_without_a_session_key_does_not_claim_to_resume_within_a_user()
 
     assert cursor.resumes_within_a_user is False
     assert "session_key" not in cursor.to_item()
+
+
+# ---------------------------------------------------------------------------
+# Chat turn event log
+# ---------------------------------------------------------------------------
+
+
+def _turn_item(turn_id: str = "turn-1", **overrides):
+    return {
+        "PK": f"CHAT_TURN#{turn_id}",
+        "SK": "#METADATA",
+        "turn_id": turn_id,
+        "thread_id": "1001",
+        "user_id": "u1",
+        "message_id": "msg_1",
+        "text_id": "text_1",
+        "status": "running",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-01T00:00:00+00:00",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        **overrides,
+    }
+
+
+async def test_creating_a_turn_writes_the_record_pointer_and_sweep_entry(patch_table, store):
+    """One transaction, because a record without its pointer is a turn no
+    reconnect can find and a pointer without its record is a thread that can
+    never start one."""
+    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    keys = [(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in items]
+    assert keys[0] == ("CHAT_TURN_THREAD#u1#THREAD#1001", "#ACTIVE")
+    assert keys[1][1] == "#METADATA" and keys[1][0].startswith("CHAT_TURN#")
+    assert keys[2][0] == "CHAT_TURN_LIST"
+
+
+async def test_the_active_pointer_expires_so_a_dead_producer_cannot_wedge_a_thread(patch_table, store):
+    """Without the expiry clause a producer that died mid-turn would leave the
+    conversation permanently unable to start another."""
+    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    pointer = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"][0]["Put"]
+    assert pointer["ConditionExpression"] == ("attribute_not_exists(PK) OR #s <> :running OR expires_at <= :now")
+
+
+async def test_a_second_running_turn_is_refused_as_a_conflict(patch_table, store):
+    """Only the pointer's own condition failing means "already running"; every
+    other transaction cancellation is a real error and must propagate."""
+    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}, {"Code": "None"}],
+        },
+        "TransactWriteItems",
+    )
+
+    with pytest.raises(ChatTurnConflictError):
+        await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+
+async def test_a_throttled_create_is_not_reported_as_a_conflict(patch_table, store):
+    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": "ThrottlingError"}],
+        },
+        "TransactWriteItems",
+    )
+
+    with pytest.raises(botocore.exceptions.ClientError):
+        await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+
+def test_event_sort_keys_are_zero_padded():
+    """Lexicographic order is the only order a Query gives, so without padding
+    EVENT#10 comes back before EVENT#2 and the replay is scrambled."""
+    keys = [dynamodb_module._chat_turn_event_sk(n) for n in (2, 10)]
+
+    assert keys == sorted(keys)
+
+
+def test_the_metadata_item_sorts_before_every_event():
+    """The turn record shares its partition with the batches, so a "give me
+    everything after seq N" range must never be able to return it."""
+    assert dynamodb_module._SK_METADATA < dynamodb_module._chat_turn_event_sk(1)
+
+
+async def test_reading_events_is_a_strongly_consistent_range_query(patch_table, store):
+    """Eventually-consistent propagation is per item, so a poll could see seq 5
+    and 7 but not 6 -- and a reader that took the gap would skip 6 forever."""
+    patch_table.query.return_value = {"Items": [{"seq": 1, "parts_json": '["one"]'}]}
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+
+    await store.read_chat_turn_events("turn-1", 0, limit=10)
+
+    kwargs = patch_table.query.call_args.kwargs
+    assert kwargs["ConsistentRead"] is True
+    assert kwargs["KeyConditionExpression"] == "PK = :pk AND SK > :after"
+    assert kwargs["ExpressionAttributeValues"][":after"] == "EVENT#0000000000"
+    assert patch_table.get_item.call_args.kwargs["ConsistentRead"] is True
+
+
+async def test_reading_events_truncates_at_the_first_gap(patch_table, store):
+    patch_table.query.return_value = {
+        "Items": [
+            {"seq": 1, "parts_json": '["one"]'},
+            {"seq": 3, "parts_json": '["three"]'},
+        ]
+    }
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+
+    page = await store.read_chat_turn_events("turn-1", 0, limit=10)
+
+    assert page is not None
+    assert [batch.seq for batch in page.batches] == [1]
+
+
+async def test_appending_a_duplicate_batch_is_a_no_op_success(patch_table, store):
+    """A retried producer must not rewrite bytes a reader has already replayed,
+    and that is not an error worth failing the turn over."""
+    patch_table.put_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "PutItem"
+    )
+
+    assert await store.append_chat_turn_events("turn-1", 1, '["one"]') is False
+
+
+async def test_appending_rejects_a_batch_no_item_could_hold(patch_table, store):
+    with pytest.raises(ValueError):
+        await store.append_chat_turn_events("turn-1", 1, "x" * (CHAT_TURN_MAX_BATCH_BYTES + 1))
+    patch_table.put_item.assert_not_called()
+
+
+async def test_finishing_a_turn_releases_the_thread_only_if_it_still_owns_it(patch_table, store):
+    """A successor turn owns the pointer by then; clearing it blindly would let
+    two producers run on one thread."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    patch_table.update_item.return_value = {"Attributes": _turn_item(status="completed", last_seq=4)}
+
+    await store.finish_chat_turn("turn-1", "completed", 4)
+
+    pointer_update = patch_table.update_item.call_args_list[1].kwargs
+    assert pointer_update["Key"]["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
+    assert pointer_update["ConditionExpression"] == "turn_id = :turn_id"
+
+
+async def test_an_expired_running_turn_is_not_offered_for_reconnect(patch_table, store):
+    """Its producer is gone, so there is nothing left to reattach to."""
+    patch_table.get_item.side_effect = [
+        {"Item": {"turn_id": "turn-1", "status": "running", "expires_at": "2020-01-01T00:00:00+00:00"}},
+        {"Item": _turn_item(expires_at="2020-01-01T00:00:00+00:00")},
+    ]
+
+    assert await store.get_active_chat_turn("u1", "1001") is None
+
+
+async def test_deleting_a_turn_batches_rather_than_transacts(patch_table, store):
+    """A turn has far more batches than a transaction's 100-item cap."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    patch_table.query.return_value = {
+        "Items": [
+            {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"},
+            {"PK": "CHAT_TURN#turn-1", "SK": "EVENT#0000000001"},
+        ]
+    }
+
+    assert await store.delete_chat_turn("turn-1") is True
+
+    patch_table.batch_writer.assert_called_once()
+    patch_table.meta.client.transact_write_items.assert_not_called()

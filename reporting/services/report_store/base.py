@@ -2,7 +2,15 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import (
+    ChatSessionItem,
+    ChatTurnEventPage,
+    ChatTurnItem,
+    ExpiredChatTurn,
+    IdleChatSession,
+    ScheduledChatItem,
+    ScheduledChatVersion,
+)
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -876,7 +884,91 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
-        """Delete a session. Returns False if not found."""
+        """Delete a session. Returns False if not found.
+
+        Deletes the thread's chat turn event logs with it: a turn log is
+        meaningless once its conversation is gone, and nothing else would ever
+        find it.
+        """
+
+    # ------------------------------------------------------------------
+    # Chat turn event log
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def create_chat_turn(
+        self,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        text_id: str,
+    ) -> ChatTurnItem:
+        """Open a store-minted turn for a thread.
+
+        A thread has at most one running, unexpired turn: a second caller loses
+        with :class:`ChatTurnConflictError`, so a reconnecting client never has
+        two logs to choose between. The exclusion has to expire, or a producer
+        that died without finishing its turn wedges the conversation forever.
+        """
+
+    @abstractmethod
+    async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        """Return the thread's running, unexpired turn, or None.
+
+        The reconnect endpoint's entry point. An expired running turn reads as
+        None: its producer is gone and nothing will ever finish it.
+        """
+
+    @abstractmethod
+    async def get_chat_turn(self, turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+        """Return a turn by id, optionally scoped to its owner."""
+
+    @abstractmethod
+    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
+        """Append one already-rendered batch of UI-stream parts.
+
+        ``parts_json`` is stored verbatim -- it is the exact JSON array text the
+        live stream sent -- so a replay is byte-identical rather than
+        re-serialized from a decoded copy.
+
+        Idempotent, returning False when ``seq`` is already present: a producer
+        that is retried or fails over must not rewrite a batch a tailing reader
+        has already replayed. Raises ValueError when the batch exceeds
+        ``CHAT_TURN_MAX_BATCH_BYTES``; splitting is the producer's job.
+        """
+
+    @abstractmethod
+    async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+        """Return the turn plus up to ``limit`` batches with seq > after_seq, in order.
+
+        The page is **truncated at the first gap** in ``seq``. A store can make
+        a later batch visible before an earlier one; a reader that accepted the
+        gap would advance its cursor past the missing batch and lose it
+        permanently, which is a hole in the replay rather than a delay. Callers
+        advance from the last batch actually returned, never from
+        ``after_seq + len(batches)``.
+        """
+
+    @abstractmethod
+    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+        """Record a turn's terminal status and its final sequence number.
+
+        ``last_seq`` is what lets a reader tell "finished" from "finished, and
+        you have seen all of it": a terminal status alone races the visibility
+        of the final batches. Also sets ``expires_at`` to the retention horizon.
+        """
+
+    @abstractmethod
+    async def delete_chat_turn(self, turn_id: str) -> bool:
+        """Delete a turn and every one of its batches. Returns False if not found."""
+
+    @abstractmethod
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+        """Turns whose ``expires_at`` has passed, oldest first.
+
+        The one turn read that spans users. These records are ephemeral and
+        nothing else deletes the log of a producer that died mid-turn.
+        """
 
     # ------------------------------------------------------------------
     # Scheduled chats

@@ -1,10 +1,8 @@
-import json
 import logging
-import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -18,35 +16,19 @@ from reporting.schema.chat import (
     ChatSessionItem,
     ChatSessionsResponse,
     ChatStreamRequest,
+    ChatTurnConflictError,
     CreateChatSessionRequest,
     UpdateChatSessionRequest,
 )
-from reporting.services import report_store
-from reporting.services.chat_budget import BudgetController, initial_budget_ledger
-from reporting.services.chat_graph import (
-    ChatState,
-    delete_thread_messages,
-    get_chat_graph,
-    load_thread_messages,
-    namespaced_thread_id,
-)
-from reporting.services.chat_messages import (
-    CONTINUATION_MARKDOC,
-    MessageTag,
-    created_at,
-    message_text,
-    tag_message,
-)
+from reporting.services import chat_turns, report_store
+from reporting.services.chat_graph import delete_thread_messages, load_thread_messages
+from reporting.services.chat_messages import created_at, message_text
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 # Detail kinds preserved in history so a reloaded turn keeps its full trace —
 # single-agent (thinking/skill/tool) plus the orchestration trace.
 _HISTORY_DETAIL_KINDS = frozenset({"thinking", "skill", "tool", "routing", "plan", "step", "verify", "subagent"})
-_CONTINUE_RESPONSE_PROMPT = (
-    "Continue the previous assistant response from where it stopped because of the output limit. "
-    "Do not repeat earlier content."
-)
 
 
 async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> str:
@@ -72,6 +54,18 @@ async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> str:
         return "unavailable"
 
 
+_STREAM_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "x-vercel-ai-ui-message-stream": "v1",
+}
+
+
+def _stream_response(source: AsyncIterator[str]) -> StreamingResponse:
+    return StreamingResponse(source, media_type="text/event-stream", headers=_STREAM_HEADERS)
+
+
 @router.post(
     "/api/v1/chat/stream",
     response_class=StreamingResponse,
@@ -86,7 +80,13 @@ async def stream_chat(
     body: ChatStreamRequest,
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> StreamingResponse:
-    """Stream a chat response as an AI SDK UI Message Stream."""
+    """Start a chat turn and stream it as an AI SDK UI Message Stream.
+
+    The turn is produced independently of this request (see
+    :mod:`reporting.services.chat_turns`); what this returns is a reader over
+    the turn's event log, which is exactly what ``GET`` returns to a client that
+    reconnects.
+    """
     if body.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in current.permissions:
         raise HTTPException(
             status_code=403,
@@ -97,143 +97,81 @@ async def stream_chat(
         # Headless-run transcripts are read-only: history stays viewable, but
         # the conversation cannot be continued from the web UI.
         raise HTTPException(status_code=403, detail="Headless chat sessions are read-only")
-    return StreamingResponse(
-        _stream_chat_response(body, current),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "x-vercel-ai-ui-message-stream": "v1",
-        },
-    )
+    return _stream_response(_start_and_stream(body, current))
 
 
-async def _stream_chat_response(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[str]:
-    message_id = (
-        body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
-    )
-    text_id = f"text_{uuid.uuid4().hex}"
-    text_started = False
-    finish_reason = "stop"
-
-    try:
-        session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
-        if session is None:
-            yield _sse_data({"type": "error", "errorText": "Session not found"})
-            yield _sse_data({"type": "finish", "finishReason": "error"})
-            yield "data: [DONE]\n\n"
-            return
-        admission = await _claim_chat_session_for_turn(current.user.user_id, body.thread_id)
-        if admission != "ok":
-            # Retryable when the store was unreachable; permanent when the
-            # session is being retired. The wording is the only thing telling
-            # the user which, so it has to differ.
-            yield _sse_data(
-                {
-                    "type": "error",
-                    "errorText": (
-                        "This conversation has been retired"
-                        if admission == "retired"
-                        else "Could not start this turn; please try again"
-                    ),
-                }
-            )
-            yield _sse_data({"type": "finish", "finishReason": "error"})
-            yield "data: [DONE]\n\n"
-            return
-        yield _sse_data({"type": "start", "messageId": message_id})
-        yield _sse_data({"type": "text-start", "id": text_id})
-        text_started = True
-        if body.continue_response:
-            yield _sse_data({"type": "text-delta", "id": text_id, "delta": CONTINUATION_MARKDOC})
-        async for event in _token_source(body, current):
-            if event["type"] == "token":
-                delta = event["content"]
-                if delta:
-                    yield _sse_data({"type": "text-delta", "id": text_id, "delta": delta})
-            elif event["type"] == "finish_reason":
-                finish_reason = event["finish_reason"]
-            elif event["type"] == "detail":
-                detail_id = event["id"]
-                detail_data = event["data"]
-                if isinstance(detail_id, str) and isinstance(detail_data, dict):
-                    yield _sse_data({"type": "data-seizu-detail", "id": detail_id, "data": detail_data})
-    except Exception:
-        logger.exception("Chat stream failed")
-        if text_started:
-            yield _sse_data({"type": "text-end", "id": text_id})
-        yield _sse_data({"type": "error", "errorText": "Chat stream failed"})
-        yield _sse_data({"type": "finish", "finishReason": "error"})
-        yield "data: [DONE]\n\n"
+async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[str]:
+    session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
+    if session is None:
+        async for frame in _stream_error("Session not found"):
+            yield frame
         return
+    # Awaited before the turn is created, not alongside it: this write is the
+    # turn's half of the retirement handshake (SBX-011), and a turn that started
+    # before it landed could be running against state being torn down.
+    admission = await _claim_chat_session_for_turn(current.user.user_id, body.thread_id)
+    if admission != "ok":
+        # Retryable when the store was unreachable; permanent when the session
+        # is being retired. The wording is the only thing telling the user
+        # which, so it has to differ.
+        async for frame in _stream_error(
+            "This conversation has been retired"
+            if admission == "retired"
+            else "Could not start this turn; please try again"
+        ):
+            yield frame
+        return
+    try:
+        turn = await chat_turns.start_turn(body, current)
+    except ChatTurnConflictError:
+        # The client has a turn running it is not watching. Telling it to
+        # reconnect is more useful than starting a second one, which would
+        # interleave two answers into the same conversation.
+        async for frame in _stream_error("This conversation already has a turn in progress"):
+            yield frame
+        return
+    except Exception:
+        logger.exception("Failed to start chat turn", extra={"thread_id": body.thread_id})
+        async for frame in _stream_error("Chat stream failed"):
+            yield frame
+        return
+    async for frame in chat_turns.tail_turn(turn.turn_id):
+        yield frame
 
-    yield _sse_data({"type": "text-end", "id": text_id})
-    finish_payload: dict[str, Any] = {
-        "type": "finish",
-        "finishReason": finish_reason,
-        "messageMetadata": {
-            "finish_reason": finish_reason,
-            "response_cut_off": finish_reason == "length",
-        },
-    }
-    yield _sse_data(finish_payload)
+
+async def _stream_error(message: str) -> AsyncIterator[str]:
+    yield chat_turns.sse_frame({"type": "error", "errorText": message})
+    yield chat_turns.sse_frame({"type": "finish", "finishReason": "error"})
     yield "data: [DONE]\n\n"
 
 
-async def _token_source(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[dict[str, Any]]:
-    graph = get_chat_graph()
-    budget_controller = BudgetController(initial_budget_ledger())
-    if body.resume_confirmation_id:
-        resume_message = HumanMessage(
-            content=f"Resume approved confirmation {body.resume_confirmation_id}",
-            id=f"msg_{uuid.uuid4().hex}",
-            additional_kwargs={"resume_confirmation_id": body.resume_confirmation_id},
-        )
-        tag_message(resume_message, MessageTag.EPHEMERAL)
-        graph_input: ChatState = {"messages": [resume_message], "budget": budget_controller.snapshot()}
-    elif body.continue_response:
-        continue_message = HumanMessage(
-            content=_CONTINUE_RESPONSE_PROMPT,
-            id=f"msg_{uuid.uuid4().hex}",
-            additional_kwargs={"continue_response": True},
-        )
-        tag_message(continue_message, MessageTag.EPHEMERAL)
-        graph_input = {"messages": [continue_message], "budget": budget_controller.snapshot()}
-    else:
-        graph_input = {
-            "messages": [HumanMessage(content=body.message, id=f"msg_{uuid.uuid4().hex}")],
-            "budget": budget_controller.snapshot(),
-        }
-    config = {
-        "configurable": {
-            "current_user": current,
-            "thread_id": namespaced_thread_id(current, body.thread_id),
-            "client_thread_id": body.thread_id,
-            # Permission re-checked in stream_chat (403) and on every bypassed
-            # call inside mcp_runtime.
-            "bypass_confirmations": body.bypass_confirmations,
-            "budget_controller": budget_controller,
-        }
-    }
-    async for chunk in graph.astream(graph_input, config, stream_mode="custom"):
-        if isinstance(chunk, dict) and chunk.get("kind") == "token":
-            delta = chunk.get("content")
-            if isinstance(delta, str):
-                yield {"type": "token", "content": delta}
-        elif isinstance(chunk, dict) and chunk.get("kind") == "finish_reason":
-            finish_reason = chunk.get("finish_reason")
-            if finish_reason == "length":
-                yield {"type": "finish_reason", "finish_reason": "length"}
-        elif isinstance(chunk, dict) and chunk.get("kind") == "detail":
-            detail_id = chunk.get("id")
-            detail_data = chunk.get("data")
-            if isinstance(detail_id, str) and isinstance(detail_data, dict):
-                yield {"type": "detail", "id": detail_id, "data": detail_data}
+@router.get(
+    "/api/v1/chat/stream/{thread_id}",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Server-sent event stream replaying the thread's running turn",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        },
+        204: {"description": "No turn is running for this thread"},
+    },
+)
+async def reconnect_chat_stream(
+    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
+) -> Response:
+    """Reattach to a thread's running turn, replaying it from the start.
 
-
-def _sse_data(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    The replay begins at sequence zero rather than at a client-supplied cursor:
+    the AI SDK's reconnect protocol carries no offset, and the turn's stable
+    ``messageId`` is what lets the client rebuild the message rather than append
+    a second one. ``204`` means there is nothing to reattach to, which the SDK
+    reads as "the response already finished".
+    """
+    turn = await report_store.get_active_chat_turn(current.user.user_id, thread_id)
+    if turn is None:
+        return Response(status_code=204)
+    return _stream_response(chat_turns.tail_turn(turn.turn_id))
 
 
 @router.get("/api/v1/chat/history", response_model=ChatHistoryResponse)
