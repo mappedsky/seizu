@@ -1564,7 +1564,9 @@ async def test_deletion_refuses_when_a_turn_starts_under_the_claim(mocker, _chat
         "reporting.routes.chat.report_store.claim_chat_session_for_retirement",
         AsyncMock(return_value=False),
     )
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+    # Watch the cascade the route calls, or the assertion below holds no matter
+    # what the route does.
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1677,12 +1679,17 @@ async def test_deletion_refuses_rather_than_racing_when_cancel_fails(mocker, _ch
     """Without knowing the turn is stopped, deleting is the race this exists to
     avoid; a retryable error beats a half-deleted conversation."""
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    # A *running* turn, or the route short-circuits past the cancel entirely and
+    # this passes without ever reaching what it is about.
+    await _open_turn("test-user-id", "1001")
     deleted = AsyncMock()
     mocker.patch(
         "reporting.routes.chat.report_store.request_chat_turn_cancel",
         AsyncMock(side_effect=RuntimeError("store down")),
     )
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+    # The cascade the route actually calls. Patching the store method underneath
+    # it instead leaves the real one running against a real backend.
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
