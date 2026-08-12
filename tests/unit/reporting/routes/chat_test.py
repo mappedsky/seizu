@@ -13,12 +13,11 @@ from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.routes import chat
 from reporting.schema.chat import (
     ChatSessionItem,
-    ChatStreamRequest,
-    ChatTurnCanceledError,
-    ChatTurnConflictError,
+    ChatTurnAdmission,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
+    ChatTurnRequest,
     ExpiredChatTurn,
 )
 from reporting.schema.report_config import User
@@ -92,21 +91,26 @@ def _chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
 
 
+#: Sessions the current test has, shared so admission can refuse a thread that
+#: has none -- the store makes that decision in the same write, so the fake has
+#: to as well.
+_SESSIONS: dict[tuple[str, str], ChatSessionItem] = {}
+
+
 @pytest.fixture(autouse=True)
 def _chat_turn_log(mocker):
-    """An in-memory stand-in for the turn event log.
+    """An in-memory stand-in for turn admission and the event log.
 
-    Every stream test needs one now that the turn is produced beside the request
-    rather than inside it: the response body is a *reader* over this log, so
-    without it the route would tail a real store. The flush and poll intervals
-    are dropped to a tick so a test is not paced by the production cadence.
+    Every stream test needs one: the response body is a *reader* over this log,
+    and admission is what decides whether there is anything to read. Flush and
+    poll intervals drop to a tick so a test is not paced by the production
+    cadence.
     """
     mocker.patch("reporting.settings.CHAT_TURN_FLUSH_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MAX_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_HEARTBEAT_SECONDS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_STOP_WAIT_SECONDS", 0.3)
-    # Paced per process in production; a test wants every turn to sweep.
     mocker.patch("reporting.services.chat_turns._last_sweep_monotonic", 0.0)
     mocker.patch("reporting.settings.CHAT_TURN_SWEEP_INTERVAL_SECONDS", 0.0)
 
@@ -114,19 +118,23 @@ def _chat_turn_log(mocker):
     events: dict[str, dict[int, str]] = {}
     counter = 0
 
-    async def create_chat_turn(
-        user_id: str,
-        thread_id: str,
-        message_id: str,
-        text_id: str,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
+    async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key=None):
         nonlocal counter
-        if client_token is not None and (user_id, thread_id, client_token) in stopped_tokens:
-            raise ChatTurnCanceledError("This turn was stopped before it started")
+        if idempotency_key is not None:
+            for turn in turns.values():
+                if (turn.user_id, turn.thread_id, turn.idempotency_key) == (
+                    user_id,
+                    thread_id,
+                    idempotency_key,
+                ):
+                    return ChatTurnAdmission(outcome="existing", turn=turn)
+        if (user_id, thread_id) not in _SESSIONS:
+            # Admission is the turn's half of the retirement handshake: no
+            # session, no turn.
+            return ChatTurnAdmission(outcome="retired")
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
-                raise ChatTurnConflictError("This conversation already has a turn in progress")
+                return ChatTurnAdmission(outcome="busy")
         counter += 1
         turn = ChatTurnItem(
             turn_id=f"turn-{counter}",
@@ -134,14 +142,14 @@ def _chat_turn_log(mocker):
             user_id=user_id,
             message_id=message_id,
             text_id=text_id,
-            client_token=client_token,
+            idempotency_key=idempotency_key,
             created_at="2024-01-01T00:00:00+00:00",
             updated_at="2024-01-01T00:00:00+00:00",
             expires_at="2099-01-01T00:00:00+00:00",
         )
         turns[turn.turn_id] = turn
         events[turn.turn_id] = {}
-        return turn
+        return ChatTurnAdmission(outcome="created", turn=turn)
 
     async def append_chat_turn_events(turn_id: str, seq: int, parts_json: str) -> bool:
         batches = events.setdefault(turn_id, {})
@@ -150,7 +158,7 @@ def _chat_turn_log(mocker):
         batches[seq] = parts_json
         return True
 
-    async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+    async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int):
         turn = turns.get(turn_id)
         if turn is None:
             return None
@@ -161,80 +169,103 @@ def _chat_turn_log(mocker):
             expected += 1
         return ChatTurnEventPage(turn=turn, batches=batches)
 
-    async def finish_chat_turn(turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+    async def finish_chat_turn(turn_id: str, status: str, last_seq: int):
         turn = turns.get(turn_id)
         if turn is None:
             return None
         turns[turn_id] = turn.model_copy(update={"status": status, "last_seq": last_seq})
         return turns[turn_id]
 
-    async def renew_chat_turn_lease(turn_id: str) -> ChatTurnItem | None:
-        turn = turns.get(turn_id)
-        if turn is None or turn.status != "running":
-            return None
-        turns[turn_id] = turn.model_copy(update={"expires_at": "2099-01-01T00:00:00+00:00"})
-        return turns[turn_id]
-
-    async def request_chat_turn_cancel(
-        user_id: str,
-        thread_id: str,
-        turn_id: str | None = None,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
-        if client_token is not None:
-            # The store writes the tombstone itself, before it looks.
-            stopped_tokens.add((user_id, thread_id, client_token))
-        for running_id, turn in turns.items():
-            if turn.user_id != user_id or turn.thread_id != thread_id or turn.status != "running":
-                continue
-            named = turn_id is not None or client_token is not None
-            if named and turn_id != running_id and (client_token is None or turn.client_token != client_token):
-                return None
-            turns[running_id] = turn.model_copy(update={"cancel_requested": True})
-            return turns[running_id]
-        return None
-
-    async def get_chat_turn(turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
-        turn = turns.get(turn_id)
-        if turn is None or (user_id is not None and turn.user_id != user_id):
-            return None
-        return turn
-
-    stopped_tokens: set[tuple[str, str, str]] = set()
-
-    async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
+    async def get_active_chat_turn(user_id: str, thread_id: str):
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
                 return turn
         return None
 
-    async def list_expired_chat_turns(expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+    async def get_chat_turn(turn_id: str, user_id: str | None = None):
+        turn = turns.get(turn_id)
+        if turn is None or (user_id is not None and turn.user_id != user_id):
+            return None
+        return turn
+
+    async def request_chat_turn_cancel(turn_id: str, user_id: str):
+        turn = turns.get(turn_id)
+        if turn is None or turn.user_id != user_id or turn.status != "running":
+            return None
+        turns[turn_id] = turn.model_copy(update={"cancel_requested": True})
+        return turns[turn_id]
+
+    async def list_expired_chat_turns(expired_before: str, limit: int):
         return [
-            ExpiredChatTurn(
-                turn_id=turn.turn_id,
-                user_id=turn.user_id,
-                thread_id=turn.thread_id,
-                expires_at=turn.expires_at,
-            )
-            for turn in turns.values()
-            if turn.expires_at <= expired_before
+            ExpiredChatTurn(turn_id=t.turn_id, user_id=t.user_id, thread_id=t.thread_id, expires_at=t.expires_at)
+            for t in turns.values()
+            if t.expires_at <= expired_before
         ][:limit]
 
     async def delete_chat_turn(turn_id: str) -> bool:
         events.pop(turn_id, None)
         return turns.pop(turn_id, None) is not None
 
-    mocker.patch("reporting.services.chat_turns.report_store.list_expired_chat_turns", list_expired_chat_turns)
-    mocker.patch("reporting.services.chat_turns.report_store.delete_chat_turn", delete_chat_turn)
-    mocker.patch("reporting.services.chat_turns.report_store.get_chat_turn", get_chat_turn)
-    mocker.patch("reporting.services.chat_turns.report_store.renew_chat_turn_lease", renew_chat_turn_lease)
-    mocker.patch("reporting.routes.chat.report_store.request_chat_turn_cancel", request_chat_turn_cancel)
-    mocker.patch("reporting.services.chat_turns.report_store.create_chat_turn", create_chat_turn)
-    mocker.patch("reporting.services.chat_turns.report_store.append_chat_turn_events", append_chat_turn_events)
-    mocker.patch("reporting.services.chat_turns.report_store.read_chat_turn_events", read_chat_turn_events)
-    mocker.patch("reporting.services.chat_turns.report_store.finish_chat_turn", finish_chat_turn)
-    mocker.patch("reporting.routes.chat.report_store.get_active_chat_turn", get_active_chat_turn)
+    for name, impl in {
+        "admit_chat_turn": admit_chat_turn,
+        "append_chat_turn_events": append_chat_turn_events,
+        "read_chat_turn_events": read_chat_turn_events,
+        "finish_chat_turn": finish_chat_turn,
+        "get_chat_turn": get_chat_turn,
+        "list_expired_chat_turns": list_expired_chat_turns,
+        "delete_chat_turn": delete_chat_turn,
+    }.items():
+        mocker.patch(f"reporting.services.chat_turns.report_store.{name}", impl)
+    for name, impl in {
+        "get_active_chat_turn": get_active_chat_turn,
+        "get_chat_turn": get_chat_turn,
+        "request_chat_turn_cancel": request_chat_turn_cancel,
+    }.items():
+        mocker.patch(f"reporting.routes.chat.report_store.{name}", impl)
     return turns
+
+
+@pytest.fixture(autouse=True)
+def _fake_temporal(mocker, _chat_turn_log):
+    """Stand in for Temporal by running the turn's activity inline.
+
+    The workflow is what owns a turn in production; here the point is that the
+    route admits, hands the turn to a producer, and reads back what it wrote --
+    so the producer runs as a task rather than on a worker, and cancelling the
+    "workflow" cancels that task.
+    """
+    running: dict[str, asyncio.Task[Any]] = {}
+
+    class _Handle:
+        def __init__(self, workflow_id: str) -> None:
+            self._workflow_id = workflow_id
+
+        async def cancel(self) -> None:
+            task = running.get(self._workflow_id)
+            if task is not None and not task.done():
+                task.cancel()
+
+    class _Client:
+        async def start_workflow(self, _name, invocation, *, id, task_queue):  # noqa: A002
+            turn = _chat_turn_log[invocation.turn_id]
+            body = ChatTurnRequest(
+                message=invocation.message,
+                resume_confirmation_id=invocation.resume_confirmation_id,
+                continue_response=invocation.continue_response,
+                bypass_confirmations=invocation.bypass_confirmations,
+            )
+            running[id] = asyncio.create_task(
+                chat_turns.produce_turn(turn, invocation.thread_id, body, _current_user())
+            )
+
+        def get_workflow_handle(self, workflow_id: str) -> "_Handle":
+            return _Handle(workflow_id)
+
+    async def _get_client():
+        return _Client()
+
+    mocker.patch("reporting.services.chat_turns.schedule_reconciler.get_client", _get_client)
+    return running
 
 
 def _current_user(permissions: frozenset[str] = ALL_PERMISSIONS) -> CurrentUser:
@@ -247,8 +278,54 @@ def _make_app(current: CurrentUser | None = None):
     return app
 
 
+async def _admit(client: AsyncClient, body: dict[str, Any]):
+    """Ask for a turn. Half of what one `client.post` used to do."""
+    payload = dict(body)
+    thread_id = payload.pop("thread_id")
+    return await client.post(f"/api/v1/chat/threads/{thread_id}/turns", json=payload)
+
+
+async def _attach(client: AsyncClient, turn_id: str):
+    return await client.get(f"/api/v1/chat/turns/{turn_id}/stream")
+
+
+async def _send(client: AsyncClient, json: dict[str, Any], **kwargs: Any):
+    """Send a message the way the browser does: admit a turn, then attach.
+
+    Returns the *admission* response when admission refuses, and the stream
+    otherwise, so a test can assert on whichever of the two halves it is about.
+    """
+    admission = await _admit(client, json)
+    if admission.status_code >= 400:
+        return admission
+    turn_id = admission.json()["turn_id"]
+    return await _attach(client, turn_id)
+
+
+def _require_turn(admission: ChatTurnAdmission) -> ChatTurnItem:
+    """Unwrap an admission a test expects to have succeeded."""
+    assert admission.turn is not None, f"admission was {admission.outcome}"
+    return admission.turn
+
+
+async def _open_turn(user_id: str, thread_id: str, message_id: str = "msg_9", text_id: str = "text_9"):
+    """Put a running turn in the log without going through a route."""
+    admission = await chat_turns.report_store.admit_chat_turn(user_id, thread_id, message_id, text_id, None)
+    assert admission.turn is not None
+    return admission.turn
+
+
+async def _reconnect(client: AsyncClient, thread_id: str):
+    """Reattach the way a reloaded client does: find the active turn, then read it."""
+    active = await client.get(f"/api/v1/chat/threads/{thread_id}/turns/active")
+    if active.status_code != 200:
+        return active
+    return await _attach(client, active.json()["turn_id"])
+
+
 def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
-    sessions: dict[tuple[str, str], ChatSessionItem] = {}
+    sessions: dict[tuple[str, str], ChatSessionItem] = _SESSIONS
+    sessions.clear()
     counter = 0
     id_counter = 1000
 
@@ -328,18 +405,19 @@ async def test_chat_stream_refuses_a_session_claimed_for_retirement(mocker):
     fake_graph = FakeChatGraph()
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    mocker.patch("reporting.services.chat_turns.report_store.create_chat_turn", AsyncMock(return_value=None))
+    mocker.patch(
+        "reporting.services.chat_turns.report_store.admit_chat_turn",
+        AsyncMock(return_value=ChatTurnAdmission(outcome="retired")),
+    )
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
-            json={"message": "Hi", "thread_id": "1001"},
-        )
+        response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
-    assert response.status_code == 200
-    assert "retired" in response.text
-    assert '"finishReason":"error"' in response.text
+    # A refusal is the answer to the request that asked for the turn, not a
+    # frame inside a stream that was opened anyway.
+    assert response.status_code == 404
+    assert "retired" in response.json()["error"]
     assert fake_graph.calls == []
 
 
@@ -356,7 +434,7 @@ async def test_admission_and_turn_creation_are_one_write(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await _send(client, json={"message": "Hi", "thread_id": "1001"})
 
     assert '"type":"start"' in response.text
     touched.assert_not_awaited()
@@ -370,18 +448,18 @@ async def test_a_store_failure_refuses_the_turn_rather_than_guessing(mocker):
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     mocker.patch(
-        "reporting.services.chat_turns.report_store.create_chat_turn",
+        "reporting.services.chat_turns.report_store.admit_chat_turn",
         AsyncMock(side_effect=RuntimeError("store down")),
     )
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
-    assert '"finishReason":"error"' in response.text
+    assert response.status_code == 503
     # Distinguishable from retirement: this one is worth retrying.
-    assert "try again" in response.text
-    assert "retired" not in response.text
+    assert "try again" in response.json()["error"]
+    assert "retired" not in response.json()["error"]
     assert fake_graph.calls == []
 
 
@@ -392,8 +470,8 @@ async def test_chat_stream_success(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -424,8 +502,8 @@ async def test_chat_stream_surfaces_output_limit_finish_reason(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -444,8 +522,8 @@ async def test_chat_stream_continuation_reuses_message_id_and_emits_marker(mocke
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={
                 "thread_id": "1001",
                 "continue_response": True,
@@ -618,8 +696,8 @@ async def test_chat_stream_emits_detail_data_parts(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -645,8 +723,8 @@ async def test_chat_stream_with_real_graph_emits_tokens(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1002"},
         )
 
@@ -668,8 +746,8 @@ async def test_chat_stream_requires_chat_permission(mocker):
     app = _make_app(_current_user(frozenset()))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -682,8 +760,8 @@ async def test_chat_stream_bypass_requires_permission(mocker):
     app = _make_app(_current_user(frozenset({"chat:use"})))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
         )
 
@@ -698,8 +776,8 @@ async def test_chat_stream_bypass_flag_reaches_graph_config(mocker):
     app = _make_app(_current_user(frozenset({"chat:use", "chat:bypass_permissions"})))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001", "bypass_confirmations": True},
         )
 
@@ -715,8 +793,8 @@ async def test_chat_stream_bypass_defaults_off(mocker):
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -731,8 +809,8 @@ async def test_chat_stream_validates_body(mocker):
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "", "thread_id": "1001"},
         )
 
@@ -745,16 +823,10 @@ async def test_chat_stream_rejects_missing_session_before_graph_write(mocker):
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
-            json={"message": "Hi", "thread_id": "9999"},
-        )
+        response = await _admit(client, {"message": "Hi", "thread_id": "9999"})
 
-    assert response.status_code == 200
-    assert '"type":"start"' not in response.text
-    assert '"errorText":"Session not found"' in response.text
-    assert '"finishReason":"error"' in response.text
-    assert '"type":"text-start"' not in response.text
+    assert response.status_code == 404
+    assert response.json()["error"] == "Session not found"
     graph.assert_not_called()
 
 
@@ -774,8 +846,8 @@ async def test_chat_history_round_trips_persisted_messages(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        stream = await client.post(
-            "/api/v1/chat/stream",
+        stream = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1003"},
         )
         assert stream.status_code == 200
@@ -806,9 +878,9 @@ async def test_chat_history_timestamps_both_turns(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        first = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1013"})
+        first = await _send(client, json={"message": "Hi", "thread_id": "1013"})
         assert first.status_code == 200
-        second = await client.post("/api/v1/chat/stream", json={"message": "Again", "thread_id": "1013"})
+        second = await _send(client, json={"message": "Again", "thread_id": "1013"})
         assert second.status_code == 200
         history = await client.get("/api/v1/chat/history", params={"thread_id": "1013"})
 
@@ -848,13 +920,13 @@ async def test_chat_history_hides_and_collapses_continue_response_turn(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        first = await client.post(
-            "/api/v1/chat/stream",
+        first = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1010"},
         )
         assert first.status_code == 200
-        continuation = await client.post(
-            "/api/v1/chat/stream",
+        continuation = await _send(
+            client,
             json={"thread_id": "1010", "continue_response": True},
         )
         assert continuation.status_code == 200
@@ -928,7 +1000,7 @@ async def test_chat_history_isolated_per_user(mocker):
     app = create_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         app.dependency_overrides[get_current_user] = lambda: _current_user()
-        await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1007"})
+        await _send(client, json={"message": "Hi", "thread_id": "1007"})
 
         other = CurrentUser(
             user=User(
@@ -961,8 +1033,8 @@ async def test_chat_delete_removes_session_and_persisted_history(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        stream = await client.post(
-            "/api/v1/chat/stream",
+        stream = await _send(
+            client,
             json={"message": "Delete this", "thread_id": "1008"},
         )
         assert stream.status_code == 200
@@ -973,14 +1045,11 @@ async def test_chat_delete_removes_session_and_persisted_history(mocker):
         deleted = await client.delete("/api/v1/chat/sessions/1008")
         assert deleted.status_code == 204
         after_delete = await client.get("/api/v1/chat/history", params={"thread_id": "1008"})
-        stream_after_delete = await client.post(
-            "/api/v1/chat/stream",
-            json={"message": "Still there?", "thread_id": "1008"},
-        )
+        send_after_delete = await _admit(client, {"message": "Still there?", "thread_id": "1008"})
 
     assert after_delete.status_code == 404
-    assert stream_after_delete.status_code == 200
-    assert '"errorText":"Session not found"' in stream_after_delete.text
+    assert send_after_delete.status_code == 404
+    assert send_after_delete.json()["error"] == "Session not found"
 
 
 async def test_chat_delete_is_idempotent_for_missing_session(mocker):
@@ -1064,8 +1133,8 @@ async def test_chat_stream_no_longer_treats_slash_text_as_command(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        stream = await client.post(
-            "/api/v1/chat/stream",
+        stream = await _send(
+            client,
             json={"message": "/tools", "thread_id": "1009"},
         )
         assert stream.status_code == 200
@@ -1084,14 +1153,18 @@ async def test_chat_stream_no_longer_treats_slash_text_as_command(mocker):
 
 def test_chat_routes_registered_when_enabled():
     paths = {getattr(route, "path", None) for route in create_app().routes}
-    assert "/api/v1/chat/stream" in paths
+    assert "/api/v1/chat/threads/{thread_id}/turns" in paths
+    assert "/api/v1/chat/threads/{thread_id}/turns/active" in paths
+    assert "/api/v1/chat/turns/{turn_id}/stream" in paths
+    assert "/api/v1/chat/turns/{turn_id}/cancel" in paths
     assert "/api/v1/chat/history" in paths
 
 
 def test_chat_routes_absent_when_disabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", False)
     paths = {getattr(route, "path", None) for route in create_app().routes}
-    assert "/api/v1/chat/stream" not in paths
+    assert "/api/v1/chat/threads/{thread_id}/turns" not in paths
+    assert "/api/v1/chat/turns/{turn_id}/stream" not in paths
     assert "/api/v1/chat/history" not in paths
 
 
@@ -1140,8 +1213,8 @@ async def test_chat_stream_rejects_headless_sessions(mocker, origin, scheduled_c
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/v1/chat/stream",
+        response = await _send(
+            client,
             json={"message": "Hi", "thread_id": "1001"},
         )
 
@@ -1162,7 +1235,7 @@ async def test_a_replay_is_byte_identical_to_the_original_delivery(mocker, _chat
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        live = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        live = await _send(client, json={"message": "Hi", "thread_id": "1001"})
         # The turn is finished, so the store still holds its log even though
         # nothing is producing into it any more.
         turn_id = next(iter(_chat_turn_log))
@@ -1179,7 +1252,7 @@ async def test_a_replay_reuses_the_message_id_so_the_client_rebuilds_one_message
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await _send(client, json={"message": "Hi", "thread_id": "1001"})
 
     turn = next(iter(_chat_turn_log.values()))
     assert f'"messageId":"{turn.message_id}"' in response.text
@@ -1192,7 +1265,7 @@ async def test_reconnect_returns_204_when_no_turn_is_running(mocker):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/chat/stream/1001")
+        response = await _reconnect(client, "1001")
 
     assert response.status_code == 204
 
@@ -1202,7 +1275,7 @@ async def test_reconnect_streams_a_running_turn_from_its_first_frame(mocker, _ch
     start at the beginning of the turn -- including the ``start`` frame, which
     is what tells the client which message it is rebuilding."""
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    turn = await _open_turn("test-user-id", "1001", "msg_9", "text_9")
     await chat_turns.report_store.append_chat_turn_events(
         turn.turn_id, 1, '[{"type":"start","messageId":"msg_9"},{"type":"text-start","id":"text_9"}]'
     )
@@ -1231,7 +1304,7 @@ async def test_reconnect_streams_a_running_turn_from_its_first_frame(mocker, _ch
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/chat/stream/1001")
+        response = await _reconnect(client, "1001")
     await finisher
 
     assert response.status_code == 200
@@ -1244,11 +1317,11 @@ async def test_reconnect_cannot_reach_another_users_turn(mocker, _chat_turn_log)
     """The turn is looked up by (user, thread), so a guessed thread id resolves
     to nothing rather than to someone else's conversation."""
     _patch_chat_sessions(mocker, [("someone-else", "1001")])
-    await chat_turns.report_store.create_chat_turn("someone-else", "1001", "msg_9", "text_9")
+    await _open_turn("someone-else", "1001", "msg_9", "text_9")
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/chat/stream/1001")
+        response = await _reconnect(client, "1001")
 
     assert response.status_code == 204
 
@@ -1258,7 +1331,7 @@ async def test_reconnect_requires_chat_permission(mocker):
 
     app = _make_app(_current_user(frozenset()))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/v1/chat/stream/1001")
+        response = await _reconnect(client, "1001")
 
     assert response.status_code == 403
 
@@ -1268,14 +1341,14 @@ async def test_a_second_turn_on_a_busy_thread_is_refused_rather_than_started(moc
     client is told to reconnect to the turn it already has."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    await _open_turn("test-user-id", "1001", "msg_9", "text_9")
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
-    assert "already has a turn in progress" in response.text
-    assert '"finishReason":"error"' in response.text
+    assert response.status_code == 409
+    assert "already has a turn in progress" in response.json()["error"]
 
 
 async def test_a_failing_turn_still_closes_the_stream(mocker, _chat_turn_log):
@@ -1293,7 +1366,7 @@ async def test_a_failing_turn_still_closes_the_stream(mocker, _chat_turn_log):
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await _send(client, json={"message": "Hi", "thread_id": "1001"})
 
     assert '"type":"error"' in response.text
     assert '"finishReason":"error"' in response.text
@@ -1315,8 +1388,10 @@ async def test_the_turn_runs_without_anyone_reading_it(mocker, _chat_turn_log):
             yield {"kind": "token", "content": "Finished anyway"}
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
-    body = ChatStreamRequest(message="Hi", thread_id="1001")
-    turn = await chat_turns.start_turn(body, _current_user())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    admission = await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user())
+    turn = admission.turn
+    assert turn is not None
 
     # Nothing is tailing this turn, and it still runs to completion.
     release.set()
@@ -1335,15 +1410,15 @@ async def test_expired_turn_logs_are_swept_after_a_turn(mocker, _chat_turn_log):
     nobody deletes would accumulate. Sweeping from the producer keeps this off
     the request and out of a scheduler that deployments may not run."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
-    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    stale = await chat_turns.report_store.create_chat_turn("test-user-id", "2002", "msg_old", "text_old")
+    _patch_chat_sessions(mocker, [("test-user-id", "1001"), ("test-user-id", "2002")])
+    stale = await _open_turn("test-user-id", "2002", "msg_old", "text_old")
     _chat_turn_log[stale.turn_id] = _chat_turn_log[stale.turn_id].model_copy(
         update={"status": "completed", "expires_at": "2020-01-01T00:00:00+00:00"}
     )
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        await _send(client, json={"message": "Hi", "thread_id": "1001"})
 
     assert stale.turn_id not in _chat_turn_log
     # The turn that just ran is still inside its reconnect window.
@@ -1373,11 +1448,11 @@ async def test_stop_ends_the_turn_and_not_just_the_reader(mocker, _chat_turn_log
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(f"/api/v1/chat/stream/{turn.thread_id}/cancel?turn_id={turn.turn_id}")
+        response = await client.post(f"/api/v1/chat/turns/{turn.turn_id}/cancel")
     assert response.status_code == 204
 
     release.set()
@@ -1398,18 +1473,18 @@ async def test_cancel_is_idempotent_when_nothing_is_running(mocker, _chat_turn_l
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream/1001/cancel?turn_id=turn-gone")
+        response = await client.post("/api/v1/chat/turns/turn-gone/cancel")
 
     assert response.status_code == 204
 
 
 async def test_cancel_cannot_reach_another_users_turn(mocker, _chat_turn_log):
     _patch_chat_sessions(mocker, [("someone-else", "1001")])
-    turn = await chat_turns.report_store.create_chat_turn("someone-else", "1001", "msg_9", "text_9")
+    turn = await _open_turn("someone-else", "1001", "msg_9", "text_9")
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(f"/api/v1/chat/stream/1001/cancel?turn_id={turn.turn_id}")
+        response = await client.post(f"/api/v1/chat/turns/{turn.turn_id}/cancel")
         assert response.status_code == 204
 
     assert _chat_turn_log[turn.turn_id].cancel_requested is False
@@ -1420,7 +1495,7 @@ async def test_cancel_requires_chat_permission(mocker, _chat_turn_log):
 
     app = _make_app(_current_user(frozenset()))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream/1001/cancel?turn_id=turn-1")
+        response = await client.post("/api/v1/chat/turns/turn-1/cancel")
 
     assert response.status_code == 403
 
@@ -1431,6 +1506,7 @@ async def test_deleting_a_session_closes_it_to_new_turns_first(mocker, _chat_tur
     runs. The retirement claim (SBX-011) shuts the door atomically."""
     order: list[str] = []
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    await _open_turn("test-user-id", "1001")
 
     claim = chat.report_store.claim_chat_session_for_retirement
     cancel = chat.report_store.request_chat_turn_cancel
@@ -1439,14 +1515,13 @@ async def test_deleting_a_session_closes_it_to_new_turns_first(mocker, _chat_tur
         order.append("claim")
         return await claim(user_id, thread_id, expected_updated_at)
 
-    async def _recording_cancel(
-        user_id: str,
-        thread_id: str,
-        turn_id: str | None = None,
-        client_token: str | None = None,
-    ):
+    async def _recording_cancel(turn_id: str, user_id: str):
         order.append("cancel")
-        return await cancel(user_id, thread_id, turn_id, client_token)
+        result = await cancel(turn_id, user_id)
+        # Stand in for the workflow noticing and stopping, so the wait that
+        # follows the cancel is not what this test is measuring.
+        await chat_turns.report_store.finish_chat_turn(turn_id, "canceled", 0)
+        return result
 
     async def _recording_delete(user_id: str, thread_id: str) -> None:
         order.append("delete")
@@ -1468,7 +1543,7 @@ async def test_deletion_refuses_when_the_turn_will_not_stop(mocker, _chat_turn_l
     new can start and the retry is a plain repeat."""
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     # A turn with no producer: nothing will ever move it out of "running".
-    await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    await _open_turn("test-user-id", "1001", "msg_9", "text_9")
     deleted = AsyncMock()
     mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
 
@@ -1499,46 +1574,11 @@ async def test_deletion_refuses_when_a_turn_starts_under_the_claim(mocker, _chat
     deleted.assert_not_awaited()
 
 
-async def test_a_long_turn_keeps_its_lease(mocker, _chat_turn_log):
-    """expires_at is a lease held by a live producer, not a fixed lifetime. A
-    turn that simply takes longer than the retention window would otherwise be
-    treated as abandoned while still running."""
-    release = asyncio.Event()
-
-    class SlowGraph(FakeChatGraph):
-        async def astream(self, input, config, *, stream_mode):
-            self.calls.append((input, config, stream_mode))
-            await release.wait()
-            yield {"kind": "token", "content": "done"}
-
-    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
-    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
-    # Its lease is about to lapse while the producer is perfectly healthy.
-    _chat_turn_log[turn.turn_id] = _chat_turn_log[turn.turn_id].model_copy(
-        update={"expires_at": "2024-01-01T00:00:00+00:00"}
-    )
-
-    for _ in range(500):
-        if _chat_turn_log[turn.turn_id].expires_at > "2090":
-            break
-        await asyncio.sleep(0.01)
-    renewed = _chat_turn_log[turn.turn_id].expires_at
-    release.set()
-    for _ in range(500):
-        if _chat_turn_log[turn.turn_id].status != "running":
-            break
-        await asyncio.sleep(0.01)
-
-    assert renewed > "2090", "the producer let its lease lapse while still running"
-    assert _chat_turn_log[turn.turn_id].status == "completed"
-
-
-async def test_a_locally_cancelled_producer_still_records_its_terminal_state(mocker, _chat_turn_log):
-    """The fast path cancels the task outright. Swallowing that cancellation is
-    not enough: without clearing it, every cleanup await is re-cancelled the
-    moment it suspends and the turn is left reading as running until its lease
-    lapses."""
+async def test_a_cancelled_producer_still_records_its_terminal_state(mocker, _chat_turn_log):
+    """Cancelling the workflow cancels the activity, and that arrives inside the
+    turn as an ordinary `CancelledError`. Swallowing it is not enough: without
+    clearing it, every cleanup await is re-cancelled the moment it suspends and
+    the turn is left reading as running with nothing left to finish it."""
     started = asyncio.Event()
 
     class BlockedGraph(FakeChatGraph):
@@ -1551,10 +1591,10 @@ async def test_a_locally_cancelled_producer_still_records_its_terminal_state(moc
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
-    assert chat_turns.cancel_local_producer(turn.turn_id) is True
+    await chat_turns.cancel_turn(turn.turn_id)
 
     for _ in range(500):
         if _chat_turn_log[turn.turn_id].status != "running":
@@ -1566,12 +1606,6 @@ async def test_a_locally_cancelled_producer_still_records_its_terminal_state(moc
     replay = "".join([frame async for frame in chat_turns.tail_turn(turn.turn_id)])
     assert '"delta":"Working"' in replay
     assert "data: [DONE]" in replay
-
-
-async def test_cancelling_a_producer_that_is_not_here_reports_so(_chat_turn_log):
-    """With several workers the request usually lands somewhere else; the store
-    flag is what reaches the producer there."""
-    assert chat_turns.cancel_local_producer("no-such-turn") is False
 
 
 async def test_cancel_interrupts_a_turn_blocked_mid_call(mocker, _chat_turn_log):
@@ -1595,11 +1629,11 @@ async def test_cancel_interrupts_a_turn_blocked_mid_call(mocker, _chat_turn_log)
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
     # Flag only: no local task cancel, which is what another worker sees.
-    await chat_turns.report_store.request_chat_turn_cancel("test-user-id", "1001")
+    await chat_turns.report_store.request_chat_turn_cancel(turn.turn_id, "test-user-id")
 
     for _ in range(500):
         if _chat_turn_log[turn.turn_id].status != "running":
@@ -1616,7 +1650,7 @@ async def test_deleting_a_session_waits_for_the_turn_to_stop(mocker, _chat_turn_
     observed: list[str] = []
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    turn = await _open_turn("test-user-id", "1001", "msg_9", "text_9")
 
     async def _recording_delete(user_id: str, thread_id: str) -> None:
         observed.append(_chat_turn_log[turn.turn_id].status)
@@ -1663,39 +1697,39 @@ async def test_a_stale_stop_cannot_cancel_a_successor_turn(mocker, _chat_turn_lo
     aimed at may have finished and the user started another, so naming the
     thread alone would stop the wrong one."""
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    first = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_1", "text_1")
+    first = await _open_turn("test-user-id", "1001", "msg_1", "text_1")
     await chat_turns.report_store.finish_chat_turn(first.turn_id, "completed", 1)
-    second = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_2", "text_2")
+    second = await _open_turn("test-user-id", "1001", "msg_2", "text_2")
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # The retry of the stop aimed at the *first* turn finally arrives.
-        response = await client.post(f"/api/v1/chat/stream/1001/cancel?turn_id={first.turn_id}")
+        response = await client.post(f"/api/v1/chat/turns/{first.turn_id}/cancel")
 
     assert response.status_code == 204
     assert _chat_turn_log[second.turn_id].cancel_requested is False
 
 
-async def test_the_turn_id_is_on_the_opening_frame(mocker, _chat_turn_log):
-    """The client can only address a stop at a turn it has been told about."""
+async def test_the_turn_id_comes_back_before_anything_streams(mocker, _chat_turn_log):
+    """The client can only address a stop at a turn it has been told about, and
+    it is told by the request that asked for the turn -- so it holds the id from
+    the moment it sends, not from the first frame it manages to read."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        admission = await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
-    turn = next(iter(_chat_turn_log.values()))
-    first_frame = json.loads(response.text.splitlines()[0].removeprefix("data: "))
-    assert first_frame["type"] == "start"
-    assert first_frame["messageMetadata"]["turn_id"] == turn.turn_id
+    assert admission.status_code == 201
+    assert admission.json() == {"turn_id": next(iter(_chat_turn_log)), "status": "created"}
 
 
-async def test_a_repeated_local_cancel_cannot_interrupt_terminal_cleanup(mocker, _chat_turn_log):
-    """The producer clears its own cancellation before its cleanup runs, so a
-    second cancel -- from a retried request, or the heartbeat noticing the flag
-    the first one set -- would land inside that cleanup and leave the turn
-    recorded as running forever."""
+async def test_a_repeated_cancel_cannot_interrupt_terminal_cleanup(mocker, _chat_turn_log):
+    """The turn clears its own cancellation before its cleanup runs, so a second
+    cancel -- from a retried request, or the store flag the first one set --
+    would land inside that cleanup and leave the turn recorded as running
+    forever."""
     started = asyncio.Event()
 
     class BlockedGraph(FakeChatGraph):
@@ -1707,14 +1741,14 @@ async def test_a_repeated_local_cancel_cannot_interrupt_terminal_cleanup(mocker,
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(ChatStreamRequest(message="Hi", thread_id="1001"), _current_user())
+    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
-    assert chat_turns.cancel_local_producer(turn.turn_id) is True
-    # Every repeat, from whatever source, must be refused while the first is
-    # still unwinding.
-    assert chat_turns.cancel_local_producer(turn.turn_id) is False
-    assert chat_turns.cancel_local_producer(turn.turn_id) is False
+    # Every repeat, from whatever source, must land harmlessly while the first
+    # is still unwinding.
+    await chat_turns.cancel_turn(turn.turn_id)
+    await chat_turns.cancel_turn(turn.turn_id)
+    await chat_turns.cancel_turn(turn.turn_id)
 
     for _ in range(500):
         if _chat_turn_log[turn.turn_id].status != "running":
@@ -1725,10 +1759,10 @@ async def test_a_repeated_local_cancel_cannot_interrupt_terminal_cleanup(mocker,
     assert _chat_turn_log[turn.turn_id].last_seq is not None
 
 
-async def test_stop_works_before_the_turn_announces_itself(mocker, _chat_turn_log):
-    """Stop is enabled from `submitted`, before any frame has arrived. Without
-    an identity the client already holds, that whole window silently did
-    nothing while the detached producer -- tool actions included -- carried on."""
+async def test_stop_works_between_admission_and_the_first_frame(mocker, _chat_turn_log):
+    """Stop is enabled from `submitted`, before any frame has arrived. Admission
+    is what closes that window: the id exists before the stream does, so the
+    whole period the user can press Stop is a period they can be obeyed in."""
     started = asyncio.Event()
 
     class BlockedGraph(FakeChatGraph):
@@ -1740,76 +1774,18 @@ async def test_stop_works_before_the_turn_announces_itself(mocker, _chat_turn_lo
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.start_turn(
-        ChatStreamRequest(message="Hi", thread_id="1001", client_token="ct_beforeframe"),
-        _current_user(),
-    )
-    await asyncio.wait_for(started.wait(), timeout=5)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # The client has only its own token at this point.
-        response = await client.post("/api/v1/chat/stream/1001/cancel?client_token=ct_beforeframe")
+        admission = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+        turn_id = admission.json()["turn_id"]
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # Nothing has been attached to yet, and the stop still lands.
+        response = await client.post(f"/api/v1/chat/turns/{turn_id}/cancel")
     assert response.status_code == 204
 
     for _ in range(500):
-        if _chat_turn_log[turn.turn_id].status != "running":
+        if _chat_turn_log[turn_id].status != "running":
             break
         await asyncio.sleep(0.01)
-    assert _chat_turn_log[turn.turn_id].status == "canceled"
-
-
-async def test_cancel_requires_naming_a_turn(mocker, _chat_turn_log):
-    """ "Whichever turn is running" is exactly what stops the wrong one."""
-    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-
-    app = _make_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/v1/chat/stream/1001/cancel")
-
-    assert response.status_code == 422
-
-
-async def test_a_turn_whose_producer_died_does_not_block_deletion(mocker, _chat_turn_log):
-    """A producer lost with its process, or cancelled before its coroutine ever
-    ran, leaves a record saying "running" that nothing will ever finish. Waiting
-    for it means the conversation can neither be used nor deleted."""
-    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
-    # Its lease lapsed: no live producer renews one.
-    _chat_turn_log[turn.turn_id] = _chat_turn_log[turn.turn_id].model_copy(
-        update={"expires_at": "2020-01-01T00:00:00+00:00"}
-    )
-    deleted = AsyncMock()
-    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
-
-    app = _make_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.delete("/api/v1/chat/sessions/1001")
-
-    assert response.status_code == 204
-    deleted.assert_awaited_once()
-
-
-async def test_a_stop_that_arrives_before_the_turn_still_stops_it(mocker, _chat_turn_log):
-    """Stop can beat the create it names into the store. Reporting success and
-    letting the turn start a moment later leaves it running with nobody
-    watching or waiting for it."""
-    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
-    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-
-    app = _make_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # The user pressed Stop while the send was still in flight.
-        stop = await client.post("/api/v1/chat/stream/1001/cancel?client_token=ct_racingsend")
-        assert stop.status_code == 204
-
-        response = await client.post(
-            "/api/v1/chat/stream",
-            json={"message": "Hi", "thread_id": "1001", "client_token": "ct_racingsend"},
-        )
-
-    assert '"finishReason":"stop"' in response.text
-    assert "data: [DONE]" in response.text
-    # No turn was created, so nothing is producing.
-    assert _chat_turn_log == {}
+    assert _chat_turn_log[turn_id].status == "canceled"

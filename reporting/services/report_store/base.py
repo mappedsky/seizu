@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from reporting import settings
 from reporting.schema.chat import (
     CHAT_TURN_MAX_BATCH_BYTES,
     CHAT_TURN_MAX_SEQ,
@@ -81,6 +82,20 @@ def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
     size = len(parts_json.encode("utf-8"))
     if size > CHAT_TURN_MAX_BATCH_BYTES:
         raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
+
+
+def chat_turn_lease_expiry(now: datetime) -> str:
+    """When a *running* turn's claim on its thread lapses.
+
+    Derived from the turn's own timeout rather than from the retention window:
+    the lease is what tells admission a producer still holds the thread, and
+    retiring a turn that is merely slow puts a second producer on the same
+    conversation. A finished turn is re-stamped with the (much shorter)
+    retention window instead -- that one is a replay deadline, not a claim.
+    """
+    return (
+        now + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS)
+    ).isoformat()
 
 
 class ReportStore(ABC):

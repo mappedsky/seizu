@@ -113,6 +113,8 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 _TIMEOUT_RESPONSE_BODY = b'{"error":"Request timed out"}'
+_TURN_STREAM_PREFIX = "/api/v1/chat/turns/"
+_TURN_STREAM_SUFFIX = "/stream"
 
 
 class _TimeoutMiddleware:
@@ -121,13 +123,22 @@ class _TimeoutMiddleware:
     def __init__(self, app: StarletteASGIApp, timeout: float, exempt_paths: frozenset[str] | None = None) -> None:
         self._app = app
         self._timeout = timeout
-        self._exempt_paths = exempt_paths or frozenset({"/api/v1/chat/stream"})
+        self._exempt_paths = exempt_paths if exempt_paths is not None else frozenset()
+
+    def _is_exempt(self, path: str) -> bool:
+        if path in self._exempt_paths:
+            return True
+        # A turn's stream runs for as long as the turn does. Its id is in the
+        # path, so this one can never be an exact match -- and only the read is
+        # exempt: admitting, cancelling and everything else about a turn are
+        # ordinary short requests that should still time out.
+        return path.startswith(_TURN_STREAM_PREFIX) and path.endswith(_TURN_STREAM_SUFFIX)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
-        if scope.get("path", "") in self._exempt_paths:
+        if self._is_exempt(scope.get("path", "")):
             await self._app(scope, receive, send)
             return
 

@@ -97,12 +97,11 @@ def mock_store():
         "get_scheduled_chat_version": None,
         "list_scheduled_chat_sessions": [],
         "complete_chat_session_run": None,
-        "create_chat_turn": None,
+        "admit_chat_turn": None,
         "get_active_chat_turn": None,
         "get_chat_turn": None,
         "append_chat_turn_events": True,
         "read_chat_turn_events": None,
-        "renew_chat_turn_lease": None,
         "request_chat_turn_cancel": None,
         "finish_chat_turn": None,
         "delete_chat_turn": True,
@@ -641,8 +640,8 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         ["Planner fallback"],
     )
 
-    await report_store.create_chat_turn("u1", "thread-1", "msg_1", "text_1", "ct_token")
-    mock_store.create_chat_turn.assert_awaited_once_with("u1", "thread-1", "msg_1", "text_1", "ct_token")
+    await report_store.admit_chat_turn("u1", "thread-1", "msg_1", "text_1", "ik_key0001")
+    mock_store.admit_chat_turn.assert_awaited_once_with("u1", "thread-1", "msg_1", "text_1", "ik_key0001")
 
     await report_store.get_active_chat_turn("u1", "thread-1")
     mock_store.get_active_chat_turn.assert_awaited_once_with("u1", "thread-1")
@@ -656,11 +655,8 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     await report_store.read_chat_turn_events("turn-1", 0, 200)
     mock_store.read_chat_turn_events.assert_awaited_once_with("turn-1", 0, 200)
 
-    await report_store.renew_chat_turn_lease("turn-1")
-    mock_store.renew_chat_turn_lease.assert_awaited_once_with("turn-1")
-
-    await report_store.request_chat_turn_cancel("u1", "thread-1", "turn-1", "ct_token")
-    mock_store.request_chat_turn_cancel.assert_awaited_once_with("u1", "thread-1", "turn-1", "ct_token")
+    await report_store.request_chat_turn_cancel("turn-1", "u1")
+    mock_store.request_chat_turn_cancel.assert_awaited_once_with("turn-1", "u1")
 
     await report_store.finish_chat_turn("turn-1", "completed", 4)
     mock_store.finish_chat_turn.assert_awaited_once_with("turn-1", "completed", 4)

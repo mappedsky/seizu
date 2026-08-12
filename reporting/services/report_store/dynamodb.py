@@ -57,6 +57,7 @@ from reporting.schema.space_config import (
 )
 from reporting.services.report_store.base import (
     ReportStore,
+    chat_turn_lease_expiry,
     initial_report_config,
     require_public_space_member,
     validate_chat_turn_batch,
@@ -4795,7 +4796,7 @@ class DynamoDBReportStore(ReportStore):
         turn_id = generate_report_id()
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
-        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+        expires_at = chat_turn_lease_expiry(now)
         metadata_pk = _chat_session_metadata_pk(user_id)
         list_pk = _chat_session_list_pk(user_id)
         metadata_item = {

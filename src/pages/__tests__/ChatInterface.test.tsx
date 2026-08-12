@@ -17,11 +17,8 @@ import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
-import {
-  DefaultChatTransport,
-  type ChatOnFinishCallback,
-  type UIMessage,
-} from 'ai';
+import { type ChatOnFinishCallback, type UIMessage } from 'ai';
+import { SeizuChatTransport } from 'src/api/chatTransport';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissionState: jest.fn(),
@@ -43,12 +40,6 @@ jest.mock('@ai-sdk/react', () => ({
   useChat: jest.fn(),
 }));
 
-jest.mock('ai', () => ({
-  DefaultChatTransport: jest.fn().mockImplementation((options: object) => ({
-    options,
-  })),
-}));
-
 const mockUsePermissionState =
   usePermissionsModule.usePermissionState as jest.MockedFunction<
     typeof usePermissionsModule.usePermissionState
@@ -66,9 +57,58 @@ const mockUseConfirmationsApi =
     typeof useConfirmationsApiModule.useConfirmationsApi
   >;
 const mockUseChat = useChat as jest.MockedFunction<typeof useChat>;
-const mockDefaultChatTransport = DefaultChatTransport as jest.MockedClass<
-  typeof DefaultChatTransport
->;
+
+/** The transport the component handed to `useChat` on its last render.
+ *
+ * Its response parsing is stubbed to a passthrough: jsdom's `Response.body` is
+ * not a real `ReadableStream`, and what these tests are about is which requests
+ * the transport makes, not the SDK's own parser.
+ */
+function activeTransport(): SeizuChatTransport<UIMessage> {
+  // useChat's options are a union whose other arm takes a prebuilt Chat, so
+  // `transport` is not on the common type.
+  const options = mockUseChat.mock.calls.at(-1)?.[0] as
+    | { transport?: unknown }
+    | undefined;
+  if (!options?.transport) throw new Error('missing transport');
+  const transport = options.transport as SeizuChatTransport<UIMessage>;
+  jest
+    .spyOn(
+      transport as unknown as {
+        processResponseStream: (s: unknown) => unknown;
+      },
+      'processResponseStream',
+    )
+    .mockImplementation((stream) => stream);
+  return transport;
+}
+
+/** Stub `fetch` for the admit-then-attach pair a send makes. */
+function mockAdmitThenAttach(turnId = 'turn-42') {
+  return jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.includes('/turns') && !url.includes('/stream')) {
+      return new Response(
+        JSON.stringify({ turn_id: turnId, status: 'created' }),
+        {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
+    return new Response('data: [DONE]\n\n', { status: 200 });
+  });
+}
+
+function sendArgs(messages: UIMessage[]) {
+  return {
+    chatId: 'chat-id',
+    messageId: messages.at(-1)?.id,
+    messages,
+    abortSignal: undefined,
+    trigger: 'submit-message',
+  } as unknown as Parameters<SeizuChatTransport<UIMessage>['sendMessages']>[0];
+}
 const theme = createTheme();
 
 type ChatRenderOptions = {
@@ -187,43 +227,43 @@ describe('ChatInterface', () => {
       );
     });
 
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    expect(transportOptions).toBeDefined();
-    if (!transportOptions) throw new Error('missing transport options');
-    expect(transportOptions.api).toBe('/api/v1/chat/stream');
-    expect(transportOptions.headers).toEqual({
-      'X-Seizu-Csrf': '1',
-    });
-
-    const prepared = transportOptions.prepareSendMessagesRequest?.({
-      id: 'chat-id',
-      messages: [
+    const fetchMock = mockAdmitThenAttach();
+    await activeTransport().sendMessages(
+      sendArgs([
         {
           id: 'user-message',
           role: 'user',
           parts: [{ type: 'text', text: 'Hello graph' }],
         },
-      ],
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: transportOptions.headers as HeadersInit,
-      api: '/api/v1/chat/stream',
-      trigger: 'submit-message',
-      messageId: 'user-message',
-    }) as
-      | {
-          headers: Record<string, string>;
-          body: { message: string; thread_id: string };
-        }
-      | undefined;
+      ]),
+    );
 
-    expect(prepared?.headers).toEqual({
-      Authorization: 'Bearer token-123',
-      'X-Seizu-Csrf': '1',
-    });
-    expect(prepared?.body.message).toBe('Hello graph');
-    expect(prepared?.body.thread_id).toBe(threadId);
+    // Two requests, in order: ask for the turn, then read it.
+    const [admitUrl, admitInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(admitUrl).toBe(`/api/v1/chat/threads/${threadId}/turns`);
+    expect(admitInit.method).toBe('POST');
+    expect(admitInit.headers).toEqual(
+      expect.objectContaining({
+        Authorization: 'Bearer token-123',
+        'X-Seizu-Csrf': '1',
+      }),
+    );
+    const body = JSON.parse(String(admitInit.body)) as {
+      message: string;
+      idempotency_key: string;
+      thread_id?: string;
+    };
+    expect(body.message).toBe('Hello graph');
+    // The thread is in the path now, so it has no business in the body too.
+    expect(body.thread_id).toBeUndefined();
+    expect(body.idempotency_key).toMatch(/^ik_/);
+
+    const [attachUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(attachUrl).toBe('/api/v1/chat/turns/turn-42/stream');
+    fetchMock.mockRestore();
   });
 
   it('uses the latest access token when preparing chat stream requests', async () => {
@@ -258,27 +298,22 @@ describe('ChatInterface', () => {
       </MemoryRouter>,
     );
 
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    if (!transportOptions) throw new Error('missing transport options');
-    const prepared = transportOptions.prepareSendMessagesRequest?.({
-      id: 'chat-id',
-      messages: [
+    const fetchMock = mockAdmitThenAttach();
+    await activeTransport().sendMessages(
+      sendArgs([
         {
           id: 'user-message',
           role: 'user',
           parts: [{ type: 'text', text: 'Fresh token please' }],
         },
-      ],
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: transportOptions.headers as HeadersInit,
-      api: '/api/v1/chat/stream',
-      trigger: 'submit-message',
-      messageId: 'user-message',
-    }) as { headers: Record<string, string> } | undefined;
+      ]),
+    );
 
-    expect(prepared?.headers.Authorization).toBe('Bearer token-2');
+    const [, admitInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((admitInit.headers as Record<string, string>).Authorization).toBe(
+      'Bearer token-2',
+    );
+    fetchMock.mockRestore();
   });
 
   it('shows a disabled message when the chat feature is off', () => {
@@ -1933,10 +1968,23 @@ describe('ChatInterface', () => {
 
   it('tells the server to stop the turn, not just the reader', async () => {
     // The turn runs beside the request now, so closing the stream on its own
-    // leaves it generating and able to run the actions it had queued.
+    // leaves it generating and able to run the actions it had queued. This one
+    // learns the turn by reattaching -- the reloaded-client path, where the id
+    // was never handed to this tab at admission.
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response(null, { status: 204 }));
+      .mockImplementation(async (input) => {
+        if (String(input).endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-42', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (String(input).endsWith('/stream')) {
+          return new Response('data: [DONE]\n\n', { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      });
     const stop = jest.fn();
     mockUseChat.mockReturnValue({
       id: 'chat-id',
@@ -1945,7 +1993,6 @@ describe('ChatInterface', () => {
         {
           id: 'a1',
           role: 'assistant',
-          metadata: { turn_id: 'turn-42' },
           parts: [{ type: 'text', text: 'Working' }],
         },
       ],
@@ -1964,6 +2011,11 @@ describe('ChatInterface', () => {
 
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
+    await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
     fetchMock.mockClear();
 
     fireEvent.click(screen.getByRole('button', { name: /stop/i }));
@@ -1972,19 +2024,42 @@ describe('ChatInterface', () => {
     // Addressed at the turn being watched, not at the thread: this request can
     // be retried, and by then the thread may be running a different turn.
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/stream/thread-1/cancel?turn_id=turn-42',
+      '/api/v1/chat/turns/turn-42/cancel',
       expect.objectContaining({ method: 'POST', keepalive: true }),
     );
     expect(stop).toHaveBeenCalled();
     fetchMock.mockRestore();
   });
 
-  it('can stop a turn that has not announced its id yet', async () => {
-    // Stop is enabled from `submitted`, before any frame arrives. Without the
-    // token we minted for the send, that window silently did nothing.
+  it.each([
+    [409, 'This conversation already has a turn in progress'],
+    [404, 'This conversation is no longer available'],
+    [503, 'Could not start this turn; please try again'],
+  ])('reports a refused admission distinctly (%i)', async (status, message) => {
+    // The server distinguishes these and only one is worth retrying, so a
+    // single "something went wrong" would tell the user the wrong thing.
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(new Response(null, { status: 204 }));
+      .mockResolvedValue(new Response('{}', { status }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow(message);
+    fetchMock.mockRestore();
+  });
+
+  it('can stop a turn as soon as it has been sent', async () => {
+    // Stop is enabled from `submitted`, before any frame arrives. Admission is
+    // what closes that window: the id comes back from the send itself, so the
+    // whole period the button is live is a period it can act on.
+    const fetchMock = mockAdmitThenAttach('turn-77');
     const stop = jest.fn();
     mockUseChat.mockReturnValue({
       id: 'chat-id',
@@ -2007,60 +2082,84 @@ describe('ChatInterface', () => {
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
 
-    // Sending is what mints the token, so drive the transport the way the SDK
-    // would before pressing Stop.
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    if (!transportOptions) throw new Error('missing transport options');
-    const prepared = transportOptions.prepareSendMessagesRequest?.({
-      id: 'chat-id',
-      messages: [
+    // Drive the send the way the SDK does; nothing has streamed yet.
+    await activeTransport().sendMessages(
+      sendArgs([
         { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
-      ],
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: {},
-      api: '/api/v1/chat/stream',
-      trigger: 'submit-message',
-      messageId: 'u1',
-    }) as { body: { client_token?: string } } | undefined;
-    const token = prepared?.body.client_token;
-    expect(token).toBeTruthy();
+      ]),
+    );
 
     fetchMock.mockClear();
     fireEvent.click(screen.getByRole('button', { name: /stop/i }));
     await act(async () => {});
 
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/v1/chat/stream/thread-1/cancel?client_token=${token}`,
+      '/api/v1/chat/turns/turn-77/cancel',
       expect.objectContaining({ method: 'POST' }),
     );
     fetchMock.mockRestore();
   });
 
-  it('authenticates the reconnect request and points it at the thread', async () => {
-    // The SDK's default reconnect carries only the transport's static headers,
-    // which would be an unauthenticated GET.
+  it('resolves the running turn before reattaching to it', async () => {
+    // A reloaded client has a thread but no turn id -- it never saw the
+    // admission -- and the SDK's own reconnect would be an unauthenticated GET
+    // at a URL that no longer identifies anything.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        if (String(input).endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-99', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
     renderChat({ initialPath: '/app/chat/thread-1' });
     await act(async () => {});
+    fetchMock.mockClear();
 
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    if (!transportOptions) throw new Error('missing transport options');
+    await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
 
-    const prepared = transportOptions.prepareReconnectToStreamRequest?.({
-      id: 'thread-1',
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: transportOptions.headers as HeadersInit,
-      api: '/api/v1/chat/stream',
-    }) as { api: string; headers: Record<string, string> } | undefined;
+    const [activeUrl, activeInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(activeUrl).toBe('/api/v1/chat/threads/thread-1/turns/active');
+    expect(activeInit.headers).toEqual(
+      expect.objectContaining({ Authorization: 'Bearer token-123' }),
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      '/api/v1/chat/turns/turn-99/stream',
+    );
+    fetchMock.mockRestore();
+  });
 
-    expect(prepared?.api).toBe('/api/v1/chat/stream/thread-1');
-    expect(prepared?.headers).toEqual({
-      Authorization: 'Bearer token-123',
-      'X-Seizu-Csrf': '1',
-    });
+  it('reports no running turn rather than attaching to nothing', async () => {
+    // 204 is how the server says the thread is idle; the SDK maps a null return
+    // to "nothing to resume".
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    fetchMock.mockClear();
+
+    const result = await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    expect(result).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockRestore();
   });
 
   it('drops the partial reply before resuming after a dropped connection', async () => {

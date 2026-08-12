@@ -99,9 +99,32 @@ async def test_timeout_middleware_exempts_chat_stream():
         sent_messages.append(message)
 
     middleware = _TimeoutMiddleware(slow_chat_app, timeout=0.001)
-    await middleware({"type": "http", "path": "/api/v1/chat/stream", "method": "POST"}, receive, send)
+    path = "/api/v1/chat/turns/turn-123/stream"
+    await middleware({"type": "http", "path": path, "method": "GET"}, receive, send)
 
     assert sent_messages[-1] == {"type": "http.response.body", "body": b"done", "more_body": False}
+
+
+async def test_timeout_middleware_still_bounds_the_rest_of_a_turns_routes():
+    """Only reading a turn is open-ended. Exempting the whole `/turns/` subtree
+    would silently drop the deadline from admission and cancellation too."""
+    sent_messages: list[dict[str, Any]] = []
+
+    async def slow_app(scope, receive, send):
+        await asyncio.sleep(0.05)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent_messages.append(message)
+
+    middleware = _TimeoutMiddleware(slow_app, timeout=0.001)
+    for path in ("/api/v1/chat/turns/turn-123/cancel", "/api/v1/chat/threads/1001/turns"):
+        sent_messages.clear()
+        await middleware({"type": "http", "path": path, "method": "POST"}, receive, send)
+        assert sent_messages[0]["status"] == 504, path
 
 
 async def test_timeout_middleware_passes_through_non_http_scope():

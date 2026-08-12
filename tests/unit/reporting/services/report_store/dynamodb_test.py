@@ -1,11 +1,13 @@
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import botocore.exceptions
 import pytest
 
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCanceledError, ChatTurnConflictError
+from reporting import settings
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion
@@ -3601,7 +3603,7 @@ def test_a_cursor_without_a_session_key_does_not_claim_to_resume_within_a_user()
 
 
 # ---------------------------------------------------------------------------
-# Chat turn event log
+# Chat turn admission and event log
 # ---------------------------------------------------------------------------
 
 
@@ -3636,56 +3638,102 @@ def _turn_item(turn_id: str = "turn-1", **overrides):
     }
 
 
-async def test_creating_a_turn_writes_the_record_pointer_and_sweep_entry(patch_table, store):
-    """One transaction, because a record without its pointer is a turn no
-    reconnect can find and a pointer without its record is a thread that can
-    never start one."""
+# --- admission -------------------------------------------------------------
+
+
+async def test_admission_writes_the_turn_and_moves_the_session(patch_table, store):
+    """One transaction, because a turn admitted against a session whose
+    timestamp did not move can be deleted out from under by a cascade that read
+    the stale value."""
     patch_table.get_item.return_value = {"Item": _session_item()}
-    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    admission = await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    assert admission.outcome == "created"
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    puts = [(i["Put"]["Item"]["PK"], i["Put"]["Item"]["SK"]) for i in items if "Put" in i]
+    assert puts[0] == ("CHAT_TURN_THREAD#u1#THREAD#1001", "#ACTIVE")
+    assert puts[1][1] == "#METADATA" and puts[1][0].startswith("CHAT_TURN#")
+    assert any(pk == "CHAT_TURN_LIST" for pk, _ in puts), "must be swept like any other turn"
+    assert any("Update" in i for i in items), "the session's timestamp moves in the same transaction"
+
+
+async def test_a_running_turns_lease_outlasts_the_turn_itself(patch_table, store):
+    """Same rule as the SQL store, asserted separately because the two compute
+    this in their own code: a lease shorter than the turn's own timeout lets one
+    send retire a turn that is merely slow, and the thread then has two
+    producers writing one conversation."""
+    patch_table.get_item.return_value = {"Item": _session_item()}
+
+    await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")
 
     items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    keys = [(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in items if "Put" in item]
-    assert keys[0] == ("CHAT_TURN_THREAD#u1#THREAD#1001", "#ACTIVE")
-    assert keys[1][1] == "#METADATA" and keys[1][0].startswith("CHAT_TURN#")
-    assert keys[2][0] == "CHAT_TURN_LIST"
-    # ...and the session's own timestamp moves in the very same transaction.
-    assert any("Update" in item for item in items)
+    metadata = next(i["Put"]["Item"] for i in items if i.get("Put", {}).get("Item", {}).get("SK") == "#METADATA")
+    latest_possible_finish = datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS)
+    assert metadata["expires_at"] > latest_possible_finish.isoformat()
 
 
 async def test_the_active_pointer_expires_so_a_dead_producer_cannot_wedge_a_thread(patch_table, store):
     """Without the expiry clause a producer that died mid-turn would leave the
     conversation permanently unable to start another."""
     patch_table.get_item.return_value = {"Item": _session_item()}
-    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
 
-    pointer = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"][0]["Put"]
-    assert pointer["ConditionExpression"] == ("attribute_not_exists(PK) OR #s <> :running OR expires_at <= :now")
+    await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")
 
-
-async def test_a_second_running_turn_is_refused_as_a_conflict(patch_table, store):
-    """Why the refusal happened is read from the state the conditions were
-    about, not decoded from which transact item failed."""
-    patch_table.get_item.side_effect = lambda Key, **kw: (
-        {"Item": _session_item()}
-        if Key["PK"].startswith("CHAT_SESSION#")
-        else {"Item": {"turn_id": "incumbent", "status": "running", "expires_at": "2099-01-01T00:00:00+00:00"}}
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    assert items[0]["Put"]["ConditionExpression"] == (
+        "attribute_not_exists(PK) OR #s <> :running OR expires_at <= :now"
     )
+
+
+async def test_admission_to_a_missing_session_is_retired(patch_table, store):
+    patch_table.get_item.return_value = {}
+
+    admission = await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")
+
+    assert admission.outcome == "retired"
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_admission_to_a_session_being_retired_is_refused(patch_table, store):
+    patch_table.get_item.return_value = {"Item": _session_item(retiring_at="2024-01-01T00:00:00+00:00")}
+
+    assert (await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")).outcome == "retired"
+
+
+async def test_a_repeat_of_a_request_resolves_to_the_turn_it_made(patch_table, store):
+    """How a lost response is fixed: ask again. Read before anything is
+    written, so it is never mistaken for a second request."""
+    patch_table.query.return_value = {"Items": [{"turn_id": "turn-1"}]}
+    patch_table.get_item.return_value = {"Item": _turn_item(idempotency_key="ik_repeated1")}
+
+    admission = await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_repeated1")
+
+    assert admission.outcome == "existing"
+    assert admission.turn is not None and admission.turn.turn_id == "turn-1"
+    patch_table.meta.client.transact_write_items.assert_not_called()
+
+
+async def test_a_refused_admission_is_busy_not_an_inferred_error(patch_table, store):
+    """Which condition failed is read from the state it was about, rather than
+    decoded from the position of the failing transact item."""
+    patch_table.query.return_value = {"Items": []}
+    patch_table.get_item.return_value = {"Item": _session_item()}
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
             "Error": {"Code": "TransactionCanceledException"},
-            "CancellationReasons": [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}, {"Code": "None"}],
+            "CancellationReasons": [{"Code": "ConditionalCheckFailed"}, {"Code": "None"}],
         },
         "TransactWriteItems",
     )
 
-    with pytest.raises(ChatTurnConflictError):
-        await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+    assert (await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")).outcome == "busy"
 
 
-async def test_a_throttled_create_is_not_reported_as_a_conflict(patch_table, store):
+async def test_a_throttled_admission_is_not_reported_as_busy(patch_table, store):
     """Throttling, capacity and validation all arrive as the same exception as a
     refused condition. Only a refused *condition* means the request was
-    answered; the rest must propagate as the error they are."""
+    answered; the rest must propagate as the errors they are."""
     patch_table.get_item.return_value = {"Item": _session_item()}
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
@@ -3696,7 +3744,32 @@ async def test_a_throttled_create_is_not_reported_as_a_conflict(patch_table, sto
     )
 
     with pytest.raises(botocore.exceptions.ClientError):
-        await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
+        await store.admit_chat_turn("u1", "1001", "msg_1", "text_1")
+
+
+# --- cancellation ----------------------------------------------------------
+
+
+async def test_cancel_flags_the_named_turn(patch_table, store):
+    patch_table.update_item.return_value = {"Attributes": _turn_item(cancel_requested=True)}
+
+    flagged = await store.request_chat_turn_cancel("turn-1", "u1")
+
+    assert flagged is not None and flagged.cancel_requested is True
+    kwargs = patch_table.update_item.call_args.kwargs
+    # Owner re-checked on the write, not only in the lookup above it.
+    assert "user_id = :user_id" in kwargs["ConditionExpression"]
+
+
+async def test_cancel_of_a_turn_that_is_not_running_reports_nothing(patch_table, store):
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+    )
+
+    assert await store.request_chat_turn_cancel("turn-1", "u1") is None
+
+
+# --- the event log ---------------------------------------------------------
 
 
 def test_event_sort_keys_are_zero_padded():
@@ -3773,8 +3846,26 @@ async def test_finishing_a_turn_releases_the_thread_only_if_it_still_owns_it(pat
         if call.kwargs["Key"]["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
     )
     assert pointer_update["ConditionExpression"] == "turn_id = :turn_id"
-    # The sweep entry's copy of the lease is refreshed here, once per turn.
-    assert any(call.kwargs["Key"]["PK"] == "CHAT_TURN_LIST" for call in patch_table.update_item.call_args_list)
+
+
+async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, store):
+    """The sweep entry is an optimisation. Failing to refresh it must not leave
+    the conversation unable to start another turn until the lease expires."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    released: list[str] = []
+
+    def _update(**kwargs):
+        if kwargs["Key"]["PK"] == "CHAT_TURN_LIST":
+            raise botocore.exceptions.ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+        released.append(kwargs["Key"]["PK"])
+        return {"Attributes": _turn_item(status="completed", last_seq=4)}
+
+    patch_table.update_item.side_effect = _update
+
+    finished = await store.finish_chat_turn("turn-1", "completed", 4)
+
+    assert finished is not None
+    assert "CHAT_TURN_THREAD#u1#THREAD#1001" in released
 
 
 async def test_an_expired_running_turn_is_not_offered_for_reconnect(patch_table, store):
@@ -3803,94 +3894,7 @@ async def test_deleting_a_turn_batches_rather_than_transacts(patch_table, store)
     patch_table.meta.client.transact_write_items.assert_not_called()
 
 
-async def test_a_finished_turn_has_no_lease_to_renew(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _turn_item(status="completed")}
-
-    assert await store.renew_chat_turn_lease("turn-1") is None
-    patch_table.meta.client.transact_write_items.assert_not_called()
-
-
-async def test_cancel_flags_the_running_turn_for_its_owner(patch_table, store):
-    patch_table.get_item.return_value = {"Item": {"turn_id": "turn-1", "status": "running"}}
-    patch_table.update_item.return_value = {"Attributes": _turn_item(cancel_requested=True)}
-
-    flagged = await store.request_chat_turn_cancel("u1", "1001")
-
-    assert flagged is not None and flagged.cancel_requested is True
-    kwargs = patch_table.update_item.call_args.kwargs
-    # Owner re-checked on the write, so a stale pointer cannot redirect it.
-    assert ":user_id" in kwargs["ExpressionAttributeValues"]
-    assert "user_id = :user_id" in kwargs["ConditionExpression"]
-
-
-async def test_cancel_reports_nothing_when_no_turn_is_running(patch_table, store):
-    patch_table.get_item.return_value = {"Item": {"turn_id": "turn-1", "status": "completed"}}
-
-    assert await store.request_chat_turn_cancel("u1", "1001") is None
-    patch_table.update_item.assert_not_called()
-
-
-async def test_a_turn_is_indexed_under_its_own_thread(patch_table, store):
-    """Deleting a session must find that thread's turns without filtering the
-    global turn partition, whose size depends on every other user's traffic."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
-    await store.create_chat_turn("u1", "1001", "msg_1", "text_1")
-
-    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    index_item = items[3]["Put"]["Item"]
-    assert index_item["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
-    assert index_item["SK"].startswith("TURN#")
-
-
-async def test_deleting_a_threads_turns_queries_only_that_thread(patch_table, store):
-    patch_table.query.return_value = {"Items": []}
-
-    dynamodb_module._delete_thread_chat_turns_sync(patch_table, "u1", "1001")
-
-    kwargs = patch_table.query.call_args.kwargs
-    assert kwargs["KeyConditionExpression"] == "PK = :pk AND begins_with(SK, :prefix)"
-    assert kwargs["ExpressionAttributeValues"][":pk"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
-    # Not a filtered scan of the shared partition.
-    assert "FilterExpression" not in kwargs
-
-
-async def test_lease_renewal_moves_both_halves_in_one_transaction(patch_table, store):
-    """Two separate writes leave a window where the record is renewed but the
-    pointer has already been taken by a successor -- the old producer would then
-    believe it still holds a thread it has lost."""
-    patch_table.get_item.return_value = {"Item": _turn_item()}
-
-    renewed = await store.renew_chat_turn_lease("turn-1")
-
-    assert renewed is not None
-    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    keys = [item["Update"]["Key"] for item in items]
-    assert keys == [
-        {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"},
-        {"PK": "CHAT_TURN_THREAD#u1#THREAD#1001", "SK": "#ACTIVE"},
-    ]
-    patch_table.update_item.assert_not_called()
-
-
-async def test_losing_the_pointer_reports_renewal_failure(patch_table, store):
-    """The producer has to be told, or it carries on writing a conversation a
-    second producer now owns."""
-    patch_table.get_item.return_value = {"Item": _turn_item()}
-    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
-        {
-            "Error": {"Code": "TransactionCanceledException"},
-            "CancellationReasons": [{"Code": "None"}, {"Code": "ConditionalCheckFailed"}],
-        },
-        "TransactWriteItems",
-    )
-
-    assert await store.renew_chat_turn_lease("turn-1") is None
-
-
 async def test_deleting_a_turn_collects_batches_whose_header_is_gone(patch_table, store):
-    """A producer that kept writing after its conversation was deleted leaves
-    headerless batches; refusing to look for them left the only rows worth
-    collecting behind."""
     patch_table.get_item.return_value = {}
     patch_table.query.return_value = {"Items": [{"PK": "CHAT_TURN#turn-1", "SK": "EVENT#0000000001"}]}
 
@@ -3899,17 +3903,25 @@ async def test_deleting_a_turn_collects_batches_whose_header_is_gone(patch_table
     patch_table.batch_writer.assert_called_once()
 
 
-async def test_deleting_an_unknown_turn_reports_nothing_to_do(patch_table, store):
-    patch_table.get_item.return_value = {}
+async def test_deleting_a_threads_turns_queries_only_that_thread(patch_table, store):
+    """Deleting one session must not cost in proportion to every other user's
+    retained turns."""
     patch_table.query.return_value = {"Items": []}
 
-    assert await store.delete_chat_turn("turn-1") is False
+    dynamodb_module._delete_thread_chat_turns_sync(patch_table, "u1", "1001")
+
+    kwargs = patch_table.query.call_args.kwargs
+    assert kwargs["KeyConditionExpression"] == "PK = :pk AND begins_with(SK, :prefix)"
+    assert kwargs["ExpressionAttributeValues"][":pk"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
+
+
+# --- the expiry sweep ------------------------------------------------------
 
 
 async def test_the_sweep_reads_past_turns_that_are_still_live(patch_table, store):
     """Renewal broke the assumption that creation order is expiry order: a few
-    long-running turns at the head of the partition would otherwise be re-read
-    and skipped by every pass while everything behind them accumulated."""
+    long-running turns at the head would otherwise be re-read and skipped by
+    every pass while everything behind them accumulated."""
     patch_table.query.return_value = {
         "Items": [
             {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a#TURN#live", "turn_id": "live"},
@@ -3918,8 +3930,9 @@ async def test_the_sweep_reads_past_turns_that_are_still_live(patch_table, store
     }
 
     def _get_item(Key, **kwargs):
+        if Key["PK"] == "CHAT_TURN_SWEEP_CURSOR":
+            return {}
         if Key["PK"] == "CHAT_TURN#live":
-            # Still running, lease renewed well into the future.
             return {"Item": _turn_item("live", expires_at="2099-01-01T00:00:00+00:00")}
         return {"Item": _turn_item("dead", status="completed", expires_at="2020-01-01T00:00:00+00:00")}
 
@@ -3931,9 +3944,8 @@ async def test_the_sweep_reads_past_turns_that_are_still_live(patch_table, store
 
 
 async def test_the_sweep_resumes_where_the_last_pass_stopped(patch_table, store):
-    """The index is in creation order and a running turn renews its lease, so
-    live entries sit at the head indefinitely. Without a durable cursor every
-    pass re-reads them and anything behind them is never reached."""
+    """Without a durable cursor every pass re-reads the live entries at the
+    head and anything behind them is never reached."""
     patch_table.get_item.side_effect = lambda Key, **kw: (
         {"Item": {"start_key": {"PK": "CHAT_TURN_LIST", "SK": "CREATED#z"}}}
         if Key["PK"] == "CHAT_TURN_SWEEP_CURSOR"
@@ -3945,176 +3957,14 @@ async def test_the_sweep_resumes_where_the_last_pass_stopped(patch_table, store)
 
     kwargs = patch_table.query.call_args.kwargs
     assert kwargs["ExclusiveStartKey"] == {"PK": "CHAT_TURN_LIST", "SK": "CREATED#z"}
-    # And bounded, so one turn's completion cannot read a megabyte of index.
     assert kwargs["Limit"] == dynamodb_module._CHAT_TURN_SWEEP_PAGE_SIZE
 
 
 async def test_reaching_the_end_of_the_index_restarts_the_next_pass(patch_table, store):
-    """Entries that were live during this pass have to be revisited, so
-    exhausting the partition clears the cursor rather than pinning it."""
+    """Entries that were live during this pass have to be revisited."""
     patch_table.get_item.return_value = {}
     patch_table.query.return_value = {"Items": []}
 
     await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
 
     patch_table.delete_item.assert_called_once_with(Key={"PK": "CHAT_TURN_SWEEP_CURSOR", "SK": "#METADATA"})
-
-
-async def test_a_pass_that_runs_out_of_pages_records_where_it_got_to(patch_table, store):
-    """This is the starvation case: pages of live entries ahead of expired ones."""
-    patch_table.get_item.side_effect = lambda Key, **kw: (
-        {} if Key["PK"] == "CHAT_TURN_SWEEP_CURSOR" else {"Item": _turn_item(expires_at="2099-01-01T00:00:00+00:00")}
-    )
-    patch_table.query.return_value = {
-        "Items": [{"PK": "CHAT_TURN_LIST", "SK": "CREATED#a", "turn_id": "live"}],
-        "LastEvaluatedKey": {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a"},
-    }
-
-    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=25)
-
-    assert expired == []
-    saved = patch_table.put_item.call_args.kwargs["Item"]
-    assert saved["PK"] == "CHAT_TURN_SWEEP_CURSOR"
-    assert saved["start_key"] == {"PK": "CHAT_TURN_LIST", "SK": "CREATED#a"}
-
-
-async def test_cancel_named_at_a_finished_turn_leaves_its_successor_alone(patch_table, store):
-    """The pointer names whichever turn holds the thread now, which is not
-    necessarily the one a delayed stop was aimed at."""
-    patch_table.get_item.side_effect = [
-        {"Item": _session_item()},
-        {"Item": {"turn_id": "successor", "status": "running"}},
-        {"Item": _turn_item("successor")},
-    ]
-
-    assert await store.request_chat_turn_cancel("u1", "1001", "the-one-that-finished") is None
-    patch_table.update_item.assert_not_called()
-
-
-def test_a_turn_item_round_trips_its_client_token():
-    """Stored but not returned makes token-addressed Stop silently useless: the
-    comparison is against a value that is always None."""
-    turn = dynamodb_module._chat_turn_from_item(_turn_item(client_token="ct_roundtrip"))
-
-    assert turn.client_token == "ct_roundtrip"
-
-
-async def test_creating_a_turn_claims_its_client_token(patch_table, store):
-    """The claim is what a racing stop collides with, and it lives in the
-    thread's own partition so it is deleted with the turn."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
-
-    await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
-
-    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    claim = next(
-        item["Put"] for item in items if "Put" in item and str(item["Put"]["Item"].get("SK", "")).startswith("TOKEN#")
-    )
-    assert claim["Item"]["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
-    assert claim["Item"]["SK"] == "TOKEN#ct_racingsend"
-    assert claim["ConditionExpression"] == "attribute_not_exists(SK)"
-
-
-async def test_a_stopped_send_is_reported_as_canceled_not_a_conflict(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _session_item()}
-    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
-        {
-            "Error": {"Code": "TransactionCanceledException"},
-            "CancellationReasons": [
-                *({"Code": "None"} for _ in range(7)),
-                {"Code": "ConditionalCheckFailed"},
-            ],
-        },
-        "TransactWriteItems",
-    )
-
-    with pytest.raises(ChatTurnCanceledError):
-        await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
-
-
-async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, store):
-    """The sweep entry is an optimisation. Failing to refresh it must not leave
-    the conversation unable to start another turn until the lease expires."""
-    patch_table.get_item.return_value = {"Item": _turn_item()}
-    released: list[str] = []
-
-    def _update(**kwargs):
-        if kwargs["Key"]["PK"] == "CHAT_TURN_LIST":
-            raise botocore.exceptions.ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
-        released.append(kwargs["Key"]["PK"])
-        return {"Attributes": _turn_item(status="completed", last_seq=4)}
-
-    patch_table.update_item.side_effect = _update
-
-    finished = await store.finish_chat_turn("turn-1", "completed", 4)
-
-    assert finished is not None
-    assert "CHAT_TURN_THREAD#u1#THREAD#1001" in released
-
-
-async def test_a_stop_with_no_running_turn_creates_one_already_canceled(patch_table, store):
-    """A create can commit either side of this. One that gets there first is
-    found and flagged; one that comes after collides with the token claim this
-    leaves. There is no window where neither happens."""
-
-    def _get_item(Key, **kwargs):
-        if Key["PK"].startswith("CHAT_SESSION#"):
-            return {"Item": _session_item()}
-        return {}
-
-    patch_table.get_item.side_effect = _get_item
-
-    stopped = await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
-
-    assert stopped is not None and stopped.status == "canceled"
-    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    keys = [(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in items]
-    # The claim first, then an ordinary turn's items.
-    assert keys[0] == ("CHAT_TURN_THREAD#u1#THREAD#1001", "TOKEN#ct_racingsend")
-    assert any(pk == "CHAT_TURN_LIST" for pk, _ in keys), "must be swept like any other turn"
-    # ...but never the active pointer, because it does not run.
-    assert all(sk != "#ACTIVE" for _, sk in keys)
-
-
-async def test_a_stop_that_loses_the_token_flags_the_turn_that_won(patch_table, store):
-    """The create got there first, so the turn exists after all."""
-    patch_table.get_item.side_effect = [
-        {"Item": _session_item()},
-        {},
-        {"Item": {"turn_id": "the-winner"}},
-    ]
-    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
-        {
-            "Error": {"Code": "TransactionCanceledException"},
-            "CancellationReasons": [{"Code": "ConditionalCheckFailed"}],
-        },
-        "TransactWriteItems",
-    )
-    patch_table.update_item.return_value = {"Attributes": _turn_item("the-winner", cancel_requested=True)}
-
-    stopped = await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
-
-    assert stopped is not None and stopped.cancel_requested is True
-
-
-async def test_a_stopped_turn_takes_its_token_claim_with_it(patch_table, store):
-    """The claim lives in the thread's partition precisely so it is deleted with
-    the turn rather than needing a lifetime of its own."""
-    patch_table.get_item.return_value = {"Item": _turn_item(client_token="ct_gone")}
-    patch_table.query.return_value = {"Items": []}
-    batch = patch_table.batch_writer.return_value.__enter__.return_value
-
-    await store.delete_chat_turn("turn-1")
-
-    deleted = [call.kwargs["Key"]["SK"] for call in batch.delete_item.call_args_list]
-    assert "TOKEN#ct_gone" in deleted
-
-
-async def test_a_stop_for_a_thread_with_no_session_records_nothing(patch_table, store):
-    """A stop only means anything for a session that can hold a turn; without
-    this any caller could leave records on threads they do not own."""
-    patch_table.get_item.return_value = {}
-
-    assert await store.request_chat_turn_cancel("u1", "9999", None, "ct_nosession") is None
-
-    patch_table.meta.client.transact_write_items.assert_not_called()

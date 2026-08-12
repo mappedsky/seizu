@@ -6,7 +6,9 @@ sandbox delegation in [sandbox](sandbox.md).
 
 Primary code: `reporting/services/chat_graph.py`,
 `reporting/services/chat_orchestrator.py`, `reporting/services/mcp_runtime.py`,
-`reporting/services/headless_chat.py`, `reporting/services/agent_run.py`.
+`reporting/services/headless_chat.py`, `reporting/services/agent_run.py`,
+`reporting/services/chat_turns.py`,
+`reporting/temporal_workflows/chat_turn.py`.
 
 ## AGT-001 — Chat tools fail closed
 
@@ -132,7 +134,7 @@ unattended agent holding a real user's permissions.
 Execution is Temporal-only; the polling worker is gone. Run sessions are created
 with `origin="scheduled"` + `scheduled_chat_id`, excluded from
 `list_chat_sessions`, listed via `list_scheduled_chat_sessions`, and
-`POST /api/v1/chat/stream` **rejects them** (403).
+admitting a turn on one **is rejected** (403).
 
 **Why the rejection:** a scheduled run's transcript is a record of what an
 unattended agent did. Allowing a user to continue that thread interactively
@@ -152,11 +154,12 @@ reconcile pass is idempotent.
 ## AGT-008 — An interactive turn is detached from the connection watching it
 
 **Applies to:** `reporting/services/chat_turns.py`,
-`reporting/routes/chat.py`, `reporting/services/report_store` (chat turn log)
+`reporting/temporal_workflows/chat_turn.py`, `reporting/routes/chat.py`,
+`reporting/services/report_store` (chat turn log), `src/api/chatTransport.ts`
 
 A turn used to *be* the HTTP request: `graph.astream` was iterated inside the
-`StreamingResponse` generator. Now a turn is a **producer** writing an
-append-only log of stream parts, and the request is a **reader** tailing it. The
+`StreamingResponse` generator. Now a turn is a **Temporal workflow** writing an
+append-only log of stream parts, and a request is a **reader** tailing it. The
 two share only a turn id, so a client can disconnect and reattach.
 
 **Why:** two failures come from the old shape, and both are structural.
@@ -170,14 +173,99 @@ the turn**: Starlette cancels a `StreamingResponse` generator on
 explicit `timeout = 300` fixes the first; only detaching the turn fixes the
 second.
 
+### Interactive chat now requires Temporal
+
+This **reverses the scoping in issue #254**, which asked for the turn to be
+detached without adding a dependency, and the first implementation duly ran the
+producer as a detached `asyncio.Task` in the web process. What that cost is the
+point: a detached task has no identity, so everything a workflow gives for free
+had to be rebuilt by hand — a renewable **lease** to prove it was alive, a
+process-local **registry** to find it, **crash detection** to notice it was
+gone, a **finalizer** for a task cancelled before its coroutine ever ran, and a
+first-writer-wins guard so a second cancel could not land inside the first one's
+cleanup. Each of those appeared as a review finding, and several of the fixes
+produced findings of their own. Meanwhile a restart of `seizu` still ended every
+turn it was running.
+
+`ChatTurnWorkflow` replaces all of it. It exists, it is addressable by a name
+derived from the turn id (`workflow_id_for`), and Temporal is what guarantees it
+reaches an end — so stopping a turn needs no stored handle, liveness needs no
+lease, and a turn survives a web-process restart. The price is that
+`CHAT_ENABLED` now implies a reachable Temporal server, the same as scheduled
+chats ([AGT-007](#agt-007)).
+
+**Don't:** add a retry policy. `maximum_attempts=1`, for the same reason as
+AGT-007 — a turn is expensive and not idempotent, and a retry both re-bills it
+and appends a second answer to the same log. What running here buys is that the
+turn survives its request and always reaches an end, not that it is repeated.
+
+**Two paths reach a terminal state, deliberately.** The activity finalizes its
+own turn, including under cancellation — it is ordinary Python and owns the log
+it has been writing. The workflow finalizes only when the activity never got to:
+it died with its worker, or timed out. Between them a turn cannot sit at
+"running" forever, which is what a reader waits on and what keeps the thread
+from admitting another.
+
+**Identity is intersected, never unioned.** An interactive turn's `CurrentUser`
+comes from a live JWT and is not serializable, so the activity rebuilds it with
+`resolve_stored_user` ([AGT-006](#agt-006)) and **intersects** the result with
+the permissions carried in the invocation. `resolve_stored_user` reads the last
+seen role claim, which can be staler *or broader* than the live token.
+
+### Admission is its own request
+
+`POST /chat/threads/{thread_id}/turns` answers with a `turn_id` before anything
+streams; `GET /chat/turns/{turn_id}/stream` reads it. The client therefore holds
+the id from the moment it sends.
+
+**Why this is a separate request and not the head of the stream.** Folding the
+two together meant every command about a turn had to be expressed against a
+resource that might not exist yet. That produced, in order: a second identity
+(`client_token`) for the window before the first frame; a cancel route that
+accepted *either* name and 422'd on neither; a stop that could beat its own turn
+into the store, and so had to **create** a turn already canceled to claim the
+token; and a uniqueness constraint per `(thread, client_token)` to settle the
+race between that create and the real one. Every one of those is deleted by
+answering admission first. **Seven rounds of review findings on this feature
+trace to that single coupling** — if a command here is hard to express, check
+whether the resource it names exists yet before adding a mechanism.
+
+`idempotency_key` makes admission repeatable: asking again resolves to the turn
+already made rather than starting a second one, so a lost response is fixed by
+retrying the same request.
+
+**Admission returns an outcome, not an exception.** `ChatTurnAdmission.outcome`
+is one of `created` / `existing` / `busy` / `retired`. It used to raise one of
+four errors inferred from *whichever constraint rejected the write*, so a single
+collision could mean any of them and the store had to guess — including, in one
+version, reporting DynamoDB throttling as "this thread is busy". The store now
+re-reads and says which it was.
+
+**A store failure during admission is a 503, never an assumption.** A failed
+write means we do not know whether the conversation is being torn down;
+refusing costs a retry, guessing costs the conversation.
+
+**Admission and the session touch are one write.** The turn's half of the
+retirement handshake ([SBX-011](sandbox.md#sbx-011)) happens *inside*
+`admit_chat_turn`. Touching the session first left a window: a delete could read
+the fresh timestamp, claim the session, see no running turn and cascade, all
+between the two — and the turn was then created against a conversation that no
+longer existed.
+
+**Don't:** enforce one-running-turn with a read above the insert. The *store*
+says a thread has at most one running turn: a partial unique index
+(`status = 'running'`) in SQL, a conditional write in DynamoDB. Under
+read-committed two requests can both observe no running turn and both commit,
+leaving two producers interleaving two answers into one conversation.
+
+### The event log
+
 **The producer renders the parts; the reader only replays them.** The log holds
 the exact JSON the live stream sent, so the first delivery and every replay are
-byte-identical and there is no second rendering path that can drift. It is also
-what lets `POST /chat/stream` and the reconnecting
-`GET /chat/stream/{thread_id}` share one reader. `message_id` and `text_id` live
-on the turn record for the same reason — a replay that minted fresh ids would
-read to the client as a *second* assistant message, not the same one being
-rebuilt.
+byte-identical and there is no second rendering path that can drift. `message_id`
+and `text_id` live on the turn record for the same reason — a replay that minted
+fresh ids would read to the client as a *second* assistant message, not the same
+one being rebuilt.
 
 **A reader stops on two conditions, not one:** a terminal status *and* a cursor
 that has reached `last_seq`. Status alone races the visibility of the final
@@ -190,68 +278,30 @@ per item, so a poll can return 5 and 7 without 6; taking the gap loses 6
 permanently rather than late. Both backends truncate a page at the first gap,
 and the DynamoDB reads are `ConsistentRead=True` on top of that.
 
-**Stopping is now an explicit request, because disconnecting no longer stops
-anything.** That cancellation used to be free — Starlette cancelled the
-generator, which cancelled the graph — and detaching the turn took it away, so
-`POST /chat/stream/{thread_id}/cancel` puts it back. It sets a flag on the
-record rather than signalling the task: with several workers the request
-usually lands somewhere other than the producer, so the record is the only
-channel that reaches it.
+**Only the stream route is exempt from the request timeout.** The exemption is
+matched on the path's shape (`/api/v1/chat/turns/{id}/stream`) because the id is
+in the path — exempting the whole `/turns/` subtree would silently drop the
+deadline from admission and cancellation too.
 
-**Don't:** make the producer notice a stop only between chunks. It reads the
-flag on its heartbeat and **cancels its own task**, because a turn is most
-likely to be stopped precisely while it is blocked on a slow model call or
-tool — where no chunk arrives for as long as the call takes, and where letting
-the call finish first means its side effects happen anyway. The publisher
-captures `asyncio.current_task()` in `__aenter__`, which is the producer's task,
-so the cross-worker path behaves like the same-worker one rather than degrading
-into a wait.
+### Stopping
+
+Disconnecting no longer stops anything, so `POST /chat/turns/{turn_id}/cancel`
+puts that back. It **only marks**: it sets a flag on the record and cancels the
+workflow. The flag is what reaches a turn running on a worker that never saw the
+request, and cancelling the workflow is what interrupts a turn blocked mid-call.
+
+**Don't:** make the turn notice a stop only between chunks. It reads the flag on
+its heartbeat and cancels its own work, because a turn is most likely to be
+stopped precisely while it is blocked on a slow model call or tool — where no
+chunk arrives for as long as the call takes, and where letting the call finish
+first means its side effects happen anyway.
 
 **Stop names the turn, not the thread.** The request can be delayed or retried,
 and by the time it lands the turn it was aimed at may have finished and the user
-started another — a thread-addressed stop would then kill the successor.
-
-A turn therefore has **two** names, because a client holds them at different
-times: `client_token`, which it mints before its send goes out, and `turn_id`,
-which rides on the opening frame. Stop is enabled from the moment a message is
-submitted, so without the token the whole window before the first frame did
-nothing at all — while the detached producer, tool actions included, carried on.
-A client that reconnected to a turn it did not start has only the id. Either
-identifies the turn; naming neither is a 422.
-
-**Stop can also beat the turn it names into the store**, so when it finds no
-running turn to flag it **creates one, already canceled**, claiming the client
-token. The create claims the same token, so whichever commits first wins and the
-loser is told which happened: the stop flags a turn that already exists, or the
-create is refused at birth. A thread has at most one turn per client token — a
-unique index on SQL, a conditional item in the thread's partition on DynamoDB.
-
-**Why a turn and not a record of its own.** The first version of this was a
-separate tombstone table, and every property it needed had to be built by hand:
-its own expiry, its own sweep, its own DynamoDB TTL, its own cascade on session
-delete, and hand-rolled locking to serialize it against the create. That
-produced a review finding in three consecutive rounds. Leaving an ordinary turn
-instead means the sweep, the session cascade and expiry all reach it without
-knowing it is special, and the uniqueness the store already enforces settles the
-race — no `SELECT ... FOR UPDATE`, and no second lifetime to keep in step.
-
-The stopped turn is a turn in every respect except that it never runs: it takes
-no active pointer, carries `last_seq = 0`, and its ids are synthetic because
-nothing ever streams it.
-
-**A stop against a thread with no session does nothing.** A stop only means
-anything for a session that can hold a turn, and without the check any
-authenticated caller could leave records on threads they do not own. That plus
-the turn lifecycle is the whole bound on what a stop can create — no rate
-limiting, because the writes are bounded by sends to conversations the user
-actually has, which is what bounds the turns themselves.
-
-
-**Don't:** let a second local cancel through. The producer clears its own
-cancellation before running its terminal cleanup, so a repeat — a retried
-request, or the heartbeat seeing the flag the first one set — lands *inside*
-that cleanup and leaves the turn recorded as running forever. Cancellation is
-first-writer-wins in-process (`_cancelling`), not merely idempotent over HTTP.
+started another — a thread-addressed stop would then kill the successor. The
+client learns the id from admission, or, after a reload, from
+`GET /chat/threads/{thread_id}/turns/active` (204 when the thread is idle, which
+the AI SDK maps to "nothing to resume").
 
 **Deleting a conversation closes it first, then stops the turn, then cascades.**
 Cancelling alone is not enough: the cancelled turn releases its mutex when it
@@ -268,93 +318,54 @@ and nothing saying so.
 
 Every uncertainty on that path is a **503**, never a delete: a failed cancel, a
 lost claim, or a turn that does not stop within `CHAT_TURN_STOP_WAIT_SECONDS`.
-A turn whose producer is *provably* gone — its local task is done, or its lease
-has lapsed — does not count as "did not stop", or a conversation orphaned by a
-restart could be neither used nor deleted. A task cancelled before its coroutine
-ever ran is the sharper case: none of the terminal cleanup happened, so the
-done-callback finalizes the record rather than leaving deletion to wait out a
-ten-minute lease.
 The claim is re-claimable by design, so the session stays closed and the retry
 is a plain repeat; a conversation half-removed from under a live producer cannot
-be put back, and no cleanup undoes checkpoint state it recreates afterwards.
-`delete_chat_turn` still collects batches **whether or not the header is
-there** — a producer that outlived its conversation is the only thing that
-creates headerless batches, so gating that cleanup on the header skipped the
-only rows worth collecting.
+be put back.
 
-**`expires_at` is a renewable lease, not a lifetime.** It is heartbeated by the
-running producer, independently of token output, because a turn is quietest
-exactly when it is slowest. Fixed at creation it would lapse mid-turn on any
-turn longer than the retention window, and then: reconnect reports nothing to
-attach to, a second producer may start on the same thread, and the sweep may
-delete the log still being written.
+### Expiry and sweeping
 
-Three things follow from expiry being mutable, and each was wrong when it was
-merely additive:
+`expires_at` on a **running** turn is a claim on the thread, and admission
+retires a lapsed one. It is therefore derived from the turn's own timeout
+(`CHAT_TURN_TIMEOUT_SECONDS + CHAT_TURN_LEASE_MARGIN_SECONDS`, in the shared
+`chat_turn_lease_expiry`), **not** from the replay retention window — which is
+much shorter than a turn may legitimately run, so using it let one send retire a
+turn that was merely slow and put two producers on one conversation. On finish
+the record is re-stamped with `CHAT_TURN_RETENTION_SECONDS`, which is a replay
+deadline rather than a claim.
 
-- **Renewal moves the record and the pointer together**, in one transaction.
-  Separately, a successor can take the pointer between the two writes and the
-  old producer carries on believing it holds the thread. **A failed renewal
-  stops the producer** rather than being ignored.
-- **Taking over an expired lease re-checks expiry in the update**, not just in
-  the read above it. The producer can renew in between, and retiring a live
-  turn puts a second producer on the thread.
-- **The DynamoDB sweep cannot assume creation order is expiry order.** Its index
-  is keyed by `created_at`, so a long-running turn that keeps renewing sits at
-  the head of the partition forever; a pass that stopped there would re-read and
-  skip the same entries every time while everything behind them accumulated. It
-  reads *past* live entries, and **persists where it got to**, so more pages of
-  live entries than one pass can walk delays the ones behind rather than
-  starving them. Reaching the end clears the cursor, which is what brings it
-  back to entries that were live last time. Queries carry an explicit `Limit`,
-  or one turn's completion could pull a megabyte of index and a `GetItem` per
-  entry in it. The sweep entry also keeps its own copy of the lease, so a
-  plainly-live turn is skipped without reading it (refreshed once, on finish —
-  it can only ever be *early*, which costs a confirming read rather than a
-  missed collection), and the sweep is paced per process by
-  `CHAT_TURN_SWEEP_INTERVAL_SECONDS` rather than run on every completed turn.
-
-**Don't:** enforce one-running-turn with a read above the insert. A thread has
-at most one running turn, and the *store* is what says so: a partial unique
-index (`status = 'running'`) in SQL, a conditional write in DynamoDB. Under
-read-committed two requests can both observe no running turn and both commit,
-leaving two producers interleaving two answers into one conversation. The loser
-is told to reconnect; the one case it retries instead is a blocker whose lease
-has **expired**, whose producer is gone and which it retires first.
-
-**Testing note:** a concurrency test here needs real connections. The SQL
-store's test fixture uses `StaticPool`, which hands every session the *same*
-connection, so two "concurrent" sessions interleave inside one transaction and
-this race cannot occur — a broken read-then-write passes, with both callers
-reporting success even though only one row lands.
-`test_two_concurrent_creates_cannot_both_win` builds its own file-backed engine
-for that reason.
-
-**Testing note:** these races are easy to write tests *around* rather than
-*for*, and three tests here passed against the broken code before being fixed.
-Check a new one fails against the version without the fix — in particular, a
-lease renewal injected before the blocking row is read is caught by the read
-guard and never reaches the update guard it was meant to exercise.
+This replaced a **renewable** lease heartbeated by the producer. Renewal existed
+only because a detached task had no other way to prove it was alive, and it
+brought three separate correctness rules with it (moving the record and the
+active pointer in one transaction, re-checking expiry in the takeover update as
+well as the read above it, and a sweep that could not assume creation order was
+expiry order). With the workflow bounding the turn, a fixed lease derived from
+that bound is sound and all three disappear.
 
 **Note:** expired logs are swept at the end of each turn, not by a scheduler. A
 log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the
-turns of a conversation nobody deletes would accumulate. Hanging the sweep off
-the producer rate-limits it to chat traffic, keeps it off the request, and keeps
-it working in deployments that run no Temporal worker (unlike session
-retirement, [SBX-011](sandbox.md#sbx-011)).
+turns of a conversation nobody deletes would accumulate. The DynamoDB sweep
+still reads *past* live entries and persists where it got to, because its index
+is keyed by `created_at`: a long-running turn sits at the head of the partition,
+and a pass that stopped there would re-read the same entries every time while
+everything behind them accumulated. Queries carry an explicit `Limit`, and the
+sweep is paced per process by `CHAT_TURN_SWEEP_INTERVAL_SECONDS`.
 
-**Admission and turn creation are one write.** The turn's half of the
-retirement handshake ([SBX-011](sandbox.md#sbx-011)) happens *inside*
-`create_chat_turn`, not before it. Touching the session first left a window: a
-delete could read the fresh timestamp, claim the session, see no running turn
-and cascade, all between the two — and the turn was then created against a
-conversation that no longer existed. There is no separate touch on this path.
+### Testing notes
 
-**Still open:** the producer is a detached task in the web process, so a restart
-of `seizu` still ends the turns it was running — the client is now told, rather
-than silently truncated. Moving the producer to the Temporal worker is the
-remaining half, and `chat_turns.start_turn` is the seam for it. Note that a
-retry there would be wrong for the same reason it is wrong for scheduled chats
-([AGT-007](#agt-007)): a turn is expensive and not idempotent, and retrying
-would append a second answer to the same log. The durability on offer is
-reconnect and surviving a web-process restart, not automatic retry.
+- A concurrency test here needs **real connections**. The SQL store's fixture
+  uses `StaticPool`, which hands every session the *same* connection, so two
+  "concurrent" sessions interleave inside one transaction and the race cannot
+  occur — a broken read-then-write passes, with both callers reporting success
+  even though only one row lands.
+  `test_two_concurrent_admissions_cannot_both_win` builds its own file-backed
+  engine for that reason.
+- These races are easy to write tests *around* rather than *for*. Several tests
+  here passed against the broken code before being fixed, so **check a new one
+  fails against the version without the fix**.
+- The route tests stand in for Temporal by running the activity inline
+  (`_fake_temporal`), so admission, the producer and the reader are exercised
+  together without a worker.
+- In the frontend suite, `jest.mock` is applied at call time by Bun rather than
+  hoisted, so it **cannot** replace the superclass of a class that has already
+  been evaluated — mocking `ai` does not change what `SeizuChatTransport`
+  extends. Stub the instance method instead.

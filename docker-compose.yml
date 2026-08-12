@@ -372,6 +372,14 @@ services:
       - CHAT_SESSION_MEMORY_MAX_RECEIPTS
       - CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS
       - SANDBOX_SESSION_PERSIST
+      # Interactive turns run here, so the turn settings apply to this
+      # service too -- the producer half of them.
+      - CHAT_TURN_RETENTION_SECONDS
+      - CHAT_TURN_FLUSH_MS
+      - CHAT_TURN_HEARTBEAT_SECONDS
+      - CHAT_TURN_SWEEP_INTERVAL_SECONDS
+      - CHAT_TURN_TIMEOUT_SECONDS
+      - CHAT_TURN_LEASE_MARGIN_SECONDS
       - CHAT_LLM_SYSTEM_PROMPT
       - CHAT_LLM_PROGRESSIVE_DISCLOSURE
       - CHAT_LLM_MAX_AUTO_ACTIONS
@@ -579,6 +587,8 @@ services:
       - CHAT_TURN_STOP_WAIT_SECONDS
       - CHAT_TURN_SWEEP_INTERVAL_SECONDS
       - CHAT_TURN_TAIL_MAX_SECONDS
+      - CHAT_TURN_TIMEOUT_SECONDS
+      - CHAT_TURN_LEASE_MARGIN_SECONDS
       # This worker also reconciles and runs scheduled chats.
       - CHAT_SCHEDULES_ENABLED
       - CHAT_SCHEDULE_TIMEOUT_SECONDS

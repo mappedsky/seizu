@@ -9,11 +9,8 @@ import {
 } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useChat } from '@ai-sdk/react';
-import {
-  DefaultChatTransport,
-  type ChatOnFinishCallback,
-  type UIMessage,
-} from 'ai';
+import { type ChatOnFinishCallback, type UIMessage } from 'ai';
+import { SeizuChatTransport, cancelChatTurn } from 'src/api/chatTransport';
 import {
   Alert,
   Accordion,
@@ -141,9 +138,8 @@ type SeizuChatMessage = UIMessage<
     // Set by useChatHistory on messages read back from the checkpoint.
     seizu_persisted?: boolean;
     // Server-side id of the turn that produced this message, carried on the
-    // stream's opening frame. Stop is addressed at this rather than at the
-    // thread: a delayed or retried request could otherwise stop a turn the
-    // user started afterwards.
+    // stream's opening frame. Informational: Stop names the id admission
+    // returned, which the client has without waiting for any frame.
     turn_id?: string;
   },
   {
@@ -750,9 +746,8 @@ export default function ChatInterface() {
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
   const resumeConfirmationIdRef = useRef<string | null>(null);
-  // Handle for the send in flight, so Stop has something to name before the
-  // turn announces its server-side id.
-  const clientTokenRef = useRef<string | null>(null);
+  // The turn admission handed back, which is what Stop names.
+  const activeTurnIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
@@ -927,11 +922,14 @@ export default function ChatInterface() {
 
   const transport = useMemo(
     () =>
-      new DefaultChatTransport<SeizuChatMessage>({
-        api: '/api/v1/chat/stream',
-        headers: { 'X-Seizu-Csrf': '1' },
-        prepareSendMessagesRequest: ({ messages, headers, body }) => {
-          const currentToken = accessTokenRef.current;
+      new SeizuChatTransport<SeizuChatMessage>({
+        threadId: () =>
+          chatIdRef.current === '__pending__' ? null : chatIdRef.current,
+        accessToken: () => accessTokenRef.current,
+        onTurn: (turnId) => {
+          activeTurnIdRef.current = turnId;
+        },
+        admissionBody: ({ messages, body }) => {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'
               ? body.resume_confirmation_id
@@ -942,51 +940,21 @@ export default function ChatInterface() {
               ? body.continue_message_id
               : undefined;
           resumeConfirmationIdRef.current = null;
-          // A handle for this send, minted before the request leaves. Stop
-          // needs an identity for the turn from the moment it is asked for,
-          // and the server-side turn id only arrives with the first frame.
-          const clientToken = `ct_${crypto.randomUUID().replace(/-/g, '')}`;
-          clientTokenRef.current = clientToken;
           return {
-            headers: {
-              ...headers,
-              ...(currentToken
-                ? { Authorization: `Bearer ${currentToken}` }
-                : {}),
-            },
-            body: {
-              message:
-                resumeConfirmationId || continueResponse
-                  ? ''
-                  : latestUserText(messages),
-              thread_id: chatIdRef.current,
-              ...(resumeConfirmationId
-                ? { resume_confirmation_id: resumeConfirmationId }
-                : {}),
-              ...(continueResponse ? { continue_response: true } : {}),
-              ...(continueMessageId
-                ? { continue_message_id: continueMessageId }
-                : {}),
-              ...(bypassConfirmationsRef.current
-                ? { bypass_confirmations: true }
-                : {}),
-              client_token: clientToken,
-            },
-          };
-        },
-        // Reconnecting to a running turn. The bearer token has to be injected
-        // here too -- the SDK's default reconnect request carries only the
-        // transport's static headers, which would be an unauthenticated GET.
-        prepareReconnectToStreamRequest: ({ headers }) => {
-          const currentToken = accessTokenRef.current;
-          return {
-            api: `/api/v1/chat/stream/${encodeURIComponent(chatIdRef.current)}`,
-            headers: {
-              ...headers,
-              ...(currentToken
-                ? { Authorization: `Bearer ${currentToken}` }
-                : {}),
-            },
+            message:
+              resumeConfirmationId || continueResponse
+                ? ''
+                : latestUserText(messages),
+            ...(resumeConfirmationId
+              ? { resume_confirmation_id: resumeConfirmationId }
+              : {}),
+            ...(continueResponse ? { continue_response: true } : {}),
+            ...(continueMessageId
+              ? { continue_message_id: continueMessageId }
+              : {}),
+            ...(bypassConfirmationsRef.current
+              ? { bypass_confirmations: true }
+              : {}),
           };
         },
       }),
@@ -1058,66 +1026,31 @@ export default function ChatInterface() {
     resume: activeThreadId !== null && !historyLoading,
   });
 
+  messagesRef.current = messages;
+  setMessagesRef.current = setMessages;
   resumeStreamRef.current = resumeStream;
 
   const handleStop = useCallback(() => {
-    // Closing the reader is not enough on its own: the turn runs beside the
-    // request, so without telling the server it keeps generating and can still
-    // execute the actions it had queued.
+    // Closing the stream is not enough: the turn is produced elsewhere, so
+    // without being told it keeps generating and can still run the actions it
+    // had queued.
     //
-    // The reader is stopped immediately so the button stays responsive, which
-    // means the request has to be the durable half. `keepalive` lets it survive
-    // the user navigating away in the same gesture, and it is retried once —
-    // otherwise a single dropped request leaves the user looking at a stopped
-    // response while the turn runs to completion behind it.
-    // Name the turn, never "whatever is running" — a retry of this request can
-    // land after the turn finished and the user started another.
-    //
-    // Two identities, because we hold them at different times: the server-side
-    // id arrives with the opening frame, while the token we minted is ours from
-    // the moment we sent. Stop is enabled during `submitted`, before any frame,
-    // so without the token that window would silently do nothing.
-    const streaming = messagesRef.current.at(-1);
-    const turnId =
-      streaming?.role === 'assistant' ? streaming.metadata?.turn_id : undefined;
-    const handle = turnId
-      ? `turn_id=${encodeURIComponent(turnId)}`
-      : clientTokenRef.current
-        ? `client_token=${encodeURIComponent(clientTokenRef.current)}`
-        : null;
-    if (activeThreadId && handle) {
-      const url =
-        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel?` +
-        handle;
-      const options: RequestInit = {
-        method: 'POST',
-        keepalive: true,
-        headers: {
-          'X-Seizu-Csrf': '1',
-          ...(accessTokenRef.current
-            ? { Authorization: `Bearer ${accessTokenRef.current}` }
-            : {}),
-        },
-      };
-      const cancel = async (): Promise<void> => {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          try {
-            const res = await fetch(url, options);
-            if (res.ok) return;
-          } catch {
-            // Retried below.
-          }
-        }
-        // Nothing further we can do from here; the turn ends on its own.
+    // One identity, held from the moment admission answered — so a late or
+    // repeated call cannot land on a turn the user started afterwards, and
+    // there is no window where we have nothing to name.
+    const turnId = activeTurnIdRef.current;
+    if (turnId) {
+      void cancelChatTurn(turnId, accessTokenRef.current).catch(() => {
+        // The reader stops regardless, so a lost request leaves the user
+        // looking at a stopped response while the turn runs on. `keepalive`
+        // covers the common cause (navigating away in the same gesture);
+        // beyond that there is nothing useful to do from here, so say so
+        // rather than retrying silently.
         console.warn('Failed to stop the chat turn on the server');
-      };
-      void cancel();
+      });
     }
     stop();
-  }, [activeThreadId, stop]);
-
-  messagesRef.current = messages;
-  setMessagesRef.current = setMessages;
+  }, [stop]);
 
   const busy = status === 'submitted' || status === 'streaming';
   const visibleMessages = useMemo(

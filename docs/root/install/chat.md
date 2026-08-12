@@ -58,8 +58,9 @@ Sessions created by scheduled chats are excluded from the sidebar and are read-o
 
 ## Turns outlive the connection watching them
 
-A turn does not run inside its HTTP request. Starting one opens a short-lived
-**turn event log** and the request becomes a reader over that log, so closing
+A turn does not run inside its HTTP request. Sending a message admits a **turn**
+— a Temporal workflow on `seizu-temporal-worker` — which writes to a short-lived
+**turn event log**; the request is a reader over that log, so closing
 the tab, losing the network, or navigating away neither stops the turn nor loses
 what it has already produced. Coming back replays the turn from its first token
 and then follows it live — the browser reattaches automatically on load, and
@@ -80,16 +81,23 @@ Two things this does *not* recover:
 
 - **A failed turn is not retried.** An agent turn is expensive and not
   idempotent, so a failure is reported rather than repeated.
-- **A restart of the `seizu` process ends the turns it was running.** The
-  producer lives in that process today. What the log guarantees is that the
-  client is told the turn ended, instead of receiving a silently truncated
-  answer.
+- **A stopped turn stays stopped.** Cancelling is a decision, not a fault, so
+  nothing restarts it.
+
+A restart of the `seizu` web process no longer ends a turn: the turn runs as a
+Temporal workflow on `seizu-temporal-worker`, and the browser reattaches to it
+when the page comes back.
 
 Turn logs are deleted `CHAT_TURN_RETENTION_SECONDS` after the turn finishes, and
 immediately when the session is deleted. Expired logs are collected at the end
-of each turn, in small batches — there is no scheduler to run and no dependency
-on the Temporal worker. They are not conversation history: that lives in the
-checkpoint and is served by `/api/v1/chat/history`.
+of each turn, in small batches — there is no scheduler to run. They are not
+conversation history: that lives in the checkpoint and is served by
+`/api/v1/chat/history`.
+
+Because each turn is a workflow, **interactive chat requires a reachable
+Temporal server and a running `seizu-temporal-worker`**. This is a change: chat
+previously ran entirely in the web process. Turns appear in the Temporal UI
+alongside scheduled chats and workflows.
 
 ### Deployment requirement: set a gunicorn timeout
 
@@ -330,7 +338,9 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_TURN_FLUSH_MS` | `200` | How often a running turn flushes buffered stream parts to its log. |
 | `CHAT_TURN_POLL_MS` | `200` | How often a connected client's request polls that log while output is arriving. Together with the flush interval this is the latency between a token being produced and reaching the browser. |
 | `CHAT_TURN_POLL_MAX_MS` | `1000` | Ceiling the poll backs off to while a turn produces nothing (tool calls, model latency). Resets to the floor as soon as a batch lands. |
-| `CHAT_TURN_HEARTBEAT_SECONDS` | `2` | How often a running turn renews its lease and checks for a stop request. Also the worst-case delay before **Stop** takes effect when the request lands on a replica that did not start the turn. |
+| `CHAT_TURN_HEARTBEAT_SECONDS` | `2` | How often a running turn checks for a stop request. Also the worst-case delay before **Stop** takes effect when the request lands on a replica that did not start the turn. |
+| `CHAT_TURN_TIMEOUT_SECONDS` | `900` | How long one turn may run before its workflow gives up. A turn that hits this is recorded as failed rather than left running. |
+| `CHAT_TURN_LEASE_MARGIN_SECONDS` | `300` | Added to the timeout above to get a running turn's claim on its thread. Must outlast every way a turn can legitimately still be running, or a concurrent send can retire a live one. |
 | `CHAT_TURN_STOP_WAIT_SECONDS` | `10` | How long deleting a conversation waits for its running turn to actually stop before cascading. |
 | `CHAT_TURN_SWEEP_INTERVAL_SECONDS` | `300` | Minimum gap between expired-log sweeps in one process. Sweeps are driven by turns completing, which is far more often than expiry needs. |
 | `CHAT_TURN_TAIL_MAX_SECONDS` | `1800` | Hard bound on how long one request will follow a turn, so a producer that dies without writing a terminal status cannot hold a connection open indefinitely. |

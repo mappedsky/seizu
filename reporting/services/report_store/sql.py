@@ -52,6 +52,7 @@ from reporting.schema.space_config import (
 )
 from reporting.services.report_store.base import (
     ReportStore,
+    chat_turn_lease_expiry,
     initial_report_config,
     require_public_space_member,
     validate_chat_turn_batch,
@@ -3487,7 +3488,7 @@ class SQLModelReportStore(ReportStore):
                 "status": "running",
                 "created_at": now_iso,
                 "updated_at": now_iso,
-                "expires_at": (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
+                "expires_at": chat_turn_lease_expiry(now),
             }
             session.add(ChatTurnRecord(**values))
             try:

@@ -84,7 +84,14 @@ async def admit_chat_turn(
         # the conversation cannot be continued from the web UI.
         raise HTTPException(status_code=403, detail="Headless chat sessions are read-only")
 
-    admission = await chat_turns.start_turn(thread_id, body, current)
+    try:
+        admission = await chat_turns.start_turn(thread_id, body, current)
+    except Exception as exc:
+        # Admission is a store write, and a failure means we do not know whether
+        # the conversation is being torn down underneath us. Refusing costs a
+        # retry; guessing costs the conversation.
+        logger.exception("Failed to admit a chat turn", extra={"thread_id": thread_id})
+        raise HTTPException(status_code=503, detail="Could not start this turn; please try again") from exc
     if admission.outcome == "retired":
         raise HTTPException(status_code=404, detail="This conversation has been retired")
     if admission.outcome == "busy":
