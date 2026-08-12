@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from snowflake import SnowflakeGenerator
-from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, text, update
+from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -378,6 +378,7 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
     thread_id: str
     message_id: str
     text_id: str
+    client_token: str | None = None
     status: str = "running"
     # None until the turn finishes; see ChatTurnItem for why a reader needs it.
     last_seq: int | None = None
@@ -666,6 +667,7 @@ def _chat_turn_from_record(record: ChatTurnRecord) -> ChatTurnItem:
             "user_id": record.user_id,
             "message_id": record.message_id,
             "text_id": record.text_id,
+            "client_token": record.client_token,
             "status": record.status,
             "last_seq": record.last_seq,
             "cancel_requested": record.cancel_requested,
@@ -3416,7 +3418,8 @@ class SQLModelReportStore(ReportStore):
         thread_id: str,
         message_id: str,
         text_id: str,
-    ) -> ChatTurnItem:
+        client_token: str | None = None,
+    ) -> ChatTurnItem | None:
         # Two attempts: the unique index is the authority on "already running",
         # and losing to a turn whose lease has *expired* is the one case worth
         # retrying -- its producer is gone, so it must not hold the thread.
@@ -3424,12 +3427,28 @@ class SQLModelReportStore(ReportStore):
             now = datetime.now(tz=UTC)
             now_iso = now.isoformat()
             async with AsyncSession(_get_engine()) as session:
+                # Admission and creation commit together, so a delete cannot
+                # slip between them: the session is closed to new turns the
+                # moment it is claimed, and this update is what observes that.
+                admitted = await session.execute(
+                    update(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                        col(ChatSessionRecord.retiring_at).is_(None),
+                    )
+                    .values(updated_at=now_iso)
+                )
+                if admitted.rowcount == 0:
+                    await session.rollback()
+                    return None
                 values = {
                     "turn_id": generate_report_id(),
                     "user_id": user_id,
                     "thread_id": thread_id,
                     "message_id": message_id,
                     "text_id": text_id,
+                    "client_token": client_token,
                     "status": "running",
                     "created_at": now_iso,
                     "updated_at": now_iso,
@@ -3507,6 +3526,7 @@ class SQLModelReportStore(ReportStore):
         user_id: str,
         thread_id: str,
         turn_id: str | None = None,
+        client_token: str | None = None,
     ) -> ChatTurnItem | None:
         async with AsyncSession(_get_engine()) as session:
             conditions = [
@@ -3514,8 +3534,15 @@ class SQLModelReportStore(ReportStore):
                 col(ChatTurnRecord.thread_id) == thread_id,
                 col(ChatTurnRecord.status) == "running",
             ]
-            if turn_id is not None:
-                conditions.append(col(ChatTurnRecord.turn_id) == turn_id)
+            if turn_id is not None or client_token is not None:
+                # Either identity is enough; they name the same turn from the
+                # two ends of its life.
+                named = []
+                if turn_id is not None:
+                    named.append(col(ChatTurnRecord.turn_id) == turn_id)
+                if client_token is not None:
+                    named.append(col(ChatTurnRecord.client_token) == client_token)
+                conditions.append(or_(*named))
             record = (await session.execute(select(ChatTurnRecord).where(*conditions))).scalars().first()
             if record is None:
                 return None

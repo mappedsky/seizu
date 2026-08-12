@@ -918,8 +918,21 @@ class ReportStore(ABC):
         thread_id: str,
         message_id: str,
         text_id: str,
-    ) -> ChatTurnItem:
-        """Open a store-minted turn for a thread.
+        client_token: str | None = None,
+    ) -> ChatTurnItem | None:
+        """Admit a turn and open its log, in one commit.
+
+        Returns None when the session does not exist or has been claimed for
+        retirement.
+
+        **Admission and creation are the same write.** Touching the session
+        first and creating the turn afterwards leaves a window: a delete can
+        read the fresh timestamp, claim the session, find no running turn and
+        cascade, all between the two -- and the turn is then created against a
+        conversation that no longer exists. So the session's ``updated_at`` is
+        moved *here*, conditioned on ``retiring_at`` being unset, and the turn
+        exists only if that condition held. This is the turn's half of the
+        retirement handshake (SBX-011); there is no separate touch.
 
         A thread has at most one running, unexpired turn: a second caller loses
         with :class:`ChatTurnConflictError`, so a reconnecting client never has
@@ -986,6 +999,7 @@ class ReportStore(ABC):
         user_id: str,
         thread_id: str,
         turn_id: str | None = None,
+        client_token: str | None = None,
     ) -> ChatTurnItem | None:
         """Ask a running turn to stop, returning it, or None.
 
@@ -999,6 +1013,12 @@ class ReportStore(ABC):
         addressing the thread alone would then stop the wrong turn. Omitting it
         means "whichever turn is running", which is only safe for a caller that
         has already closed the thread to new turns.
+
+        ``client_token`` names the same turn by the handle the *client* minted
+        for the send that started it. A client has that before its request goes
+        out, while it only learns ``turn_id`` once the turn announces itself --
+        so the token is what makes Stop work in between. Either identifies the
+        turn; matching one is enough.
         """
 
     @abstractmethod

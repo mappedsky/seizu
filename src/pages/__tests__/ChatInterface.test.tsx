@@ -1979,6 +1979,65 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
+  it('can stop a turn that has not announced its id yet', async () => {
+    // Stop is enabled from `submitted`, before any frame arrives. Without the
+    // token we minted for the send, that window silently did nothing.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const stop = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop,
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'submitted',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    // Sending is what mints the token, so drive the transport the way the SDK
+    // would before pressing Stop.
+    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
+    if (!transportOptions) throw new Error('missing transport options');
+    const prepared = transportOptions.prepareSendMessagesRequest?.({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      requestMetadata: undefined,
+      body: undefined,
+      credentials: 'same-origin',
+      headers: {},
+      api: '/api/v1/chat/stream',
+      trigger: 'submit-message',
+      messageId: 'u1',
+    }) as { body: { client_token?: string } } | undefined;
+    const token = prepared?.body.client_token;
+    expect(token).toBeTruthy();
+
+    fetchMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }));
+    await act(async () => {});
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/chat/stream/thread-1/cancel?client_token=${token}`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    fetchMock.mockRestore();
+  });
+
   it('authenticates the reconnect request and points it at the thread', async () => {
     // The SDK's default reconnect carries only the transport's static headers,
     // which would be an unauthenticated GET.

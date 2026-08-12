@@ -915,6 +915,10 @@ CHAT_TURN_HEARTBEAT_SECONDS = int_env("CHAT_TURN_HEARTBEAT_SECONDS", 2)
 # stop before cascading. Bounded by the heartbeat above: a producer on another
 # replica cannot notice sooner than that.
 CHAT_TURN_STOP_WAIT_SECONDS = float_env("CHAT_TURN_STOP_WAIT_SECONDS", 10.0)
+# Minimum gap between expired-log sweeps in one process. The sweep is driven
+# by turns completing, which is far more often than expiry needs; pacing it
+# keeps the cost proportional to time rather than to chat volume.
+CHAT_TURN_SWEEP_INTERVAL_SECONDS = float_env("CHAT_TURN_SWEEP_INTERVAL_SECONDS", 300.0)
 # Hard bound on how long a reader will tail one turn before giving up, so a
 # producer that dies without writing a terminal status cannot hold a request
 # open forever.

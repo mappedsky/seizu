@@ -750,6 +750,9 @@ export default function ChatInterface() {
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
   const resumeConfirmationIdRef = useRef<string | null>(null);
+  // Handle for the send in flight, so Stop has something to name before the
+  // turn announces its server-side id.
+  const clientTokenRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
@@ -939,6 +942,11 @@ export default function ChatInterface() {
               ? body.continue_message_id
               : undefined;
           resumeConfirmationIdRef.current = null;
+          // A handle for this send, minted before the request leaves. Stop
+          // needs an identity for the turn from the moment it is asked for,
+          // and the server-side turn id only arrives with the first frame.
+          const clientToken = `ct_${crypto.randomUUID().replace(/-/g, '')}`;
+          clientTokenRef.current = clientToken;
           return {
             headers: {
               ...headers,
@@ -962,6 +970,7 @@ export default function ChatInterface() {
               ...(bypassConfirmationsRef.current
                 ? { bypass_confirmations: true }
                 : {}),
+              client_token: clientToken,
             },
           };
         },
@@ -1061,16 +1070,25 @@ export default function ChatInterface() {
     // the user navigating away in the same gesture, and it is retried once —
     // otherwise a single dropped request leaves the user looking at a stopped
     // response while the turn runs to completion behind it.
-    // Only the turn we are actually watching, and only if it has announced
-    // itself. Before the opening frame arrives there is nothing to name, and
-    // guessing "whatever is running" is what would stop the wrong turn.
+    // Name the turn, never "whatever is running" — a retry of this request can
+    // land after the turn finished and the user started another.
+    //
+    // Two identities, because we hold them at different times: the server-side
+    // id arrives with the opening frame, while the token we minted is ours from
+    // the moment we sent. Stop is enabled during `submitted`, before any frame,
+    // so without the token that window would silently do nothing.
     const streaming = messagesRef.current.at(-1);
     const turnId =
       streaming?.role === 'assistant' ? streaming.metadata?.turn_id : undefined;
-    if (activeThreadId && turnId) {
+    const handle = turnId
+      ? `turn_id=${encodeURIComponent(turnId)}`
+      : clientTokenRef.current
+        ? `client_token=${encodeURIComponent(clientTokenRef.current)}`
+        : null;
+    if (activeThreadId && handle) {
       const url =
-        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel` +
-        `?turn_id=${encodeURIComponent(turnId)}`;
+        `/api/v1/chat/stream/${encodeURIComponent(activeThreadId)}/cancel?` +
+        handle;
       const options: RequestInit = {
         method: 'POST',
         keepalive: true,

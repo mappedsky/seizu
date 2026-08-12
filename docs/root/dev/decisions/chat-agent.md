@@ -210,7 +210,13 @@ into a wait.
 **Stop names the turn, not the thread.** The request can be delayed or retried,
 and by the time it lands the turn it was aimed at may have finished and the user
 started another — a thread-addressed stop would then kill the successor. The
-turn id rides on the stream's opening frame so the client has one to name.
+A turn therefore has **two** names, because a client holds them at different
+times: `client_token`, which it mints before its send goes out, and `turn_id`,
+which rides on the opening frame. Stop is enabled from the moment a message is
+submitted, so without the token the whole window before the first frame did
+nothing at all — while the detached producer, tool actions included, carried
+on. A client that reconnected to a turn it did not start has only the id.
+Either identifies the turn; naming neither is a 422.
 
 **Don't:** let a second local cancel through. The producer clears its own
 cancellation before running its terminal cleanup, so a repeat — a retried
@@ -222,11 +228,20 @@ first-writer-wins in-process (`_cancelling`), not merely idempotent over HTTP.
 Cancelling alone is not enough: the cancelled turn releases its mutex when it
 stops, and another tab can start a successor before the cascade runs. The gate
 is the reaper's own claim (`claim_chat_session_for_retirement`,
-[SBX-011](sandbox.md#sbx-011)), which makes `touch_chat_session` fail atomically
-— one mechanism for "this conversation is going away", not a second one.
+[SBX-011](sandbox.md#sbx-011)), which makes admission fail atomically — one
+mechanism for "this conversation is going away", not a second one.
+
+The record is deleted **last**, after the checkpoint and sandbox, by the same
+`delete_session_state` the reaper uses. The route used to do the opposite and
+swallow a cleanup failure behind a 204: the record is what makes a thread
+findable, so that left the transcript stored forever with nothing to retry from
+and nothing saying so.
 
 Every uncertainty on that path is a **503**, never a delete: a failed cancel, a
 lost claim, or a turn that does not stop within `CHAT_TURN_STOP_WAIT_SECONDS`.
+A turn whose producer is *provably* gone — its local task is done, or its lease
+has lapsed — does not count as "did not stop", or a conversation orphaned by a
+restart could be neither used nor deleted.
 The claim is re-claimable by design, so the session stays closed and the retry
 is a plain repeat; a conversation half-removed from under a live producer cannot
 be put back, and no cleanup undoes checkpoint state it recreates afterwards.
@@ -261,7 +276,11 @@ merely additive:
   starving them. Reaching the end clears the cursor, which is what brings it
   back to entries that were live last time. Queries carry an explicit `Limit`,
   or one turn's completion could pull a megabyte of index and a `GetItem` per
-  entry in it.
+  entry in it. The sweep entry also keeps its own copy of the lease, so a
+  plainly-live turn is skipped without reading it (refreshed once, on finish —
+  it can only ever be *early*, which costs a confirming read rather than a
+  missed collection), and the sweep is paced per process by
+  `CHAT_TURN_SWEEP_INTERVAL_SECONDS` rather than run on every completed turn.
 
 **Don't:** enforce one-running-turn with a read above the insert. A thread has
 at most one running turn, and the *store* is what says so: a partial unique
@@ -292,10 +311,12 @@ the producer rate-limits it to chat traffic, keeps it off the request, and keeps
 it working in deployments that run no Temporal worker (unlike session
 retirement, [SBX-011](sandbox.md#sbx-011)).
 
-**Note:** the retirement handshake is unchanged and still comes first.
-`touch_chat_session` is awaited *before* the turn is created, not beside it, for
-the reason in [SBX-011](sandbox.md#sbx-011): a turn that started before that
-write landed could be running against state being torn down.
+**Admission and turn creation are one write.** The turn's half of the
+retirement handshake ([SBX-011](sandbox.md#sbx-011)) happens *inside*
+`create_chat_turn`, not before it. Touching the session first left a window: a
+delete could read the fresh timestamp, claim the session, see no running turn
+and cascade, all between the two — and the turn was then created against a
+conversation that no longer existed. There is no separate touch on this path.
 
 **Still open:** the producer is a detached task in the web process, so a restart
 of `seizu` still ends the turns it was running — the client is now told, rather

@@ -17,11 +17,12 @@ from reporting.schema.chat import (
     ChatSessionsResponse,
     ChatStreamRequest,
     ChatTurnConflictError,
+    ChatTurnNotAdmittedError,
     CreateChatSessionRequest,
     UpdateChatSessionRequest,
 )
-from reporting.services import chat_turns, report_store
-from reporting.services.chat_graph import delete_thread_messages, load_thread_messages
+from reporting.services import chat_turns, report_store, session_reaper
+from reporting.services.chat_graph import load_thread_messages
 from reporting.services.chat_messages import created_at, message_text
 
 logger = logging.getLogger(__name__)
@@ -29,29 +30,6 @@ router = APIRouter()
 # Detail kinds preserved in history so a reloaded turn keeps its full trace —
 # single-agent (thinking/skill/tool) plus the orchestration trace.
 _HISTORY_DETAIL_KINDS = frozenset({"thinking", "skill", "tool", "routing", "plan", "step", "verify", "subagent"})
-
-
-async def _claim_chat_session_for_turn(user_id: str, thread_id: str) -> str:
-    """Record the turn's activity before it starts, and report whether it may.
-
-    Awaited rather than fired into a background task: the timestamp this writes
-    is what stops the session reaper retiring the conversation
-    (:mod:`reporting.services.session_reaper`), and a task that has not run yet
-    protects nothing.
-
-    Three outcomes, and the last is why this cannot fail open. A successful
-    write is the turn's half of the retirement handshake; ``None`` means the
-    session is gone or already claimed, so its checkpoint and sandbox are being
-    deleted. **A store failure means we do not know which** -- and proceeding on
-    "probably fine" is exactly the case where a turn runs against state being
-    torn down underneath it. Refusing costs a retry; guessing costs the
-    conversation.
-    """
-    try:
-        return "ok" if await report_store.touch_chat_session(user_id, thread_id) else "retired"
-    except Exception:
-        logger.exception("Failed to update chat session timestamp", extra={"thread_id": thread_id})
-        return "unavailable"
 
 
 _STREAM_HEADERS = {
@@ -106,23 +84,16 @@ async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> As
         async for frame in _stream_error("Session not found"):
             yield frame
         return
-    # Awaited before the turn is created, not alongside it: this write is the
-    # turn's half of the retirement handshake (SBX-011), and a turn that started
-    # before it landed could be running against state being torn down.
-    admission = await _claim_chat_session_for_turn(current.user.user_id, body.thread_id)
-    if admission != "ok":
-        # Retryable when the store was unreachable; permanent when the session
-        # is being retired. The wording is the only thing telling the user
-        # which, so it has to differ.
-        async for frame in _stream_error(
-            "This conversation has been retired"
-            if admission == "retired"
-            else "Could not start this turn; please try again"
-        ):
-            yield frame
-        return
     try:
         turn = await chat_turns.start_turn(body, current)
+    except ChatTurnNotAdmittedError:
+        # The session is gone or claimed for retirement -- its checkpoint and
+        # sandbox are being deleted, so a turn must not run against it. The
+        # store decided that in the same write that would have created the
+        # turn, so there is no window between admission and creation.
+        async for frame in _stream_error("This conversation has been retired"):
+            yield frame
+        return
     except ChatTurnConflictError:
         # The client has a turn running it is not watching. Telling it to
         # reconnect is more useful than starting a second one, which would
@@ -131,8 +102,10 @@ async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> As
             yield frame
         return
     except Exception:
+        # Includes the store being unreachable, which is retryable and reads
+        # differently from a conversation that has been retired.
         logger.exception("Failed to start chat turn", extra={"thread_id": body.thread_id})
-        async for frame in _stream_error("Chat stream failed"):
+        async for frame in _stream_error("Could not start this turn; please try again"):
             yield frame
         return
     async for frame in chat_turns.tail_turn(turn.turn_id):
@@ -177,7 +150,8 @@ async def reconnect_chat_stream(
 @router.post("/api/v1/chat/stream/{thread_id}/cancel", status_code=204)
 async def cancel_chat_stream(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
-    turn_id: str = Query(min_length=1, max_length=64),
+    turn_id: str | None = Query(default=None, min_length=1, max_length=64),
+    client_token: str | None = Query(default=None, min_length=8, max_length=64),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
     """Stop a specific running turn.
@@ -187,13 +161,25 @@ async def cancel_chat_stream(
     tokens and still able to execute the actions it had lined up. Stop has to
     say so explicitly.
 
-    ``turn_id`` is required rather than implied by the thread. This request can
-    be delayed or retried, and by the time it lands the turn it was aimed at may
-    have finished and the user started another -- addressing the thread alone
-    would stop that one instead. Clients read the id from the stream's opening
-    frame. Idempotent: a turn that is already gone is a 204, not an error.
+    The turn is named, not implied by the thread. This request can be delayed or
+    retried, and by the time it lands the turn it was aimed at may have finished
+    and the user started another -- addressing the thread alone would stop that
+    one instead.
+
+    Either identity will do, because a client has them at different times: it
+    mints ``client_token`` before its send goes out, and only learns ``turn_id``
+    when the turn announces itself on the opening frame. A client that
+    reconnected to a turn it did not start has only the id. Idempotent: a turn
+    that is already gone is a 204, not an error.
     """
-    turn = await report_store.request_chat_turn_cancel(current.user.user_id, thread_id, turn_id)
+    if turn_id is None and client_token is None:
+        raise HTTPException(status_code=422, detail="turn_id or client_token is required")
+    turn = await report_store.request_chat_turn_cancel(
+        current.user.user_id,
+        thread_id,
+        turn_id,
+        client_token,
+    )
     if turn is not None:
         # Fast path when the producer is on this worker; otherwise the flag
         # above reaches it at its next heartbeat.
@@ -390,7 +376,7 @@ async def update_chat_session(
     return result
 
 
-async def _close_session_for_deletion(user_id: str, thread_id: str) -> None:
+async def _close_session_for_deletion(user_id: str, thread_id: str) -> bool:
     """Claim a session and stop its turn, so deletion cannot race a producer.
 
     Raises 503 rather than proceeding on any uncertainty. The claim is
@@ -400,7 +386,9 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> None:
     """
     session = await report_store.get_chat_session(user_id, thread_id)
     if session is None:
-        return
+        # Already gone. Deleting is idempotent, and there is no state left to
+        # tear down under a session that never existed.
+        return False
     try:
         claimed = await report_store.claim_chat_session_for_retirement(user_id, thread_id, session.updated_at)
     except Exception as exc:
@@ -417,7 +405,7 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> None:
         logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
         raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
     if canceled is None:
-        return
+        return True
     chat_turns.cancel_local_producer(canceled.turn_id)
     if not await chat_turns.await_turn_stopped(canceled.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
         # Deleting now would leave the producer recreating checkpoint state
@@ -428,6 +416,7 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> None:
             extra={"thread_id": thread_id, "turn_id": canceled.turn_id},
         )
         raise HTTPException(status_code=503, detail="Conversation is still running; try again")
+    return True
 
 
 @router.delete("/api/v1/chat/sessions/{thread_id}", status_code=204)
@@ -435,23 +424,26 @@ async def delete_chat_session(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> None:
-    """Delete a chat session."""
-    # Close the conversation to new turns, stop the one running, and only then
-    # remove what it was writing into.
-    #
-    # The claim is the same one the reaper uses (SBX-011): it makes
-    # touch_chat_session fail atomically, so no turn can start while this runs.
-    # Cancelling without it is not enough -- the cancelled turn releases its
-    # mutex when it stops, and another tab can start a successor in the window
-    # between that and the cascade.
-    await _close_session_for_deletion(current.user.user_id, thread_id)
+    """Delete a chat session.
+
+    Close it to new turns, stop the one running, then destroy its state --
+    checkpoint and sandbox first, the session record **last**.
+
+    The claim is the reaper's own (SBX-011): it makes admission fail atomically,
+    so no turn can start while this runs. Cancelling without it is not enough,
+    because a cancelled turn releases its mutex when it stops and another tab
+    could start a successor before the cascade.
+
+    Deleting the record last is what makes a failure retryable. The record is
+    the only thing that makes the thread findable: removing it first and then
+    failing to delete the checkpoint would leave the transcript stored forever
+    with nothing left to retry from -- and reporting 204 while that happened
+    would not even say so.
+    """
+    if not await _close_session_for_deletion(current.user.user_id, thread_id):
+        return
     try:
-        deleted = await report_store.delete_chat_session(current.user.user_id, thread_id)
+        await session_reaper.delete_session_state(current.user.user_id, thread_id)
     except Exception as exc:
         logger.exception("Failed to delete chat session", extra={"thread_id": thread_id})
         raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
-    if deleted:
-        try:
-            await delete_thread_messages(current, thread_id)
-        except Exception:
-            logger.exception("Failed to delete chat session checkpoints", extra={"thread_id": thread_id})

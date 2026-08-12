@@ -15,6 +15,10 @@ class ChatStreamRequest(BaseModel):
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Client-minted handle for this send, used to stop the turn it starts.
+    # The client has it before the request goes out, which is what makes Stop
+    # work in the window before the turn announces its server-side id.
+    client_token: str | None = Field(default=None, min_length=8, max_length=64)
     # Run the turn with action confirmations bypassed. Requires the
     # chat:bypass_permissions permission (403 otherwise); every bypassed tool
     # execution is audit-logged.
@@ -90,6 +94,10 @@ class ChatTurnConflictError(Exception):
     """Raised when a thread already has a running turn."""
 
 
+class ChatTurnNotAdmittedError(Exception):
+    """Raised when a turn may not start: the session is gone or being retired."""
+
+
 class ChatTurnItem(BaseModel):
     """The header of one in-flight chat turn's replayable event log.
 
@@ -105,6 +113,11 @@ class ChatTurnItem(BaseModel):
     user_id: str
     message_id: str = Field(min_length=1, max_length=128)
     text_id: str = Field(min_length=1, max_length=128)
+    # The client's own handle for the send that started this turn, when there
+    # was one. Stop can be addressed at either this or ``turn_id``: a client
+    # that sent the turn has the token immediately, while one that reconnected
+    # to it only ever learns the id.
+    client_token: str | None = None
     status: Literal["running", "completed", "failed", "canceled"] = "running"
     # None until the turn finishes. A reader may stop only once the status is
     # terminal *and* it has consumed through last_seq: a terminal status on its

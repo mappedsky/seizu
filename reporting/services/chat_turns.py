@@ -32,7 +32,12 @@ from langchain_core.messages import HumanMessage
 
 from reporting import settings
 from reporting.authnz import CurrentUser
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatStreamRequest, ChatTurnItem
+from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    ChatStreamRequest,
+    ChatTurnItem,
+    ChatTurnNotAdmittedError,
+)
 from reporting.services import report_store
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
@@ -52,6 +57,10 @@ _EXPIRED_TURNS_PER_SWEEP = 25
 # How often a caller waiting for a turn to stop re-reads it. The local fast
 # path is immediate; a producer on another worker takes until its heartbeat.
 _TURN_STOP_POLL_SECONDS = 0.05
+
+# When this process last swept expired logs. Paced rather than run on every
+# completed turn; see :func:`sweep_expired_turns`.
+_last_sweep_monotonic = 0.0
 
 # Detached producer tasks, held so the event loop keeps a strong reference. A
 # task nobody holds can be garbage collected mid-run, which would look exactly
@@ -299,18 +308,25 @@ async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnI
     message_id = (
         body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
     )
+    # Admission happens inside this write, not before it: the store moves the
+    # session's timestamp and creates the turn in one commit, so a delete cannot
+    # claim the session in between and cascade over a turn about to exist.
     turn = await report_store.create_chat_turn(
         current.user.user_id,
         body.thread_id,
         message_id,
         f"text_{uuid.uuid4().hex}",
+        body.client_token,
     )
+    if turn is None:
+        raise ChatTurnNotAdmittedError("This conversation has been retired")
+    turn_id = turn.turn_id
     task = asyncio.create_task(run_turn_in_process(turn, body, current))
-    _running_producers[turn.turn_id] = task
+    _running_producers[turn_id] = task
 
     def _forget(_task: "asyncio.Task[None]") -> None:
-        _running_producers.pop(turn.turn_id, None)
-        _cancelling.discard(turn.turn_id)
+        _running_producers.pop(turn_id, None)
+        _cancelling.discard(turn_id)
 
     task.add_done_callback(_forget)
     return turn
@@ -355,9 +371,30 @@ async def await_turn_stopped(turn_id: str, timeout_seconds: float) -> bool:
         turn = await report_store.get_chat_turn(turn_id)
         if turn is None or turn.status != "running":
             return True
+        if _producer_is_gone(turn):
+            # Nothing will ever move this record out of "running": the producer
+            # died with its process, or was cancelled before its coroutine ever
+            # ran and so never reached its terminal cleanup. Waiting for it is
+            # waiting forever, and the caller would keep failing while holding a
+            # session that cannot start another turn either.
+            return True
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(_TURN_STOP_POLL_SECONDS)
+
+
+def _producer_is_gone(turn: ChatTurnItem) -> bool:
+    """True when nothing is left to finish this turn.
+
+    Two ways that happens. Locally we can be certain: the task is present and
+    done, so its cleanup has run or can no longer run. Otherwise the lease is
+    the evidence -- a live producer renews it every heartbeat with half the
+    retention window of slack, so an expired one is not merely quiet.
+    """
+    task = _running_producers.get(turn.turn_id)
+    if task is not None and task.done():
+        return True
+    return _expires_within(turn.expires_at, timedelta(0))
 
 
 async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, current: CurrentUser) -> None:
@@ -464,6 +501,15 @@ async def sweep_expired_turns() -> None:
     chat traffic, and it runs after the turn has finished, so no user waits for
     it. Each pass is bounded; a backlog drains over several turns.
     """
+    global _last_sweep_monotonic
+    now = time.monotonic()
+    if now - _last_sweep_monotonic < settings.CHAT_TURN_SWEEP_INTERVAL_SECONDS:
+        # Once per completed turn is far more often than expiry needs, and each
+        # pass is a query plus a read per candidate. Pacing it per process keeps
+        # the total proportional to time and replicas rather than to chat
+        # volume, without needing a shared lease to coordinate.
+        return
+    _last_sweep_monotonic = now
     try:
         expired = await report_store.list_expired_chat_turns(
             datetime.now(tz=UTC).isoformat(),

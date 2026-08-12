@@ -479,7 +479,42 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
 # ---------------------------------------------------------------------------
 
 
+async def _ensure_session(user_id: str = "user-1", thread_id: str = "1001") -> None:
+    """Give a thread a session row.
+
+    Creating a turn now *admits* it, in the same write, so a turn cannot exist
+    without a session to admit it -- which is the point (see AGT-008). Written
+    directly because ``create_chat_session`` mints its own thread id.
+    """
+    async with AsyncSession(sql_module._get_engine()) as session:
+        existing = (
+            (
+                await session.execute(
+                    select(sql_module.ChatSessionRecord).where(
+                        sql_module.ChatSessionRecord.user_id == user_id,
+                        sql_module.ChatSessionRecord.thread_id == thread_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            return
+        session.add(
+            sql_module.ChatSessionRecord(
+                user_id=user_id,
+                thread_id=thread_id,
+                title="",
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-01T00:00:00+00:00",
+            )
+        )
+        await session.commit()
+
+
 async def _open_turn(store, user_id: str = "user-1", thread_id: str = "1001"):
+    await _ensure_session(user_id, thread_id)
     return await store.create_chat_turn(user_id, thread_id, "msg_1", "text_1")
 
 
@@ -655,6 +690,7 @@ async def test_deleting_a_session_deletes_its_turn_logs(store, mocker):
 
 async def test_list_expired_chat_turns_selects_only_expired(store):
     live = await _open_turn(store)
+    await _ensure_session("user-2", "2002")
     stale = await store.create_chat_turn("user-2", "2002", "msg_2", "text_2")
     await _expire_turn(store, stale.turn_id, "2020-01-01T00:00:00+00:00")
 
@@ -682,6 +718,17 @@ async def test_two_concurrent_creates_cannot_both_win(tmp_path):
     try:
         with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
             concurrent = SQLModelReportStore()
+            async with AsyncSession(engine) as session:
+                session.add(
+                    sql_module.ChatSessionRecord(
+                        user_id="user-1",
+                        thread_id="1001",
+                        title="",
+                        created_at="2024-01-01T00:00:00+00:00",
+                        updated_at="2024-01-01T00:00:00+00:00",
+                    )
+                )
+                await session.commit()
             results = await asyncio.gather(
                 concurrent.create_chat_turn("user-1", "1001", "msg_1", "text_1"),
                 concurrent.create_chat_turn("user-1", "1001", "msg_1", "text_1"),
@@ -762,6 +809,65 @@ async def test_cancel_named_at_the_running_turn_flags_it(store):
     assert flagged is not None and flagged.cancel_requested is True
 
 
+async def test_a_turn_cannot_be_admitted_to_a_session_being_retired(store):
+    """The claim is what closes a conversation to new turns; admitting one
+    afterwards is the race the single write exists to remove."""
+    await _ensure_session()
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = (
+            (
+                await session.execute(
+                    select(sql_module.ChatSessionRecord).where(sql_module.ChatSessionRecord.thread_id == "1001")
+                )
+            )
+            .scalars()
+            .first()
+        )
+        record.retiring_at = "2024-01-01T00:00:00+00:00"
+        session.add(record)
+        await session.commit()
+
+    assert await store.create_chat_turn("user-1", "1001", "msg_1", "text_1") is None
+
+
+async def test_a_turn_cannot_be_admitted_without_a_session(store):
+    assert await store.create_chat_turn("user-1", "9999", "msg_1", "text_1") is None
+
+
+async def test_admitting_a_turn_moves_the_session_timestamp(store):
+    """The same write, so a delete cannot read the fresh timestamp, claim the
+    session and cascade in between."""
+    await _ensure_session()
+
+    await _open_turn(store)
+
+    session_item = await store.get_chat_session("user-1", "1001")
+    assert session_item is not None
+    assert session_item.updated_at > "2024-01-01T00:00:00+00:00"
+
+
+async def test_cancel_can_be_named_by_the_client_token(store):
+    """The client holds this from the moment it sends, while the turn id only
+    arrives with the first frame -- which is the window Stop used to miss."""
+    await _ensure_session()
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_abcdefgh")
+
+    flagged = await store.request_chat_turn_cancel("user-1", "1001", None, "ct_abcdefgh")
+
+    assert flagged is not None and flagged.turn_id == turn.turn_id
+    assert flagged.cancel_requested is True
+
+
+async def test_a_stale_token_does_not_cancel_a_successor(store):
+    await _ensure_session()
+    first = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_firstsend")
+    await store.finish_chat_turn(first.turn_id, "completed", 1)
+    second = await store.create_chat_turn("user-1", "1001", "msg_2", "text_2", "ct_secondsnd")
+
+    assert await store.request_chat_turn_cancel("user-1", "1001", None, "ct_firstsend") is None
+    assert (await store.get_chat_turn(second.turn_id)).cancel_requested is False
+
+
 async def test_cancel_reports_nothing_when_no_turn_is_running(store):
     turn = await _open_turn(store)
     await store.finish_chat_turn(turn.turn_id, "completed", 1)
@@ -785,6 +891,17 @@ async def test_takeover_does_not_retire_a_lease_renewed_since_it_was_read(mocker
     try:
         with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
             store = SQLModelReportStore()
+            async with AsyncSession(engine) as session:
+                session.add(
+                    sql_module.ChatSessionRecord(
+                        user_id="user-1",
+                        thread_id="1001",
+                        title="",
+                        created_at="2024-01-01T00:00:00+00:00",
+                        updated_at="2024-01-01T00:00:00+00:00",
+                    )
+                )
+                await session.commit()
             stale = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
             async with AsyncSession(engine) as session:
                 record = await session.get(sql_module.ChatTurnRecord, stale.turn_id)

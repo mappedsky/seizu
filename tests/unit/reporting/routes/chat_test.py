@@ -105,12 +105,21 @@ def _chat_turn_log(mocker):
     mocker.patch("reporting.settings.CHAT_TURN_POLL_MAX_MS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_HEARTBEAT_SECONDS", 1)
     mocker.patch("reporting.settings.CHAT_TURN_STOP_WAIT_SECONDS", 0.3)
+    # Paced per process in production; a test wants every turn to sweep.
+    mocker.patch("reporting.services.chat_turns._last_sweep_monotonic", 0.0)
+    mocker.patch("reporting.settings.CHAT_TURN_SWEEP_INTERVAL_SECONDS", 0.0)
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}
     counter = 0
 
-    async def create_chat_turn(user_id: str, thread_id: str, message_id: str, text_id: str) -> ChatTurnItem:
+    async def create_chat_turn(
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        text_id: str,
+        client_token: str | None = None,
+    ) -> ChatTurnItem | None:
         nonlocal counter
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
@@ -122,6 +131,7 @@ def _chat_turn_log(mocker):
             user_id=user_id,
             message_id=message_id,
             text_id=text_id,
+            client_token=client_token,
             created_at="2024-01-01T00:00:00+00:00",
             updated_at="2024-01-01T00:00:00+00:00",
             expires_at="2099-01-01T00:00:00+00:00",
@@ -166,11 +176,13 @@ def _chat_turn_log(mocker):
         user_id: str,
         thread_id: str,
         turn_id: str | None = None,
+        client_token: str | None = None,
     ) -> ChatTurnItem | None:
         for running_id, turn in turns.items():
             if turn.user_id != user_id or turn.thread_id != thread_id or turn.status != "running":
                 continue
-            if turn_id is not None and turn_id != running_id:
+            named = turn_id is not None or client_token is not None
+            if named and turn_id != running_id and (client_token is None or turn.client_token != client_token):
                 return None
             turns[running_id] = turn.model_copy(update={"cancel_requested": True})
             return turns[running_id]
@@ -303,12 +315,12 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
 
 async def test_chat_stream_refuses_a_session_claimed_for_retirement(mocker):
     """The reaper claims a session before destroying its checkpoint and sandbox,
-    and a claimed session reports as untouchable. Starting the turn anyway would
-    run it against state that is being deleted underneath it."""
+    and a claimed session admits no turn. Starting one anyway would run it
+    against state that is being deleted underneath it."""
     fake_graph = FakeChatGraph()
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    mocker.patch("reporting.routes.chat.report_store.touch_chat_session", AsyncMock(return_value=None))
+    mocker.patch("reporting.services.chat_turns.report_store.create_chat_turn", AsyncMock(return_value=None))
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -323,45 +335,34 @@ async def test_chat_stream_refuses_a_session_claimed_for_retirement(mocker):
     assert fake_graph.calls == []
 
 
-async def test_chat_stream_records_activity_before_running_the_turn(mocker):
-    """Awaited, not fired into a background task: this timestamp is what stops
-    the reaper retiring the conversation, and a task that has not run yet
-    protects nothing."""
-    order: list[str] = []
+async def test_admission_and_turn_creation_are_one_write(mocker):
+    """Two writes leave a window: a delete can read the fresh timestamp, claim
+    the session, see no running turn and cascade — all between them — and the
+    turn is then created against a conversation that no longer exists. So the
+    route must not touch the session separately at all."""
     fake_graph = FakeChatGraph()
-    original_stream = fake_graph.astream
-
-    def _recording_astream(*args, **kwargs):
-        order.append("stream")
-        return original_stream(*args, **kwargs)
-
-    fake_graph.astream = _recording_astream  # type: ignore[method-assign]
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-
-    async def _touch(user_id: str, thread_id: str):
-        order.append("touch")
-        return ChatSessionItem(thread_id=thread_id, title="", created_at="", updated_at="")
-
-    mocker.patch("reporting.routes.chat.report_store.touch_chat_session", _touch)
+    touched = AsyncMock()
+    mocker.patch("reporting.routes.chat.report_store.touch_chat_session", touched)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
+        response = await client.post("/api/v1/chat/stream", json={"message": "Hi", "thread_id": "1001"})
 
-    assert order[:2] == ["touch", "stream"]
+    assert '"type":"start"' in response.text
+    touched.assert_not_awaited()
 
 
 async def test_a_store_failure_refuses_the_turn_rather_than_guessing(mocker):
-    """This write is the turn's half of the retirement handshake, so a failure
-    means we do not know whether the session was already claimed. Proceeding on
-    "probably fine" is exactly the case where a turn runs against a checkpoint
-    being deleted underneath it; refusing costs a retry."""
+    """Admission is a store write, and a failure means we do not know whether
+    the conversation is being torn down. Refusing costs a retry; guessing costs
+    the conversation."""
     fake_graph = FakeChatGraph()
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=fake_graph)
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     mocker.patch(
-        "reporting.routes.chat.report_store.touch_chat_session",
+        "reporting.services.chat_turns.report_store.create_chat_turn",
         AsyncMock(side_effect=RuntimeError("store down")),
     )
 
@@ -976,37 +977,69 @@ async def test_chat_delete_removes_session_and_persisted_history(mocker):
 
 async def test_chat_delete_is_idempotent_for_missing_session(mocker):
     _patch_chat_sessions(mocker)
-    delete_messages = mocker.patch("reporting.routes.chat.delete_thread_messages")
+    delete_state = mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", AsyncMock())
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete("/api/v1/chat/sessions/9999")
 
     assert response.status_code == 204
-    delete_messages.assert_not_called()
+    delete_state.assert_not_awaited()
 
 
-async def test_chat_delete_ignores_checkpoint_cleanup_failure(mocker):
+async def test_chat_delete_reports_a_failed_checkpoint_cleanup(mocker):
+    """It used to swallow this and return 204 -- having already deleted the
+    session record, which was the only thing that made the thread findable. The
+    transcript stayed stored forever with nothing left to retry from, and
+    nothing said so."""
     _patch_chat_sessions(mocker, [("test-user-id", "1010")])
-    mocker.patch("reporting.routes.chat.delete_thread_messages", side_effect=RuntimeError("cleanup failed"))
+    mocker.patch(
+        "reporting.routes.chat.session_reaper.delete_session_state",
+        AsyncMock(side_effect=RuntimeError("cleanup failed")),
+    )
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete("/api/v1/chat/sessions/1010")
 
-    assert response.status_code == 204
+    assert response.status_code == 503
 
 
 async def test_chat_delete_store_failure_returns_503(mocker):
     _patch_chat_sessions(mocker, [("test-user-id", "1011")])
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", side_effect=RuntimeError("contention"))
-    mocker.patch("reporting.routes.chat.delete_thread_messages")
+    mocker.patch(
+        "reporting.routes.chat.session_reaper.delete_session_state",
+        AsyncMock(side_effect=RuntimeError("contention")),
+    )
     app = _make_app()
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete("/api/v1/chat/sessions/1011")
 
     assert response.status_code == 503
+
+
+async def test_the_session_record_is_deleted_last(mocker):
+    """The record is the thread's tombstone: removing it before the checkpoint
+    means a failure leaves the transcript with nothing to retry from."""
+    order: list[str] = []
+    _patch_chat_sessions(mocker, [("test-user-id", "1012")])
+
+    async def _delete_state(user_id: str, thread_id: str) -> None:
+        order.append("checkpoint")
+        order.append("record")
+
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", _delete_state)
+    mocker.patch(
+        "reporting.routes.chat.report_store.delete_chat_session",
+        AsyncMock(side_effect=AssertionError("the route must not delete the record itself")),
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.delete("/api/v1/chat/sessions/1012")).status_code == 204
+
+    assert order == ["checkpoint", "record"]
 
 
 async def test_chat_stream_no_longer_treats_slash_text_as_command(mocker):
@@ -1393,24 +1426,26 @@ async def test_deleting_a_session_closes_it_to_new_turns_first(mocker, _chat_tur
 
     claim = chat.report_store.claim_chat_session_for_retirement
     cancel = chat.report_store.request_chat_turn_cancel
-    delete = chat.report_store.delete_chat_session
 
     async def _recording_claim(user_id: str, thread_id: str, expected_updated_at: str):
         order.append("claim")
         return await claim(user_id, thread_id, expected_updated_at)
 
-    async def _recording_cancel(user_id: str, thread_id: str, turn_id: str | None = None):
+    async def _recording_cancel(
+        user_id: str,
+        thread_id: str,
+        turn_id: str | None = None,
+        client_token: str | None = None,
+    ):
         order.append("cancel")
-        return await cancel(user_id, thread_id, turn_id)
+        return await cancel(user_id, thread_id, turn_id, client_token)
 
-    async def _recording_delete(user_id: str, thread_id: str):
+    async def _recording_delete(user_id: str, thread_id: str) -> None:
         order.append("delete")
-        return await delete(user_id, thread_id)
 
     mocker.patch("reporting.routes.chat.report_store.claim_chat_session_for_retirement", _recording_claim)
     mocker.patch("reporting.routes.chat.report_store.request_chat_turn_cancel", _recording_cancel)
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", _recording_delete)
-    mocker.patch("reporting.routes.chat.delete_thread_messages", AsyncMock())
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", _recording_delete)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1427,7 +1462,7 @@ async def test_deletion_refuses_when_the_turn_will_not_stop(mocker, _chat_turn_l
     # A turn with no producer: nothing will ever move it out of "running".
     await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
     deleted = AsyncMock()
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", deleted)
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1575,14 +1610,10 @@ async def test_deleting_a_session_waits_for_the_turn_to_stop(mocker, _chat_turn_
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
 
-    delete = chat.report_store.delete_chat_session
-
-    async def _recording_delete(user_id: str, thread_id: str):
+    async def _recording_delete(user_id: str, thread_id: str) -> None:
         observed.append(_chat_turn_log[turn.turn_id].status)
-        return await delete(user_id, thread_id)
 
-    mocker.patch("reporting.routes.chat.report_store.delete_chat_session", _recording_delete)
-    mocker.patch("reporting.routes.chat.delete_thread_messages", AsyncMock())
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", _recording_delete)
 
     # Nothing is producing this turn, so it only reaches a terminal state
     # because something else finishes it -- stand in for the producer noticing.
@@ -1684,3 +1715,69 @@ async def test_a_repeated_local_cancel_cannot_interrupt_terminal_cleanup(mocker,
 
     assert _chat_turn_log[turn.turn_id].status == "canceled"
     assert _chat_turn_log[turn.turn_id].last_seq is not None
+
+
+async def test_stop_works_before_the_turn_announces_itself(mocker, _chat_turn_log):
+    """Stop is enabled from `submitted`, before any frame has arrived. Without
+    an identity the client already holds, that whole window silently did
+    nothing while the detached producer -- tool actions included -- carried on."""
+    started = asyncio.Event()
+
+    class BlockedGraph(FakeChatGraph):
+        async def astream(self, input, config, *, stream_mode):
+            self.calls.append((input, config, stream_mode))
+            started.set()
+            await asyncio.sleep(30)
+            yield {"kind": "token", "content": "too late"}
+
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.start_turn(
+        ChatStreamRequest(message="Hi", thread_id="1001", client_token="ct_beforeframe"),
+        _current_user(),
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # The client has only its own token at this point.
+        response = await client.post("/api/v1/chat/stream/1001/cancel?client_token=ct_beforeframe")
+    assert response.status_code == 204
+
+    for _ in range(500):
+        if _chat_turn_log[turn.turn_id].status != "running":
+            break
+        await asyncio.sleep(0.01)
+    assert _chat_turn_log[turn.turn_id].status == "canceled"
+
+
+async def test_cancel_requires_naming_a_turn(mocker, _chat_turn_log):
+    """ "Whichever turn is running" is exactly what stops the wrong one."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/chat/stream/1001/cancel")
+
+    assert response.status_code == 422
+
+
+async def test_a_turn_whose_producer_died_does_not_block_deletion(mocker, _chat_turn_log):
+    """A producer lost with its process, or cancelled before its coroutine ever
+    ran, leaves a record saying "running" that nothing will ever finish. Waiting
+    for it means the conversation can neither be used nor deleted."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await chat_turns.report_store.create_chat_turn("test-user-id", "1001", "msg_9", "text_9")
+    # Its lease lapsed: no live producer renews one.
+    _chat_turn_log[turn.turn_id] = _chat_turn_log[turn.turn_id].model_copy(
+        update={"expires_at": "2020-01-01T00:00:00+00:00"}
+    )
+    deleted = AsyncMock()
+    mocker.patch("reporting.routes.chat.session_reaper.delete_session_state", deleted)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.delete("/api/v1/chat/sessions/1001")
+
+    assert response.status_code == 204
+    deleted.assert_awaited_once()
