@@ -4,6 +4,7 @@ from typing import Any
 
 from reporting.schema.chat import (
     ChatSessionItem,
+    ChatTurnAdmission,
     ChatTurnEventPage,
     ChatTurnItem,
     ExpiredChatTurn,
@@ -862,14 +863,14 @@ async def delete_chat_session(user_id: str, thread_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def create_chat_turn(
+async def admit_chat_turn(
     user_id: str,
     thread_id: str,
     message_id: str,
     text_id: str,
-    client_token: str | None = None,
-) -> ChatTurnItem | None:
-    return await get_store().create_chat_turn(user_id, thread_id, message_id, text_id, client_token)
+    idempotency_key: str | None = None,
+) -> ChatTurnAdmission:
+    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key)
 
 
 async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
@@ -888,17 +889,8 @@ async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int) -> Cha
     return await get_store().read_chat_turn_events(turn_id, after_seq, limit)
 
 
-async def renew_chat_turn_lease(turn_id: str) -> ChatTurnItem | None:
-    return await get_store().renew_chat_turn_lease(turn_id)
-
-
-async def request_chat_turn_cancel(
-    user_id: str,
-    thread_id: str,
-    turn_id: str | None = None,
-    client_token: str | None = None,
-) -> ChatTurnItem | None:
-    return await get_store().request_chat_turn_cancel(user_id, thread_id, turn_id, client_token)
+async def request_chat_turn_cancel(turn_id: str, user_id: str) -> ChatTurnItem | None:
+    return await get_store().request_chat_turn_cancel(turn_id, user_id)
 
 
 async def finish_chat_turn(turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:

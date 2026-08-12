@@ -23,6 +23,7 @@ from reporting.temporal_workflows.activities import (
     check_scheduled_chat_watch,
     execute_configured_activity,
     execute_configured_query,
+    finalize_chat_turn,
     get_pr_ci_status,
     load_configured_workflow,
     load_scheduled_chat,
@@ -31,6 +32,7 @@ from reporting.temporal_workflows.activities import (
     record_configured_workflow_result,
     record_scheduled_chat_run_result,
     run_agent_chat_session,
+    run_chat_turn,
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
@@ -39,6 +41,7 @@ from reporting.temporal_workflows.activities import (
 )
 from reporting.temporal_workflows.agent_chat import AgentChatWorkflow
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
+from reporting.temporal_workflows.chat_turn import ChatTurnWorkflow
 from reporting.temporal_workflows.configured_workflow import (
     ConfiguredWorkflow,
     ConfiguredWorkflowExecution,
@@ -77,6 +80,7 @@ async def _run_worker() -> None:
                 ConfiguredWorkflowExecution,
                 ConfiguredWorkflowWaitingSlot,
                 ConfiguredWorkflowWatchPoll,
+                ChatTurnWorkflow,
                 ScheduledChatWorkflow,
                 ScheduledChatWatchPoll,
                 AgentChatWorkflow,
@@ -97,6 +101,8 @@ async def _run_worker() -> None:
                 run_dependency_ci_fix,
                 load_scheduled_chat,
                 check_scheduled_chat_watch,
+                finalize_chat_turn,
+                run_chat_turn,
                 run_scheduled_chat_session,
                 record_scheduled_chat_run_result,
                 run_agent_chat_session,

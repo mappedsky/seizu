@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from snowflake import SnowflakeGenerator
-from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, or_, text, update
+from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -11,8 +11,7 @@ from sqlmodel import Field, SQLModel, col, select
 from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
-    ChatTurnCanceledError,
-    ChatTurnConflictError,
+    ChatTurnAdmission,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
@@ -365,12 +364,10 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
         # requests can both see no running turn and both commit, leaving two
         # producers interleaving state on one LangGraph thread. Partial so
         # finished turns, of which a thread has many, do not collide.
-        # One turn per client token. This is what settles a stop racing the
-        # create it names: both try to write a row for the token, whichever
-        # commits first wins, and the loser is told which happened. Nothing
-        # else has to be locked or ordered. NULLs are distinct, so turns
-        # without a token (headless runs) do not collide.
-        UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turns_client_token"),
+        # One turn per idempotency key: a repeat of an admission request
+        # resolves to the turn it already made rather than making another.
+        # NULLs are distinct, so turns admitted without a key do not collide.
+        UniqueConstraint("user_id", "thread_id", "idempotency_key", name="uq_chat_turns_idempotency_key"),
         Index(
             "uq_chat_turns_one_running",
             "user_id",
@@ -385,7 +382,7 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
     thread_id: str
     message_id: str
     text_id: str
-    client_token: str | None = None
+    idempotency_key: str | None = None
     status: str = "running"
     # None until the turn finishes; see ChatTurnItem for why a reader needs it.
     last_seq: int | None = None
@@ -674,7 +671,7 @@ def _chat_turn_from_record(record: ChatTurnRecord) -> ChatTurnItem:
             "user_id": record.user_id,
             "message_id": record.message_id,
             "text_id": record.text_id,
-            "client_token": record.client_token,
+            "idempotency_key": record.idempotency_key,
             "status": record.status,
             "last_seq": record.last_seq,
             "cancel_requested": record.cancel_requested,
@@ -3418,18 +3415,37 @@ class SQLModelReportStore(ReportStore):
     # ------------------------------------------------------------------
     # Chat turn event log
     # ------------------------------------------------------------------
-
-    async def create_chat_turn(
+    async def admit_chat_turn(
         self,
         user_id: str,
         thread_id: str,
         message_id: str,
         text_id: str,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
+        idempotency_key: str | None = None,
+    ) -> ChatTurnAdmission:
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
         async with AsyncSession(_get_engine()) as session:
+            if idempotency_key is not None:
+                # A repeat of this request resolves to the turn it already
+                # admitted. Checked first so a lost response is answered by
+                # asking again -- never mistaken for anything else.
+                already = (
+                    (
+                        await session.execute(
+                            select(ChatTurnRecord).where(
+                                col(ChatTurnRecord.user_id) == user_id,
+                                col(ChatTurnRecord.thread_id) == thread_id,
+                                col(ChatTurnRecord.idempotency_key) == idempotency_key,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if already is not None:
+                    return ChatTurnAdmission(outcome="existing", turn=_chat_turn_from_record(already))
+
             # Admission and creation commit together, so a delete cannot slip
             # between them: the session is closed to new turns the moment it is
             # claimed, and this update is what observes that.
@@ -3444,14 +3460,12 @@ class SQLModelReportStore(ReportStore):
             )
             if admitted.rowcount == 0:
                 await session.rollback()
-                return None
+                return ChatTurnAdmission(outcome="retired")
 
-            # Retire a turn whose lease has lapsed, in the *same* transaction as
-            # the insert below rather than as a step before a retry. Its
-            # producer is gone, so it must not keep holding the thread -- and
-            # doing it here means a producer that renews concurrently cannot be
-            # retired by us at all, rather than being protected by remembering
-            # to re-check expiry in the WHERE clause.
+            # Retire a turn whose lease has lapsed, in the same transaction as
+            # the insert. Its producer is gone, so it must not keep holding the
+            # thread -- and doing it here means a turn that is still alive
+            # cannot be retired by us at all.
             await session.execute(
                 update(ChatTurnRecord)
                 .where(
@@ -3469,7 +3483,7 @@ class SQLModelReportStore(ReportStore):
                 "thread_id": thread_id,
                 "message_id": message_id,
                 "text_id": text_id,
-                "client_token": client_token,
+                "idempotency_key": idempotency_key,
                 "status": "running",
                 "created_at": now_iso,
                 "updated_at": now_iso,
@@ -3481,140 +3495,32 @@ class SQLModelReportStore(ReportStore):
             except IntegrityError:
                 await session.rollback()
             else:
-                # Built from the values we wrote, not from the ORM object:
-                # commit expires its attributes, so reading them back would be a
-                # second round trip after the row is already durable.
-                return ChatTurnItem.model_validate(values)
+                # Built from the values we wrote: commit expires the ORM
+                # object's attributes, so reading them back is a second round
+                # trip after the row is already durable.
+                return ChatTurnAdmission(outcome="created", turn=ChatTurnItem.model_validate(values))
 
-            # The insert lost. Which constraint decides what the caller is told,
-            # so read rather than guess -- and there is nothing to retry, since
-            # neither answer can turn back into "you may start".
-            if client_token is not None:
-                stopped = (
+            # The insert lost. Only two things can have taken it, and the
+            # idempotency key was already checked above, so this is the thread
+            # being held -- either by a turn that is running or by one admitted
+            # concurrently under the same key.
+            if idempotency_key is not None:
+                concurrent = (
                     (
                         await session.execute(
                             select(ChatTurnRecord).where(
                                 col(ChatTurnRecord.user_id) == user_id,
                                 col(ChatTurnRecord.thread_id) == thread_id,
-                                col(ChatTurnRecord.client_token) == client_token,
+                                col(ChatTurnRecord.idempotency_key) == idempotency_key,
                             )
                         )
                     )
                     .scalars()
                     .first()
                 )
-                if stopped is not None:
-                    # A stop got here first and created the turn, already
-                    # canceled: the user asked for nothing to happen.
-                    raise ChatTurnCanceledError("This turn was stopped before it started")
-            raise ChatTurnConflictError("This conversation already has a turn in progress")
-
-    async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
-        now = datetime.now(tz=UTC)
-        async with AsyncSession(_get_engine()) as session:
-            result = await session.execute(
-                update(ChatTurnRecord)
-                .where(col(ChatTurnRecord.turn_id) == turn_id, col(ChatTurnRecord.status) == "running")
-                .values(
-                    updated_at=now.isoformat(),
-                    expires_at=(now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
-                )
-            )
-            await session.commit()
-            if result.rowcount == 0:
-                return None
-            record = await session.get(ChatTurnRecord, turn_id)
-            return _chat_turn_from_record(record) if record else None
-
-    async def request_chat_turn_cancel(
-        self,
-        user_id: str,
-        thread_id: str,
-        turn_id: str | None = None,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
-        now = datetime.now(tz=UTC)
-        async with AsyncSession(_get_engine()) as session:
-            # A stop only means anything for a session that can hold a turn, and
-            # this is also what keeps a caller from writing records against
-            # threads they do not own.
-            owned = (
-                (
-                    await session.execute(
-                        select(ChatSessionRecord).where(
-                            col(ChatSessionRecord.user_id) == user_id,
-                            col(ChatSessionRecord.thread_id) == thread_id,
-                        )
-                    )
-                )
-                .scalars()
-                .first()
-            )
-            if owned is None:
-                return None
-            conditions = [
-                col(ChatTurnRecord.user_id) == user_id,
-                col(ChatTurnRecord.thread_id) == thread_id,
-                col(ChatTurnRecord.status) == "running",
-            ]
-            if turn_id is not None or client_token is not None:
-                # Either identity is enough; they name the same turn from the
-                # two ends of its life.
-                named = []
-                if turn_id is not None:
-                    named.append(col(ChatTurnRecord.turn_id) == turn_id)
-                if client_token is not None:
-                    named.append(col(ChatTurnRecord.client_token) == client_token)
-                conditions.append(or_(*named))
-            record = (await session.execute(select(ChatTurnRecord).where(*conditions))).scalars().first()
-            if record is None:
-                if client_token is None:
-                    return None
-                # Nothing running by that name -- which may mean the turn has
-                # not been created yet. Leaving an already-canceled turn under
-                # the same token is what stops it: the create will collide with
-                # it and be refused. An ordinary turn, so it is swept, cascaded
-                # and expired like any other rather than needing its own rules.
-                stopped = {
-                    "turn_id": generate_report_id(),
-                    "user_id": user_id,
-                    "thread_id": thread_id,
-                    # Synthetic: nothing ever streams this turn, but the ids
-                    # are part of what a turn is.
-                    "message_id": f"msg_stopped_{generate_report_id()}",
-                    "text_id": f"text_stopped_{generate_report_id()}",
-                    "client_token": client_token,
-                    "status": "canceled",
-                    "last_seq": 0,
-                    "cancel_requested": True,
-                    "created_at": now.isoformat(),
-                    "updated_at": now.isoformat(),
-                    "expires_at": (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
-                }
-                session.add(ChatTurnRecord(**stopped))
-                try:
-                    await session.commit()
-                except IntegrityError:
-                    # The create won the token, so the turn exists after all.
-                    # One re-read rather than a retry loop: the row is there now
-                    # and cannot go back to not existing.
-                    await session.rollback()
-                    late = (await session.execute(select(ChatTurnRecord).where(*conditions))).scalars().first()
-                    if late is None:
-                        return None
-                    late.cancel_requested = True
-                    late.updated_at = now.isoformat()
-                    session.add(late)
-                    await session.commit()
-                    await session.refresh(late)
-                    return _chat_turn_from_record(late)
-                return ChatTurnItem.model_validate(stopped)
-            record.cancel_requested = True
-            record.updated_at = now.isoformat()
-            session.add(record)
-            await session.commit()
-            await session.refresh(record)
-            return _chat_turn_from_record(record)
+                if concurrent is not None:
+                    return ChatTurnAdmission(outcome="existing", turn=_chat_turn_from_record(concurrent))
+            return ChatTurnAdmission(outcome="busy")
 
     async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
         now_iso = datetime.now(tz=UTC).isoformat()
@@ -3700,6 +3606,30 @@ class SQLModelReportStore(ReportStore):
                 batches.append(ChatTurnEventBatch(seq=row.seq, parts_json=row.parts_json))
                 expected += 1
             return ChatTurnEventPage(turn=_chat_turn_from_record(record), batches=batches)
+
+    async def request_chat_turn_cancel(self, turn_id: str, user_id: str) -> ChatTurnItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord).where(
+                            col(ChatTurnRecord.turn_id) == turn_id,
+                            col(ChatTurnRecord.user_id) == user_id,
+                            col(ChatTurnRecord.status) == "running",
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if record is None:
+                return None
+            record.cancel_requested = True
+            record.updated_at = datetime.now(tz=UTC).isoformat()
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _chat_turn_from_record(record)
 
     async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
         now = datetime.now(tz=UTC)

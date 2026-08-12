@@ -394,3 +394,32 @@ def group_rows_by_repo_package(rows: list[dict[str, Any]]) -> dict[tuple[str, st
             continue
         grouped.setdefault((repo, package), []).append(row)
     return grouped
+
+
+@dataclass
+class ChatTurnInvocation:
+    """Everything the worker needs to produce one interactive turn.
+
+    Carries the caller's *effective* permissions rather than trusting the
+    worker to rebuild them: ``resolve_stored_user`` reconstructs from the last
+    role claim seen, which can be staler or broader than the token the request
+    actually arrived with. The activity intersects the two, so the turn can
+    never exceed either.
+    """
+
+    turn_id: str = ""
+    thread_id: str = ""
+    user_id: str = ""
+    message: str = ""
+    resume_confirmation_id: str | None = None
+    continue_response: bool = False
+    bypass_confirmations: bool = False
+    permissions: list[str] = field(default_factory=list)
+    timeout_seconds: int = 600
+
+
+@dataclass
+class ChatTurnRunResult:
+    # completed | failed | canceled
+    status: str = "completed"
+    last_seq: int = 0

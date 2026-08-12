@@ -24,8 +24,8 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -34,11 +34,11 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.schema.chat import (
     CHAT_TURN_MAX_BATCH_BYTES,
-    ChatStreamRequest,
+    ChatTurnAdmission,
     ChatTurnItem,
-    ChatTurnNotAdmittedError,
+    ChatTurnRequest,
 )
-from reporting.services import report_store
+from reporting.services import report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
@@ -54,41 +54,13 @@ _CONTINUE_RESPONSE_PROMPT = (
 # passes rather than one long one at the end of somebody's turn.
 _EXPIRED_TURNS_PER_SWEEP = 25
 
-# How often a caller waiting for a turn to stop re-reads it. The local fast
-# path is immediate; a producer on another worker takes until its heartbeat.
+# How often a caller waiting for a turn to stop re-reads it.
 _TURN_STOP_POLL_SECONDS = 0.05
+
 
 # When this process last swept expired logs. Paced rather than run on every
 # completed turn; see :func:`sweep_expired_turns`.
 _last_sweep_monotonic = 0.0
-
-# Detached producer tasks, held so the event loop keeps a strong reference. A
-# task nobody holds can be garbage collected mid-run, which would look exactly
-# like the failure this module exists to remove. Keyed by turn id so a cancel
-# arriving on this worker can stop one without waiting for its heartbeat.
-_running_producers: dict[str, asyncio.Task[None]] = {}
-# Turns whose local cancellation has already been requested. See
-# :func:`cancel_local_producer` for why a second request must not land.
-_cancelling: set[str] = set()
-# Finalizers for turns whose producer never got to run. Held for the same
-# reason as the producers themselves.
-_cleanup_tasks: set["asyncio.Task[None]"] = set()
-
-
-class _TurnCanceled(Exception):
-    """Raised inside the producer when the turn has been asked to stop."""
-
-
-def _expires_within(expires_at: str, window: timedelta) -> bool:
-    """True when the lease runs out inside ``window``.
-
-    An unparsable timestamp counts as expiring: renewing a lease that did not
-    need it costs one write, while failing to renew one that did loses the turn.
-    """
-    try:
-        return datetime.fromisoformat(expires_at) - datetime.now(tz=UTC) <= window
-    except ValueError:
-        return True
 
 
 def sse_frame(part: dict[str, Any]) -> str:
@@ -148,9 +120,8 @@ class ChatTurnPublisher:
         self._seq = 0
         self._lock = asyncio.Lock()
         self._flusher: asyncio.Task[None] | None = None
-        self._heartbeat: asyncio.Task[None] | None = None
+        self._cancel_watch: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
-        self._producer: asyncio.Task[Any] | None = None
 
     @property
     def last_seq(self) -> int:
@@ -162,19 +133,15 @@ class ChatTurnPublisher:
         return self._stopped
 
     async def __aenter__(self) -> "ChatTurnPublisher":
-        # Entered from inside the producer, so this *is* the producer's task --
-        # which is what lets the heartbeat interrupt it rather than only ask it
-        # to notice.
-        self._producer = asyncio.current_task()
         # A periodic flusher rather than flushing only on append: a turn that
         # goes quiet mid-tool-call would otherwise leave its last partial batch
         # sitting in memory, and the viewer would see the stream stall.
         self._flusher = asyncio.create_task(self._flush_loop())
-        self._heartbeat = asyncio.create_task(self._heartbeat_loop())
+        self._cancel_watch = asyncio.create_task(self._cancel_watch_loop())
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        for task in (self._flusher, self._heartbeat):
+        for task in (self._flusher, self._cancel_watch):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -187,20 +154,16 @@ class ChatTurnPublisher:
             await asyncio.sleep(interval)
             await self.flush()
 
-    async def _heartbeat_loop(self) -> None:
-        """Hold the lease and watch for a stop request.
+    async def _cancel_watch_loop(self) -> None:
+        """Watch for a stop that arrived while the turn is quiet.
 
-        Both live here because both must happen while the turn is *quiet* — a
-        long tool call is exactly when a lease lapses and when a user reaches
-        for Stop, and neither can be driven by token output. The stop request
-        arrives through the record rather than as a signal because the producer
-        and the request asking it to stop are not necessarily in the same
-        process.
+        A turn is most likely to be stopped precisely while it is blocked on a
+        slow model call or tool, where no chunk arrives for as long as the call
+        takes. Temporal cancels the activity when the workflow is cancelled,
+        which covers the ordinary path; this covers a stop recorded on the turn
+        without one -- and it is why the flag exists at all.
         """
         interval = max(settings.CHAT_TURN_HEARTBEAT_SECONDS, 1)
-        # Renew well before expiry so one failed heartbeat does not drop the
-        # lease; a renewal is a single conditional write.
-        renew_after = timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS / 2)
         while True:
             await asyncio.sleep(interval)
             try:
@@ -208,34 +171,18 @@ class ChatTurnPublisher:
                 if turn is None or turn.cancel_requested or turn.status != "running":
                     self._stop_producer()
                     return
-                if _expires_within(turn.expires_at, renew_after) and (
-                    await report_store.renew_chat_turn_lease(self._turn.turn_id) is None
-                ):
-                    # The lease is gone: the thread has been taken, or the turn
-                    # is no longer running. Carrying on would mean two producers
-                    # writing one conversation.
-                    logger.warning("Chat turn lost its lease", extra={"turn_id": self._turn.turn_id})
-                    self._stop_producer()
-                    return
             except Exception:
-                # A transient store failure must not stop a healthy turn; the
-                # lease has half the retention window of slack for exactly this.
-                logger.warning("Chat turn heartbeat failed", extra={"turn_id": self._turn.turn_id}, exc_info=True)
+                # A transient store failure must not stop a healthy turn.
+                logger.warning("Chat turn cancel-watch failed", extra={"turn_id": self._turn.turn_id}, exc_info=True)
 
     def _stop_producer(self) -> None:
-        """End the turn now, wherever it happens to be.
+        """Ask the turn to stop.
 
-        Setting the flag is not enough on its own: the producer only reads it
-        between chunks, and a turn is most likely to be stopped precisely while
-        it is blocked on a slow model call or tool. Cancelling the task
-        interrupts that, so a Stop landing on another worker behaves like one
-        landing on this one instead of waiting for the call to finish -- which
-        would also let the tool's side effects happen first.
+        Only sets the event. The supervisor owns cancellation and does it
+        exactly once, which is what removes the "a second cancel interrupts the
+        first one's cleanup" problem rather than guarding against it.
         """
         self._stopped.set()
-        # Through the shared guard rather than cancelling the task directly, so
-        # this and a concurrent request cannot both interrupt the same producer.
-        cancel_local_producer(self._turn.turn_id)
 
     async def publish(self, parts: list[dict[str, Any]]) -> None:
         if not parts:
@@ -270,7 +217,7 @@ class ChatTurnPublisher:
         self._buffered_bytes = 0
 
 
-def build_graph_input(body: ChatStreamRequest, budget_controller: BudgetController) -> ChatState:
+def build_graph_input(body: ChatTurnRequest, budget_controller: BudgetController) -> ChatState:
     """Build the turn's opening message.
 
     Confirmation resumes and continuations are tagged ephemeral: they are
@@ -299,220 +246,190 @@ def build_graph_input(body: ChatStreamRequest, budget_controller: BudgetControll
     }
 
 
-async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnItem:
-    """Open a turn's event log and start producing into it.
+async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser) -> ChatTurnAdmission:
+    """Admit a turn, and hand it to the worker that will produce it.
 
-    Raises :class:`reporting.schema.chat.ChatTurnConflictError` when the thread
-    already has a turn running -- the caller should reconnect to that one rather
-    than start a second.
+    The store decides and reports which of ``created``, ``existing``, ``busy``
+    or ``retired`` happened; only ``created`` starts a workflow, so a repeat of
+    a request never starts a second producer.
     """
     # Reusing the client's message id for a continuation is what makes the
     # continued text land in the same assistant message rather than a new one.
     message_id = (
         body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
     )
-    # Admission happens inside this write, not before it: the store moves the
-    # session's timestamp and creates the turn in one commit, so a delete cannot
-    # claim the session in between and cascade over a turn about to exist.
-    turn = await report_store.create_chat_turn(
+    admission = await report_store.admit_chat_turn(
         current.user.user_id,
-        body.thread_id,
+        thread_id,
         message_id,
         f"text_{uuid.uuid4().hex}",
-        body.client_token,
+        body.idempotency_key,
     )
-    if turn is None:
-        raise ChatTurnNotAdmittedError("This conversation has been retired")
-    turn_id = turn.turn_id
-    task = asyncio.create_task(run_turn_in_process(turn, body, current))
-    _running_producers[turn_id] = task
+    if admission.outcome != "created" or admission.turn is None:
+        return admission
 
-    def _forget(finished: "asyncio.Task[None]") -> None:
-        _running_producers.pop(turn_id, None)
-        _cancelling.discard(turn_id)
-        if finished.cancelled():
-            # Cancelled before its coroutine first ran, so none of the terminal
-            # cleanup happened and the record still says "running". Nothing else
-            # will ever finish it: waiting for the lease to lapse would leave the
-            # conversation neither usable nor deletable for minutes.
-            cleanup = asyncio.create_task(_finalize_abandoned_turn(turn_id))
-            # Held for the same reason the producers are: a task nobody
-            # references can be collected before it runs, and this one is what
-            # keeps the turn from reading as running until its lease expires.
-            _cleanup_tasks.add(cleanup)
-            cleanup.add_done_callback(_cleanup_tasks.discard)
+    from reporting.temporal_workflows.chat_turn import workflow_id_for
+    from reporting.temporal_workflows.shared import ChatTurnInvocation
 
-    task.add_done_callback(_forget)
-    return turn
+    client = await schedule_reconciler.get_client()
+    await client.start_workflow(
+        "seizu_chat_turn",
+        ChatTurnInvocation(
+            turn_id=admission.turn.turn_id,
+            thread_id=thread_id,
+            user_id=current.user.user_id,
+            message=body.message,
+            resume_confirmation_id=body.resume_confirmation_id,
+            continue_response=body.continue_response,
+            bypass_confirmations=body.bypass_confirmations,
+            # The turn can never exceed these; the worker intersects them with
+            # what the stored user has now.
+            permissions=sorted(current.permissions),
+            timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+        ),
+        id=workflow_id_for(admission.turn.turn_id),
+        task_queue=settings.TEMPORAL_TASK_QUEUE,
+    )
+    return admission
 
 
-def cancel_local_producer(turn_id: str) -> bool:
-    """Stop a producer running in *this* process, if it is here.
+async def cancel_turn(turn_id: str) -> None:
+    """Cancel the workflow producing a turn.
 
-    A fast path, not the mechanism: with several workers the request asking a
-    turn to stop usually lands somewhere else, and the store flag is what
-    reaches it there. This just spares the common single-worker case a
-    heartbeat interval of delay.
-
-    **First writer wins.** Cancelling twice is not harmless: the producer clears
-    its own cancellation before running its terminal cleanup, so a second
-    ``cancel()`` -- from a retried request, or from the heartbeat noticing the
-    flag the first one set -- lands *inside* that cleanup and leaves the turn
-    recorded as running forever. Being idempotent over HTTP is not enough; it
-    has to be idempotent here.
+    Idempotent by construction: cancelling an already-finished workflow is not
+    an error, and Temporal collapses repeats. That is what replaced the
+    first-writer-wins guard the detached task needed -- there is no longer a
+    second canceller to race.
     """
-    task = _running_producers.get(turn_id)
-    if task is None or task.done() or turn_id in _cancelling:
-        return False
-    _cancelling.add(turn_id)
-    task.cancel()
-    return True
+    from reporting.temporal_workflows.chat_turn import workflow_id_for
 
-
-async def _finalize_abandoned_turn(turn_id: str) -> None:
-    """Give a terminal status to a turn whose producer never got to run."""
     try:
-        turn = await report_store.get_chat_turn(turn_id)
-        if turn is not None and turn.status == "running":
-            await report_store.finish_chat_turn(turn_id, "canceled", 0)
+        client = await schedule_reconciler.get_client()
+        await client.get_workflow_handle(workflow_id_for(turn_id)).cancel()
     except Exception:
-        # The lease is the backstop; it expires either way.
-        logger.warning("Could not finalize an abandoned chat turn", extra={"turn_id": turn_id}, exc_info=True)
+        # The record already carries the stop; the producer reads it on its
+        # next watch tick even if this did not land.
+        logger.warning("Could not cancel the workflow for a chat turn", extra={"turn_id": turn_id}, exc_info=True)
+
+
+async def produce_turn(
+    turn: ChatTurnItem,
+    thread_id: str,
+    body: ChatTurnRequest,
+    current: CurrentUser,
+    on_progress: Callable[[], None] | None = None,
+) -> tuple[str, int]:
+    """Drive one turn to completion, publishing as it goes.
+
+    A supervisor: the graph runs in a child task, and this cancels that child
+    at most once, then always publishes the closing frames and records the
+    terminal state. Nothing outside cancels *this*, so the cleanup cannot be
+    interrupted part-way -- which is what the detached-task version needed
+    ``uncancel()``, a first-writer-wins guard and an abandoned-task finalizer to
+    approximate.
+    """
+    finish_reason = "stop"
+    status = "completed"
+    async with ChatTurnPublisher(turn) as publisher:
+        opening: list[dict[str, Any]] = [
+            {"type": "start", "messageId": turn.message_id},
+            {"type": "text-start", "id": turn.text_id},
+        ]
+        if body.continue_response:
+            opening.append({"type": "text-delta", "id": turn.text_id, "delta": CONTINUATION_MARKDOC})
+        await publisher.publish(opening)
+
+        budget_controller = BudgetController(initial_budget_ledger())
+        config = build_turn_config(
+            current,
+            thread_id,
+            budget_controller=budget_controller,
+            bypass_confirmations=body.bypass_confirmations,
+        )
+
+        async def _drive() -> None:
+            nonlocal finish_reason
+            graph = get_chat_graph()
+            async for chunk in graph.astream(
+                build_graph_input(body, budget_controller),
+                config,
+                stream_mode="custom",
+            ):
+                if isinstance(chunk, dict) and chunk.get("kind") == "finish_reason":
+                    if chunk.get("finish_reason") == "length":
+                        finish_reason = "length"
+                    continue
+                await publisher.publish(render_parts(chunk, turn.text_id))
+                if on_progress is not None:
+                    on_progress()
+
+        child = asyncio.create_task(_drive())
+        stopped = asyncio.create_task(publisher.stopped.wait())
+        try:
+            done, _ = await asyncio.wait({child, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if child in done:
+                child.result()
+            else:
+                # Asked to stop. Cancelling the child interrupts it wherever it
+                # is, including mid-model-call, so a queued tool action does not
+                # get to run first.
+                status = "canceled"
+        except asyncio.CancelledError:
+            # Temporal cancelled the activity. Same outcome, different messenger.
+            status = "canceled"
+        except Exception:
+            logger.exception("Chat turn failed", extra={"turn_id": turn.turn_id})
+            status = "failed"
+        finally:
+            stopped.cancel()
+            if not child.done():
+                child.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await child
+
+        if status == "failed":
+            await publisher.publish(
+                [
+                    {"type": "text-end", "id": turn.text_id},
+                    {"type": "error", "errorText": "Chat stream failed"},
+                    *finish_parts("error"),
+                ]
+            )
+        else:
+            await publisher.publish(
+                [
+                    {"type": "text-end", "id": turn.text_id},
+                    *finish_parts("stop" if status == "canceled" else finish_reason),
+                ]
+            )
+        # Flushed here rather than left to __aexit__: last_seq has to name a
+        # batch that is already stored, or a reader stops short of the final
+        # frames believing it has them all.
+        await publisher.flush()
+        last_seq = publisher.last_seq
+
+    await report_store.finish_chat_turn(turn.turn_id, status, last_seq)
+    await sweep_expired_turns()
+    return status, last_seq
 
 
 async def await_turn_stopped(turn_id: str, timeout_seconds: float) -> bool:
     """Wait for a turn to reach a terminal state, or give up.
 
-    Cancelling a turn is a request, and on another worker it takes until that
-    producer's next heartbeat. A caller about to delete what the producer is
-    writing into has to know it has actually stopped, not just been asked to.
-
-    Returns False on timeout; the caller decides whether to proceed. Proceeding
-    is safe but not free: the producer will find its header gone and clean up
-    the batches it wrote in the meantime.
+    A caller about to delete what a turn is writing into has to know it has
+    actually stopped, not just been asked to. Simply polling for terminal is
+    enough now that the workflow owns the turn: Temporal guarantees it ends,
+    where a detached task could be gone with no one left to say so -- which is
+    why this used to have to infer death from a lapsed lease.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
         turn = await report_store.get_chat_turn(turn_id)
         if turn is None or turn.status != "running":
             return True
-        if _producer_is_gone(turn):
-            # Nothing will ever move this record out of "running": the producer
-            # died with its process, or was cancelled before its coroutine ever
-            # ran and so never reached its terminal cleanup. Waiting for it is
-            # waiting forever, and the caller would keep failing while holding a
-            # session that cannot start another turn either.
-            return True
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(_TURN_STOP_POLL_SECONDS)
-
-
-def _producer_is_gone(turn: ChatTurnItem) -> bool:
-    """True when nothing is left to finish this turn.
-
-    Two ways that happens. Locally we can be certain: the task is present and
-    done, so its cleanup has run or can no longer run. Otherwise the lease is
-    the evidence -- a live producer renews it every heartbeat with half the
-    retention window of slack, so an expired one is not merely quiet.
-    """
-    task = _running_producers.get(turn.turn_id)
-    if task is not None and task.done():
-        return True
-    return _expires_within(turn.expires_at, timedelta(0))
-
-
-async def run_turn_in_process(turn: ChatTurnItem, body: ChatStreamRequest, current: CurrentUser) -> None:
-    """Drive one turn to completion, publishing as it goes.
-
-    Detached from the request, so a client that disconnects mid-turn neither
-    stops the work nor loses it. What this does *not* survive is the process
-    itself going away -- that is what moving the producer onto Temporal buys.
-    """
-    finish_reason = "stop"
-    status = "completed"
-    try:
-        async with ChatTurnPublisher(turn) as publisher:
-            try:
-                opening: list[dict[str, Any]] = [
-                    # The turn id rides on the opening frame so the client can
-                    # address a stop at *this* turn. A stop can be delayed or
-                    # retried, and by the time it lands this turn may have
-                    # finished and a successor started; naming the thread alone
-                    # would stop the wrong one.
-                    {
-                        "type": "start",
-                        "messageId": turn.message_id,
-                        "messageMetadata": {"turn_id": turn.turn_id},
-                    },
-                    {"type": "text-start", "id": turn.text_id},
-                ]
-                if body.continue_response:
-                    opening.append({"type": "text-delta", "id": turn.text_id, "delta": CONTINUATION_MARKDOC})
-                await publisher.publish(opening)
-
-                budget_controller = BudgetController(initial_budget_ledger())
-                config = build_turn_config(
-                    current,
-                    body.thread_id,
-                    budget_controller=budget_controller,
-                    bypass_confirmations=body.bypass_confirmations,
-                )
-                graph = get_chat_graph()
-                async for chunk in graph.astream(
-                    build_graph_input(body, budget_controller),
-                    config,
-                    stream_mode="custom",
-                ):
-                    if publisher.stopped.is_set():
-                        # Stop was pressed, or the conversation was deleted.
-                        # Breaking out abandons the rest of the turn: no further
-                        # tokens are bought and no queued tool action runs.
-                        raise _TurnCanceled
-                    if isinstance(chunk, dict) and chunk.get("kind") == "finish_reason":
-                        if chunk.get("finish_reason") == "length":
-                            finish_reason = "length"
-                        continue
-                    await publisher.publish(render_parts(chunk, turn.text_id))
-            except (_TurnCanceled, asyncio.CancelledError):
-                status = "canceled"
-                # Clear the pending cancellation before the cleanup awaits.
-                # Without this every await below -- publishing the closing
-                # frames, flushing, recording the terminal status -- is
-                # re-cancelled the moment it suspends, and the turn would be
-                # left reading as "running" until its lease lapsed.
-                task = asyncio.current_task()
-                if task is not None:
-                    task.uncancel()
-                await publisher.publish([{"type": "text-end", "id": turn.text_id}, *finish_parts("stop")])
-            except Exception:
-                logger.exception("Chat turn failed", extra={"turn_id": turn.turn_id})
-                status = "failed"
-                await publisher.publish(
-                    [
-                        {"type": "text-end", "id": turn.text_id},
-                        {"type": "error", "errorText": "Chat stream failed"},
-                        *finish_parts("error"),
-                    ]
-                )
-            else:
-                await publisher.publish([{"type": "text-end", "id": turn.text_id}, *finish_parts(finish_reason)])
-            # Flushed here, not left to __aexit__: last_seq has to name a batch
-            # that is already in the store, or a reader would stop short of the
-            # final frames while believing it had consumed them all.
-            await publisher.flush()
-            last_seq = publisher.last_seq
-        if await report_store.finish_chat_turn(turn.turn_id, status, last_seq) is None:
-            # The turn record vanished mid-flight -- the conversation was
-            # deleted. Anything published since then is an orphan whose parent
-            # the cascade has already removed, so clear it up rather than leave
-            # rows nothing will ever collect.
-            await report_store.delete_chat_turn(turn.turn_id)
-    except Exception:
-        # The log is now unfinishable, so nothing will release the thread until
-        # the turn expires. Recorded loudly rather than swallowed.
-        logger.exception("Failed to record chat turn completion", extra={"turn_id": turn.turn_id})
-    await sweep_expired_turns()
 
 
 async def sweep_expired_turns() -> None:

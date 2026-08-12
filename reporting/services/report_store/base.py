@@ -6,6 +6,7 @@ from reporting.schema.chat import (
     CHAT_TURN_MAX_BATCH_BYTES,
     CHAT_TURN_MAX_SEQ,
     ChatSessionItem,
+    ChatTurnAdmission,
     ChatTurnEventPage,
     ChatTurnItem,
     ExpiredChatTurn,
@@ -912,32 +913,41 @@ class ReportStore(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def create_chat_turn(
+    async def admit_chat_turn(
         self,
         user_id: str,
         thread_id: str,
         message_id: str,
         text_id: str,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
-        """Admit a turn and open its log, in one commit.
+        idempotency_key: str | None = None,
+    ) -> ChatTurnAdmission:
+        """Reserve a thread for a turn, and say what happened.
 
-        Returns None when the session does not exist or has been claimed for
-        retirement.
+        Returns an outcome rather than raising one of several errors the caller
+        must interpret: ``created``, ``existing``, ``busy`` or ``retired``. The
+        store knows which of those it did, so it reports it -- earlier versions
+        inferred it afterwards from whichever constraint rejected the write,
+        and a single collision could legitimately mean any of them.
 
-        **Admission and creation are the same write.** Touching the session
-        first and creating the turn afterwards leaves a window: a delete can
-        read the fresh timestamp, claim the session, find no running turn and
-        cascade, all between the two -- and the turn is then created against a
-        conversation that no longer exists. So the session's ``updated_at`` is
-        moved *here*, conditioned on ``retiring_at`` being unset, and the turn
-        exists only if that condition held. This is the turn's half of the
-        retirement handshake (SBX-011); there is no separate touch.
+        **Admission is a request of its own, answered before anything streams.**
+        The turn exists, with an id, before the client can need one. That is
+        what removes an entire class of problem: there is never a command
+        against a turn that does not exist yet, so nothing has to be parked,
+        replayed against a placeholder, or addressed by a second identity.
 
-        A thread has at most one running, unexpired turn: a second caller loses
-        with :class:`ChatTurnConflictError`, so a reconnecting client never has
-        two logs to choose between. The exclusion has to expire, or a producer
-        that died without finishing its turn wedges the conversation forever.
+        ``idempotency_key`` makes a repeat resolve to the turn it already
+        admitted (``existing``). A lost response is therefore fixed by asking
+        again. A repeat is never read as a cancellation.
+
+        The session's ``updated_at`` moves in the same commit, conditioned on
+        the session not being claimed for retirement -- the turn's half of the
+        handshake in SBX-011. Two writes would leave a window where a delete
+        reads the fresh timestamp, claims the session, sees no running turn and
+        cascades, and the turn is then admitted to a conversation that is gone.
+
+        A thread holds at most one running, unexpired turn. The exclusion has to
+        expire, or a producer that died without finishing wedges the
+        conversation forever.
         """
 
     @abstractmethod
@@ -979,58 +989,15 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
-    async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
-        """Push a running turn's ``expires_at`` forward and return it.
-
-        ``expires_at`` is a lease held by a live producer, not a fixed lifetime.
-        Without renewal a turn that simply takes longer than the retention
-        window would be treated as abandoned *while still running*: reconnect
-        would report nothing to attach to, a second producer could start on the
-        same thread, and the sweep could delete the log being written. Renewal
-        is driven by a heartbeat rather than by output, because a turn is at its
-        quietest exactly when it is doing the slow work.
-
-        Returns None when the turn is gone or no longer running.
-        """
-
-    @abstractmethod
-    async def request_chat_turn_cancel(
-        self,
-        user_id: str,
-        thread_id: str,
-        turn_id: str | None = None,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
+    async def request_chat_turn_cancel(self, turn_id: str, user_id: str) -> ChatTurnItem | None:
         """Ask a running turn to stop, returning it, or None.
 
-        A request, not a signal: the producer may be in another process, so it
-        is told through the record and stops at its next heartbeat. Scoped to
-        the owner so a guessed thread id cannot stop someone else's turn.
+        **Only ever marks a turn that exists.** It creates nothing: a stop for a
+        turn that has not been admitted is not this method's problem, because a
+        client cannot name a turn before admission gives it one.
 
-        ``turn_id`` names *which* turn, and callers acting for a user must pass
-        it. A stop request can be delayed or retried, and by the time it lands
-        the turn it was aimed at may have finished and a successor started —
-        addressing the thread alone would then stop the wrong turn. Omitting it
-        means "whichever turn is running", which is only safe for a caller that
-        has already closed the thread to new turns.
-
-        ``client_token`` names the same turn by the handle the *client* minted
-        for the send that started it. A client has that before its request goes
-        out, while it only learns ``turn_id`` once the turn announces itself --
-        so the token is what makes Stop work in between. Either identifies the
-        turn; matching one is enough.
-
-        **Given a token for a turn that does not exist yet, this creates one,
-        already canceled.** The user can press Stop while the create is still in
-        flight, and a request that merely looked, found nothing and returned
-        would let that turn start a moment later with nobody watching it.
-
-        A stop and a create racing for the same token are settled by the store
-        refusing the second: a thread has at most one turn per client token, so
-        whichever commits first wins and the loser is told which happened. The
-        record a stop leaves is an ordinary turn -- swept, cascaded and expired
-        with every other one -- rather than a second kind of thing with its own
-        lifetime to get wrong.
+        A request, not a signal -- the turn runs elsewhere, so it is told
+        through the record. Scoped to the owner, so a guessed id stops nothing.
         """
 
     @abstractmethod

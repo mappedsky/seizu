@@ -919,6 +919,10 @@ CHAT_TURN_STOP_WAIT_SECONDS = float_env("CHAT_TURN_STOP_WAIT_SECONDS", 10.0)
 # by turns completing, which is far more often than expiry needs; pacing it
 # keeps the cost proportional to time rather than to chat volume.
 CHAT_TURN_SWEEP_INTERVAL_SECONDS = float_env("CHAT_TURN_SWEEP_INTERVAL_SECONDS", 300.0)
+# How long one interactive turn may run before its workflow gives up. The
+# activity gets this plus a margin; a turn that hits it is recorded as failed
+# rather than left running.
+CHAT_TURN_TIMEOUT_SECONDS = int_env("CHAT_TURN_TIMEOUT_SECONDS", 900)
 # Hard bound on how long a reader will tail one turn before giving up, so a
 # producer that dies without writing a terminal status cannot hold a request
 # open forever.

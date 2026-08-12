@@ -18,12 +18,14 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from reporting import scheduled_query_modules, settings
+from reporting.authnz import CurrentUser
 from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
 from reporting.authnz.permissions import Permission
-from reporting.schema.chat import ScheduledChatItem
+from reporting.schema.chat import ChatTurnRequest, ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryAction, ScheduledQueryWatchScan
 from reporting.services import (
     agent_run,
+    chat_turns,
     github_checks,
     report_store,
     sandbox_remediation,
@@ -43,6 +45,8 @@ from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowInputContext
 from reporting.temporal_workflows.shared import (
     AgentChatInput,
     AgentChatResult,
+    ChatTurnInvocation,
+    ChatTurnRunResult,
     CiFixInput,
     CiFixResult,
     CodeWorkflowInputRequest,
@@ -1014,4 +1018,61 @@ async def run_agent_chat_session(input: AgentChatInput) -> AgentChatResult:
         summary=result.summary,
         error=result.error,
         budget=result.budget,
+    )
+
+
+@activity.defn
+async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
+    """Produce one interactive turn, writing its stream into the event log.
+
+    Identity is rebuilt from the store and then **intersected** with the
+    permissions the request actually arrived with. ``resolve_stored_user``
+    reconstructs from the last role claim seen, which can be staler or broader
+    than the caller's token, so the turn can never exceed either (AGT-006).
+
+    Finalizes its own turn, cancellation included: this is the code that owns
+    the log, so it is the code that closes it.
+    """
+    stored = await resolve_stored_user(invocation.user_id)
+    effective = frozenset(stored.permissions) & frozenset(invocation.permissions)
+    current = CurrentUser(user=stored.user, jwt_claims=stored.jwt_claims, permissions=effective)
+    if invocation.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in effective:
+        raise ApplicationError("Missing permissions to bypass confirmations", non_retryable=True)
+
+    turn = await report_store.get_chat_turn(invocation.turn_id)
+    if turn is None:
+        # Admitted and then deleted -- the conversation went away before the
+        # worker picked this up. Nothing to produce and nothing to close.
+        raise ApplicationError("Chat turn no longer exists", non_retryable=True)
+
+    status, last_seq = await chat_turns.produce_turn(
+        turn,
+        invocation.thread_id,
+        ChatTurnRequest(
+            message=invocation.message,
+            resume_confirmation_id=invocation.resume_confirmation_id,
+            continue_response=invocation.continue_response,
+            bypass_confirmations=invocation.bypass_confirmations,
+        ),
+        current,
+        on_progress=activity.heartbeat,
+    )
+    return ChatTurnRunResult(status=status, last_seq=last_seq)
+
+
+@activity.defn
+async def finalize_chat_turn(invocation: ChatTurnInvocation) -> None:
+    """Close a turn whose producer did not get to close it itself.
+
+    Only reached when the activity died with its worker or timed out, so no
+    code of ours ran at the end. Idempotent: a turn that is already terminal is
+    left alone.
+    """
+    turn = await report_store.get_chat_turn(invocation.turn_id)
+    if turn is None or turn.status != "running":
+        return
+    await report_store.finish_chat_turn(invocation.turn_id, "failed", turn.last_seq or 0)
+    logger.warning(
+        "Closed a chat turn whose producer did not finish it",
+        extra={"turn_id": invocation.turn_id},
     )

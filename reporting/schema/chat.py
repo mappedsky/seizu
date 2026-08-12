@@ -7,28 +7,37 @@ from reporting.schema.reporting_config import ScheduleSpec
 CHAT_THREAD_ID_PATTERN = r"^[0-9]+$"
 
 
-class ChatStreamRequest(BaseModel):
+class ChatTurnRequest(BaseModel):
     # Cap the message so a single turn can't store an unbounded payload in the
     # checkpoint (and, once a model is wired in, can't blow the token budget).
     message: str = Field(default="", max_length=32000)
-    thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
-    # Client-minted handle for this send, used to stop the turn it starts.
-    # The client has it before the request goes out, which is what makes Stop
-    # work in the window before the turn announces its server-side id.
-    client_token: str | None = Field(default=None, min_length=8, max_length=64)
+    # Client-minted key making admission idempotent. A repeat of this request
+    # returns the turn it already admitted rather than starting a second one,
+    # which is how a lost response is resolved -- by asking again, not by
+    # racing a different kind of write.
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
     # Run the turn with action confirmations bypassed. Requires the
     # chat:bypass_permissions permission (403 otherwise); every bypassed tool
     # execution is audit-logged.
     bypass_confirmations: bool = False
 
     @model_validator(mode="after")
-    def require_message_or_resume(self) -> "ChatStreamRequest":
+    def require_message_or_resume(self) -> "ChatTurnRequest":
         if not self.message and not self.resume_confirmation_id and not self.continue_response:
             raise ValueError("message, resume_confirmation_id, or continue_response is required")
         return self
+
+
+class ChatTurnAdmissionResponse(BaseModel):
+    """What admission did, and the turn to attach to."""
+
+    turn_id: str
+    # "created" started a turn; "existing" resolved a repeat of the same
+    # request to the turn it already made.
+    status: Literal["created", "existing"]
 
 
 class ChatHistoryMessage(BaseModel):
@@ -90,31 +99,25 @@ CHAT_TURN_MAX_BATCH_BYTES = 320_000
 CHAT_TURN_MAX_SEQ = 5_000
 
 
-class ChatTurnConflictError(Exception):
-    """Raised when a thread already has a running turn."""
+class ChatTurnAdmission(BaseModel):
+    """What happened when a turn was asked for, and the turn if there is one.
 
-
-class ChatTurnNotAdmittedError(Exception):
-    """Raised when a turn may not start: the session is gone or being retired."""
-
-
-class ChatTurnAdmissionError(Exception):
-    """Raised when a turn could not be admitted for a transient reason.
-
-    The conversation was being written concurrently. Retrying inside the store
-    would only race again, so the caller is told to try again instead -- which
-    it already does, with a message that says so.
+    An outcome rather than an exception per outcome. Admission used to raise
+    four different errors, each inferred after the fact from whichever database
+    constraint happened to reject the write -- so a single uniqueness collision
+    could mean "duplicate request", "a stop got here first", "another turn is
+    running" or "the conversation is being deleted", and both backends read
+    mutable state afterwards to guess which. The store knows which it did; this
+    is it saying so.
     """
 
-
-class ChatTurnCanceledError(Exception):
-    """Raised when the send this turn would serve was already stopped.
-
-    Stop can beat the turn it is aimed at into the store -- the user presses it
-    while the create is still in flight. The cancellation is recorded against
-    the client's token so the turn is refused rather than started and left
-    running with nobody watching.
-    """
+    # created  -- a new turn, admitted and reserved.
+    # existing -- this exact request was already admitted; here is that turn.
+    #             Never a cancellation: a repeat of a request is a repeat.
+    # busy     -- another turn holds the thread.
+    # retired  -- the conversation is gone or being deleted.
+    outcome: Literal["created", "existing", "busy", "retired"]
+    turn: "ChatTurnItem | None" = None
 
 
 class ChatTurnItem(BaseModel):
@@ -132,11 +135,11 @@ class ChatTurnItem(BaseModel):
     user_id: str
     message_id: str = Field(min_length=1, max_length=128)
     text_id: str = Field(min_length=1, max_length=128)
-    # The client's own handle for the send that started this turn, when there
-    # was one. Stop can be addressed at either this or ``turn_id``: a client
-    # that sent the turn has the token immediately, while one that reconnected
-    # to it only ever learns the id.
-    client_token: str | None = None
+    # The key the admitting request carried, if any. Kept so a repeat of that
+    # request resolves to this turn. It is *not* a way to address the turn:
+    # everything acting on a turn names its ``turn_id``, which the client has
+    # from the moment admission returns.
+    idempotency_key: str | None = None
     status: Literal["running", "completed", "failed", "canceled"] = "running"
     # None until the turn finishes. A reader may stop only once the status is
     # terminal *and* it has consumed through last_seq: a terminal status on its
@@ -152,6 +155,9 @@ class ChatTurnItem(BaseModel):
     # this forward, so a long turn is never mistaken for an abandoned one; once
     # the turn ends it becomes the reconnect window.
     expires_at: str
+
+
+ChatTurnAdmission.model_rebuild()
 
 
 class ChatTurnEventBatch(BaseModel):

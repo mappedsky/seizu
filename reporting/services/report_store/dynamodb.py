@@ -16,9 +16,7 @@ from snowflake import SnowflakeGenerator
 from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
-    ChatTurnAdmissionError,
-    ChatTurnCanceledError,
-    ChatTurnConflictError,
+    ChatTurnAdmission,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
@@ -141,10 +139,6 @@ _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 # CHAT_TURN_LIST partition -- making one user's delete cost proportional to
 # every other user's retained turns.
 _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
-# One turn per client token, in the thread's own partition so it is deleted with
-# the turn. This is what settles a stop racing the create it names: both try to
-# claim the token, whichever gets there first wins.
-_SK_CHAT_TURN_TOKEN_PREFIX = "TOKEN#"
 # Pages of the sweep index one pass will read past. Live entries are not in
 # expiry order (a running turn renews its lease), so a pass has to be able to
 # step over them to reach the expired ones behind.
@@ -457,10 +451,6 @@ def _chat_turn_event_sk(seq: int) -> str:
     return f"{_SK_CHAT_TURN_EVENT_PREFIX}{seq:010d}"  # noqa: E231
 
 
-def _chat_turn_token_sk(client_token: str) -> str:
-    return f"{_SK_CHAT_TURN_TOKEN_PREFIX}{client_token}"
-
-
 def _chat_turn_thread_turn_sk(turn_id: str) -> str:
     return f"{_SK_CHAT_TURN_THREAD_TURN_PREFIX}{turn_id}"
 
@@ -632,7 +622,7 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         user_id=item["user_id"],
         message_id=item["message_id"],
         text_id=item["text_id"],
-        client_token=item.get("client_token"),
+        idempotency_key=item.get("idempotency_key"),
         status=status if status in ("running", "completed", "failed", "canceled") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
         cancel_requested=bool(item.get("cancel_requested", False)),
@@ -754,43 +744,6 @@ def _get_chat_turn_sync(table: Any, turn_id: str) -> ChatTurnItem | None:
     return _chat_turn_from_item(item) if item else None
 
 
-def _raise_chat_turn_refusal(
-    table: Any,
-    user_id: str,
-    thread_id: str,
-    client_token: str | None,
-    now_iso: str,
-) -> None:
-    """Report why a turn's create transaction was refused.
-
-    Reads the state the conditions were about rather than decoding which
-    transact item failed. A refusal is rare, so the reads are free; what they
-    buy is that adding or reordering an item cannot quietly change which error
-    a caller sees.
-    """
-    if client_token:
-        claim = table.get_item(
-            Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _chat_turn_token_sk(client_token)},
-            ConsistentRead=True,
-        ).get("Item")
-        if claim:
-            # Somebody already holds this token. A stop that created the turn
-            # itself is the common case; the user asked for nothing to happen.
-            raise ChatTurnCanceledError("This turn was stopped before it started")
-
-    pointer = table.get_item(
-        Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE},
-        ConsistentRead=True,
-    ).get("Item")
-    if pointer and pointer.get("status") == "running" and str(pointer.get("expires_at", "")) > now_iso:
-        raise ChatTurnConflictError("This conversation already has a turn in progress")
-
-    # Neither: the session moved under us, or was claimed for retirement, while
-    # the transaction was in flight. Retrying here would only race again, and
-    # the caller already tells the user to try again.
-    raise ChatTurnAdmissionError("Could not start this turn; the conversation is busy")
-
-
 def _flag_chat_turn_canceled_sync(
     table: Any,
     turn_id: str,
@@ -821,93 +774,34 @@ def _flag_chat_turn_canceled_sync(
     return _chat_turn_from_item(resp["Attributes"])
 
 
-def _create_stopped_chat_turn_sync(
+def _chat_turn_for_key_sync(
     table: Any,
     user_id: str,
     thread_id: str,
-    client_token: str,
-    now: datetime,
+    idempotency_key: str,
 ) -> ChatTurnItem | None:
-    """Claim a client token with a turn that is already canceled.
+    """The turn a previous attempt of this request already admitted, if any.
 
-    The record a stop leaves when its turn does not exist yet. Made of the same
-    items as any other turn -- minus the active pointer, since it never runs --
-    so the sweep, the session cascade and expiry all reach it without knowing
-    it is special.
+    The thread's own turn index carries the key, so this is a query of one
+    partition rather than a scan -- and it is deleted with the turn, so a
+    repeat after the turn has been swept admits a new one rather than
+    resolving to something that is gone.
     """
-    turn_id = generate_report_id()
-    now_iso = now.isoformat()
-    metadata_item = {
-        "PK": _chat_turn_pk(turn_id),
-        "SK": _SK_METADATA,
-        "turn_id": turn_id,
-        "thread_id": thread_id,
-        "user_id": user_id,
-        # Synthetic: nothing ever streams this turn, but the ids are part of
-        # what a turn is.
-        "message_id": f"msg_stopped_{turn_id}",
-        "text_id": f"text_stopped_{turn_id}",
-        "client_token": client_token,
-        "status": "canceled",
-        "last_seq": 0,
-        "cancel_requested": True,
-        "created_at": now_iso,
-        "updated_at": now_iso,
-        "expires_at": (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
-    }
-    try:
-        table.meta.client.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": {
-                            "PK": _chat_turn_thread_pk(user_id, thread_id),
-                            "SK": _chat_turn_token_sk(client_token),
-                            "turn_id": turn_id,
-                        },
-                        "ConditionExpression": "attribute_not_exists(SK)",
-                    }
-                },
-                {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": metadata_item}},
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": {
-                            "PK": _PK_CHAT_TURN_LIST,
-                            "SK": _chat_turn_list_sk(now_iso, turn_id),
-                            "turn_id": turn_id,
-                            "user_id": user_id,
-                            "thread_id": thread_id,
-                            "expires_at": metadata_item["expires_at"],
-                        },
-                    }
-                },
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": {
-                            "PK": _chat_turn_thread_pk(user_id, thread_id),
-                            "SK": _chat_turn_thread_turn_sk(turn_id),
-                            "turn_id": turn_id,
-                        },
-                    }
-                },
-            ]
-        )
-    except botocore.exceptions.ClientError as exc:
-        if not _first_item_condition_failed(exc):
-            raise
-        # The create won the token, so the turn exists after all. One re-read
-        # rather than a retry loop: it cannot go back to not existing.
-        claimed = table.get_item(
-            Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _chat_turn_token_sk(client_token)},
-            ConsistentRead=True,
-        ).get("Item")
-        if not claimed:
-            return None
-        return _flag_chat_turn_canceled_sync(table, str(claimed["turn_id"]), user_id, now)
-    return _chat_turn_from_item(metadata_item)
+    for item in _query_all_sync(
+        table,
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        FilterExpression="idempotency_key = :key",
+        ExpressionAttributeValues={
+            ":pk": _chat_turn_thread_pk(user_id, thread_id),
+            ":prefix": _SK_CHAT_TURN_THREAD_TURN_PREFIX,
+            ":key": idempotency_key,
+        },
+        ProjectionExpression="turn_id",
+    ):
+        turn = _get_chat_turn_sync(table, str(item["turn_id"]))
+        if turn is not None:
+            return turn
+    return None
 
 
 def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
@@ -932,13 +826,6 @@ def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
             "SK": _chat_turn_thread_turn_sk(turn.turn_id),
         }
     )
-    if turn.client_token:
-        keys.append(
-            {
-                "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
-                "SK": _chat_turn_token_sk(turn.client_token),
-            }
-        )
     with table.batch_writer() as batch:
         for key in keys:
             batch.delete_item(Key=key)
@@ -4897,19 +4784,20 @@ class DynamoDBReportStore(ReportStore):
     # ------------------------------------------------------------------
     # Chat turn event log
     # ------------------------------------------------------------------
-
-    async def create_chat_turn(
+    async def admit_chat_turn(
         self,
         user_id: str,
         thread_id: str,
         message_id: str,
         text_id: str,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
+        idempotency_key: str | None = None,
+    ) -> ChatTurnAdmission:
         turn_id = generate_report_id()
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
         expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+        metadata_pk = _chat_session_metadata_pk(user_id)
+        list_pk = _chat_session_list_pk(user_id)
         metadata_item = {
             "PK": _chat_turn_pk(turn_id),
             "SK": _SK_METADATA,
@@ -4918,98 +4806,46 @@ class DynamoDBReportStore(ReportStore):
             "user_id": user_id,
             "message_id": message_id,
             "text_id": text_id,
-            "client_token": client_token,
+            "idempotency_key": idempotency_key,
             "status": "running",
             "created_at": now_iso,
             "updated_at": now_iso,
             "expires_at": expires_at,
         }
-        pointer_item = {
-            "PK": _chat_turn_thread_pk(user_id, thread_id),
-            "SK": _SK_CHAT_TURN_ACTIVE,
-            "turn_id": turn_id,
-            "status": "running",
-            "expires_at": expires_at,
-        }
-        list_item = {
-            "PK": _PK_CHAT_TURN_LIST,
-            "SK": _chat_turn_list_sk(now_iso, turn_id),
-            "turn_id": turn_id,
-            "user_id": user_id,
-            "thread_id": thread_id,
-            # A copy of the lease, so a sweep can skip an entry without reading
-            # the turn itself. Kept fresh by finish_chat_turn; while the turn
-            # runs it can only be *early*, which costs a confirming read rather
-            # than a missed collection.
-            "expires_at": expires_at,
-        }
-        thread_index_item = {
-            "PK": _chat_turn_thread_pk(user_id, thread_id),
-            "SK": _chat_turn_thread_turn_sk(turn_id),
-            "turn_id": turn_id,
-        }
 
-        metadata_pk = _chat_session_metadata_pk(user_id)
-        list_pk = _chat_session_list_pk(user_id)
-        # Checked *in* the transaction rather than read before it: a stop for
-        # this send can land while the create is in flight, and a read above
-        # would simply miss it.
-        token_claim: list[dict[str, Any]] = (
-            [
-                {
-                    "Put": {
-                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                        "Item": {
-                            "PK": _chat_turn_thread_pk(user_id, thread_id),
-                            "SK": _chat_turn_token_sk(client_token),
-                            "turn_id": turn_id,
-                        },
-                        # A stop for this send may have claimed the token
-                        # already, having created the turn itself, canceled.
-                        "ConditionExpression": "attribute_not_exists(SK)",
-                    }
-                }
-            ]
-            if client_token
-            else []
-        )
-
-        def _op() -> ChatTurnItem | None:
+        def _op() -> ChatTurnAdmission:
             table = _get_table()
-            existing = table.get_item(
+            if idempotency_key is not None:
+                # A repeat of this request resolves to the turn it already
+                # admitted. Read first, so a lost response is answered by asking
+                # again rather than by racing another write.
+                seen = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
+                if seen is not None:
+                    return ChatTurnAdmission(outcome="existing", turn=seen)
+
+            session = table.get_item(
                 Key={"PK": metadata_pk, "SK": thread_id},
                 ConsistentRead=True,
             ).get("Item")
-            if not existing or existing.get("retiring_at"):
-                # Gone, or claimed for retirement. Either way no turn may
-                # start against it.
-                return None
-            # The session's timestamp moves in the *same* transaction as the
-            # turn. Two writes would leave a window where a delete reads the
-            # fresh timestamp, claims the session, sees no running turn and
-            # cascades -- and this turn is then created against a
-            # conversation that no longer exists.
-            admission = _chat_session_update_transactions(
-                metadata_pk=metadata_pk,
-                list_pk=list_pk,
-                thread_id=thread_id,
-                existing=existing,
-                updated={**existing, "updated_at": now_iso},
-                update_expression="SET updated_at = :updated_at",
-                expression_attribute_values={":updated_at": now_iso},
-            )
+            if not session or session.get("retiring_at"):
+                return ChatTurnAdmission(outcome="retired")
+
             try:
                 table.meta.client.transact_write_items(
                     TransactItems=[
                         {
                             "Put": {
                                 "TableName": settings.DYNAMODB_TABLE_NAME,
-                                "Item": pointer_item,
-                                # One running turn per thread. The expiry
-                                # clause is not optional: without it a
-                                # producer that died mid-turn wedges the
-                                # conversation until someone deletes the
-                                # pointer by hand.
+                                "Item": {
+                                    "PK": _chat_turn_thread_pk(user_id, thread_id),
+                                    "SK": _SK_CHAT_TURN_ACTIVE,
+                                    "turn_id": turn_id,
+                                    "status": "running",
+                                    "expires_at": expires_at,
+                                },
+                                # One running turn per thread. The expiry clause
+                                # is not optional: without it a producer that
+                                # died mid-turn wedges the conversation.
                                 "ConditionExpression": (
                                     "attribute_not_exists(PK) OR #s <> :running OR expires_at <= :now"
                                 ),
@@ -5018,26 +4854,62 @@ class DynamoDBReportStore(ReportStore):
                             },
                         },
                         {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": metadata_item}},
-                        {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": list_item}},
-                        {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": thread_index_item}},
-                        *admission,
-                        *token_claim,
+                        {
+                            "Put": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Item": {
+                                    "PK": _PK_CHAT_TURN_LIST,
+                                    "SK": _chat_turn_list_sk(now_iso, turn_id),
+                                    "turn_id": turn_id,
+                                    "user_id": user_id,
+                                    "thread_id": thread_id,
+                                    "expires_at": expires_at,
+                                },
+                            }
+                        },
+                        {
+                            "Put": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Item": {
+                                    "PK": _chat_turn_thread_pk(user_id, thread_id),
+                                    "SK": _chat_turn_thread_turn_sk(turn_id),
+                                    "turn_id": turn_id,
+                                    "idempotency_key": idempotency_key,
+                                },
+                            }
+                        },
+                        # The session's timestamp moves in the *same*
+                        # transaction, conditioned on it not being retired.
+                        *_chat_session_update_transactions(
+                            metadata_pk=metadata_pk,
+                            list_pk=list_pk,
+                            thread_id=thread_id,
+                            existing=session,
+                            updated={**session, "updated_at": now_iso},
+                            update_expression="SET updated_at = :updated_at",
+                            expression_attribute_values={":updated_at": now_iso},
+                        ),
                     ]
                 )
             except botocore.exceptions.ClientError as exc:
                 if not _any_item_condition_failed(exc):
-                    # Throttling, capacity and validation all arrive as the same
-                    # TransactionCanceledException. Only a refused *condition*
-                    # means the request was answered; the rest must propagate as
-                    # the error they are.
+                    # Throttling, capacity and validation arrive as the same
+                    # exception; only a refused condition means the request was
+                    # answered.
                     raise
-                # Which condition it was is *read* from the state they were
-                # about, rather than decoded from the position of the failing
-                # item: the positional form misattributes silently the moment
-                # anyone reorders them, and a refusal is rare enough that an
-                # extra read costs nothing.
-                _raise_chat_turn_refusal(table, user_id, thread_id, client_token, now_iso)
-            return _chat_turn_from_item(metadata_item)
+                if idempotency_key is not None:
+                    # Another attempt of the same request may have won the race.
+                    concurrent = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
+                    if concurrent is not None:
+                        return ChatTurnAdmission(outcome="existing", turn=concurrent)
+                fresh = table.get_item(
+                    Key={"PK": metadata_pk, "SK": thread_id},
+                    ConsistentRead=True,
+                ).get("Item")
+                if not fresh or fresh.get("retiring_at"):
+                    return ChatTurnAdmission(outcome="retired")
+                return ChatTurnAdmission(outcome="busy")
+            return ChatTurnAdmission(outcome="created", turn=_chat_turn_from_item(metadata_item))
 
         return await asyncio.to_thread(_op)
 
@@ -5133,116 +5005,11 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def renew_chat_turn_lease(self, turn_id: str) -> ChatTurnItem | None:
-        now = datetime.now(tz=UTC)
-        now_iso = now.isoformat()
-        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
-
-        def _op() -> ChatTurnItem | None:
-            table = _get_table()
-            turn = _get_chat_turn_sync(table, turn_id)
-            if turn is None or turn.status != "running":
-                return None
-            # Both halves in one transaction. The pointer carries its own copy
-            # because the "is this thread free" condition can only read the item
-            # it writes, so the two must move together: renewing the record
-            # alone leaves a producer believing it holds a thread whose pointer
-            # a successor has already taken.
-            try:
-                table.meta.client.transact_write_items(
-                    TransactItems=[
-                        {
-                            "Update": {
-                                "TableName": settings.DYNAMODB_TABLE_NAME,
-                                "Key": {"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
-                                "UpdateExpression": "SET updated_at = :now, expires_at = :expires_at",
-                                "ConditionExpression": "attribute_exists(PK) AND #s = :running",
-                                "ExpressionAttributeNames": {"#s": "status"},
-                                "ExpressionAttributeValues": {
-                                    ":now": now_iso,
-                                    ":expires_at": expires_at,
-                                    ":running": "running",
-                                },
-                            }
-                        },
-                        {
-                            "Update": {
-                                "TableName": settings.DYNAMODB_TABLE_NAME,
-                                "Key": {
-                                    "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
-                                    "SK": _SK_CHAT_TURN_ACTIVE,
-                                },
-                                "UpdateExpression": "SET expires_at = :expires_at",
-                                "ConditionExpression": "turn_id = :turn_id",
-                                "ExpressionAttributeValues": {
-                                    ":expires_at": expires_at,
-                                    ":turn_id": turn_id,
-                                },
-                            }
-                        },
-                    ]
-                )
-            except botocore.exceptions.ClientError as exc:
-                if _transaction_cancelled(exc):
-                    # Lost the thread, or the turn is no longer running. Either
-                    # way this producer no longer holds the lease and must stop
-                    # rather than carry on believing it does.
-                    return None
-                raise
-            return turn.model_copy(update={"updated_at": now_iso, "expires_at": expires_at})
-
-        return await asyncio.to_thread(_op)
-
-    async def request_chat_turn_cancel(
-        self,
-        user_id: str,
-        thread_id: str,
-        turn_id: str | None = None,
-        client_token: str | None = None,
-    ) -> ChatTurnItem | None:
+    async def request_chat_turn_cancel(self, turn_id: str, user_id: str) -> ChatTurnItem | None:
         now = datetime.now(tz=UTC)
 
         def _op() -> ChatTurnItem | None:
-            table = _get_table()
-            # A stop only means anything for a session that can hold a turn, and
-            # this is what keeps a caller from leaving records on threads they
-            # do not own.
-            if not table.get_item(
-                Key={"PK": _chat_session_metadata_pk(user_id), "SK": thread_id},
-                ConsistentRead=True,
-            ).get("Item"):
-                return None
-            pointer = table.get_item(
-                Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE},
-                ConsistentRead=True,
-            ).get("Item")
-            if not pointer or pointer.get("status") != "running":
-                if client_token is None:
-                    return None
-                # Nothing running by that name -- which may mean the turn has
-                # not been created yet. Claiming the token with a turn that is
-                # already canceled is what stops it: the create collides on the
-                # claim and is refused. An ordinary turn, so it is swept,
-                # cascaded and expired like any other.
-                return _create_stopped_chat_turn_sync(table, user_id, thread_id, client_token, now)
-            running_turn_id = str(pointer["turn_id"])
-            named = turn_id is not None or client_token is not None
-            if named and turn_id != running_turn_id:
-                # Either identity may be the one the caller holds, so the token
-                # is checked against the record before concluding this is a
-                # different turn.
-                running = _get_chat_turn_sync(table, running_turn_id)
-                if (
-                    running is None
-                    or client_token is None
-                    or running.client_token is None
-                    or running.client_token != client_token
-                ):
-                    # The turn this was aimed at has already finished and
-                    # another has taken the thread. Stopping that one is not
-                    # what was asked.
-                    return None
-            return _flag_chat_turn_canceled_sync(table, running_turn_id, user_id, now)
+            return _flag_chat_turn_canceled_sync(_get_table(), turn_id, user_id, now)
 
         return await asyncio.to_thread(_op)
 

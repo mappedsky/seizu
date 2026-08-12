@@ -31,10 +31,10 @@ _TURN_INDEXES = {
 # both commit, leaving two producers on one LangGraph thread. Partial, so the
 # many finished turns a thread accumulates do not collide.
 _RUNNING_TURN_INDEX = "uq_chat_turns_one_running"
-# One turn per client token. This is what settles a stop racing the create it
-# names: both try to write a row for the token, and the loser is told which
-# happened. NULLs are distinct, so turns without a token do not collide.
-_CLIENT_TOKEN_INDEX = "uq_chat_turns_client_token"
+# One turn per idempotency key: a repeat of an admission request resolves to
+# the turn it already made rather than making another. NULLs are distinct, so
+# turns admitted without a key do not collide.
+_IDEMPOTENCY_INDEX = "uq_chat_turns_idempotency_key"
 _RUNNING_TURN_WHERE = sa.text("status = 'running'")
 
 
@@ -63,7 +63,7 @@ def upgrade() -> None:
             sa.Column("thread_id", sa.String(), nullable=False),
             sa.Column("message_id", sa.String(), nullable=False),
             sa.Column("text_id", sa.String(), nullable=False),
-            sa.Column("client_token", sa.String(), nullable=True),
+            sa.Column("idempotency_key", sa.String(), nullable=True),
             sa.Column("status", sa.String(), nullable=False, server_default="running"),
             sa.Column("last_seq", sa.Integer(), nullable=True),
             sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default=sa.false()),
@@ -75,8 +75,8 @@ def upgrade() -> None:
     for name, columns in _TURN_INDEXES.items():
         if name not in turn_indexes:
             op.create_index(name, _TURNS, columns)
-    if _CLIENT_TOKEN_INDEX not in turn_indexes:
-        op.create_index(_CLIENT_TOKEN_INDEX, _TURNS, ["user_id", "thread_id", "client_token"], unique=True)
+    if _IDEMPOTENCY_INDEX not in turn_indexes:
+        op.create_index(_IDEMPOTENCY_INDEX, _TURNS, ["user_id", "thread_id", "idempotency_key"], unique=True)
     if _RUNNING_TURN_INDEX not in turn_indexes:
         op.create_index(
             _RUNNING_TURN_INDEX,
@@ -107,7 +107,7 @@ def downgrade() -> None:
         op.drop_table(_EVENTS)
     if _TURNS in existing:
         turn_indexes = _indexes(_TURNS)
-        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX, _CLIENT_TOKEN_INDEX):
+        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX, _IDEMPOTENCY_INDEX):
             if name in turn_indexes:
                 op.drop_index(name, table_name=_TURNS)
         op.drop_table(_TURNS)

@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from reporting import settings
@@ -15,10 +15,8 @@ from reporting.schema.chat import (
     ChatHistoryResponse,
     ChatSessionItem,
     ChatSessionsResponse,
-    ChatStreamRequest,
-    ChatTurnCanceledError,
-    ChatTurnConflictError,
-    ChatTurnNotAdmittedError,
+    ChatTurnAdmissionResponse,
+    ChatTurnRequest,
     CreateChatSessionRequest,
     UpdateChatSessionRequest,
 )
@@ -46,162 +44,127 @@ def _stream_response(source: AsyncIterator[str]) -> StreamingResponse:
 
 
 @router.post(
-    "/api/v1/chat/stream",
-    response_class=StreamingResponse,
+    "/api/v1/chat/threads/{thread_id}/turns",
+    response_model=ChatTurnAdmissionResponse,
+    status_code=201,
     responses={
-        200: {
-            "description": "Server-sent event stream",
-            "content": {"text/event-stream": {"schema": {"type": "string"}}},
-        }
+        200: {"description": "This request was already admitted; the existing turn is returned"},
+        409: {"description": "Another turn is already running on this thread"},
+        404: {"description": "The conversation does not exist or is being deleted"},
     },
 )
-async def stream_chat(
-    body: ChatStreamRequest,
+async def admit_chat_turn(
+    body: ChatTurnRequest,
+    response: Response,
+    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
-) -> StreamingResponse:
-    """Start a chat turn and stream it as an AI SDK UI Message Stream.
+) -> ChatTurnAdmissionResponse:
+    """Admit a turn and return its id, without streaming anything.
 
-    The turn is produced independently of this request (see
-    :mod:`reporting.services.chat_turns`); what this returns is a reader over
-    the turn's event log, which is exactly what ``GET`` returns to a client that
-    reconnects.
+    **Admission is its own request, answered before anything streams.** The
+    client therefore holds a ``turn_id`` before it can possibly need one, so
+    everything afterwards -- attaching, stopping -- names a turn that exists.
+    Folding this into the stream was what forced a second identity for the
+    window before the first frame, and a way to represent a stop against a turn
+    that had not been created yet.
+
+    ``idempotency_key`` makes a repeat resolve to the turn it already admitted,
+    so a lost response is fixed by asking again.
     """
     if body.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in current.permissions:
         raise HTTPException(
             status_code=403,
             detail=f"Missing permissions: {Permission.CHAT_BYPASS_PERMISSIONS.value}",
         )
-    session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
-    if session is not None and session.origin != "interactive":
+    session = await report_store.get_chat_session(current.user.user_id, thread_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.origin != "interactive":
         # Headless-run transcripts are read-only: history stays viewable, but
         # the conversation cannot be continued from the web UI.
         raise HTTPException(status_code=403, detail="Headless chat sessions are read-only")
-    return _stream_response(_start_and_stream(body, current))
 
-
-async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> AsyncIterator[str]:
-    session = await report_store.get_chat_session(current.user.user_id, body.thread_id)
-    if session is None:
-        async for frame in _stream_error("Session not found"):
-            yield frame
-        return
-    try:
-        turn = await chat_turns.start_turn(body, current)
-    except ChatTurnCanceledError:
-        # Stop reached the store before this turn did. The user asked for
-        # nothing to happen, so end the stream cleanly rather than as an error.
-        async for frame in _stream_stopped():
-            yield frame
-        return
-    except ChatTurnNotAdmittedError:
-        # The session is gone or claimed for retirement -- its checkpoint and
-        # sandbox are being deleted, so a turn must not run against it. The
-        # store decided that in the same write that would have created the
-        # turn, so there is no window between admission and creation.
-        async for frame in _stream_error("This conversation has been retired"):
-            yield frame
-        return
-    except ChatTurnConflictError:
-        # The client has a turn running it is not watching. Telling it to
-        # reconnect is more useful than starting a second one, which would
-        # interleave two answers into the same conversation.
-        async for frame in _stream_error("This conversation already has a turn in progress"):
-            yield frame
-        return
-    except Exception:
-        # Includes the store being unreachable and ChatTurnAdmissionError, both
-        # retryable and both reading differently from a conversation that has
-        # been retired.
-        logger.exception("Failed to start chat turn", extra={"thread_id": body.thread_id})
-        async for frame in _stream_error("Could not start this turn; please try again"):
-            yield frame
-        return
-    async for frame in chat_turns.tail_turn(turn.turn_id):
-        yield frame
-
-
-async def _stream_stopped() -> AsyncIterator[str]:
-    """Close an empty stream for a turn that was stopped before it began."""
-    yield chat_turns.sse_frame({"type": "finish", "finishReason": "stop"})
-    yield "data: [DONE]\n\n"
-
-
-async def _stream_error(message: str) -> AsyncIterator[str]:
-    yield chat_turns.sse_frame({"type": "error", "errorText": message})
-    yield chat_turns.sse_frame({"type": "finish", "finishReason": "error"})
-    yield "data: [DONE]\n\n"
+    admission = await chat_turns.start_turn(thread_id, body, current)
+    if admission.outcome == "retired":
+        raise HTTPException(status_code=404, detail="This conversation has been retired")
+    if admission.outcome == "busy":
+        raise HTTPException(status_code=409, detail="This conversation already has a turn in progress")
+    if admission.turn is None:  # pragma: no cover - defensive
+        raise HTTPException(status_code=503, detail="Could not start this turn; please try again")
+    if admission.outcome == "existing":
+        response.status_code = 200
+    return ChatTurnAdmissionResponse(turn_id=admission.turn.turn_id, status=admission.outcome)
 
 
 @router.get(
-    "/api/v1/chat/stream/{thread_id}",
-    response_class=StreamingResponse,
-    responses={
-        200: {
-            "description": "Server-sent event stream replaying the thread's running turn",
-            "content": {"text/event-stream": {"schema": {"type": "string"}}},
-        },
-        204: {"description": "No turn is running for this thread"},
-    },
+    "/api/v1/chat/threads/{thread_id}/turns/active",
+    response_model=ChatTurnAdmissionResponse,
+    responses={204: {"description": "No turn is running for this thread"}},
 )
-async def reconnect_chat_stream(
+async def active_chat_turn(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
-    """Reattach to a thread's running turn, replaying it from the start.
+    """Return the thread's running turn, so a reloaded client can reattach.
 
-    The replay begins at sequence zero rather than at a client-supplied cursor:
-    the AI SDK's reconnect protocol carries no offset, and the turn's stable
-    ``messageId`` is what lets the client rebuild the message rather than append
-    a second one. ``204`` means there is nothing to reattach to, which the SDK
-    reads as "the response already finished".
+    A client that reconnects has a thread but no turn id -- it never saw the
+    admission that started it. This is the one place that resolves one to the
+    other; everything else takes the id.
     """
     turn = await report_store.get_active_chat_turn(current.user.user_id, thread_id)
     if turn is None:
         return Response(status_code=204)
+    return JSONResponse(ChatTurnAdmissionResponse(turn_id=turn.turn_id, status="existing").model_dump())
+
+
+@router.get(
+    "/api/v1/chat/turns/{turn_id}/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Server-sent event stream of the turn's event log",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        },
+        404: {"description": "No such turn for this user"},
+    },
+)
+async def stream_chat_turn(
+    turn_id: str = Path(min_length=1, max_length=64),
+    current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
+) -> Response:
+    """Attach to a turn's event log, replaying it from the start.
+
+    The same reader whether the turn was admitted a moment ago or is being
+    picked up after a reload: the log is the only thing either case reads.
+    """
+    turn = await report_store.get_chat_turn(turn_id, user_id=current.user.user_id)
+    if turn is None:
+        raise HTTPException(status_code=404, detail="Turn not found")
     return _stream_response(chat_turns.tail_turn(turn.turn_id))
 
 
-@router.post("/api/v1/chat/stream/{thread_id}/cancel", status_code=204)
-async def cancel_chat_stream(
-    thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
-    turn_id: str | None = Query(default=None, min_length=1, max_length=64),
-    client_token: str | None = Query(default=None, min_length=8, max_length=64),
+@router.post("/api/v1/chat/turns/{turn_id}/cancel", status_code=204)
+async def cancel_chat_turn(
+    turn_id: str = Path(min_length=1, max_length=64),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
-    """Stop a specific running turn.
+    """Stop a turn.
 
-    Closing the SSE connection is not enough: the turn is produced beside the
-    request, so a client that only hangs up leaves it running -- still spending
-    tokens and still able to execute the actions it had lined up. Stop has to
-    say so explicitly.
+    Closing the stream is not enough: the turn is produced elsewhere, so
+    without being told it keeps generating and can still run the actions it had
+    queued.
 
-    The turn is named, not implied by the thread. This request can be delayed or
-    retried, and by the time it lands the turn it was aimed at may have finished
-    and the user started another -- addressing the thread alone would stop that
-    one instead.
-
-    Either identity will do, because a client has them at different times: it
-    mints ``client_token`` before its send goes out, and only learns ``turn_id``
-    when the turn announces itself on the opening frame. A client that
-    reconnected to a turn it did not start has only the id.
-
-    Given a token, the store records the stop even when no turn is running yet
-    -- and does so as one operation with the search, because a create can commit
-    between looking and writing. Idempotent: a turn that is already gone, or was
-    never created, is a 204 rather than an error.
+    **This only ever marks a turn that exists.** A client cannot name a turn
+    before admission gives it one, so there is nothing here to create, park or
+    reconcile. Idempotent: a turn that is already finished, or was never
+    admitted, is a 204 rather than an error.
     """
-    if turn_id is None and client_token is None:
-        raise HTTPException(status_code=422, detail="turn_id or client_token is required")
-    turn = await report_store.request_chat_turn_cancel(
-        current.user.user_id,
-        thread_id,
-        turn_id,
-        client_token,
-    )
+    turn = await report_store.request_chat_turn_cancel(turn_id, current.user.user_id)
     if turn is not None:
-        # Fast path when the producer is on this worker; otherwise the flag
-        # above reaches it at its next heartbeat.
-        chat_turns.cancel_local_producer(turn.turn_id)
+        # The record carries the stop for the producer's own watch; cancelling
+        # the workflow is what interrupts it mid-call rather than at the next
+        # chunk boundary.
+        await chat_turns.cancel_turn(turn.turn_id)
     return Response(status_code=204)
 
 
@@ -417,21 +380,22 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> bool:
         # new timestamp; deleting now would race that turn.
         raise HTTPException(status_code=503, detail="Conversation is in use; try again")
 
+    running = await report_store.get_active_chat_turn(user_id, thread_id)
+    if running is None:
+        return True
     try:
-        canceled = await report_store.request_chat_turn_cancel(user_id, thread_id)
+        await report_store.request_chat_turn_cancel(running.turn_id, user_id)
     except Exception as exc:
         logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
         raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
-    if canceled is None:
-        return True
-    chat_turns.cancel_local_producer(canceled.turn_id)
-    if not await chat_turns.await_turn_stopped(canceled.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
-        # Deleting now would leave the producer recreating checkpoint state
-        # behind the cascade, which no cleanup can undo. The session stays
-        # claimed, so nothing new can start and the retry is a plain repeat.
+    await chat_turns.cancel_turn(running.turn_id)
+    if not await chat_turns.await_turn_stopped(running.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
+        # Deleting now would leave the producer writing behind the cascade,
+        # which no cleanup undoes. The session stays claimed, so nothing new can
+        # start and the retry is a plain repeat.
         logger.warning(
             "Chat turn did not stop in time for deletion",
-            extra={"thread_id": thread_id, "turn_id": canceled.turn_id},
+            extra={"thread_id": thread_id, "turn_id": running.turn_id},
         )
         raise HTTPException(status_code=503, detail="Conversation is still running; try again")
     return True
