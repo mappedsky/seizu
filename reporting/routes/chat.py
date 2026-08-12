@@ -182,8 +182,12 @@ async def cancel_chat_stream(
     Either identity will do, because a client has them at different times: it
     mints ``client_token`` before its send goes out, and only learns ``turn_id``
     when the turn announces itself on the opening frame. A client that
-    reconnected to a turn it did not start has only the id. Idempotent: a turn
-    that is already gone is a 204, not an error.
+    reconnected to a turn it did not start has only the id.
+
+    Given a token, the store records the stop even when no turn is running yet
+    -- and does so as one operation with the search, because a create can commit
+    between looking and writing. Idempotent: a turn that is already gone, or was
+    never created, is a 204 rather than an error.
     """
     if turn_id is None and client_token is None:
         raise HTTPException(status_code=422, detail="turn_id or client_token is required")
@@ -193,11 +197,6 @@ async def cancel_chat_stream(
         turn_id,
         client_token,
     )
-    if turn is None and client_token is not None:
-        # Nothing running by that name -- which may mean the turn has not been
-        # created *yet*. Recording the stop against the token is what stops it
-        # starting a moment later and running with nobody watching.
-        await report_store.record_chat_turn_cancellation(current.user.user_id, thread_id, client_token)
     if turn is not None:
         # Fast path when the producer is on this worker; otherwise the flag
         # above reaches it at its next heartbeat.

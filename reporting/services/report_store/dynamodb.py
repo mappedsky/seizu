@@ -338,6 +338,34 @@ def _ensure_space_reports_index(dynamodb: Any) -> None:
         )
 
 
+def _enable_ttl(dynamodb: Any) -> None:
+    """Turn on the table's native TTL for the ``ttl`` attribute.
+
+    Only stop tombstones carry it: they have no shared partition to sweep, so
+    without this an app-managed table keeps them forever. Best effort, and only
+    for tables this process creates -- an IaC-managed table needs the same
+    setting applied there (see the chat install docs). Nothing depends on the
+    collection happening: admission already ignores an expired tombstone.
+    """
+    client = dynamodb.meta.client
+    try:
+        description = client.describe_time_to_live(TableName=settings.DYNAMODB_TABLE_NAME)
+        status = description.get("TimeToLiveDescription", {}).get("TimeToLiveStatus")
+        if status in ("ENABLED", "ENABLING"):
+            return
+        client.update_time_to_live(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
+        )
+        logger.info("Enabled DynamoDB TTL", extra={"table": settings.DYNAMODB_TABLE_NAME})
+    except botocore.exceptions.ClientError:
+        logger.warning(
+            "Could not enable DynamoDB TTL; expired chat turn tombstones will not be collected",
+            extra={"table": settings.DYNAMODB_TABLE_NAME},
+            exc_info=True,
+        )
+
+
 def _space_reports_gsi_definition() -> dict[str, Any]:
     return {
         "IndexName": _GSI_SPACE_REPORTS,
@@ -1619,12 +1647,14 @@ class DynamoDBReportStore(ReportStore):
                     "Created DynamoDB table",
                     extra={"table": settings.DYNAMODB_TABLE_NAME},
                 )
+                _enable_ttl(dynamodb)
             except dynamodb.meta.client.exceptions.ResourceInUseException:
                 logger.info(
                     "DynamoDB table already exists (created by another worker)",
                     extra={"table": settings.DYNAMODB_TABLE_NAME},
                 )
                 _ensure_space_reports_index(dynamodb)
+                _enable_ttl(dynamodb)
 
         await asyncio.to_thread(_op)
 
@@ -4798,7 +4828,10 @@ class DynamoDBReportStore(ReportStore):
                             "PK": _chat_turn_cancel_pk(user_id, thread_id, client_token),
                             "SK": _SK_METADATA,
                         },
-                        "ConditionExpression": "attribute_not_exists(PK)",
+                        # An expired tombstone is not a live stop; honouring one
+                        # forever would make the token permanently unusable.
+                        "ConditionExpression": "attribute_not_exists(PK) OR expires_at <= :cancel_now",
+                        "ExpressionAttributeValues": {":cancel_now": now_iso},
                     }
                 }
             ]
@@ -5026,19 +5059,16 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
-        expires_at = (datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+    async def delete_expired_chat_turn_cancellations(self, expired_before: str, limit: int) -> int:
+        """No-op: DynamoDB collects these itself.
 
-        def _op() -> None:
-            _get_table().put_item(
-                Item={
-                    "PK": _chat_turn_cancel_pk(user_id, thread_id, client_token),
-                    "SK": _SK_METADATA,
-                    "expires_at": expires_at,
-                }
-            )
-
-        await asyncio.to_thread(_op)
+        The items have no shared partition to walk, so a sweep would mean a
+        scan. They carry a ``ttl`` epoch attribute for the table's native TTL
+        instead, and correctness does not depend on the deletion happening at
+        all -- admission already ignores an expired tombstone, so a late
+        collection costs storage and nothing else.
+        """
+        return 0
 
     async def request_chat_turn_cancel(
         self,
@@ -5047,8 +5077,35 @@ class DynamoDBReportStore(ReportStore):
         turn_id: str | None = None,
         client_token: str | None = None,
     ) -> ChatTurnItem | None:
+        now = datetime.now(tz=UTC)
+        expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+
         def _op() -> ChatTurnItem | None:
             table = _get_table()
+            # A tombstone only means anything for a session that can hold a
+            # turn. Without this check any authenticated caller could write one
+            # per token against a thread they do not own, for nothing.
+            if not table.get_item(
+                Key={"PK": _chat_session_metadata_pk(user_id), "SK": thread_id},
+                ConsistentRead=True,
+            ).get("Item"):
+                return None
+            if client_token is not None:
+                # **Before** looking for a turn, not after. A create can commit
+                # in between: one that commits after this sees the tombstone in
+                # its own transaction and is refused, and one that commits
+                # before is found by the search below. Looking first leaves a
+                # window where neither happens.
+                table.put_item(
+                    Item={
+                        "PK": _chat_turn_cancel_pk(user_id, thread_id, client_token),
+                        "SK": _SK_METADATA,
+                        "expires_at": expires_at,
+                        # For the table's native TTL, where the operator has it
+                        # enabled; admission does not depend on the collection.
+                        "ttl": int((now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).timestamp()),
+                    }
+                )
             pointer = table.get_item(
                 Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE},
                 ConsistentRead=True,

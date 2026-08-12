@@ -209,18 +209,44 @@ into a wait.
 
 **Stop names the turn, not the thread.** The request can be delayed or retried,
 and by the time it lands the turn it was aimed at may have finished and the user
-started another — a thread-addressed stop would then kill the successor. The
+started another — a thread-addressed stop would then kill the successor.
+
 A turn therefore has **two** names, because a client holds them at different
 times: `client_token`, which it mints before its send goes out, and `turn_id`,
-which rides on the opening frame. Stop can also beat the turn it names into the
-store entirely — the user presses it while the create is still in flight — so a
-request that finds nothing running records a **tombstone** against the token,
-and the create refuses on it *in the same transaction that would create the
-turn*. Checking before that write would simply miss the race it exists for. Stop is enabled from the moment a message is
+which rides on the opening frame. Stop is enabled from the moment a message is
 submitted, so without the token the whole window before the first frame did
-nothing at all — while the detached producer, tool actions included, carried
-on. A client that reconnected to a turn it did not start has only the id.
-Either identifies the turn; naming neither is a 422.
+nothing at all — while the detached producer, tool actions included, carried on.
+A client that reconnected to a turn it did not start has only the id. Either
+identifies the turn; naming neither is a 422.
+
+**Stop can also beat the turn it names into the store**, so it records a
+**tombstone** against the token — always, whether or not it also found a turn to
+flag, and *before* it looks — and the create refuses on that tombstone inside
+the transaction that would create the turn.
+
+Both orderings are load-bearing. Writing the tombstone after the search leaves a
+window where a create commits in between and sees neither. And on SQL both paths
+take the **session row** for update first, because a `SELECT` for a tombstone
+that is not there locks nothing: without it the create reads no tombstone, the
+stop finds no turn, and the turn still commits unflagged.
+
+Tombstones expire, and admission ignores an expired one — honouring one forever
+would make that token permanently unusable and let them accumulate per send. SQL
+sweeps them on the same paced pass as the logs; DynamoDB carries a `ttl`
+attribute and `initialize` turns the table's TTL on (an IaC-managed table needs
+the same setting applied there). Correctness depends on the expiry check, not on
+either collection happening.
+
+**A stop against a thread with no session records nothing.** A tombstone only
+means anything for a session that can hold a turn, and without the check any
+authenticated caller could write one per token against a thread they do not own.
+On SQL the session row is doing double duty here: it is both that check and the
+lock, and an absent row locks nothing.
+
+**Don't:** roll back when the tombstone already exists. It drops the session-row
+lock the whole path depends on, and leaves behind a row that may already have
+expired — which admission then ignores, so a create started after the stop
+commits anyway. Refresh the existing row's expiry under the lock instead.
 
 **Don't:** let a second local cancel through. The producer clears its own
 cancellation before running its terminal cleanup, so a repeat — a retried

@@ -398,7 +398,11 @@ class ChatTurnCancellationRecord(SQLModel, table=True):  # type: ignore
     """
 
     __tablename__ = "chat_turn_cancellations"
-    __table_args__ = (UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),
+        # The expiry sweep spans every user, which is a full scan without this.
+        Index("ix_chat_turn_cancellations_expires_at", "expires_at"),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: str
     thread_id: str
@@ -3445,6 +3449,19 @@ class SQLModelReportStore(ReportStore):
             now = datetime.now(tz=UTC)
             now_iso = now.isoformat()
             async with AsyncSession(_get_engine()) as session:
+                # The session row is also the serialization point against a
+                # concurrent stop. A SELECT for a tombstone that is not there
+                # locks nothing, so without taking this first the two can cross:
+                # the create sees no tombstone, the stop finds no turn, and the
+                # turn commits unflagged.
+                await session.execute(
+                    select(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                    )
+                    .with_for_update()
+                )
                 # Admission and creation commit together, so a delete cannot
                 # slip between them: the session is closed to new turns the
                 # moment it is claimed, and this update is what observes that.
@@ -3471,6 +3488,10 @@ class SQLModelReportStore(ReportStore):
                                     col(ChatTurnCancellationRecord.user_id) == user_id,
                                     col(ChatTurnCancellationRecord.thread_id) == thread_id,
                                     col(ChatTurnCancellationRecord.client_token) == client_token,
+                                    # An expired tombstone is not a live stop;
+                                    # honouring it would make the token
+                                    # permanently unusable.
+                                    col(ChatTurnCancellationRecord.expires_at) > now_iso,
                                 )
                             )
                         )
@@ -3559,22 +3580,26 @@ class SQLModelReportStore(ReportStore):
             record = await session.get(ChatTurnRecord, turn_id)
             return _chat_turn_from_record(record) if record else None
 
-    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
-        expires_at = (datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+    async def delete_expired_chat_turn_cancellations(self, expired_before: str, limit: int) -> int:
         async with AsyncSession(_get_engine()) as session:
-            session.add(
-                ChatTurnCancellationRecord(
-                    user_id=user_id,
-                    thread_id=thread_id,
-                    client_token=client_token,
-                    expires_at=expires_at,
+            stale = (
+                (
+                    await session.execute(
+                        select(col(ChatTurnCancellationRecord.id))
+                        .where(col(ChatTurnCancellationRecord.expires_at) <= expired_before)
+                        .limit(limit)
+                    )
                 )
+                .scalars()
+                .all()
             )
-            try:
-                await session.commit()
-            except IntegrityError:
-                # Already recorded; stopping twice is not an error.
-                await session.rollback()
+            if not stale:
+                return 0
+            await session.execute(
+                delete(ChatTurnCancellationRecord).where(col(ChatTurnCancellationRecord.id).in_(stale))
+            )
+            await session.commit()
+            return len(stale)
 
     async def request_chat_turn_cancel(
         self,
@@ -3583,7 +3608,70 @@ class SQLModelReportStore(ReportStore):
         turn_id: str | None = None,
         client_token: str | None = None,
     ) -> ChatTurnItem | None:
+        now = datetime.now(tz=UTC)
         async with AsyncSession(_get_engine()) as session:
+            # The same lock the create takes, for the same reason: without it a
+            # create can commit between this looking and this writing, and end
+            # up with neither the flag nor the tombstone.
+            #
+            # It is also the existence check. A tombstone only means anything
+            # for a session that can hold a turn, and an absent row locks
+            # nothing -- so a request naming a thread the caller does not own
+            # would neither serialize against anything nor have anything to
+            # stop.
+            owned = (
+                (
+                    await session.execute(
+                        select(ChatSessionRecord)
+                        .where(
+                            col(ChatSessionRecord.user_id) == user_id,
+                            col(ChatSessionRecord.thread_id) == thread_id,
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if owned is None:
+                return None
+            if client_token is not None:
+                # Written whether or not a turn is running: if one is, this is
+                # redundant; if one is about to be, it is the only thing that
+                # stops it.
+                #
+                # Refreshed rather than left alone when one already exists. The
+                # old row may have expired, and admission ignores an expired
+                # tombstone -- so keeping it would let a create started after
+                # this call commit anyway. Rolling back here would be worse
+                # still: it drops the lock this whole path depends on.
+                existing = (
+                    (
+                        await session.execute(
+                            select(ChatTurnCancellationRecord).where(
+                                col(ChatTurnCancellationRecord.user_id) == user_id,
+                                col(ChatTurnCancellationRecord.thread_id) == thread_id,
+                                col(ChatTurnCancellationRecord.client_token) == client_token,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+                if existing is not None:
+                    existing.expires_at = expires_at
+                    session.add(existing)
+                else:
+                    session.add(
+                        ChatTurnCancellationRecord(
+                            user_id=user_id,
+                            thread_id=thread_id,
+                            client_token=client_token,
+                            expires_at=expires_at,
+                        )
+                    )
+                await session.flush()
             conditions = [
                 col(ChatTurnRecord.user_id) == user_id,
                 col(ChatTurnRecord.thread_id) == thread_id,
@@ -3600,9 +3688,13 @@ class SQLModelReportStore(ReportStore):
                 conditions.append(or_(*named))
             record = (await session.execute(select(ChatTurnRecord).where(*conditions))).scalars().first()
             if record is None:
+                # Committed even with nothing to flag: the tombstone above is
+                # the whole point of this call when the turn does not exist yet,
+                # and closing the session without it would discard it.
+                await session.commit()
                 return None
             record.cancel_requested = True
-            record.updated_at = datetime.now(tz=UTC).isoformat()
+            record.updated_at = now.isoformat()
             session.add(record)
             await session.commit()
             await session.refresh(record)

@@ -23,6 +23,7 @@ depends_on = None
 _TURNS = "chat_turns"
 _EVENTS = "chat_turn_events"
 _CANCELLATIONS = "chat_turn_cancellations"
+_CANCEL_EXPIRY_INDEX = "ix_chat_turn_cancellations_expires_at"
 _TURN_INDEXES = {
     "ix_chat_turns_thread_status": ["user_id", "thread_id", "status"],
     "ix_chat_turns_expires_at": ["expires_at"],
@@ -105,6 +106,8 @@ def upgrade() -> None:
             sa.Column("expires_at", sa.String(), nullable=False),
             sa.UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),
         )
+    if _CANCEL_EXPIRY_INDEX not in _indexes(_CANCELLATIONS):
+        op.create_index(_CANCEL_EXPIRY_INDEX, _CANCELLATIONS, ["expires_at"])
 
 
 def downgrade() -> None:

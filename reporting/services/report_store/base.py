@@ -994,16 +994,12 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
-    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
-        """Remember that a send was stopped before its turn existed.
+    async def delete_expired_chat_turn_cancellations(self, expired_before: str, limit: int) -> int:
+        """Collect stop tombstones whose window has passed. Returns how many went.
 
-        Stop can arrive before the turn it names: the user presses it while the
-        create is still in flight, and a request that finds nothing running
-        would otherwise return success while the turn goes on to start. The
-        tombstone is what ``create_chat_turn`` checks, in the same write that
-        would create the turn, so the two cannot cross.
-
-        Short-lived: it only has to outlive the create it is racing.
+        A tombstone only has to outlive the create it is racing. Kept forever it
+        would both accumulate per send and make a token permanently unusable,
+        so admission ignores an expired one and this removes it.
         """
 
     @abstractmethod
@@ -1032,6 +1028,16 @@ class ReportStore(ABC):
         out, while it only learns ``turn_id`` once the turn announces itself --
         so the token is what makes Stop work in between. Either identifies the
         turn; matching one is enough.
+
+        **Given a token, this also records a stop tombstone, in the same
+        operation.** The turn may not exist yet -- the user pressed Stop while
+        the create was in flight -- and a request that merely looked, found
+        nothing and returned would let that turn start a moment later. Looking
+        first and writing the tombstone afterwards has the same hole, just
+        narrower: a create can commit in between and see neither. So the
+        tombstone is written *first*, and implementations must serialize this
+        against ``create_chat_turn`` so exactly one of the two outcomes
+        happens -- the turn is flagged, or it is refused at birth.
         """
 
     @abstractmethod

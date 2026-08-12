@@ -3975,6 +3975,7 @@ async def test_cancel_named_at_a_finished_turn_leaves_its_successor_alone(patch_
     """The pointer names whichever turn holds the thread now, which is not
     necessarily the one a delayed stop was aimed at."""
     patch_table.get_item.side_effect = [
+        {"Item": _session_item()},
         {"Item": {"turn_id": "successor", "status": "running"}},
         {"Item": _turn_item("successor")},
     ]
@@ -4001,7 +4002,7 @@ async def test_the_create_transaction_refuses_a_stopped_send(patch_table, store)
     items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
     guard = next(item["ConditionCheck"] for item in items if "ConditionCheck" in item)
     assert guard["Key"]["PK"] == "CHAT_TURN_CANCEL#u1#THREAD#1001#TOKEN#ct_racingsend"
-    assert guard["ConditionExpression"] == "attribute_not_exists(PK)"
+    assert guard["ConditionExpression"].startswith("attribute_not_exists(PK)")
 
 
 async def test_a_stopped_send_is_reported_as_canceled_not_a_conflict(patch_table, store):
@@ -4039,3 +4040,69 @@ async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, stor
 
     assert finished is not None
     assert "CHAT_TURN_THREAD#u1#THREAD#1001" in released
+
+
+async def test_the_tombstone_is_written_before_the_search(patch_table, store):
+    """A create can commit between looking and writing. One that commits after
+    the tombstone is refused by its own transaction; one that commits before is
+    found by the search. Looking first leaves a window where neither happens."""
+    calls: list[str] = []
+    patch_table.put_item.side_effect = lambda **kw: calls.append("tombstone")
+
+    def _get_item(Key, **kwargs):
+        if Key["PK"].startswith("CHAT_SESSION#"):
+            # The session check that gates the call; not the turn search.
+            return {"Item": _session_item()}
+        calls.append("search")
+        return {}
+
+    patch_table.get_item.side_effect = _get_item
+
+    await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
+
+    assert calls == ["tombstone", "search"]
+
+
+async def test_an_expired_tombstone_does_not_brick_a_token(patch_table, store):
+    """Kept forever it would make the token permanently unusable."""
+    patch_table.get_item.return_value = {"Item": _session_item()}
+
+    await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    guard = next(item["ConditionCheck"] for item in items if "ConditionCheck" in item)
+    assert guard["ConditionExpression"] == "attribute_not_exists(PK) OR expires_at <= :cancel_now"
+
+
+async def test_a_stop_for_a_thread_with_no_session_records_nothing(patch_table, store):
+    """A tombstone only means anything for a session that can hold a turn;
+    without this any caller could write one per token against any thread."""
+    patch_table.get_item.return_value = {}
+
+    assert await store.request_chat_turn_cancel("u1", "9999", None, "ct_nosession") is None
+
+    patch_table.put_item.assert_not_called()
+
+
+def test_table_creation_enables_ttl_for_tombstones(mocker):
+    """They have no shared partition to sweep, so without TTL an app-managed
+    table keeps them forever."""
+    dynamodb = mocker.MagicMock()
+    dynamodb.meta.client.describe_time_to_live.return_value = {
+        "TimeToLiveDescription": {"TimeToLiveStatus": "DISABLED"}
+    }
+
+    dynamodb_module._enable_ttl(dynamodb)
+
+    dynamodb.meta.client.update_time_to_live.assert_called_once()
+    spec = dynamodb.meta.client.update_time_to_live.call_args.kwargs["TimeToLiveSpecification"]
+    assert spec == {"Enabled": True, "AttributeName": "ttl"}
+
+
+def test_enabling_ttl_is_skipped_when_already_on(mocker):
+    dynamodb = mocker.MagicMock()
+    dynamodb.meta.client.describe_time_to_live.return_value = {"TimeToLiveDescription": {"TimeToLiveStatus": "ENABLED"}}
+
+    dynamodb_module._enable_ttl(dynamodb)
+
+    dynamodb.meta.client.update_time_to_live.assert_not_called()

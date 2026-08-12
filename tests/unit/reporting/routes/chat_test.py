@@ -181,6 +181,9 @@ def _chat_turn_log(mocker):
         turn_id: str | None = None,
         client_token: str | None = None,
     ) -> ChatTurnItem | None:
+        if client_token is not None:
+            # The store writes the tombstone itself, before it looks.
+            stopped_tokens.add((user_id, thread_id, client_token))
         for running_id, turn in turns.items():
             if turn.user_id != user_id or turn.thread_id != thread_id or turn.status != "running":
                 continue
@@ -198,9 +201,6 @@ def _chat_turn_log(mocker):
         return turn
 
     stopped_tokens: set[tuple[str, str, str]] = set()
-
-    async def record_chat_turn_cancellation(user_id: str, thread_id: str, client_token: str) -> None:
-        stopped_tokens.add((user_id, thread_id, client_token))
 
     async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
         for turn in turns.values():
@@ -234,10 +234,6 @@ def _chat_turn_log(mocker):
     mocker.patch("reporting.services.chat_turns.report_store.read_chat_turn_events", read_chat_turn_events)
     mocker.patch("reporting.services.chat_turns.report_store.finish_chat_turn", finish_chat_turn)
     mocker.patch("reporting.routes.chat.report_store.get_active_chat_turn", get_active_chat_turn)
-    mocker.patch(
-        "reporting.routes.chat.report_store.record_chat_turn_cancellation",
-        record_chat_turn_cancellation,
-    )
     return turns
 
 

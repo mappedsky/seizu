@@ -887,7 +887,7 @@ async def test_a_send_stopped_before_it_started_is_refused(store):
     """Stop can beat the create it names; without the tombstone the turn starts
     a moment later and runs with nobody watching."""
     await _ensure_session()
-    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_racingsend")
 
     with pytest.raises(ChatTurnCanceledError):
         await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_racingsend")
@@ -895,7 +895,7 @@ async def test_a_send_stopped_before_it_started_is_refused(store):
 
 async def test_a_tombstone_only_stops_the_send_it_names(store):
     await _ensure_session()
-    await store.record_chat_turn_cancellation("user-1", "1001", "ct_othersend")
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_othersend")
 
     turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_thissend")
 
@@ -903,8 +903,91 @@ async def test_a_tombstone_only_stops_the_send_it_names(store):
 
 
 async def test_recording_the_same_cancellation_twice_is_not_an_error(store):
-    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
-    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
+    await _ensure_session()
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_racingsend")
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_racingsend")
+
+
+async def test_stopping_a_running_turn_also_leaves_a_tombstone(store):
+    """Written whether or not a turn is running: looking first and writing
+    afterwards lets a create commit in between and see neither."""
+    await _ensure_session()
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_livetoken")
+
+    flagged = await store.request_chat_turn_cancel("user-1", "1001", None, "ct_livetoken")
+    assert flagged is not None and flagged.cancel_requested is True
+
+    # The same token can never start another turn, even after this one ends.
+    await store.finish_chat_turn(turn.turn_id, "canceled", 1)
+    with pytest.raises(ChatTurnCanceledError):
+        await store.create_chat_turn("user-1", "1001", "msg_2", "text_2", "ct_livetoken")
+
+
+async def test_an_expired_tombstone_does_not_brick_a_token(store):
+    """Kept forever it would both accumulate and make the token permanently
+    unusable."""
+    await _ensure_session()
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_oldtoken1")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
+        record.expires_at = "2020-01-01T00:00:00+00:00"
+        session.add(record)
+        await session.commit()
+
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_oldtoken1")
+
+    assert turn is not None
+
+
+async def test_expired_tombstones_are_collected(store):
+    await _ensure_session()
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_oldtoken1")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
+        record.expires_at = "2020-01-01T00:00:00+00:00"
+        session.add(record)
+        await session.commit()
+
+    assert await store.delete_expired_chat_turn_cancellations("2021-01-01T00:00:00+00:00", 50) == 1
+    assert await store.delete_expired_chat_turn_cancellations("2021-01-01T00:00:00+00:00", 50) == 0
+
+
+async def test_a_repeated_stop_refreshes_its_tombstone(store):
+    """Rolling back on the duplicate dropped the session-row lock this whole
+    path depends on, and left a tombstone that may already have expired -- so a
+    create started after the stop could ignore it and commit anyway."""
+    await _ensure_session()
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_repeated1")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
+        record.expires_at = "2020-01-01T00:00:00+00:00"
+        session.add(record)
+        await session.commit()
+
+    # The user presses Stop again; the stale tombstone must come back to life.
+    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_repeated1")
+
+    with pytest.raises(ChatTurnCanceledError):
+        await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_repeated1")
+
+
+async def test_a_stop_for_a_thread_with_no_session_records_nothing(store):
+    """A tombstone only means anything for a session that can hold a turn."""
+    assert await store.request_chat_turn_cancel("user-1", "9999", None, "ct_nosession") is None
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        rows = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().all()
+    assert rows == []
+
+
+async def test_a_stop_cannot_write_a_tombstone_on_someone_elses_thread(store):
+    await _ensure_session("owner", "1001")
+
+    assert await store.request_chat_turn_cancel("someone-else", "1001", None, "ct_notyours") is None
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        rows = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().all()
+    assert rows == []
 
 
 async def test_cancel_reports_nothing_when_no_turn_is_running(store):

@@ -70,6 +70,9 @@ _running_producers: dict[str, asyncio.Task[None]] = {}
 # Turns whose local cancellation has already been requested. See
 # :func:`cancel_local_producer` for why a second request must not land.
 _cancelling: set[str] = set()
+# Finalizers for turns whose producer never got to run. Held for the same
+# reason as the producers themselves.
+_cleanup_tasks: set["asyncio.Task[None]"] = set()
 
 
 class _TurnCanceled(Exception):
@@ -332,7 +335,12 @@ async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnI
             # cleanup happened and the record still says "running". Nothing else
             # will ever finish it: waiting for the lease to lapse would leave the
             # conversation neither usable nor deletable for minutes.
-            asyncio.create_task(_finalize_abandoned_turn(turn_id))
+            cleanup = asyncio.create_task(_finalize_abandoned_turn(turn_id))
+            # Held for the same reason the producers are: a task nobody
+            # references can be collected before it runs, and this one is what
+            # keeps the turn from reading as running until its lease expires.
+            _cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(_cleanup_tasks.discard)
 
     task.add_done_callback(_forget)
     return turn
@@ -534,6 +542,12 @@ async def sweep_expired_turns() -> None:
         )
         for entry in expired:
             await report_store.delete_chat_turn(entry.turn_id)
+        # Stop tombstones age out on the same pass. Admission already ignores an
+        # expired one, so this is storage hygiene rather than correctness.
+        await report_store.delete_expired_chat_turn_cancellations(
+            datetime.now(tz=UTC).isoformat(),
+            limit=_EXPIRED_TURNS_PER_SWEEP,
+        )
     except Exception:
         # Housekeeping. A failure here costs storage, never a turn.
         logger.warning("Failed to sweep expired chat turns", exc_info=True)
