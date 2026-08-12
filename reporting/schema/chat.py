@@ -98,6 +98,15 @@ class ChatTurnNotAdmittedError(Exception):
     """Raised when a turn may not start: the session is gone or being retired."""
 
 
+class ChatTurnAdmissionError(Exception):
+    """Raised when a turn could not be admitted for a transient reason.
+
+    The conversation was being written concurrently. Retrying inside the store
+    would only race again, so the caller is told to try again instead -- which
+    it already does, with a message that says so.
+    """
+
+
 class ChatTurnCanceledError(Exception):
     """Raised when the send this turn would serve was already stopped.
 

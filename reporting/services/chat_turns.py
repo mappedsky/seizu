@@ -542,12 +542,6 @@ async def sweep_expired_turns() -> None:
         )
         for entry in expired:
             await report_store.delete_chat_turn(entry.turn_id)
-        # Stop tombstones age out on the same pass. Admission already ignores an
-        # expired one, so this is storage hygiene rather than correctness.
-        await report_store.delete_expired_chat_turn_cancellations(
-            datetime.now(tz=UTC).isoformat(),
-            limit=_EXPIRED_TURNS_PER_SWEEP,
-        )
     except Exception:
         # Housekeeping. A failure here costs storage, never a turn.
         logger.warning("Failed to sweep expired chat turns", exc_info=True)

@@ -109,8 +109,9 @@ async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> As
             yield frame
         return
     except Exception:
-        # Includes the store being unreachable, which is retryable and reads
-        # differently from a conversation that has been retired.
+        # Includes the store being unreachable and ChatTurnAdmissionError, both
+        # retryable and both reading differently from a conversation that has
+        # been retired.
         logger.exception("Failed to start chat turn", extra={"thread_id": body.thread_id})
         async for frame in _stream_error("Could not start this turn; please try again"):
             yield frame

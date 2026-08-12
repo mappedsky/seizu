@@ -887,7 +887,8 @@ async def test_a_send_stopped_before_it_started_is_refused(store):
     """Stop can beat the create it names; without the tombstone the turn starts
     a moment later and runs with nobody watching."""
     await _ensure_session()
-    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_racingsend")
+    stopped = await store.request_chat_turn_cancel("user-1", "1001", None, "ct_racingsend")
+    assert stopped is not None and stopped.status == "canceled"
 
     with pytest.raises(ChatTurnCanceledError):
         await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_racingsend")
@@ -923,71 +924,30 @@ async def test_stopping_a_running_turn_also_leaves_a_tombstone(store):
         await store.create_chat_turn("user-1", "1001", "msg_2", "text_2", "ct_livetoken")
 
 
-async def test_an_expired_tombstone_does_not_brick_a_token(store):
-    """Kept forever it would both accumulate and make the token permanently
-    unusable."""
+async def test_a_stopped_turn_is_swept_like_any_other(store):
+    """The whole point of leaving a turn rather than a record of its own: it is
+    reached by the same sweep, the same cascade and the same expiry, with no
+    second lifetime to get wrong."""
     await _ensure_session()
-    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_oldtoken1")
-    async with AsyncSession(sql_module._get_engine()) as session:
-        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
-        record.expires_at = "2020-01-01T00:00:00+00:00"
-        session.add(record)
-        await session.commit()
+    stopped = await store.request_chat_turn_cancel("user-1", "1001", None, "ct_sweptaway")
+    assert stopped is not None
+    await _expire_turn(store, stopped.turn_id, "2020-01-01T00:00:00+00:00")
 
-    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_oldtoken1")
+    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=10)
 
-    assert turn is not None
+    assert [entry.turn_id for entry in expired] == [stopped.turn_id]
+    assert await store.delete_chat_turn(stopped.turn_id) is True
+    assert await store.get_chat_turn(stopped.turn_id) is None
 
 
-async def test_expired_tombstones_are_collected(store):
+async def test_deleting_a_session_takes_its_stopped_turns_too(store, mocker):
     await _ensure_session()
-    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_oldtoken1")
-    async with AsyncSession(sql_module._get_engine()) as session:
-        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
-        record.expires_at = "2020-01-01T00:00:00+00:00"
-        session.add(record)
-        await session.commit()
+    stopped = await store.request_chat_turn_cancel("user-1", "1001", None, "ct_cascaded1")
+    assert stopped is not None
 
-    assert await store.delete_expired_chat_turn_cancellations("2021-01-01T00:00:00+00:00", 50) == 1
-    assert await store.delete_expired_chat_turn_cancellations("2021-01-01T00:00:00+00:00", 50) == 0
+    assert await store.delete_chat_session("user-1", "1001") is True
 
-
-async def test_a_repeated_stop_refreshes_its_tombstone(store):
-    """Rolling back on the duplicate dropped the session-row lock this whole
-    path depends on, and left a tombstone that may already have expired -- so a
-    create started after the stop could ignore it and commit anyway."""
-    await _ensure_session()
-    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_repeated1")
-    async with AsyncSession(sql_module._get_engine()) as session:
-        record = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().first()
-        record.expires_at = "2020-01-01T00:00:00+00:00"
-        session.add(record)
-        await session.commit()
-
-    # The user presses Stop again; the stale tombstone must come back to life.
-    await store.request_chat_turn_cancel("user-1", "1001", None, "ct_repeated1")
-
-    with pytest.raises(ChatTurnCanceledError):
-        await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_repeated1")
-
-
-async def test_a_stop_for_a_thread_with_no_session_records_nothing(store):
-    """A tombstone only means anything for a session that can hold a turn."""
-    assert await store.request_chat_turn_cancel("user-1", "9999", None, "ct_nosession") is None
-
-    async with AsyncSession(sql_module._get_engine()) as session:
-        rows = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().all()
-    assert rows == []
-
-
-async def test_a_stop_cannot_write_a_tombstone_on_someone_elses_thread(store):
-    await _ensure_session("owner", "1001")
-
-    assert await store.request_chat_turn_cancel("someone-else", "1001", None, "ct_notyours") is None
-
-    async with AsyncSession(sql_module._get_engine()) as session:
-        rows = (await session.execute(select(sql_module.ChatTurnCancellationRecord))).scalars().all()
-    assert rows == []
+    assert await store.get_chat_turn(stopped.turn_id) is None
 
 
 async def test_cancel_reports_nothing_when_no_turn_is_running(store):
@@ -997,83 +957,22 @@ async def test_cancel_reports_nothing_when_no_turn_is_running(store):
     assert await store.request_chat_turn_cancel("user-1", "1001") is None
 
 
-async def test_takeover_does_not_retire_a_lease_renewed_since_it_was_read(mocker, tmp_path):
-    """A producer can renew between the read that sees an expired lease and the
-    update that retires it. Retiring anyway would put a second producer on a
-    live thread -- exactly what the index exists to prevent.
+async def test_a_create_does_not_retire_a_live_lease(store):
+    """Retiring a turn whose producer is alive would put a second producer on
+    the thread -- the thing the index exists to prevent.
 
-    The renewal is injected *into* that window -- after the blocking row is
-    read, before the update that retires it -- so what is under test is the
-    condition on the update, not the read above it. Injecting any earlier is
-    caught by the read, which already worked.
+    There is no longer a read-then-retire-then-retry to race against: the
+    retirement and the insert are one transaction, and the retirement only
+    matches a lease that has already lapsed. So this asserts the outcome rather
+    than trying to inject into a window that no longer exists.
     """
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/takeover.db")
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-    try:
-        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
-            store = SQLModelReportStore()
-            async with AsyncSession(engine) as session:
-                session.add(
-                    sql_module.ChatSessionRecord(
-                        user_id="user-1",
-                        thread_id="1001",
-                        title="",
-                        created_at="2024-01-01T00:00:00+00:00",
-                        updated_at="2024-01-01T00:00:00+00:00",
-                    )
-                )
-                await session.commit()
-            stale = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
-            async with AsyncSession(engine) as session:
-                record = await session.get(sql_module.ChatTurnRecord, stale.turn_id)
-                record.expires_at = "2020-01-01T00:00:00+00:00"
-                session.add(record)
-                await session.commit()
+    await _ensure_session()
+    live = await _open_turn(store)
 
-            renewed = False
-            real_session = sql_module.AsyncSession
+    with pytest.raises(ChatTurnConflictError):
+        await _open_turn(store)
 
-            class _RenewingSession(real_session):
-                async def execute(self, statement, *args, **kwargs):
-                    nonlocal renewed
-                    text = str(statement)
-                    result = await super().execute(statement, *args, **kwargs)
-                    # Renew *after* the blocking row has been read and *before*
-                    # the update that retires it. Renewing any earlier is caught
-                    # by the read, which is the guard that already worked.
-                    if not renewed and text.upper().startswith("SELECT") and "chat_turns" in text:
-                        renewed = True
-                        await super().execute(
-                            sql_module.update(sql_module.ChatTurnRecord)
-                            .where(sql_module.col(sql_module.ChatTurnRecord.turn_id) == stale.turn_id)
-                            .values(expires_at="2099-01-01T00:00:00+00:00")
-                            .execution_options(synchronize_session=False)
-                        )
-                    return result
-
-            mocker.patch.object(sql_module, "AsyncSession", _RenewingSession)
-
-            with pytest.raises(ChatTurnConflictError):
-                await store.create_chat_turn("user-1", "1001", "msg_1", "text_1")
-
-            assert renewed, "the renewal was never injected, so the race was not exercised"
-
-        async with AsyncSession(engine) as session:
-            blocking = await session.get(sql_module.ChatTurnRecord, stale.turn_id)
-            assert blocking.status == "running", "a renewed lease was retired anyway"
-            running = (
-                (
-                    await session.execute(
-                        select(sql_module.ChatTurnRecord).where(sql_module.ChatTurnRecord.status == "running")
-                    )
-                )
-                .scalars()
-                .all()
-            )
-        assert len(running) == 1
-    finally:
-        await engine.dispose()
+    assert (await store.get_chat_turn(live.turn_id)).status == "running"
 
 
 async def test_deleting_a_turn_collects_batches_whose_header_is_gone(store):

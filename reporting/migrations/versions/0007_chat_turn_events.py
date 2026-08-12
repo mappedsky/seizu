@@ -1,4 +1,4 @@
-"""Add the chat turn event log: turn headers, batches, and stop tombstones.
+"""Add the chat turn event log: turn headers and their append-only batches.
 
 A turn's stream parts are written by whichever process runs the turn and read
 back by whichever process is serving the client's SSE connection, so they need
@@ -22,8 +22,6 @@ depends_on = None
 
 _TURNS = "chat_turns"
 _EVENTS = "chat_turn_events"
-_CANCELLATIONS = "chat_turn_cancellations"
-_CANCEL_EXPIRY_INDEX = "ix_chat_turn_cancellations_expires_at"
 _TURN_INDEXES = {
     "ix_chat_turns_thread_status": ["user_id", "thread_id", "status"],
     "ix_chat_turns_expires_at": ["expires_at"],
@@ -33,6 +31,10 @@ _TURN_INDEXES = {
 # both commit, leaving two producers on one LangGraph thread. Partial, so the
 # many finished turns a thread accumulates do not collide.
 _RUNNING_TURN_INDEX = "uq_chat_turns_one_running"
+# One turn per client token. This is what settles a stop racing the create it
+# names: both try to write a row for the token, and the loser is told which
+# happened. NULLs are distinct, so turns without a token do not collide.
+_CLIENT_TOKEN_INDEX = "uq_chat_turns_client_token"
 _RUNNING_TURN_WHERE = sa.text("status = 'running'")
 
 
@@ -73,6 +75,8 @@ def upgrade() -> None:
     for name, columns in _TURN_INDEXES.items():
         if name not in turn_indexes:
             op.create_index(name, _TURNS, columns)
+    if _CLIENT_TOKEN_INDEX not in turn_indexes:
+        op.create_index(_CLIENT_TOKEN_INDEX, _TURNS, ["user_id", "thread_id", "client_token"], unique=True)
     if _RUNNING_TURN_INDEX not in turn_indexes:
         op.create_index(
             _RUNNING_TURN_INDEX,
@@ -96,29 +100,14 @@ def upgrade() -> None:
             sa.UniqueConstraint("turn_id", "seq", name="uq_chat_turn_events_turn_seq"),
         )
 
-    if _CANCELLATIONS not in existing:
-        op.create_table(
-            _CANCELLATIONS,
-            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-            sa.Column("user_id", sa.String(), nullable=False),
-            sa.Column("thread_id", sa.String(), nullable=False),
-            sa.Column("client_token", sa.String(), nullable=False),
-            sa.Column("expires_at", sa.String(), nullable=False),
-            sa.UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),
-        )
-    if _CANCEL_EXPIRY_INDEX not in _indexes(_CANCELLATIONS):
-        op.create_index(_CANCEL_EXPIRY_INDEX, _CANCELLATIONS, ["expires_at"])
-
 
 def downgrade() -> None:
     existing = _tables()
-    if _CANCELLATIONS in existing:
-        op.drop_table(_CANCELLATIONS)
     if _EVENTS in existing:
         op.drop_table(_EVENTS)
     if _TURNS in existing:
         turn_indexes = _indexes(_TURNS)
-        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX):
+        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX, _CLIENT_TOKEN_INDEX):
             if name in turn_indexes:
                 op.drop_index(name, table_name=_TURNS)
         op.drop_table(_TURNS)

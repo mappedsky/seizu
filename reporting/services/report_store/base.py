@@ -994,15 +994,6 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
-    async def delete_expired_chat_turn_cancellations(self, expired_before: str, limit: int) -> int:
-        """Collect stop tombstones whose window has passed. Returns how many went.
-
-        A tombstone only has to outlive the create it is racing. Kept forever it
-        would both accumulate per send and make a token permanently unusable,
-        so admission ignores an expired one and this removes it.
-        """
-
-    @abstractmethod
     async def request_chat_turn_cancel(
         self,
         user_id: str,
@@ -1029,15 +1020,17 @@ class ReportStore(ABC):
         so the token is what makes Stop work in between. Either identifies the
         turn; matching one is enough.
 
-        **Given a token, this also records a stop tombstone, in the same
-        operation.** The turn may not exist yet -- the user pressed Stop while
-        the create was in flight -- and a request that merely looked, found
-        nothing and returned would let that turn start a moment later. Looking
-        first and writing the tombstone afterwards has the same hole, just
-        narrower: a create can commit in between and see neither. So the
-        tombstone is written *first*, and implementations must serialize this
-        against ``create_chat_turn`` so exactly one of the two outcomes
-        happens -- the turn is flagged, or it is refused at birth.
+        **Given a token for a turn that does not exist yet, this creates one,
+        already canceled.** The user can press Stop while the create is still in
+        flight, and a request that merely looked, found nothing and returned
+        would let that turn start a moment later with nobody watching it.
+
+        A stop and a create racing for the same token are settled by the store
+        refusing the second: a thread has at most one turn per client token, so
+        whichever commits first wins and the loser is told which happened. The
+        record a stop leaves is an ordinary turn -- swept, cascaded and expired
+        with every other one -- rather than a second kind of thing with its own
+        lifetime to get wrong.
         """
 
     @abstractmethod

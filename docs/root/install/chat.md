@@ -85,15 +85,6 @@ Two things this does *not* recover:
   client is told the turn ended, instead of receiving a silently truncated
   answer.
 
-```{note}
-Stopping a turn records a short-lived marker against the client's request token,
-so a stop that arrives before the turn exists still takes effect. On DynamoDB
-these are collected by the table's **TTL** on the `ttl` attribute — Seizu enables
-it on tables it creates, but a table managed by your own infrastructure needs
-that setting applied there. Nothing breaks without it: an expired marker is
-ignored either way, it simply is not deleted.
-```
-
 Turn logs are deleted `CHAT_TURN_RETENTION_SECONDS` after the turn finishes, and
 immediately when the session is deleted. Expired logs are collected at the end
 of each turn, in small batches — there is no scheduler to run and no dependency

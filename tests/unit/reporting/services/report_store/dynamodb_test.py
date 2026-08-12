@@ -3663,9 +3663,13 @@ async def test_the_active_pointer_expires_so_a_dead_producer_cannot_wedge_a_thre
 
 
 async def test_a_second_running_turn_is_refused_as_a_conflict(patch_table, store):
-    """Only the pointer's own condition failing means "already running"; every
-    other transaction cancellation is a real error and must propagate."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    """Why the refusal happened is read from the state the conditions were
+    about, not decoded from which transact item failed."""
+    patch_table.get_item.side_effect = lambda Key, **kw: (
+        {"Item": _session_item()}
+        if Key["PK"].startswith("CHAT_SESSION#")
+        else {"Item": {"turn_id": "incumbent", "status": "running", "expires_at": "2099-01-01T00:00:00+00:00"}}
+    )
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
             "Error": {"Code": "TransactionCanceledException"},
@@ -3679,6 +3683,9 @@ async def test_a_second_running_turn_is_refused_as_a_conflict(patch_table, store
 
 
 async def test_a_throttled_create_is_not_reported_as_a_conflict(patch_table, store):
+    """Throttling, capacity and validation all arrive as the same exception as a
+    refused condition. Only a refused *condition* means the request was
+    answered; the rest must propagate as the error they are."""
     patch_table.get_item.return_value = {"Item": _session_item()}
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
@@ -3992,17 +3999,20 @@ def test_a_turn_item_round_trips_its_client_token():
     assert turn.client_token == "ct_roundtrip"
 
 
-async def test_the_create_transaction_refuses_a_stopped_send(patch_table, store):
-    """Checked inside the transaction, not read above it: a stop for this send
-    can land while the create is in flight."""
+async def test_creating_a_turn_claims_its_client_token(patch_table, store):
+    """The claim is what a racing stop collides with, and it lives in the
+    thread's own partition so it is deleted with the turn."""
     patch_table.get_item.return_value = {"Item": _session_item()}
 
     await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
 
     items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    guard = next(item["ConditionCheck"] for item in items if "ConditionCheck" in item)
-    assert guard["Key"]["PK"] == "CHAT_TURN_CANCEL#u1#THREAD#1001#TOKEN#ct_racingsend"
-    assert guard["ConditionExpression"].startswith("attribute_not_exists(PK)")
+    claim = next(
+        item["Put"] for item in items if "Put" in item and str(item["Put"]["Item"].get("SK", "")).startswith("TOKEN#")
+    )
+    assert claim["Item"]["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
+    assert claim["Item"]["SK"] == "TOKEN#ct_racingsend"
+    assert claim["ConditionExpression"] == "attribute_not_exists(SK)"
 
 
 async def test_a_stopped_send_is_reported_as_canceled_not_a_conflict(patch_table, store):
@@ -4042,67 +4052,69 @@ async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, stor
     assert "CHAT_TURN_THREAD#u1#THREAD#1001" in released
 
 
-async def test_the_tombstone_is_written_before_the_search(patch_table, store):
-    """A create can commit between looking and writing. One that commits after
-    the tombstone is refused by its own transaction; one that commits before is
-    found by the search. Looking first leaves a window where neither happens."""
-    calls: list[str] = []
-    patch_table.put_item.side_effect = lambda **kw: calls.append("tombstone")
+async def test_a_stop_with_no_running_turn_creates_one_already_canceled(patch_table, store):
+    """A create can commit either side of this. One that gets there first is
+    found and flagged; one that comes after collides with the token claim this
+    leaves. There is no window where neither happens."""
 
     def _get_item(Key, **kwargs):
         if Key["PK"].startswith("CHAT_SESSION#"):
-            # The session check that gates the call; not the turn search.
             return {"Item": _session_item()}
-        calls.append("search")
         return {}
 
     patch_table.get_item.side_effect = _get_item
 
-    await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
+    stopped = await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
 
-    assert calls == ["tombstone", "search"]
-
-
-async def test_an_expired_tombstone_does_not_brick_a_token(patch_table, store):
-    """Kept forever it would make the token permanently unusable."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
-
-    await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
-
+    assert stopped is not None and stopped.status == "canceled"
     items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
-    guard = next(item["ConditionCheck"] for item in items if "ConditionCheck" in item)
-    assert guard["ConditionExpression"] == "attribute_not_exists(PK) OR expires_at <= :cancel_now"
+    keys = [(item["Put"]["Item"]["PK"], item["Put"]["Item"]["SK"]) for item in items]
+    # The claim first, then an ordinary turn's items.
+    assert keys[0] == ("CHAT_TURN_THREAD#u1#THREAD#1001", "TOKEN#ct_racingsend")
+    assert any(pk == "CHAT_TURN_LIST" for pk, _ in keys), "must be swept like any other turn"
+    # ...but never the active pointer, because it does not run.
+    assert all(sk != "#ACTIVE" for _, sk in keys)
+
+
+async def test_a_stop_that_loses_the_token_flags_the_turn_that_won(patch_table, store):
+    """The create got there first, so the turn exists after all."""
+    patch_table.get_item.side_effect = [
+        {"Item": _session_item()},
+        {},
+        {"Item": {"turn_id": "the-winner"}},
+    ]
+    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": "ConditionalCheckFailed"}],
+        },
+        "TransactWriteItems",
+    )
+    patch_table.update_item.return_value = {"Attributes": _turn_item("the-winner", cancel_requested=True)}
+
+    stopped = await store.request_chat_turn_cancel("u1", "1001", None, "ct_racingsend")
+
+    assert stopped is not None and stopped.cancel_requested is True
+
+
+async def test_a_stopped_turn_takes_its_token_claim_with_it(patch_table, store):
+    """The claim lives in the thread's partition precisely so it is deleted with
+    the turn rather than needing a lifetime of its own."""
+    patch_table.get_item.return_value = {"Item": _turn_item(client_token="ct_gone")}
+    patch_table.query.return_value = {"Items": []}
+    batch = patch_table.batch_writer.return_value.__enter__.return_value
+
+    await store.delete_chat_turn("turn-1")
+
+    deleted = [call.kwargs["Key"]["SK"] for call in batch.delete_item.call_args_list]
+    assert "TOKEN#ct_gone" in deleted
 
 
 async def test_a_stop_for_a_thread_with_no_session_records_nothing(patch_table, store):
-    """A tombstone only means anything for a session that can hold a turn;
-    without this any caller could write one per token against any thread."""
+    """A stop only means anything for a session that can hold a turn; without
+    this any caller could leave records on threads they do not own."""
     patch_table.get_item.return_value = {}
 
     assert await store.request_chat_turn_cancel("u1", "9999", None, "ct_nosession") is None
 
-    patch_table.put_item.assert_not_called()
-
-
-def test_table_creation_enables_ttl_for_tombstones(mocker):
-    """They have no shared partition to sweep, so without TTL an app-managed
-    table keeps them forever."""
-    dynamodb = mocker.MagicMock()
-    dynamodb.meta.client.describe_time_to_live.return_value = {
-        "TimeToLiveDescription": {"TimeToLiveStatus": "DISABLED"}
-    }
-
-    dynamodb_module._enable_ttl(dynamodb)
-
-    dynamodb.meta.client.update_time_to_live.assert_called_once()
-    spec = dynamodb.meta.client.update_time_to_live.call_args.kwargs["TimeToLiveSpecification"]
-    assert spec == {"Enabled": True, "AttributeName": "ttl"}
-
-
-def test_enabling_ttl_is_skipped_when_already_on(mocker):
-    dynamodb = mocker.MagicMock()
-    dynamodb.meta.client.describe_time_to_live.return_value = {"TimeToLiveDescription": {"TimeToLiveStatus": "ENABLED"}}
-
-    dynamodb_module._enable_ttl(dynamodb)
-
-    dynamodb.meta.client.update_time_to_live.assert_not_called()
+    patch_table.meta.client.transact_write_items.assert_not_called()

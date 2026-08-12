@@ -219,34 +219,33 @@ nothing at all — while the detached producer, tool actions included, carried o
 A client that reconnected to a turn it did not start has only the id. Either
 identifies the turn; naming neither is a 422.
 
-**Stop can also beat the turn it names into the store**, so it records a
-**tombstone** against the token — always, whether or not it also found a turn to
-flag, and *before* it looks — and the create refuses on that tombstone inside
-the transaction that would create the turn.
+**Stop can also beat the turn it names into the store**, so when it finds no
+running turn to flag it **creates one, already canceled**, claiming the client
+token. The create claims the same token, so whichever commits first wins and the
+loser is told which happened: the stop flags a turn that already exists, or the
+create is refused at birth. A thread has at most one turn per client token — a
+unique index on SQL, a conditional item in the thread's partition on DynamoDB.
 
-Both orderings are load-bearing. Writing the tombstone after the search leaves a
-window where a create commits in between and sees neither. And on SQL both paths
-take the **session row** for update first, because a `SELECT` for a tombstone
-that is not there locks nothing: without it the create reads no tombstone, the
-stop finds no turn, and the turn still commits unflagged.
+**Why a turn and not a record of its own.** The first version of this was a
+separate tombstone table, and every property it needed had to be built by hand:
+its own expiry, its own sweep, its own DynamoDB TTL, its own cascade on session
+delete, and hand-rolled locking to serialize it against the create. That
+produced a review finding in three consecutive rounds. Leaving an ordinary turn
+instead means the sweep, the session cascade and expiry all reach it without
+knowing it is special, and the uniqueness the store already enforces settles the
+race — no `SELECT ... FOR UPDATE`, and no second lifetime to keep in step.
 
-Tombstones expire, and admission ignores an expired one — honouring one forever
-would make that token permanently unusable and let them accumulate per send. SQL
-sweeps them on the same paced pass as the logs; DynamoDB carries a `ttl`
-attribute and `initialize` turns the table's TTL on (an IaC-managed table needs
-the same setting applied there). Correctness depends on the expiry check, not on
-either collection happening.
+The stopped turn is a turn in every respect except that it never runs: it takes
+no active pointer, carries `last_seq = 0`, and its ids are synthetic because
+nothing ever streams it.
 
-**A stop against a thread with no session records nothing.** A tombstone only
-means anything for a session that can hold a turn, and without the check any
-authenticated caller could write one per token against a thread they do not own.
-On SQL the session row is doing double duty here: it is both that check and the
-lock, and an absent row locks nothing.
+**A stop against a thread with no session does nothing.** A stop only means
+anything for a session that can hold a turn, and without the check any
+authenticated caller could leave records on threads they do not own. That plus
+the turn lifecycle is the whole bound on what a stop can create — no rate
+limiting, because the writes are bounded by sends to conversations the user
+actually has, which is what bounds the turns themselves.
 
-**Don't:** roll back when the tombstone already exists. It drops the session-row
-lock the whole path depends on, and leaves behind a row that may already have
-expired — which admission then ignores, so a create started after the stop
-commits anyway. Refresh the existing row's expiry under the lock instead.
 
 **Don't:** let a second local cancel through. The producer clears its own
 cancellation before running its terminal cleanup, so a repeat — a retried
