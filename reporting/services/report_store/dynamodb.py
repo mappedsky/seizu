@@ -16,6 +16,7 @@ from snowflake import SnowflakeGenerator
 from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
+    ChatTurnCanceledError,
     ChatTurnConflictError,
     ChatTurnEventBatch,
     ChatTurnEventPage,
@@ -139,6 +140,9 @@ _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 # CHAT_TURN_LIST partition -- making one user's delete cost proportional to
 # every other user's retained turns.
 _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
+# Stop can beat the turn it names into the store. The tombstone records that,
+# and the create transaction refuses on it, so the two cannot cross.
+_PK_CHAT_TURN_CANCEL_PREFIX = "CHAT_TURN_CANCEL#"
 # Pages of the sweep index one pass will read past. Live entries are not in
 # expiry order (a running turn renews its lease), so a pass has to be able to
 # step over them to reach the expired ones behind.
@@ -451,6 +455,10 @@ def _chat_turn_event_sk(seq: int) -> str:
     return f"{_SK_CHAT_TURN_EVENT_PREFIX}{seq:010d}"  # noqa: E231
 
 
+def _chat_turn_cancel_pk(user_id: str, thread_id: str, client_token: str) -> str:
+    return f"{_PK_CHAT_TURN_CANCEL_PREFIX}{user_id}#THREAD#{thread_id}#TOKEN#{client_token}"
+
+
 def _chat_turn_thread_turn_sk(turn_id: str) -> str:
     return f"{_SK_CHAT_TURN_THREAD_TURN_PREFIX}{turn_id}"
 
@@ -622,6 +630,7 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         user_id=item["user_id"],
         message_id=item["message_id"],
         text_id=item["text_id"],
+        client_token=item.get("client_token"),
         status=status if status in ("running", "completed", "failed", "canceled") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
         cancel_requested=bool(item.get("cancel_requested", False)),
@@ -4777,6 +4786,25 @@ class DynamoDBReportStore(ReportStore):
 
         metadata_pk = _chat_session_metadata_pk(user_id)
         list_pk = _chat_session_list_pk(user_id)
+        # Checked *in* the transaction rather than read before it: a stop for
+        # this send can land while the create is in flight, and a read above
+        # would simply miss it.
+        cancellation_guard: list[dict[str, Any]] = (
+            [
+                {
+                    "ConditionCheck": {
+                        "TableName": settings.DYNAMODB_TABLE_NAME,
+                        "Key": {
+                            "PK": _chat_turn_cancel_pk(user_id, thread_id, client_token),
+                            "SK": _SK_METADATA,
+                        },
+                        "ConditionExpression": "attribute_not_exists(PK)",
+                    }
+                }
+            ]
+            if client_token
+            else []
+        )
 
         def _op() -> ChatTurnItem | None:
             table = _get_table()
@@ -4826,11 +4854,16 @@ class DynamoDBReportStore(ReportStore):
                             {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": list_item}},
                             {"Put": {"TableName": settings.DYNAMODB_TABLE_NAME, "Item": thread_index_item}},
                             *admission,
+                            *cancellation_guard,
                         ]
                     )
                 except botocore.exceptions.ClientError as exc:
                     if _first_item_condition_failed(exc):
                         raise ChatTurnConflictError("This conversation already has a turn in progress") from exc
+                    if cancellation_guard and _item_condition_failed(exc, 7):
+                        # Stop got here first. Starting anyway would leave a
+                        # turn running that nobody is watching or waiting for.
+                        raise ChatTurnCanceledError("This turn was stopped before it started") from exc
                     if _item_condition_failed(exc, 4):
                         # The session moved under us -- another turn touched it,
                         # or a delete claimed it. Re-read and decide again.
@@ -4993,6 +5026,20 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
+    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
+        expires_at = (datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+
+        def _op() -> None:
+            _get_table().put_item(
+                Item={
+                    "PK": _chat_turn_cancel_pk(user_id, thread_id, client_token),
+                    "SK": _SK_METADATA,
+                    "expires_at": expires_at,
+                }
+            )
+
+        await asyncio.to_thread(_op)
+
     async def request_chat_turn_cancel(
         self,
         user_id: str,
@@ -5079,22 +5126,6 @@ class DynamoDBReportStore(ReportStore):
                 if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
                     return None
                 raise
-            # Keep the sweep entry's copy of the lease in step, so a pass can
-            # skip this turn without reading it. Only ever done here, so it is
-            # one write per turn rather than one per renewal.
-            try:
-                table.update_item(
-                    Key={
-                        "PK": _PK_CHAT_TURN_LIST,
-                        "SK": _chat_turn_list_sk(turn.created_at, turn_id),
-                    },
-                    UpdateExpression="SET expires_at = :expires_at",
-                    ConditionExpression="attribute_exists(PK)",
-                    ExpressionAttributeValues={":expires_at": expires_at},
-                )
-            except botocore.exceptions.ClientError as exc:
-                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                    raise
             # Release the thread so the next turn can start. Conditioned on this
             # turn's id so a turn that already lost the pointer to a successor
             # cannot clear it out from under them.
@@ -5112,6 +5143,27 @@ class DynamoDBReportStore(ReportStore):
             except botocore.exceptions.ClientError as exc:
                 if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                     raise
+            # Keep the sweep entry's copy of the lease in step, so a pass can
+            # skip this turn without reading it. Last, and best effort: it is an
+            # optimisation, and failing it must not leave the thread unable to
+            # start another turn until the lease expires. A stale copy only ever
+            # costs the sweep a confirming read.
+            try:
+                table.update_item(
+                    Key={
+                        "PK": _PK_CHAT_TURN_LIST,
+                        "SK": _chat_turn_list_sk(turn.created_at, turn_id),
+                    },
+                    UpdateExpression="SET expires_at = :expires_at",
+                    ConditionExpression="attribute_exists(PK)",
+                    ExpressionAttributeValues={":expires_at": expires_at},
+                )
+            except botocore.exceptions.ClientError:
+                logger.warning(
+                    "Could not refresh a chat turn's sweep entry",
+                    extra={"turn_id": turn_id},
+                    exc_info=True,
+                )
             return _chat_turn_from_item(resp["Attributes"])
 
         return await asyncio.to_thread(_op)

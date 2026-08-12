@@ -11,6 +11,7 @@ from sqlmodel import Field, SQLModel, col, select
 from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
+    ChatTurnCanceledError,
     ChatTurnConflictError,
     ChatTurnEventBatch,
     ChatTurnEventPage,
@@ -385,6 +386,23 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
     cancel_requested: bool = False
     created_at: str
     updated_at: str
+    expires_at: str
+
+
+class ChatTurnCancellationRecord(SQLModel, table=True):  # type: ignore
+    """A send stopped before its turn existed.
+
+    Stop can beat the create it names into the store; without this the request
+    would find nothing running, report success, and the turn would go on to
+    start with nobody watching it.
+    """
+
+    __tablename__ = "chat_turn_cancellations"
+    __table_args__ = (UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: str
+    thread_id: str
+    client_token: str
     expires_at: str
 
 
@@ -3442,6 +3460,26 @@ class SQLModelReportStore(ReportStore):
                 if admitted.rowcount == 0:
                     await session.rollback()
                     return None
+                if client_token is not None:
+                    # In the same transaction as the insert, not read above it:
+                    # a stop for this send can land while the create is in
+                    # flight, and a check outside would simply miss it.
+                    stopped = (
+                        (
+                            await session.execute(
+                                select(ChatTurnCancellationRecord).where(
+                                    col(ChatTurnCancellationRecord.user_id) == user_id,
+                                    col(ChatTurnCancellationRecord.thread_id) == thread_id,
+                                    col(ChatTurnCancellationRecord.client_token) == client_token,
+                                )
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    if stopped is not None:
+                        await session.rollback()
+                        raise ChatTurnCanceledError("This turn was stopped before it started")
                 values = {
                     "turn_id": generate_report_id(),
                     "user_id": user_id,
@@ -3520,6 +3558,23 @@ class SQLModelReportStore(ReportStore):
                 return None
             record = await session.get(ChatTurnRecord, turn_id)
             return _chat_turn_from_record(record) if record else None
+
+    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
+        expires_at = (datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            session.add(
+                ChatTurnCancellationRecord(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    client_token=client_token,
+                    expires_at=expires_at,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Already recorded; stopping twice is not an error.
+                await session.rollback()
 
     async def request_chat_turn_cancel(
         self,

@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError, ChatTurnItem
+from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    ChatTurnCanceledError,
+    ChatTurnConflictError,
+    ChatTurnItem,
+)
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
@@ -866,6 +871,40 @@ async def test_a_stale_token_does_not_cancel_a_successor(store):
 
     assert await store.request_chat_turn_cancel("user-1", "1001", None, "ct_firstsend") is None
     assert (await store.get_chat_turn(second.turn_id)).cancel_requested is False
+
+
+async def test_a_turn_carries_its_client_token_back(store):
+    """The token is the only handle Stop has before the first frame; a store
+    that stores it and does not return it makes that path silently useless."""
+    await _ensure_session()
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_roundtrip")
+
+    assert turn.client_token == "ct_roundtrip"
+    assert (await store.get_chat_turn(turn.turn_id)).client_token == "ct_roundtrip"
+
+
+async def test_a_send_stopped_before_it_started_is_refused(store):
+    """Stop can beat the create it names; without the tombstone the turn starts
+    a moment later and runs with nobody watching."""
+    await _ensure_session()
+    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
+
+    with pytest.raises(ChatTurnCanceledError):
+        await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_racingsend")
+
+
+async def test_a_tombstone_only_stops_the_send_it_names(store):
+    await _ensure_session()
+    await store.record_chat_turn_cancellation("user-1", "1001", "ct_othersend")
+
+    turn = await store.create_chat_turn("user-1", "1001", "msg_1", "text_1", "ct_thissend")
+
+    assert turn is not None
+
+
+async def test_recording_the_same_cancellation_twice_is_not_an_error(store):
+    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
+    await store.record_chat_turn_cancellation("user-1", "1001", "ct_racingsend")
 
 
 async def test_cancel_reports_nothing_when_no_turn_is_running(store):

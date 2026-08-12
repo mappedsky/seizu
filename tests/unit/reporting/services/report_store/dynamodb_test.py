@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import botocore.exceptions
 import pytest
 
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnConflictError
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCanceledError, ChatTurnConflictError
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion
@@ -3981,3 +3981,61 @@ async def test_cancel_named_at_a_finished_turn_leaves_its_successor_alone(patch_
 
     assert await store.request_chat_turn_cancel("u1", "1001", "the-one-that-finished") is None
     patch_table.update_item.assert_not_called()
+
+
+def test_a_turn_item_round_trips_its_client_token():
+    """Stored but not returned makes token-addressed Stop silently useless: the
+    comparison is against a value that is always None."""
+    turn = dynamodb_module._chat_turn_from_item(_turn_item(client_token="ct_roundtrip"))
+
+    assert turn.client_token == "ct_roundtrip"
+
+
+async def test_the_create_transaction_refuses_a_stopped_send(patch_table, store):
+    """Checked inside the transaction, not read above it: a stop for this send
+    can land while the create is in flight."""
+    patch_table.get_item.return_value = {"Item": _session_item()}
+
+    await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    guard = next(item["ConditionCheck"] for item in items if "ConditionCheck" in item)
+    assert guard["Key"]["PK"] == "CHAT_TURN_CANCEL#u1#THREAD#1001#TOKEN#ct_racingsend"
+    assert guard["ConditionExpression"] == "attribute_not_exists(PK)"
+
+
+async def test_a_stopped_send_is_reported_as_canceled_not_a_conflict(patch_table, store):
+    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [
+                *({"Code": "None"} for _ in range(7)),
+                {"Code": "ConditionalCheckFailed"},
+            ],
+        },
+        "TransactWriteItems",
+    )
+
+    with pytest.raises(ChatTurnCanceledError):
+        await store.create_chat_turn("u1", "1001", "msg_1", "text_1", "ct_racingsend")
+
+
+async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, store):
+    """The sweep entry is an optimisation. Failing to refresh it must not leave
+    the conversation unable to start another turn until the lease expires."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    released: list[str] = []
+
+    def _update(**kwargs):
+        if kwargs["Key"]["PK"] == "CHAT_TURN_LIST":
+            raise botocore.exceptions.ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+        released.append(kwargs["Key"]["PK"])
+        return {"Attributes": _turn_item(status="completed", last_seq=4)}
+
+    patch_table.update_item.side_effect = _update
+
+    finished = await store.finish_chat_turn("turn-1", "completed", 4)
+
+    assert finished is not None
+    assert "CHAT_TURN_THREAD#u1#THREAD#1001" in released

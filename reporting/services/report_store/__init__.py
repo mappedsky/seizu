@@ -892,6 +892,10 @@ async def renew_chat_turn_lease(turn_id: str) -> ChatTurnItem | None:
     return await get_store().renew_chat_turn_lease(turn_id)
 
 
+async def record_chat_turn_cancellation(user_id: str, thread_id: str, client_token: str) -> None:
+    return await get_store().record_chat_turn_cancellation(user_id, thread_id, client_token)
+
+
 async def request_chat_turn_cancel(
     user_id: str,
     thread_id: str,

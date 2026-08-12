@@ -98,6 +98,16 @@ class ChatTurnNotAdmittedError(Exception):
     """Raised when a turn may not start: the session is gone or being retired."""
 
 
+class ChatTurnCanceledError(Exception):
+    """Raised when the send this turn would serve was already stopped.
+
+    Stop can beat the turn it is aimed at into the store -- the user presses it
+    while the create is still in flight. The cancellation is recorded against
+    the client's token so the turn is refused rather than started and left
+    running with nobody watching.
+    """
+
+
 class ChatTurnItem(BaseModel):
     """The header of one in-flight chat turn's replayable event log.
 

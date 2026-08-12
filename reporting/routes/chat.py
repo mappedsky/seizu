@@ -16,6 +16,7 @@ from reporting.schema.chat import (
     ChatSessionItem,
     ChatSessionsResponse,
     ChatStreamRequest,
+    ChatTurnCanceledError,
     ChatTurnConflictError,
     ChatTurnNotAdmittedError,
     CreateChatSessionRequest,
@@ -86,6 +87,12 @@ async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> As
         return
     try:
         turn = await chat_turns.start_turn(body, current)
+    except ChatTurnCanceledError:
+        # Stop reached the store before this turn did. The user asked for
+        # nothing to happen, so end the stream cleanly rather than as an error.
+        async for frame in _stream_stopped():
+            yield frame
+        return
     except ChatTurnNotAdmittedError:
         # The session is gone or claimed for retirement -- its checkpoint and
         # sandbox are being deleted, so a turn must not run against it. The
@@ -110,6 +117,12 @@ async def _start_and_stream(body: ChatStreamRequest, current: CurrentUser) -> As
         return
     async for frame in chat_turns.tail_turn(turn.turn_id):
         yield frame
+
+
+async def _stream_stopped() -> AsyncIterator[str]:
+    """Close an empty stream for a turn that was stopped before it began."""
+    yield chat_turns.sse_frame({"type": "finish", "finishReason": "stop"})
+    yield "data: [DONE]\n\n"
 
 
 async def _stream_error(message: str) -> AsyncIterator[str]:
@@ -180,6 +193,11 @@ async def cancel_chat_stream(
         turn_id,
         client_token,
     )
+    if turn is None and client_token is not None:
+        # Nothing running by that name -- which may mean the turn has not been
+        # created *yet*. Recording the stop against the token is what stops it
+        # starting a moment later and running with nobody watching.
+        await report_store.record_chat_turn_cancellation(current.user.user_id, thread_id, client_token)
     if turn is not None:
         # Fast path when the producer is on this worker; otherwise the flag
         # above reaches it at its next heartbeat.

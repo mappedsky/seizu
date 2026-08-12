@@ -14,6 +14,7 @@ from reporting.routes import chat
 from reporting.schema.chat import (
     ChatSessionItem,
     ChatStreamRequest,
+    ChatTurnCanceledError,
     ChatTurnConflictError,
     ChatTurnEventBatch,
     ChatTurnEventPage,
@@ -121,6 +122,8 @@ def _chat_turn_log(mocker):
         client_token: str | None = None,
     ) -> ChatTurnItem | None:
         nonlocal counter
+        if client_token is not None and (user_id, thread_id, client_token) in stopped_tokens:
+            raise ChatTurnCanceledError("This turn was stopped before it started")
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
                 raise ChatTurnConflictError("This conversation already has a turn in progress")
@@ -194,6 +197,11 @@ def _chat_turn_log(mocker):
             return None
         return turn
 
+    stopped_tokens: set[tuple[str, str, str]] = set()
+
+    async def record_chat_turn_cancellation(user_id: str, thread_id: str, client_token: str) -> None:
+        stopped_tokens.add((user_id, thread_id, client_token))
+
     async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
         for turn in turns.values():
             if turn.user_id == user_id and turn.thread_id == thread_id and turn.status == "running":
@@ -226,6 +234,10 @@ def _chat_turn_log(mocker):
     mocker.patch("reporting.services.chat_turns.report_store.read_chat_turn_events", read_chat_turn_events)
     mocker.patch("reporting.services.chat_turns.report_store.finish_chat_turn", finish_chat_turn)
     mocker.patch("reporting.routes.chat.report_store.get_active_chat_turn", get_active_chat_turn)
+    mocker.patch(
+        "reporting.routes.chat.report_store.record_chat_turn_cancellation",
+        record_chat_turn_cancellation,
+    )
     return turns
 
 
@@ -1781,3 +1793,27 @@ async def test_a_turn_whose_producer_died_does_not_block_deletion(mocker, _chat_
 
     assert response.status_code == 204
     deleted.assert_awaited_once()
+
+
+async def test_a_stop_that_arrives_before_the_turn_still_stops_it(mocker, _chat_turn_log):
+    """Stop can beat the create it names into the store. Reporting success and
+    letting the turn start a moment later leaves it running with nobody
+    watching or waiting for it."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # The user pressed Stop while the send was still in flight.
+        stop = await client.post("/api/v1/chat/stream/1001/cancel?client_token=ct_racingsend")
+        assert stop.status_code == 204
+
+        response = await client.post(
+            "/api/v1/chat/stream",
+            json={"message": "Hi", "thread_id": "1001", "client_token": "ct_racingsend"},
+        )
+
+    assert '"finishReason":"stop"' in response.text
+    assert "data: [DONE]" in response.text
+    # No turn was created, so nothing is producing.
+    assert _chat_turn_log == {}

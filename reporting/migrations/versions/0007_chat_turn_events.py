@@ -1,4 +1,4 @@
-"""Add the chat turn event log: turn headers and their append-only batches.
+"""Add the chat turn event log: turn headers, batches, and stop tombstones.
 
 A turn's stream parts are written by whichever process runs the turn and read
 back by whichever process is serving the client's SSE connection, so they need
@@ -22,6 +22,7 @@ depends_on = None
 
 _TURNS = "chat_turns"
 _EVENTS = "chat_turn_events"
+_CANCELLATIONS = "chat_turn_cancellations"
 _TURN_INDEXES = {
     "ix_chat_turns_thread_status": ["user_id", "thread_id", "status"],
     "ix_chat_turns_expires_at": ["expires_at"],
@@ -59,6 +60,7 @@ def upgrade() -> None:
             sa.Column("thread_id", sa.String(), nullable=False),
             sa.Column("message_id", sa.String(), nullable=False),
             sa.Column("text_id", sa.String(), nullable=False),
+            sa.Column("client_token", sa.String(), nullable=True),
             sa.Column("status", sa.String(), nullable=False, server_default="running"),
             sa.Column("last_seq", sa.Integer(), nullable=True),
             sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default=sa.false()),
@@ -93,9 +95,22 @@ def upgrade() -> None:
             sa.UniqueConstraint("turn_id", "seq", name="uq_chat_turn_events_turn_seq"),
         )
 
+    if _CANCELLATIONS not in existing:
+        op.create_table(
+            _CANCELLATIONS,
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+            sa.Column("user_id", sa.String(), nullable=False),
+            sa.Column("thread_id", sa.String(), nullable=False),
+            sa.Column("client_token", sa.String(), nullable=False),
+            sa.Column("expires_at", sa.String(), nullable=False),
+            sa.UniqueConstraint("user_id", "thread_id", "client_token", name="uq_chat_turn_cancel"),
+        )
+
 
 def downgrade() -> None:
     existing = _tables()
+    if _CANCELLATIONS in existing:
+        op.drop_table(_CANCELLATIONS)
     if _EVENTS in existing:
         op.drop_table(_EVENTS)
     if _TURNS in existing:

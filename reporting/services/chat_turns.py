@@ -324,9 +324,15 @@ async def start_turn(body: ChatStreamRequest, current: CurrentUser) -> ChatTurnI
     task = asyncio.create_task(run_turn_in_process(turn, body, current))
     _running_producers[turn_id] = task
 
-    def _forget(_task: "asyncio.Task[None]") -> None:
+    def _forget(finished: "asyncio.Task[None]") -> None:
         _running_producers.pop(turn_id, None)
         _cancelling.discard(turn_id)
+        if finished.cancelled():
+            # Cancelled before its coroutine first ran, so none of the terminal
+            # cleanup happened and the record still says "running". Nothing else
+            # will ever finish it: waiting for the lease to lapse would leave the
+            # conversation neither usable nor deletable for minutes.
+            asyncio.create_task(_finalize_abandoned_turn(turn_id))
 
     task.add_done_callback(_forget)
     return turn
@@ -353,6 +359,17 @@ def cancel_local_producer(turn_id: str) -> bool:
     _cancelling.add(turn_id)
     task.cancel()
     return True
+
+
+async def _finalize_abandoned_turn(turn_id: str) -> None:
+    """Give a terminal status to a turn whose producer never got to run."""
+    try:
+        turn = await report_store.get_chat_turn(turn_id)
+        if turn is not None and turn.status == "running":
+            await report_store.finish_chat_turn(turn_id, "canceled", 0)
+    except Exception:
+        # The lease is the backstop; it expires either way.
+        logger.warning("Could not finalize an abandoned chat turn", extra={"turn_id": turn_id}, exc_info=True)
 
 
 async def await_turn_stopped(turn_id: str, timeout_seconds: float) -> bool:

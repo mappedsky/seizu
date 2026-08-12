@@ -994,6 +994,19 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
+    async def record_chat_turn_cancellation(self, user_id: str, thread_id: str, client_token: str) -> None:
+        """Remember that a send was stopped before its turn existed.
+
+        Stop can arrive before the turn it names: the user presses it while the
+        create is still in flight, and a request that finds nothing running
+        would otherwise return success while the turn goes on to start. The
+        tombstone is what ``create_chat_turn`` checks, in the same write that
+        would create the turn, so the two cannot cross.
+
+        Short-lived: it only has to outlive the create it is racing.
+        """
+
+    @abstractmethod
     async def request_chat_turn_cancel(
         self,
         user_id: str,

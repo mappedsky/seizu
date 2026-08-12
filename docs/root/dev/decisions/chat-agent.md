@@ -212,7 +212,11 @@ and by the time it lands the turn it was aimed at may have finished and the user
 started another — a thread-addressed stop would then kill the successor. The
 A turn therefore has **two** names, because a client holds them at different
 times: `client_token`, which it mints before its send goes out, and `turn_id`,
-which rides on the opening frame. Stop is enabled from the moment a message is
+which rides on the opening frame. Stop can also beat the turn it names into the
+store entirely — the user presses it while the create is still in flight — so a
+request that finds nothing running records a **tombstone** against the token,
+and the create refuses on it *in the same transaction that would create the
+turn*. Checking before that write would simply miss the race it exists for. Stop is enabled from the moment a message is
 submitted, so without the token the whole window before the first frame did
 nothing at all — while the detached producer, tool actions included, carried
 on. A client that reconnected to a turn it did not start has only the id.
@@ -241,7 +245,10 @@ Every uncertainty on that path is a **503**, never a delete: a failed cancel, a
 lost claim, or a turn that does not stop within `CHAT_TURN_STOP_WAIT_SECONDS`.
 A turn whose producer is *provably* gone — its local task is done, or its lease
 has lapsed — does not count as "did not stop", or a conversation orphaned by a
-restart could be neither used nor deleted.
+restart could be neither used nor deleted. A task cancelled before its coroutine
+ever ran is the sharper case: none of the terminal cleanup happened, so the
+done-callback finalizes the record rather than leaving deletion to wait out a
+ten-minute lease.
 The claim is re-claimable by design, so the session stays closed and the retry
 is a plain repeat; a conversation half-removed from under a live producer cannot
 be put back, and no cleanup undoes checkpoint state it recreates afterwards.
