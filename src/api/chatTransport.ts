@@ -48,6 +48,14 @@ type PendingSend = {
   /** Stop pressed before we had an id. */
   stopRequested: boolean;
   /**
+   * The SSE id of the last frame this client actually received.
+   *
+   * Reattaching with it resumes rather than replays, which is what a client
+   * that only lost its connection wants: it still holds the message it was
+   * building, so a replay would render the answer twice.
+   */
+  cursor: string | null;
+  /**
    * True once every admission attempt has failed *ambiguously* -- a 503, a
    * timeout, a dropped connection. The turn may exist server-side, so the key
    * is the only way back to it and must survive the failure.
@@ -78,6 +86,41 @@ export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
 };
 
 const csrf = { 'X-Seizu-Csrf': '1' };
+
+/**
+ * Scan SSE text for `id:` lines, across chunk boundaries.
+ *
+ * Separate from the stream plumbing so the part with the actual edge case --
+ * a frame split anywhere, including inside the id -- can be tested directly.
+ */
+export function createCursorScanner(
+  onId: (id: string) => void,
+): (text: string) => void {
+  let buffered = '';
+  return (text: string) => {
+    buffered += text;
+    const lines = buffered.split('\n');
+    // The last element may be a partial line; keep it for the next chunk.
+    buffered = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line.startsWith('id: ')) onId(line.slice(4).trim());
+    }
+  };
+}
+
+/** Pass bytes through untouched while noting each `id:` line. */
+function trackCursor(
+  onId: (id: string) => void,
+): TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>> {
+  const decoder = new TextDecoder();
+  const scan = createCursorScanner(onId);
+  return new TransformStream({
+    transform(chunk, controller) {
+      controller.enqueue(chunk);
+      scan(decoder.decode(chunk, { stream: true }));
+    },
+  });
+}
 
 /** Per-attempt deadline for admission. Short: it is one small write server-side. */
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -111,6 +154,16 @@ export class SeizuChatTransport<
       return;
     }
     await cancelChatTurn(pending.turnId, this.seizu.accessToken());
+  }
+
+  /** Whether reattaching would replay the turn from its first frame.
+   *
+   * True when this client has no cursor -- a reloaded page, or a turn it never
+   * watched. The caller has to drop its partial assistant message in that case,
+   * because the replay rebuilds the whole thing.
+   */
+  willReplayFromStart(threadId: string | null): boolean {
+    return !(this.pending?.threadId === threadId && this.pending.cursor);
   }
 
   /** Whether this thread has a send whose outcome is still unknown.
@@ -147,15 +200,33 @@ export class SeizuChatTransport<
   private async attach(
     turnId: string,
     signal?: AbortSignal,
+    after?: string | null,
   ): Promise<ReadableStream<never>> {
+    const query = after ? `?after=${encodeURIComponent(after)}` : '';
     const res = await fetch(
-      `/api/v1/chat/turns/${encodeURIComponent(turnId)}/stream`,
+      `/api/v1/chat/turns/${encodeURIComponent(turnId)}/stream${query}`,
       { headers: this.authHeaders(), signal },
     );
     if (!res.ok || !res.body) {
       throw new Error('Failed to attach to the chat turn');
     }
-    return this.processResponseStream(res.body) as ReadableStream<never>;
+    // The SDK consumes the body and does not surface SSE ids, so the cursor is
+    // read off the bytes on their way through. Pass-through only: the parser
+    // downstream sees exactly what the server sent.
+    // Best effort: a body that cannot be piped -- some non-browser fetch
+    // implementations, including the one the tests run under -- still streams
+    // fine to the parser. It just cannot report a cursor, and the cost of that
+    // is replaying instead of resuming, which is always correct.
+    const pending = this.pending;
+    let body = res.body;
+    if (pending) {
+      try {
+        body = res.body.pipeThrough(trackCursor((id) => (pending.cursor = id)));
+      } catch {
+        body = res.body;
+      }
+    }
+    return this.processResponseStream(body) as ReadableStream<never>;
   }
 
   async sendMessages(
@@ -182,6 +253,7 @@ export class SeizuChatTransport<
             turnId: null,
             stopRequested: false,
             unresolved: false,
+            cursor: null,
           };
     this.pending = pending;
 
@@ -309,6 +381,13 @@ export class SeizuChatTransport<
     }
     if (!active.ok) throw new Error('Failed to look for a running turn');
     const { turn_id: turnId } = (await active.json()) as ChatTurnAdmission;
+    // Same tab, same turn: resume from where delivery stopped rather than
+    // replaying, so the partial message on screen is continued, not repeated.
+    const resumeFrom =
+      this.pending?.turnId === turnId ? this.pending.cursor : null;
+    if (resumeFrom) {
+      return this.attach(turnId, undefined, resumeFrom);
+    }
     // A turn this tab did not start is still one it can stop.
     this.pending = {
       threadId,
@@ -317,6 +396,8 @@ export class SeizuChatTransport<
       turnId,
       stopRequested: false,
       unresolved: false,
+      // A reattach after a reload has nothing to resume into, so it replays.
+      cursor: null,
     };
     return this.attach(turnId);
   }

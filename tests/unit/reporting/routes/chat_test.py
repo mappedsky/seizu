@@ -1254,6 +1254,66 @@ async def test_chat_stream_rejects_headless_sessions(mocker, origin, scheduled_c
 # ---------------------------------------------------------------------------
 
 
+async def test_every_frame_carries_a_cursor_naming_its_position(mocker, _chat_turn_log):
+    """`seq:index`, not just `seq`: a batch holds several parts and a connection
+    can drop between them, so a batch-granular cursor would re-send parts the
+    client already rendered -- duplicated words on screen for text deltas."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = await (await _send(client, json={"message": "Hi", "thread_id": "1001"})).aread()
+
+    ids = [line.removeprefix("id: ") for line in body.decode().splitlines() if line.startswith("id: ")]
+    assert ids, "frames carried no cursor"
+    assert all(":" in i for i in ids)
+    # Monotonic, so a client can keep the last one it saw and mean it.
+    parsed = [tuple(int(p) for p in i.split(":")) for i in ids]
+    assert parsed == sorted(parsed)
+
+
+async def test_resuming_from_a_cursor_skips_what_was_already_delivered(mocker, _chat_turn_log):
+    """The point of the cursor: a client that merely lost its connection still
+    holds the message it was building, so re-sending from the first frame would
+    render the answer twice."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admission = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+        turn_id = admission.json()["turn_id"]
+        whole = (await (await _attach(client, turn_id)).aread()).decode()
+        ids = [line.removeprefix("id: ") for line in whole.splitlines() if line.startswith("id: ")]
+        # Resume from partway through, mid-batch where possible.
+        cursor = ids[len(ids) // 2]
+        resumed = await client.get(f"/api/v1/chat/turns/{turn_id}/stream?after={cursor}")
+        tail = (await resumed.aread()).decode()
+
+    delivered = [line for line in whole.splitlines() if line.startswith("id: ")]
+    resumed_ids = [line for line in tail.splitlines() if line.startswith("id: ")]
+    # Exactly the frames after the cursor, and none of the ones before it.
+    assert resumed_ids == delivered[delivered.index(f"id: {cursor}") + 1 :]
+    assert "data: [DONE]" in tail
+
+
+async def test_an_unusable_cursor_replays_rather_than_skipping(mocker, _chat_turn_log):
+    """A cursor we cannot read must not silently drop the middle of a turn.
+    Replaying costs the client a duplicate; trusting it costs the answer."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admission = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+        turn_id = admission.json()["turn_id"]
+        whole = (await (await _attach(client, turn_id)).aread()).decode()
+        for junk in ("nonsense", "", "0:0", "-3:1", "5"):
+            replayed = await client.get(f"/api/v1/chat/turns/{turn_id}/stream?after={junk}")
+            assert (await replayed.aread()).decode() == whole, junk
+
+
 async def test_a_replay_is_byte_identical_to_the_original_delivery(mocker, _chat_turn_log):
     """The producer renders the frames once and both deliveries read them back,
     so there is no second rendering path that can drift from the first."""

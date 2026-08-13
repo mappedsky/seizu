@@ -339,6 +339,36 @@ per item, so a poll can return 5 and 7 without 6; taking the gap loses 6
 permanently rather than late. Both backends truncate a page at the first gap,
 and the DynamoDB reads are `ConsistentRead=True` on top of that.
 
+**Frames carry a `seq:index` cursor, and a reattach may resume from it.** Batch
+alone is not enough: a batch holds several parts and a connection can drop
+between them, so a batch-granular cursor re-sends parts the client already
+rendered — duplicated words on screen for text deltas. `parse_stream_cursor`
+re-reads the batch a cursor points into and skips what it already saw.
+
+**Don't** trust a cursor you cannot parse. An unreadable one replays from the
+start: replaying costs the client a duplicate, where honouring a bad cursor
+silently drops the middle of an answer.
+
+Two cases, and only one of them can resume:
+
+- **Connection dropped, same page.** The client still holds the message it was
+  building, so it reattaches with its cursor and delivery continues. This is
+  what makes the partial-message trim conditional (`willReplayFromStart`)
+  rather than unconditional.
+- **Page reload.** No cursor, because nothing saw the earlier frames — and a
+  stream starting mid-text has no `start`/`text-start` for the SDK to build on.
+  It replays, and the trim is unnecessary because there is no partial message.
+
+The client cannot see SSE ids through the SDK, which consumes the body, so
+`attach` pipes the bytes through a pass-through transform that notes them.
+**Best effort by design:** a body that cannot be piped still streams fine to the
+parser, and losing the cursor degrades to replaying, which is always correct.
+
+**Testing note:** the joined-up resume is covered server-side (mid-batch resume,
+exact continuation, malformed cursor). The browser half is split — the scanner
+is a pure function tested against chunk boundaries — because the test
+environment's `fetch` does not provide a real streaming body.
+
 **Only the stream route is exempt from the request timeout.** The exemption is
 matched on the path's shape (`/api/v1/chat/turns/{id}/stream`) because the id is
 in the path — exempting the whole `/turns/` subtree would silently drop the

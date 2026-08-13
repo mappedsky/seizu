@@ -142,17 +142,27 @@ async def active_chat_turn(
 )
 async def stream_chat_turn(
     turn_id: str = Path(min_length=1, max_length=64),
+    after: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Cursor from the last frame this client received (its SSE id).",
+    ),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> Response:
-    """Attach to a turn's event log, replaying it from the start.
+    """Attach to a turn's event log.
 
     The same reader whether the turn was admitted a moment ago or is being
     picked up after a reload: the log is the only thing either case reads.
+
+    With ``after``, delivery resumes from that cursor rather than replaying --
+    which is what a client that merely lost its connection wants, since it still
+    holds the message it was building. A reloaded page sends no cursor and gets
+    the whole turn, because it has nothing to resume into.
     """
     turn = await report_store.get_chat_turn(turn_id, user_id=current.user.user_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="Turn not found")
-    return _stream_response(chat_turns.tail_turn(turn.turn_id))
+    return _stream_response(chat_turns.tail_turn(turn.turn_id, after))
 
 
 @router.post("/api/v1/chat/turns/{turn_id}/cancel", status_code=204)

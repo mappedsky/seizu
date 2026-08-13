@@ -18,7 +18,7 @@ import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
-import { SeizuChatTransport } from 'src/api/chatTransport';
+import { createCursorScanner, SeizuChatTransport } from 'src/api/chatTransport';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissionState: jest.fn(),
@@ -2268,6 +2268,53 @@ describe('ChatInterface', () => {
     expect(
       await screen.findByText(/may still be running/i),
     ).toBeInTheDocument();
+    fetchMock.mockRestore();
+  });
+
+  it('reads SSE cursors across chunk boundaries', () => {
+    // The stream splits wherever the network decides, including inside an id,
+    // so the scanner has to buffer rather than assume whole lines.
+    const seen: string[] = [];
+    const scan = createCursorScanner((id) => seen.push(id));
+    scan('id: 3:0\ndata: {"a":1}\n\nid: 3');
+    scan(':1\ndata: {"b":2}\n\n');
+    scan('id: 4:0\n');
+    expect(seen).toEqual(['3:0', '3:1', '4:0']);
+  });
+
+  it('replays from the start when it has no cursor', async () => {
+    // A reloaded page never saw the earlier frames, so it has nothing to resume
+    // into and must be sent the whole turn. (The resuming case needs a real
+    // streaming body, which this environment's fetch does not provide -- the
+    // scanner above covers the half that can be tested here.)
+    const urls: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-9', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    expect(transport.willReplayFromStart('thread-1')).toBe(true);
+    await transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    expect(urls).toContain('/api/v1/chat/turns/turn-9/stream');
+    expect(urls.some((u) => u.includes('after='))).toBe(false);
     fetchMock.mockRestore();
   });
 

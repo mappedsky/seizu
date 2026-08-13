@@ -982,14 +982,17 @@ export default function ChatInterface() {
       }
       if (isDisconnect) {
         // The turn is still running on the server; only our connection to it
-        // died. Reconnecting replays the turn from its first frame, so the
-        // partial assistant message has to go first: the SDK resumes *into*
-        // the last assistant message and text-start pushes a fresh part, so
+        // died. Whether the partial assistant message has to go depends on what
+        // the reattach will send: with a cursor it resumes mid-answer and the
+        // partial message is exactly what the rest belongs to, but a replay
+        // starts at the first frame and text-start pushes a fresh part, so
         // keeping it would show the answer twice.
-        setMessagesRef.current((current) => {
-          const last = current.at(-1);
-          return last?.role === 'assistant' ? current.slice(0, -1) : current;
-        });
+        if (transport.willReplayFromStart(activeThreadId)) {
+          setMessagesRef.current((current) => {
+            const last = current.at(-1);
+            return last?.role === 'assistant' ? current.slice(0, -1) : current;
+          });
+        }
         void resumeStreamRef.current();
         return;
       }
