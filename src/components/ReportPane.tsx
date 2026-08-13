@@ -42,7 +42,7 @@ import { usePermissionState } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
 import { pageContentSx } from 'src/theme/layout';
 
-interface ReportPaneProps {
+export interface ReportPaneProps {
   /** The report to render. */
   id: string | undefined;
   /**
