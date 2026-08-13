@@ -83,6 +83,28 @@ function activeTransport(): SeizuChatTransport<UIMessage> {
   return transport;
 }
 
+/** A transport whose thread the test controls, stubbed the same way
+ * `activeTransport` stubs the component's: jsdom's `Response.body` is not a
+ * real `ReadableStream`, and these tests are about which requests get made. */
+function standaloneTransport(threadId: () => string | null) {
+  const transport = new SeizuChatTransport<UIMessage>({
+    threadId,
+    accessToken: () => 'token',
+    onStopFailed: () => {},
+    onUnresolvedChange: () => {},
+    admissionBody: () => ({ message: 'Hi' }),
+  });
+  jest
+    .spyOn(
+      transport as unknown as {
+        processResponseStream: (s: unknown) => unknown;
+      },
+      'processResponseStream',
+    )
+    .mockImplementation((stream) => stream);
+  return transport;
+}
+
 /** Stub `fetch` for the admit-then-attach pair a send makes. */
 function mockAdmitThenAttach(turnId = 'turn-42') {
   return jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
@@ -2271,41 +2293,173 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
-  it('does not let one thread finishing disarm Stop in another', async () => {
-    // The transport outlives any one conversation, and the sidebar can switch
-    // sessions mid-turn. Clearing pending state without checking which thread
-    // finished silently disarms Stop for the turn actually running.
+  it("keeps each thread's turn stoppable independently", async () => {
+    // The transport outlives any one conversation and the sidebar can switch
+    // mid-turn, so its state has to be keyed by thread. Built directly here
+    // because the component binds `threadId` to whatever is on screen, and the
+    // bug is precisely about a second conversation existing.
+    let thread = 'thread-1';
+    const stops: string[] = [];
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async (input) => {
         const url = String(input);
+        if (url.endsWith('/cancel')) {
+          stops.push(url);
+          return new Response(null, { status: 204 });
+        }
+        if (url.endsWith('/turns/active')) {
+          // The conversation switched to has nothing running.
+          return new Response(null, { status: 204 });
+        }
         if (url.includes('/turns') && !url.includes('/stream')) {
           return new Response(
-            JSON.stringify({ turn_id: 'turn-b', status: 'created' }),
+            JSON.stringify({ turn_id: `turn-${thread}`, status: 'created' }),
             { status: 201, headers: { 'Content-Type': 'application/json' } },
           );
         }
         return new Response('data: [DONE]\n\n', { status: 200 });
       });
 
-    renderChat({ initialPath: '/app/chat/thread-1' });
-    await act(async () => {});
-    const transport = activeTransport();
+    const transport = standaloneTransport(() => thread);
+
     await transport.sendMessages(
       sendArgs([
         { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
       ]),
     );
 
-    // A turn in a *different* conversation reports that it finished.
-    transport.clearPending('thread-other');
-
-    fetchMock.mockClear();
-    await transport.requestStop();
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/turns/turn-b/cancel',
-      expect.objectContaining({ method: 'POST' }),
+    // Switch away, and reattach in a conversation that is idle.
+    thread = 'thread-2';
+    await transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
     );
+    // Nothing running here, so there is nothing to stop.
+    await transport.requestStop();
+    expect(stops).toEqual([]);
+
+    // Back to the first, whose turn is still running.
+    thread = 'thread-1';
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-1/cancel']);
+    fetchMock.mockRestore();
+  });
+
+  it('clears the thread whose stream ended, not the one on screen', async () => {
+    // A completion callback runs after the user may have switched away, so
+    // "which thread finished" is not "which thread is selected". Clearing on
+    // the latter disarms Stop for the turn they are actually watching.
+    let thread = 'thread-1';
+    const stops: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/cancel')) {
+          stops.push(url);
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          return new Response(
+            JSON.stringify({ turn_id: `turn-${thread}`, status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    const transport = standaloneTransport(() => thread);
+
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    // The user switches, and starts a turn in the new conversation.
+    thread = 'thread-2';
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u2', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    // thread-2's stream ends while thread-2 is on screen.
+    transport.clearFinishedStream();
+    await transport.requestStop();
+    expect(stops).toEqual([]);
+
+    // thread-1's turn is untouched by that.
+    thread = 'thread-1';
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-1/cancel']);
+    fetchMock.mockRestore();
+  });
+
+  it('offers a Retry that replays the unresolved send under its own key', async () => {
+    // The repair path is only reachable with the original key and body, and
+    // typing the message again mints a new key -- so without an explicit retry
+    // the preserved key is unreachable and the turn stays stranded.
+    const bodies: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          bodies.push(String(init?.body));
+          if (bodies.length <= 3) return new Response('{}', { status: 503 });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-repaired', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn().mockResolvedValue(undefined),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: new Error('Could not start this turn; please try again'),
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    // A send whose outcome was never established.
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    // The banner now offers recovery, and taking it replays the same request.
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+
+    expect(bodies).toHaveLength(4);
+    const keys = bodies.map(
+      (b) => (JSON.parse(b) as { idempotency_key: string }).idempotency_key,
+    );
+    expect(new Set(keys).size).toBe(1);
+    // Byte-identical, or the fingerprint the key is bound to would not match.
+    expect(new Set(bodies).size).toBe(1);
     fetchMock.mockRestore();
   });
 

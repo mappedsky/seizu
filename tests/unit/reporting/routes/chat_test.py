@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -12,7 +12,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from reporting import settings
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
-from reporting.authnz.permissions import ALL_PERMISSIONS
+from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.routes import chat
 from reporting.schema.chat import (
     ChatSessionItem,
@@ -1410,6 +1410,50 @@ async def test_the_workflow_is_bounded_and_deduplicated(mocker, _chat_turn_log, 
     )
 
 
+async def test_a_late_repair_is_bounded_by_what_is_left_of_the_claim(mocker, _chat_turn_log, _fake_temporal):
+    """A duration cannot express the invariant. The claim is an instant fixed at
+    admission, but a timeout starts when the workflow is created -- so a handoff
+    repaired minutes later would restart the clock and let the workflow run past
+    a claim a successor may already have taken."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    seen: dict[str, Any] = {}
+    real_start = _fake_temporal["client"].start_workflow
+
+    async def _capture(name, invocation, **kwargs):
+        seen.update(kwargs)
+        await real_start(name, invocation, **kwargs)
+
+    mocker.patch.object(_fake_temporal["client"], "start_workflow", _capture)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admission = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+    turn = _chat_turn_log[admission.json()["turn_id"]]
+
+    ends_at = datetime.now(UTC) + seen["execution_timeout"]
+    assert ends_at <= datetime.fromisoformat(turn.expires_at), (
+        "the workflow may still be producing after its turn's claim has lapsed"
+    )
+
+
+async def test_a_turn_whose_claim_already_lapsed_is_not_started(mocker, _chat_turn_log, _fake_temporal):
+    """Nothing safe is left to start: a successor may already own the thread."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    mocker.patch(
+        "reporting.services.chat_turns.chat_turn_execution_bound_seconds",
+        return_value=0,
+    )
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+
+    assert response.status_code == 201
+    assert _fake_temporal["starts"] == [], "a turn past its claim was handed to a producer"
+
+
 async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, _fake_temporal):
     """The store commits the turn before the workflow is started, so a handoff
     that fails leaves a turn recorded as running with nothing producing it. It
@@ -1466,6 +1510,30 @@ async def test_a_key_reused_for_a_different_request_is_refused(mocker, _chat_tur
     assert second.status_code == 409
     assert "different request" in second.json()["error"]
     assert len(_chat_turn_log) == 1
+
+
+async def test_a_repeat_with_widened_permissions_is_refused(mocker, _chat_turn_log, _fake_temporal):
+    """A repair dispatches from the *retrying* request, so the permission cap has
+    to be part of what a key names. Otherwise a turn admitted before a role was
+    widened could be started afterwards with the wider one -- the turn would run
+    above the authority it was admitted under, which is the one thing the cap
+    exists to prevent."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    body = {"message": "Summarize", "thread_id": "1001", "idempotency_key": "ik_elevated"}
+
+    narrow = _make_app(_current_user(frozenset({Permission.CHAT_USE.value})))
+    async with AsyncClient(transport=ASGITransport(app=narrow), base_url="http://test") as client:
+        first = await _admit(client, body)
+    assert first.status_code == 201
+
+    # The same request again, by the same user, now holding more.
+    wide = _make_app(_current_user(ALL_PERMISSIONS))
+    async with AsyncClient(transport=ASGITransport(app=wide), base_url="http://test") as client:
+        second = await _admit(client, body)
+
+    assert second.status_code == 409
+    assert "different request" in second.json()["error"]
 
 
 async def test_an_identical_repeat_still_resolves(mocker, _chat_turn_log, _fake_temporal):

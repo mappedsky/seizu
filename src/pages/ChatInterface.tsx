@@ -724,6 +724,9 @@ export default function ChatInterface() {
   // either way, so the UI would otherwise look exactly as if it had worked
   // while the turn keeps generating.
   const [stopError, setStopError] = useState<string | null>(null);
+  // The thread whose last send never resolved, if any. Mirrors transport state
+  // so the recovery banner re-renders when it changes.
+  const [unresolvedThread, setUnresolvedThread] = useState<string | null>(null);
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
   // Off by default every visit; bypassing confirmations is an explicit,
   // per-session opt-in for users holding chat:bypass_permissions.
@@ -928,6 +931,13 @@ export default function ChatInterface() {
         threadId: () =>
           chatIdRef.current === '__pending__' ? null : chatIdRef.current,
         accessToken: () => accessTokenRef.current,
+        onUnresolvedChange: (threadId, unresolved) => {
+          // Mirrored into React state: the transport's own copy is a plain
+          // object, so without this the recovery banner never renders.
+          setUnresolvedThread((current) =>
+            unresolved ? threadId : current === threadId ? null : current,
+          );
+        },
         onStopFailed: () => {
           setStopError(
             'Failed to stop this turn on the server; it may still be running.',
@@ -998,15 +1008,12 @@ export default function ChatInterface() {
       // is admitted -- cancels this finished turn and silently does nothing to
       // the live one.
       //
-      // Except when the send never resolved. `onFinish` fires for an errored
-      // send too, and a send that failed ambiguously may have admitted a turn
-      // we can still reach -- but only with its key. Clearing it there strands
-      // that turn until its lease lapses, which is the failure this whole path
-      // exists to avoid. Scoped to the thread that finished, since the user may
-      // have switched conversations while it ran.
-      if (!transport.hasUnresolvedSend(activeThreadId)) {
-        transport.clearPending(activeThreadId);
-      }
+      // The transport decides *which* thread finished, because by now the user
+      // may have switched conversations and `activeThreadId` is the wrong
+      // answer -- clearing on that basis disarms Stop for the turn they are
+      // actually watching. It also keeps a send whose outcome is unknown: that
+      // turn may exist server-side and only its key can reach it.
+      transport.clearFinishedStream();
       if (!activeThreadId) return;
       window.setTimeout(() => {
         void fetchConfirmations();
@@ -1022,6 +1029,7 @@ export default function ChatInterface() {
     status,
     stop,
     error,
+    clearError,
     resumeStream,
   } = useChat<SeizuChatMessage>({
     id: chatId,
@@ -1047,6 +1055,23 @@ export default function ChatInterface() {
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;
   resumeStreamRef.current = resumeStream;
+
+  const [retrying, setRetrying] = useState(false);
+  const handleRetryUnresolved = useCallback(() => {
+    // Replays the original request, key and body intact, and hands the stream
+    // back to the SDK exactly as a fresh send would.
+    setRetrying(true);
+    void transport
+      .retryUnresolved()
+      .then(() => {
+        clearError();
+        void resumeStreamRef.current();
+      })
+      .catch(() => {
+        // Left as it was: still unresolved, still retryable.
+      })
+      .finally(() => setRetrying(false));
+  }, [clearError, transport]);
 
   const handleStop = useCallback(() => {
     // Closing the stream is not enough: the turn is produced elsewhere, so
@@ -1816,8 +1841,30 @@ export default function ChatInterface() {
         </Box>
 
         {error ? (
-          <Alert severity="error" sx={{ flexShrink: 0, my: 0.5 }}>
-            {error.message}
+          <Alert
+            severity="error"
+            sx={{ flexShrink: 0, my: 0.5 }}
+            action={
+              // Only offered when the outcome was never established. The turn
+              // may be running server-side, and replaying the original request
+              // under its original key is the one thing that can resolve to it
+              // -- typing the message again mints a new key and admits a
+              // second turn, or is told the thread is busy.
+              unresolvedThread === activeThreadId ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={retrying}
+                  onClick={handleRetryUnresolved}
+                >
+                  {retrying ? 'Retrying…' : 'Retry'}
+                </Button>
+              ) : null
+            }
+          >
+            {unresolvedThread === activeThreadId
+              ? 'We could not confirm your message was received. It may still be running.'
+              : error.message}
           </Alert>
         ) : null}
 

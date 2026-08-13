@@ -278,6 +278,14 @@ followed by an act, so the turn can finish in between — and under the default
 start the finished turn over. `REJECT_DUPLICATE` makes the id itself the guard:
 a turn's workflow can exist exactly once, ever.
 
+**The workflow is bounded by what is left of the claim, not by a fresh
+duration.** A duration cannot express the invariant: the claim is an *instant*
+fixed at admission, while a timeout starts whenever the workflow is created — so
+a handoff repaired minutes later restarts the clock and the workflow can run past
+a claim a successor has already taken. `chat_turn_execution_bound_seconds` takes
+the turn's `expires_at` and returns the remainder; a turn whose claim has already
+lapsed is not started at all.
+
 **Both deadlines come from one helper.** The bound adds *half* the lease margin
 where the lease adds all of it, so it is smaller by construction rather than by
 coincidence. Hard-coding it (`timeout + 60`) while the lease used the
@@ -301,6 +309,15 @@ the write and on the re-read *after* a lost race
 sharing a key but not a body can have the loser resolve to the winner's turn —
 and then hand it the wrong work, since the loser may be the one that starts the
 workflow.
+
+**The permission cap is part of the fingerprint.** A repair dispatches from the
+*retrying* request, so without this a turn admitted before a role was widened
+could be started afterwards with the wider cap — precisely what the cap exists
+to prevent ([AGT-006](#agt-006)). The cost is deliberate and worth knowing: a
+turn is **not repairable across a permission change**, becoming unrecoverable
+rather than running above its admitted authority. Persisting the whole
+invocation would let such repairs succeed instead; that is a schema change, and
+a different decision.
 
 **A key names one request.** The key alone says "this is a repeat", not a repeat
 *of what* — and it resolves to a turn that may already be running, whose body is
@@ -477,6 +494,25 @@ Three rules fall out of that object, and each was a live defect without it:
   is busy. This retries an idempotent *request*; the turn still runs at most
   once ([AGT-007](#agt-007)). A 409 or 404 is a decision, not ambiguity, and is
   never retried.
+- **Pending state is a map keyed by thread, not one slot.** The transport
+  outlives any one conversation and the sidebar can switch mid-turn, so a single
+  slot means whichever thread acted last owns it and the others silently lose
+  Stop. Reattaching in an idle conversation must clear only its own entry.
+- **Completion clears the thread whose *stream* ended**, which is not the thread
+  on screen: a callback runs after the user may have switched away, and clearing
+  on the selected thread disarms Stop for the turn they are watching. The
+  transport records which stream it is reading (`clearFinishedStream`), because
+  the caller cannot know.
+- **An unresolved send is recoverable from the UI**, or the preserved key is
+  unreachable and the repair path is theatre — typing the message again mints a
+  new key and admits a second turn. The banner offers Retry, which replays the
+  stored body **verbatim** under the stored key; a recomposed body would not
+  match the fingerprint and would be refused. First send and retry share one
+  admission path so they cannot drift.
+- **Don't** hold that state only in the transport. It lives on plain objects
+  React cannot observe, so the button never renders and the feature is invisible
+  in the product while testing green against the transport directly
+  (`onUnresolvedChange` mirrors it into state).
 - **The pending send is scoped to its thread.** The transport outlives any one
   conversation and the sidebar can switch sessions mid-turn, so a turn finishing
   in a thread the user has navigated away from must not clear the pending state
@@ -528,6 +564,20 @@ Three rules fall out of that object, and each was a live defect without it:
 - CI's `unit` job blocks network, which catches unmocked store and Temporal
   calls that pass locally because a real Temporal and Postgres are there to fall
   into. A locally green backend suite does not prove the mocks are complete.
+- **Drive client behaviour through the path a user takes.** Two defects here
+  were masked by tests that called the transport directly: a `clearPending`
+  scoped by an argument the test supplied (so it never exercised the callback
+  that reads the *wrong* thread), and a Retry that worked in the transport while
+  never rendering a button. If a test supplies the value the bug is about, it
+  cannot see the bug.
+- **A resumed SSE stream cannot be fed to the AI SDK mid-message.**
+  `createStreamingUIMessageState` initialises `activeTextParts: {}` even when it
+  reuses the existing assistant message, and `text-delta` throws when that map
+  has no entry — the `text-start` was before the cursor and is not re-sent.
+  Resuming was implemented and reverted for this reason; replaying from the
+  first frame is what works. Note that no test here can catch it: the
+  environment's `fetch` has no streaming body, so `processResponseStream` is
+  stubbed and the real parser never sees a resumed stream.
 - In the frontend suite, `jest.mock` is applied at call time by Bun rather than
   hoisted, so it **cannot** replace the superclass of a class that has already
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`

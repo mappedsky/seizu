@@ -1,7 +1,8 @@
 import hashlib
 import json
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from reporting import settings
@@ -92,16 +93,33 @@ def chat_turn_request_hash(
     continue_response: bool,
     continue_message_id: str | None,
     bypass_confirmations: bool,
+    permissions: Sequence[str],
 ) -> str:
-    """Fingerprint of what a turn was asked to do.
+    """Fingerprint of what a turn was asked to do, and with what authority.
 
     Bound to the idempotency key so a repeat cannot quietly change the work of a
-    turn that is already running -- the key resolves to that turn, and its body
-    is what the producer executes. Covers every field that reaches the
-    invocation; adding one to the request means adding it here.
+    turn that is already running -- the key resolves to that turn, and the
+    repeating request's body is what gets dispatched. Covers every field that
+    reaches the invocation; adding one to the request means adding it here.
+
+    **Permissions are part of it.** They are the cap the turn runs under, and a
+    repair dispatches from the *retrying* request -- so without this, a turn
+    admitted before a role was widened could be started afterwards with the
+    wider cap, which is exactly what the cap exists to prevent
+    (:ref:`AGT-006 <agt>`). Including them means such a repeat is refused
+    instead: the turn is not repairable across a permission change, which costs
+    an unrecoverable turn and buys never executing one above its admitted
+    authority.
     """
     payload = json.dumps(
-        [message, resume_confirmation_id, continue_response, continue_message_id, bypass_confirmations],
+        [
+            message,
+            resume_confirmation_id,
+            continue_response,
+            continue_message_id,
+            bypass_confirmations,
+            sorted(permissions),
+        ],
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -120,17 +138,30 @@ def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) ->
     return ChatTurnAdmission(outcome="existing", turn=turn)
 
 
-def chat_turn_execution_bound_seconds() -> int:
+def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: datetime | None = None) -> int:
     """How long a turn's whole workflow may take, queue time included.
 
-    Derived from the same two settings as the lease, and strictly smaller by
-    construction: the lease adds the full margin, this adds half of it. That
-    relationship is the safety property -- a workflow that outlives its turn's
-    claim on the thread can begin after a successor has taken it, putting two
-    producers on one conversation -- and deriving both here is what stops a
-    change to either setting from quietly inverting it.
+    The safety property is that a workflow never outlives its turn's claim on
+    the thread: past the claim, a successor can be admitted, and two producers
+    then write one conversation.
+
+    A duration alone cannot express that. The claim is an *instant* fixed at
+    admission, while a timeout starts whenever the workflow is finally created
+    -- and a handoff repaired minutes later restarts it, so the workflow can run
+    past a claim that has already lapsed. Given the turn's ``expires_at``, this
+    returns whatever is left of it instead, which is the same instant no matter
+    when the workflow starts.
+
+    Without one it falls back to the derived duration, which is smaller than a
+    fresh lease by construction: the lease adds the whole margin, this adds half.
+    Zero or negative means the claim is already gone and there is nothing safe
+    to start.
     """
-    return settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS // 2
+    bound = settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS // 2
+    if expires_at is None:
+        return bound
+    remaining = int((datetime.fromisoformat(expires_at) - (now or datetime.now(tz=UTC))).total_seconds())
+    return min(bound, remaining)
 
 
 def chat_turn_lease_expiry(now: datetime) -> str:

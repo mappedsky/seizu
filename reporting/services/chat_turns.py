@@ -278,6 +278,10 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             body.continue_response,
             body.continue_message_id,
             body.bypass_confirmations,
+            # The cap this turn is admitted under. A repair dispatches from the
+            # retrying request, so leaving it out lets a turn admitted before a
+            # role widened be started afterwards with the wider one.
+            sorted(current.permissions),
         ),
     )
     if admission.turn is None:
@@ -296,6 +300,17 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
 
     from reporting.temporal_workflows.chat_turn import workflow_id_for
     from reporting.temporal_workflows.shared import ChatTurnInvocation
+
+    # Bounded by what is left of the turn's claim, not by a fresh duration: a
+    # repair can land long after admission, and a workflow that outlives the
+    # claim can still be producing when a successor takes the thread.
+    remaining = chat_turn_execution_bound_seconds(admission.turn.expires_at)
+    if remaining <= 0:
+        logger.warning(
+            "Not starting a chat turn whose claim has already lapsed",
+            extra={"turn_id": admission.turn.turn_id},
+        )
+        return admission
 
     client = await schedule_reconciler.get_client()
     try:
@@ -330,7 +345,7 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             # outage can start after the turn's lease has lapsed and a successor
             # has taken the thread -- two producers, one conversation. Kept
             # comfortably under the lease for that reason.
-            execution_timeout=timedelta(seconds=chat_turn_execution_bound_seconds()),
+            execution_timeout=timedelta(seconds=remaining),
         )
     except WorkflowAlreadyStartedError:
         # The first attempt got further than it managed to report. That is the
