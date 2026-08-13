@@ -928,6 +928,11 @@ export default function ChatInterface() {
         threadId: () =>
           chatIdRef.current === '__pending__' ? null : chatIdRef.current,
         accessToken: () => accessTokenRef.current,
+        onStopFailed: () => {
+          setStopError(
+            'Failed to stop this turn on the server; it may still be running.',
+          );
+        },
         admissionBody: ({ messages, body }) => {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'

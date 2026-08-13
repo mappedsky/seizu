@@ -1,3 +1,5 @@
+import hashlib
+import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from typing import Any
@@ -82,6 +84,27 @@ def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
     size = len(parts_json.encode("utf-8"))
     if size > CHAT_TURN_MAX_BATCH_BYTES:
         raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
+
+
+def chat_turn_request_hash(
+    message: str,
+    resume_confirmation_id: str | None,
+    continue_response: bool,
+    continue_message_id: str | None,
+    bypass_confirmations: bool,
+) -> str:
+    """Fingerprint of what a turn was asked to do.
+
+    Bound to the idempotency key so a repeat cannot quietly change the work of a
+    turn that is already running -- the key resolves to that turn, and its body
+    is what the producer executes. Covers every field that reaches the
+    invocation; adding one to the request means adding it here.
+    """
+    payload = json.dumps(
+        [message, resume_confirmation_id, continue_response, continue_message_id, bypass_confirmations],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def chat_turn_lease_expiry(now: datetime) -> str:
@@ -935,8 +958,14 @@ class ReportStore(ABC):
         message_id: str,
         text_id: str,
         idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> ChatTurnAdmission:
         """Reserve a thread for a turn, and say what happened.
+
+        ``request_hash`` binds the key to the request it was minted for. A
+        repeat carrying the same key but a different fingerprint returns
+        ``mismatched``: the key resolves to a turn that may already be running,
+        so honouring the new body would change what that turn executes.
 
         Returns an outcome rather than raising one of several errors the caller
         must interpret: ``created``, ``existing``, ``busy`` or ``retired``. The
@@ -1017,11 +1046,21 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
-        """Record a turn's terminal status and its final sequence number.
+        """Move a *running* turn to a terminal status, first writer wins.
 
         ``last_seq`` is what lets a reader tell "finished" from "finished, and
         you have seen all of it": a terminal status alone races the visibility
         of the final batches. Also sets ``expires_at`` to the retention horizon.
+
+        **Conditional on the turn still being ``running``.** Two writers can
+        reach here for one turn -- the turn closing itself, and the workflow's
+        fallback closing it after the activity timed out -- and a turn that
+        timed out spuriously is still alive, so the later write would replace a
+        recorded outcome (and its ``last_seq``) with a stale one.
+
+        Returns what is *recorded*, which is not necessarily what was asked for:
+        a caller that lost sees the winning status rather than its own, and
+        ``None`` only when the turn is gone.
         """
 
     @abstractmethod

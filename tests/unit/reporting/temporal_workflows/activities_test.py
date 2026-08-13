@@ -976,11 +976,11 @@ async def test_remediation_requires_scheduled_queries_write_at_runtime(mocker):
     run.assert_not_called()
 
 
-def _chat_turn_item():
+def _chat_turn_item(turn_id: str = "turn-1"):
     from reporting.schema.chat import ChatTurnItem
 
     return ChatTurnItem(
-        turn_id="turn-1",
+        turn_id=turn_id,
         thread_id="1001",
         user_id="user-1",
         message_id="msg_1",
@@ -1017,6 +1017,11 @@ async def test_a_silent_turn_still_reports_liveness(mocker):
         "get_chat_turn",
         AsyncMock(return_value=_chat_turn_item()),
     )
+    mocker.patch.object(
+        activities.report_store,
+        "get_active_chat_turn",
+        AsyncMock(return_value=_chat_turn_item()),
+    )
 
     async def _silent_turn(*args, **kwargs):
         # Produces nothing at all, the way a long tool call looks from here.
@@ -1041,3 +1046,47 @@ async def test_a_silent_turn_still_reports_liveness(mocker):
 
     assert result.status == "completed"
     assert len(beats) > 1, "a turn producing no output never reported liveness"
+
+
+async def test_a_turn_that_no_longer_owns_its_thread_does_not_run(mocker):
+    """A workflow queued through a worker outage can arrive after its turn's
+    claim lapsed and a successor took the thread. Producing anyway puts two
+    turns on one conversation: the same checkpoint, and tools run twice."""
+    stored = mocker.Mock()
+    stored.user = User(
+        user_id="user-1",
+        sub="sub123",
+        iss="https://idp.example.com",
+        email="test@example.com",
+        created_at="2024-01-01T00:00:00+00:00",
+        last_login="2024-01-01T00:00:00+00:00",
+    )
+    stored.jwt_claims = {}
+    stored.permissions = frozenset({"chat:use"})
+    mocker.patch.object(activities, "resolve_stored_user", AsyncMock(return_value=stored))
+    mocker.patch.object(activities.report_store, "get_chat_turn", AsyncMock(return_value=_chat_turn_item()))
+    # The thread belongs to a later turn by now.
+    mocker.patch.object(
+        activities.report_store,
+        "get_active_chat_turn",
+        AsyncMock(return_value=_chat_turn_item(turn_id="turn-2")),
+    )
+    produce = AsyncMock()
+    mocker.patch.object(activities.chat_turns, "produce_turn", produce)
+
+    with pytest.raises(ApplicationError, match="no longer owns its thread"):
+        await activities.run_chat_turn(
+            ChatTurnInvocation(
+                turn_id="turn-1",
+                thread_id="1001",
+                user_id="user-1",
+                message="Hi",
+                resume_confirmation_id=None,
+                continue_response=False,
+                bypass_confirmations=False,
+                permissions=["chat:use"],
+                timeout_seconds=60,
+            )
+        )
+
+    produce.assert_not_called()

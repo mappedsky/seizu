@@ -272,6 +272,30 @@ names has finished, and a closed workflow's id is reusable — ensuring it then
 would run the whole turn again and bill a second answer into the same log. The
 guard is `status == "running"`.
 
+**Temporal deduplicates, not the status check above it.** That check is a read
+followed by an act, so the turn can finish in between — and under the default
+`ALLOW_DUPLICATE` a *closed* workflow's id is free again, so the repair would
+start the finished turn over. `REJECT_DUPLICATE` makes the id itself the guard:
+a turn's workflow can exist exactly once, ever.
+
+**The execution bound covers queue time, not just the activity.** A
+`start_to_close_timeout` starts when a worker accepts the task, so a workflow
+queued through a worker outage can begin *after* the turn's claim on the thread
+has lapsed and a successor has been admitted. `execution_timeout` bounds the
+whole thing and is kept strictly under the lease, with a test asserting that
+relationship so a settings change cannot quietly reopen it. Belt and braces on
+the worker side: the activity re-checks that its turn is still `running` **and**
+still holds the thread pointer before producing, because a lapsed claim is
+exactly the case the bound is protecting against.
+
+**A key names one request.** The key alone says "this is a repeat", not a repeat
+*of what* — and it resolves to a turn that may already be running, whose body is
+what the producer executes. So a `request_hash` (`chat_turn_request_hash`, over
+every field that reaches the invocation) is stored with the turn and compared on
+admission; a repeat carrying the same key with a different body is `mismatched`
+→ **409**, never resolved. Nullable and compared only when both sides have one,
+so turns admitted before the fingerprint existed keep resolving.
+
 **Cancellation does reach the fallback finalizer.** Worth recording because it
 reads like a bug: the workflow catches `Exception`, and Temporal cancellation is
 often described as arriving as `asyncio.CancelledError`, which is not one. In
@@ -364,6 +388,14 @@ well as the read above it, and a sweep that could not assume creation order was
 expiry order). With the workflow bounding the turn, a fixed lease derived from
 that bound is sound and all three disappear.
 
+**Deletion order is load-bearing.** Event batches go first, in a batch write —
+there can be hundreds, far past a transaction's limit, and a half-deleted log is
+unreachable without its header anyway. The header then goes *with* every index
+naming it in one small transaction. Orphaning the idempotency-key item is the
+case that motivates this: it names a missing turn, and its
+`attribute_not_exists` condition then refuses that key forever while resolving
+to nothing — a request that can be neither admitted nor repaired.
+
 **Note:** expired logs are swept at the end of each turn, not by a scheduler. A
 log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the
 turns of a conversation nobody deletes would accumulate. The DynamoDB sweep
@@ -382,6 +414,22 @@ checkpoint, which is two producers on one conversation. The activity ticks
 independently (`_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS`); `start_to_close_timeout`
 is what bounds a turn that genuinely runs too long.
 
+**Terminal writes are conditional on the turn still being `running`, in both
+stores.** Two writers reach `finish_chat_turn` for one turn: the turn closing
+itself, and the workflow's fallback closing it after the activity timed out. A
+turn that timed out *spuriously* is still alive, so an unconditional write lets
+the late one replace a recorded outcome — including its `last_seq`, which is
+exactly what a reader uses to know it has seen the whole answer. First writer
+wins, enforced by the write itself: `WHERE status = 'running'` in SQL, and
+`#s = :running` in the DynamoDB condition expression.
+
+The loser is handed **what is recorded**, not what it asked for, so it can tell
+it lost; `None` keeps meaning "no such turn". `produce_turn` reports the store's
+status rather than its own, so the workflow result and the log a reader sees
+cannot disagree. And a loser must **not** go on to release the thread pointer:
+by then it may belong to a successor, and clearing it would let a third turn
+start alongside.
+
 ### The client holds a pending send
 
 Stop is live from `submitted`, which is *before* admission answers, so there is a
@@ -398,6 +446,21 @@ Three rules fall out of that object, and each was a live defect without it:
 - **The key is minted per logical message, not per attempt.** A fresh key per
   attempt puts the server's idempotency promise out of reach: a retry admits a
   *second* turn instead of resolving to the one a lost response already made.
+- **Ambiguous admissions are retried by the transport, with that key.** A 503 or
+  a dropped connection means the turn may well have been admitted, and the
+  server's repair path is reachable *only* by asking again with the same key —
+  waiting for the user to resend does not work, because their next message gets
+  a new id and therefore a new key, which admits nothing and is told the thread
+  is busy. This retries an idempotent *request*; the turn still runs at most
+  once ([AGT-007](#agt-007)). A 409 or 404 is a decision, not ambiguity, and is
+  never retried.
+- **A deferred stop reports through a callback, not a return value.** A stop
+  asked for before admission answers is carried out later, by which point
+  `requestStop` has returned and throwing from the send would be swallowed by
+  the SDK as an expected abort — so the exact race the deferral exists for would
+  be the one whose failure is invisible. (A promise settled later was tried
+  first and is worse: it deadlocks any caller that awaits it before releasing
+  the step that settles it, and strands unsettled on an admission failure.)
 - **A finished turn stops being the pending one.** Otherwise a Stop pressed
   during the *next* send — before that one is admitted — cancels the turn that
   already ended and silently does nothing to the live one.

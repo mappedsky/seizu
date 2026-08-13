@@ -25,10 +25,11 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from reporting import settings
@@ -43,6 +44,7 @@ from reporting.services import report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
+from reporting.services.report_store.base import chat_turn_request_hash
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +269,16 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
         message_id,
         f"text_{uuid.uuid4().hex}",
         body.idempotency_key,
+        # Binds the key to this request. Without it a repeat carrying the same
+        # key but a different body resolves to the admitted turn and the repair
+        # below hands the *new* body to a turn that may already be running.
+        chat_turn_request_hash(
+            body.message,
+            body.resume_confirmation_id,
+            body.continue_response,
+            body.continue_message_id,
+            body.bypass_confirmations,
+        ),
     )
     if admission.turn is None:
         return admission
@@ -306,6 +318,19 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             # the second attempt names the same workflow as the first.
             id=workflow_id_for(admission.turn.turn_id),
             task_queue=settings.TEMPORAL_TASK_QUEUE,
+            # Temporal is what deduplicates, not the status check above it.
+            # That check is a read followed by an act, so the turn can finish in
+            # between -- and under the default ALLOW_DUPLICATE a closed
+            # workflow's id is free, so the "repair" would start the finished
+            # turn over and bill a second answer. REJECT_DUPLICATE makes the id
+            # itself the guard: a turn's workflow can exist exactly once.
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            # A bound on the *whole* execution, not just on the activity once a
+            # worker picks it up. Without it a workflow queued through a worker
+            # outage can start after the turn's lease has lapsed and a successor
+            # has taken the thread -- two producers, one conversation. Kept
+            # comfortably under the lease for that reason.
+            execution_timeout=timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + 60),
         )
     except WorkflowAlreadyStartedError:
         # The first attempt got further than it managed to report. That is the
@@ -432,7 +457,23 @@ async def produce_turn(
         await publisher.flush()
         last_seq = publisher.last_seq
 
-    await report_store.finish_chat_turn(turn.turn_id, status, last_seq)
+    # First writer wins, and it may not be this one: a turn that was declared
+    # timed-out while it was in fact still running finds its outcome already
+    # recorded. Report what the store actually holds, so the workflow's result
+    # and the log a reader sees cannot disagree.
+    recorded = await report_store.finish_chat_turn(turn.turn_id, status, last_seq)
+    if recorded is not None and recorded.status != status:
+        logger.warning(
+            "Chat turn was already closed by another writer",
+            extra={"turn_id": turn.turn_id, "recorded": recorded.status, "attempted": status},
+        )
+        # `is not None`, not `or`: zero is the legitimate recorded value when
+        # the fallback closed the turn before any batch was written, and `or`
+        # would quietly substitute this producer's larger sequence for it --
+        # telling every reader to wait for frames that do not exist.
+        status = recorded.status
+        if recorded.last_seq is not None:
+            last_seq = recorded.last_seq
     await sweep_expired_turns()
     return status, last_seq
 

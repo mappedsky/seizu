@@ -869,8 +869,9 @@ async def admit_chat_turn(
     message_id: str,
     text_id: str,
     idempotency_key: str | None = None,
+    request_hash: str | None = None,
 ) -> ChatTurnAdmission:
-    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key)
+    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, request_hash)
 
 
 async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:

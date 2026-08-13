@@ -94,6 +94,11 @@ async def admit_chat_turn(
         raise HTTPException(status_code=503, detail="Could not start this turn; please try again") from exc
     if admission.outcome == "retired":
         raise HTTPException(status_code=404, detail="This conversation has been retired")
+    if admission.outcome == "mismatched":
+        raise HTTPException(
+            status_code=409,
+            detail="This idempotency key was used for a different request",
+        )
     if admission.outcome == "busy":
         raise HTTPException(status_code=409, detail="This conversation already has a turn in progress")
     if admission.turn is None:  # pragma: no cover - defensive

@@ -1050,6 +1050,19 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
         # Admitted and then deleted -- the conversation went away before the
         # worker picked this up. Nothing to produce and nothing to close.
         raise ApplicationError("Chat turn no longer exists", non_retryable=True)
+    if turn.status != "running":
+        # Already closed while this was queued: cancelled, or timed out and
+        # finalized. Producing now would write into a log a reader has already
+        # been told is complete.
+        raise ApplicationError("Chat turn is no longer running", non_retryable=True)
+    # Ownership, not just liveness. A workflow queued through a worker outage
+    # can arrive after its turn's claim on the thread lapsed and a successor
+    # took it. Both would then produce into one conversation, driving the same
+    # checkpoint and running tools twice, so the one that no longer owns the
+    # thread must not start.
+    active = await report_store.get_active_chat_turn(invocation.user_id, invocation.thread_id)
+    if active is None or active.turn_id != invocation.turn_id:
+        raise ApplicationError("Chat turn no longer owns its thread", non_retryable=True)
 
     async def _heartbeat_until_done() -> None:
         """Report liveness on a timer, not on output.
@@ -1094,11 +1107,23 @@ async def finalize_chat_turn(invocation: ChatTurnInvocation) -> None:
     Only reached when the activity died with its worker or timed out, so no
     code of ours ran at the end. Idempotent: a turn that is already terminal is
     left alone.
+
+    The read below is only an early out. The *store* is what settles this: the
+    write moves a turn out of `running` and no further, so a turn that is
+    finishing itself right now -- the spurious-timeout case, where the activity
+    is alive and simply went quiet -- keeps its own outcome rather than having
+    this one overwrite it.
     """
     turn = await report_store.get_chat_turn(invocation.turn_id)
     if turn is None or turn.status != "running":
         return
-    await report_store.finish_chat_turn(invocation.turn_id, "failed", turn.last_seq or 0)
+    recorded = await report_store.finish_chat_turn(invocation.turn_id, "failed", turn.last_seq or 0)
+    if recorded is not None and recorded.status != "failed":
+        logger.info(
+            "A chat turn closed itself before the fallback could",
+            extra={"turn_id": invocation.turn_id, "recorded": recorded.status},
+        )
+        return
     logger.warning(
         "Closed a chat turn whose producer did not finish it",
         extra={"turn_id": invocation.turn_id},

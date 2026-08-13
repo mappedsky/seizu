@@ -641,7 +641,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     )
 
     await report_store.admit_chat_turn("u1", "thread-1", "msg_1", "text_1", "ik_key0001")
-    mock_store.admit_chat_turn.assert_awaited_once_with("u1", "thread-1", "msg_1", "text_1", "ik_key0001")
+    mock_store.admit_chat_turn.assert_awaited_once_with("u1", "thread-1", "msg_1", "text_1", "ik_key0001", None)
 
     await report_store.get_active_chat_turn("u1", "thread-1")
     mock_store.get_active_chat_turn.assert_awaited_once_with("u1", "thread-1")

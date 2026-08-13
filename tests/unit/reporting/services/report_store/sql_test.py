@@ -642,6 +642,78 @@ async def test_admission_does_not_retire_a_live_lease(store):
     assert (await store.get_chat_turn(live.turn_id)).status == "running"
 
 
+async def test_only_a_running_turn_can_be_finished(store):
+    """First writer wins. Two writers reach here for one turn -- the turn
+    closing itself, and the workflow's fallback closing it after the activity
+    timed out -- and a turn that timed out *spuriously* is still alive. Without
+    this the late one replaces the recorded outcome, including the `last_seq` a
+    reader uses to know it has seen the whole answer."""
+    turn = await _open_turn(store)
+
+    won = await store.finish_chat_turn(turn.turn_id, "completed", 7)
+    lost = await store.finish_chat_turn(turn.turn_id, "failed", 0)
+
+    assert won is not None and won.status == "completed"
+    # The loser is handed what is recorded, not what it asked for, so it can
+    # tell the difference.
+    assert lost is not None
+    assert lost.status == "completed"
+    assert lost.last_seq == 7
+    stored = await store.get_chat_turn(turn.turn_id)
+    assert stored is not None and (stored.status, stored.last_seq) == ("completed", 7)
+
+
+async def test_finishing_a_missing_turn_is_still_none(store):
+    """`None` keeps meaning "no such turn", so a caller can tell a turn that is
+    gone from one another writer already closed."""
+    assert await store.finish_chat_turn("turn-nope", "completed", 1) is None
+
+
+async def test_two_concurrent_finishes_cannot_both_win(store, tmp_path):
+    """The database settles this, not a read above the write.
+
+    Its own file-backed engine for the reason given below: under StaticPool the
+    two sessions share one connection, so a broken read-then-write passes with
+    both callers reporting success.
+    """
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/finish.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
+            concurrent = SQLModelReportStore()
+            async with AsyncSession(engine) as session:
+                session.add(
+                    sql_module.ChatSessionRecord(
+                        user_id="user-1",
+                        thread_id="1001",
+                        title="",
+                        created_at="2024-01-01T00:00:00+00:00",
+                        updated_at="2024-01-01T00:00:00+00:00",
+                    )
+                )
+                await session.commit()
+            admission = await concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1")
+            assert admission.turn is not None
+            turn_id = admission.turn.turn_id
+
+            results = await asyncio.gather(
+                concurrent.finish_chat_turn(turn_id, "completed", 5),
+                concurrent.finish_chat_turn(turn_id, "failed", 0),
+            )
+
+            # Both see the same recorded outcome, whichever of them wrote it.
+            statuses = {r.status for r in results if r is not None}
+            assert len(statuses) == 1
+            async with AsyncSession(engine) as session:
+                row = await session.get(sql_module.ChatTurnRecord, turn_id)
+            assert row is not None
+            assert (row.status, row.last_seq) in {("completed", 5), ("failed", 0)}
+    finally:
+        await engine.dispose()
+
+
 async def test_two_concurrent_admissions_cannot_both_win(store, tmp_path):
     """The database is the authority, not a read above the insert.
 

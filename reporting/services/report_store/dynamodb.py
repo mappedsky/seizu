@@ -629,6 +629,7 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         message_id=item["message_id"],
         text_id=item["text_id"],
         idempotency_key=item.get("idempotency_key"),
+        request_hash=item.get("request_hash"),
         status=status if status in ("running", "completed", "failed", "canceled") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
         cancel_requested=bool(item.get("cancel_requested", False)),
@@ -810,35 +811,53 @@ def _chat_turn_for_key_sync(
 def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
     """Delete a turn's whole partition, its pointer and its sweep entry.
 
-    Batched rather than transactional: a transaction caps at 100 items and a
-    turn of any length has many more batches than that.
+    **Order matters, because this is not one atomic operation.** The event
+    batches go first, in a batch write -- there can be hundreds of them, far
+    past a transaction's limit, and a half-deleted log is harmless because
+    nothing can reach it without the header. The header then goes *with* its
+    external indexes in one small transaction, so an interruption can never
+    leave an index pointing at a turn that is gone.
+
+    That mattered most for the idempotency-key item: orphaned, it names a
+    missing turn, and its ``attribute_not_exists`` condition then refuses that
+    key forever while resolving to nothing -- a request that can neither be
+    admitted nor repaired.
     """
-    keys = [
+    event_keys = [
         {"PK": item["PK"], "SK": item["SK"]}
         for item in _query_all_sync(
             table,
-            KeyConditionExpression="PK = :pk",
-            ExpressionAttributeValues={":pk": _chat_turn_pk(turn.turn_id)},
+            KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+            ExpressionAttributeValues={
+                ":pk": _chat_turn_pk(turn.turn_id),
+                ":prefix": _SK_CHAT_TURN_EVENT_PREFIX,
+            },
             ProjectionExpression="PK, SK",
         )
     ]
-    keys.append({"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.created_at, turn.turn_id)})
-    keys.append(
+    with table.batch_writer() as batch:
+        for key in event_keys:
+            batch.delete_item(Key=key)
+
+    # Header plus every index that names it, atomically. Four items at most.
+    deletes = [
+        {"PK": _chat_turn_pk(turn.turn_id), "SK": _SK_METADATA},
+        {"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.created_at, turn.turn_id)},
         {
             "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
             "SK": _chat_turn_thread_turn_sk(turn.turn_id),
-        }
-    )
+        },
+    ]
     if turn.idempotency_key is not None:
-        keys.append(
+        deletes.append(
             {
                 "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
                 "SK": _chat_turn_key_sk(turn.idempotency_key),
             }
         )
-    with table.batch_writer() as batch:
-        for key in keys:
-            batch.delete_item(Key=key)
+    table.meta.client.transact_write_items(
+        TransactItems=[{"Delete": {"TableName": settings.DYNAMODB_TABLE_NAME, "Key": key}} for key in deletes]
+    )
     # The pointer is deleted on its own and conditionally: a newer turn on the
     # same thread owns it by then, and clearing that would let two turns run.
     try:
@@ -4801,6 +4820,7 @@ class DynamoDBReportStore(ReportStore):
         message_id: str,
         text_id: str,
         idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> ChatTurnAdmission:
         turn_id = generate_report_id()
         now = datetime.now(tz=UTC)
@@ -4817,6 +4837,7 @@ class DynamoDBReportStore(ReportStore):
             "message_id": message_id,
             "text_id": text_id,
             "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
             "status": "running",
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -4831,6 +4852,10 @@ class DynamoDBReportStore(ReportStore):
                 # again rather than by racing another write.
                 seen = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
                 if seen is not None:
+                    if request_hash is not None and seen.request_hash is not None and seen.request_hash != request_hash:
+                        # Same key, different request. Resolving here would hand
+                        # back a turn running work this caller did not ask for.
+                        return ChatTurnAdmission(outcome="mismatched")
                     return ChatTurnAdmission(outcome="existing", turn=seen)
 
             session = table.get_item(
@@ -5061,19 +5086,34 @@ class DynamoDBReportStore(ReportStore):
                     UpdateExpression=(
                         "SET #s = :status, last_seq = :last_seq, updated_at = :now, expires_at = :expires_at"
                     ),
-                    ConditionExpression="attribute_exists(PK)",
+                    # Only a *running* turn may be moved to a terminal state.
+                    # Two writers race here -- the turn closing itself, and the
+                    # workflow's fallback closing it after a timeout -- and
+                    # without this the later one overwrites the outcome the
+                    # earlier one recorded, including its last_seq, which is
+                    # what a reader uses to know it has seen everything.
+                    ConditionExpression="attribute_exists(PK) AND #s = :running",
                     ExpressionAttributeNames={"#s": "status"},
                     ExpressionAttributeValues={
                         ":status": status,
                         ":last_seq": last_seq,
                         ":now": now_iso,
                         ":expires_at": expires_at,
+                        ":running": "running",
                     },
                     ReturnValues="ALL_NEW",
                 )
             except botocore.exceptions.ClientError as exc:
                 if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                    return None
+                    # Already terminal, or gone. Hand back what is recorded so a
+                    # late writer can tell it lost -- and do *not* touch the
+                    # thread pointer below, which by now may belong to a
+                    # successor turn.
+                    logger.info(
+                        "Chat turn was already finished",
+                        extra={"turn_id": turn_id, "attempted": status},
+                    )
+                    return _get_chat_turn_sync(table, turn_id)
                 raise
             # Release the thread so the next turn can start. Conditioned on this
             # turn's id so a turn that already lost the pointer to a successor

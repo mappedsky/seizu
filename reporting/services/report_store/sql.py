@@ -384,6 +384,7 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
     message_id: str
     text_id: str
     idempotency_key: str | None = None
+    request_hash: str | None = None
     status: str = "running"
     # None until the turn finishes; see ChatTurnItem for why a reader needs it.
     last_seq: int | None = None
@@ -673,6 +674,7 @@ def _chat_turn_from_record(record: ChatTurnRecord) -> ChatTurnItem:
             "message_id": record.message_id,
             "text_id": record.text_id,
             "idempotency_key": record.idempotency_key,
+            "request_hash": record.request_hash,
             "status": record.status,
             "last_seq": record.last_seq,
             "cancel_requested": record.cancel_requested,
@@ -3423,6 +3425,7 @@ class SQLModelReportStore(ReportStore):
         message_id: str,
         text_id: str,
         idempotency_key: str | None = None,
+        request_hash: str | None = None,
     ) -> ChatTurnAdmission:
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
@@ -3445,6 +3448,15 @@ class SQLModelReportStore(ReportStore):
                     .first()
                 )
                 if already is not None:
+                    if (
+                        request_hash is not None
+                        and already.request_hash is not None
+                        and already.request_hash != request_hash
+                    ):
+                        # Same key, different request. The key already names a
+                        # turn, so resolving here would hand back one running
+                        # work this caller did not ask for.
+                        return ChatTurnAdmission(outcome="mismatched")
                     return ChatTurnAdmission(outcome="existing", turn=_chat_turn_from_record(already))
 
             # Admission and creation commit together, so a delete cannot slip
@@ -3485,6 +3497,7 @@ class SQLModelReportStore(ReportStore):
                 "message_id": message_id,
                 "text_id": text_id,
                 "idempotency_key": idempotency_key,
+                "request_hash": request_hash,
                 "status": "running",
                 "created_at": now_iso,
                 "updated_at": now_iso,
@@ -3635,16 +3648,35 @@ class SQLModelReportStore(ReportStore):
     async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
         now = datetime.now(tz=UTC)
         async with AsyncSession(_get_engine()) as session:
+            # Conditional in the statement, not a read followed by a write: two
+            # writers can race here (the turn closing itself, and the workflow's
+            # fallback closing it after a timeout), and a read-then-write lets
+            # both observe `running` and both commit.
+            result = await session.execute(
+                update(ChatTurnRecord)
+                .where(
+                    col(ChatTurnRecord.turn_id) == turn_id,
+                    col(ChatTurnRecord.status) == "running",
+                )
+                .values(
+                    status=status,
+                    last_seq=last_seq,
+                    updated_at=now.isoformat(),
+                    expires_at=(now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat(),
+                )
+            )
+            await session.commit()
             record = await session.get(ChatTurnRecord, turn_id)
             if record is None:
                 return None
-            record.status = status
-            record.last_seq = last_seq
-            record.updated_at = now.isoformat()
-            record.expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
-            session.add(record)
-            await session.commit()
-            await session.refresh(record)
+            if result.rowcount == 0:
+                # Already terminal. The caller is handed what is actually
+                # recorded rather than what it tried to write, so a late writer
+                # can tell it lost instead of believing it won.
+                logger.info(
+                    "Chat turn was already finished",
+                    extra={"turn_id": turn_id, "recorded": record.status, "attempted": status},
+                )
             return _chat_turn_from_record(record)
 
     async def delete_chat_turn(self, turn_id: str) -> bool:

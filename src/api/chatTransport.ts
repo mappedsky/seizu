@@ -45,6 +45,16 @@ export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
   threadId: () => string | null;
   /** Bearer token, read at send time so a refresh is picked up. */
   accessToken: () => string | null;
+  /**
+   * A stop that could not be delivered.
+   *
+   * Needed because a stop asked for before admission answers is carried out
+   * later, by which point there is no call left to reject: `requestStop` has
+   * returned, and throwing from the send is swallowed by the SDK as an expected
+   * abort. Without this the exact race the deferral exists for is the one whose
+   * failure is invisible.
+   */
+  onStopFailed: (error: unknown) => void;
   /** Body fields for the admission request, minus the idempotency key. */
   admissionBody: (options: {
     messages: UI_MESSAGE[];
@@ -76,6 +86,8 @@ export class SeizuChatTransport<
     const pending = this.pending;
     if (!pending) return;
     if (pending.turnId === null) {
+      // Carried out once the turn has an id; a failure then is reported through
+      // `onStopFailed`, since this call is long gone by that point.
       pending.stopRequested = true;
       return;
     }
@@ -133,25 +145,63 @@ export class SeizuChatTransport<
           };
     this.pending = pending;
 
+    const body = JSON.stringify({
+      ...this.seizu.admissionBody({
+        messages: options.messages,
+        body: options.body as Record<string, unknown> | undefined,
+      }),
+      idempotency_key: pending.idempotencyKey,
+    });
+
     // Deliberately not given `options.abortSignal`. Aborting this request does
     // not un-admit the turn -- the server may already have started it -- so an
     // abort here would strand a running turn the client has no id for. Stop is
     // honoured through `requestStop` below instead.
-    const admission = await fetch(
-      `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns`,
-      {
-        method: 'POST',
-        headers: this.authHeaders(),
-        body: JSON.stringify({
-          ...this.seizu.admissionBody({
-            messages: options.messages,
-            body: options.body as Record<string, unknown> | undefined,
-          }),
-          idempotency_key: pending.idempotencyKey,
-        }),
-      },
-    );
+    //
+    // Ambiguous outcomes are retried here, with the *same* key. A 503 or a
+    // dropped connection means the turn may well have been admitted, and the
+    // server's repair path is reachable only by asking again with that key:
+    // waiting for the user to resend does not work, because their next message
+    // gets a new id and therefore a new key, which admits nothing and is told
+    // the thread is busy. This is a retry of an idempotent *request*, not of
+    // the turn -- the turn still runs at most once (AGT-007).
+    let admission: Response | null = null;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+      }
+      try {
+        admission = await fetch(
+          `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns`,
+          { method: 'POST', headers: this.authHeaders(), body },
+        );
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      // Only 503 is ambiguous. A 409/404 is a decision, and repeating it just
+      // asks the same question again.
+      if (admission.status !== 503) break;
+    }
+    if (admission === null) {
+      if (pending.stopRequested) {
+        this.seizu.onStopFailed(
+          new Error('Could not confirm the turn was stopped'),
+        );
+      }
+      throw lastError instanceof Error
+        ? lastError
+        : new Error('Could not start this turn; please try again');
+    }
     if (!admission.ok) {
+      if (pending.stopRequested) {
+        // There is no turn id to aim the deferred stop at, and the server may
+        // still have admitted one. Say so rather than letting it look handled.
+        this.seizu.onStopFailed(
+          new Error('Could not confirm the turn was stopped'),
+        );
+      }
       // The server distinguishes these, and so should the message: only one of
       // them is worth retrying.
       if (admission.status === 409) {
@@ -168,7 +218,13 @@ export class SeizuChatTransport<
       // Stop arrived while this was in flight. The turn exists now, so it can
       // finally be told -- then attach anyway, so the client reads the turn's
       // own closing frames rather than guessing how it ended.
-      await cancelChatTurn(turnId, this.seizu.accessToken());
+      try {
+        await cancelChatTurn(turnId, this.seizu.accessToken());
+      } catch (error) {
+        // Never thrown from here: the SDK has already seen its abort and treats
+        // anything this throws as expected, so it would vanish.
+        this.seizu.onStopFailed(error);
+      }
     }
     return this.attach(turnId, options.abortSignal);
   }

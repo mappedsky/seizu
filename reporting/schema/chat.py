@@ -116,7 +116,7 @@ class ChatTurnAdmission(BaseModel):
     #             Never a cancellation: a repeat of a request is a repeat.
     # busy     -- another turn holds the thread.
     # retired  -- the conversation is gone or being deleted.
-    outcome: Literal["created", "existing", "busy", "retired"]
+    outcome: Literal["created", "existing", "busy", "retired", "mismatched"]
     turn: "ChatTurnItem | None" = None
 
 
@@ -140,6 +140,11 @@ class ChatTurnItem(BaseModel):
     # everything acting on a turn names its ``turn_id``, which the client has
     # from the moment admission returns.
     idempotency_key: str | None = None
+    # Fingerprint of the request admitted under that key. A repeat carrying the
+    # same key but a different fingerprint is refused rather than resolving
+    # here: the key names a turn that may already be running, so honouring the
+    # new body would change what that turn executes.
+    request_hash: str | None = None
     status: Literal["running", "completed", "failed", "canceled"] = "running"
     # None until the turn finishes. A reader may stop only once the status is
     # terminal *and* it has consumed through last_seq: a terminal status on its

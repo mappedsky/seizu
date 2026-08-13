@@ -2138,8 +2138,10 @@ describe('ChatInterface', () => {
     );
     await act(async () => {});
 
-    // Stop, while the turn still has no id anywhere.
-    await transport.requestStop();
+    // Stop, while the turn still has no id anywhere. Not awaited on the
+    // deferred path -- the cancel it asks for cannot happen until admission
+    // answers, which this test has not released yet.
+    void transport.requestStop();
     expect(calls.some((url) => url.includes('/cancel'))).toBe(false);
 
     await act(async () => {
@@ -2151,10 +2153,11 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
-  it('reuses one idempotency key when a send is retried', async () => {
-    // The server promises that repeating a request resolves to the turn it
-    // already admitted. A fresh key per attempt puts that out of reach: the
-    // retry admits a *second* turn instead of recovering the first.
+  it('retries an ambiguous admission itself, with the same key', async () => {
+    // A 503 means the turn may already have been admitted, and the server's
+    // repair path is reachable only by asking again with the same key. Waiting
+    // for the user to resend does not work: their next message gets a new id,
+    // so a new key, which admits nothing and is told the thread is busy.
     const keys: string[] = [];
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
@@ -2165,11 +2168,124 @@ describe('ChatInterface', () => {
             (JSON.parse(String(init?.body)) as { idempotency_key: string })
               .idempotency_key,
           );
-          if (keys.length === 1) throw new Error('network dropped');
+          if (keys.length === 1) {
+            return new Response('{}', { status: 503 });
+          }
           return new Response(
-            JSON.stringify({ turn_id: 'turn-1', status: 'existing' }),
+            JSON.stringify({ turn_id: 'turn-repaired', status: 'existing' }),
             { status: 200, headers: { 'Content-Type': 'application/json' } },
           );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await activeTransport().sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === '/api/v1/chat/turns/turn-repaired/stream',
+      ),
+    ).toBe(true);
+    fetchMock.mockRestore();
+  });
+
+  it('does not retry a decision the server already made', async () => {
+    // 409 and 404 are answers, not ambiguity. Repeating them just asks the
+    // same question again.
+    const attempts: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        attempts.push(String(input));
+        return new Response('{}', { status: 409 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow('already has a turn in progress');
+
+    expect(attempts).toHaveLength(1);
+    fetchMock.mockRestore();
+  });
+
+  it('reports a deferred stop that the server refused', async () => {
+    // The stop is recorded before the turn has an id, so it is carried out
+    // later -- by which point `requestStop` has returned and throwing from the
+    // send would be swallowed by the SDK as an expected abort. The warning is
+    // the only channel left, and this is the exact race the deferral exists
+    // for, so it is the one that must not fail silently.
+    let releaseAdmission: (() => void) | null = null;
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          await new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-x', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/cancel')) return new Response(null, { status: 500 });
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    const sending = transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    await act(async () => {});
+    await transport.requestStop();
+
+    await act(async () => {
+      releaseAdmission?.();
+      await sending;
+    });
+
+    expect(
+      await screen.findByText(/may still be running/i),
+    ).toBeInTheDocument();
+    fetchMock.mockRestore();
+  });
+
+  it('reuses one idempotency key across sends of the same message', async () => {
+    // The server promises that repeating a request resolves to the turn it
+    // already admitted. A fresh key per attempt puts that out of reach: the
+    // repeat admits a *second* turn instead of recovering the first.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          return new Response('{}', { status: 503 });
         }
         return new Response('data: [DONE]\n\n', { status: 200 });
       });
@@ -2186,10 +2302,11 @@ describe('ChatInterface', () => {
     ];
 
     await expect(transport.sendMessages(sendArgs(message))).rejects.toThrow();
-    await transport.sendMessages(sendArgs(message));
+    await expect(transport.sendMessages(sendArgs(message))).rejects.toThrow();
 
-    expect(keys).toHaveLength(2);
-    expect(keys[0]).toBe(keys[1]);
+    // Every attempt, internal retries included, carries one key.
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
     fetchMock.mockRestore();
   });
 

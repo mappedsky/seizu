@@ -1,12 +1,15 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from temporalio.common import WorkflowIDReusePolicy
 
+from reporting import settings
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
@@ -118,7 +121,7 @@ def _chat_turn_log(mocker):
     events: dict[str, dict[int, str]] = {}
     counter = 0
 
-    async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key=None):
+    async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key=None, request_hash=None):
         nonlocal counter
         if idempotency_key is not None:
             for turn in turns.values():
@@ -127,6 +130,10 @@ def _chat_turn_log(mocker):
                     thread_id,
                     idempotency_key,
                 ):
+                    # A key names one request, like the real stores: honouring a
+                    # different body would change what an admitted turn runs.
+                    if request_hash is not None and turn.request_hash is not None and turn.request_hash != request_hash:
+                        return ChatTurnAdmission(outcome="mismatched")
                     return ChatTurnAdmission(outcome="existing", turn=turn)
         if (user_id, thread_id) not in _SESSIONS:
             # Admission is the turn's half of the retirement handshake: no
@@ -143,6 +150,7 @@ def _chat_turn_log(mocker):
             message_id=message_id,
             text_id=text_id,
             idempotency_key=idempotency_key,
+            request_hash=request_hash,
             created_at="2024-01-01T00:00:00+00:00",
             updated_at="2024-01-01T00:00:00+00:00",
             expires_at="2099-01-01T00:00:00+00:00",
@@ -173,6 +181,12 @@ def _chat_turn_log(mocker):
         turn = turns.get(turn_id)
         if turn is None:
             return None
+        # Conditional, like the real stores: only a running turn moves to a
+        # terminal state, and a caller that loses is handed what is recorded.
+        # A permissive double here would let route tests pass against behaviour
+        # the store forbids.
+        if turn.status != "running":
+            return turn
         turns[turn_id] = turn.model_copy(update={"status": status, "last_seq": last_seq})
         return turns[turn_id]
 
@@ -248,7 +262,11 @@ def _fake_temporal(mocker, _chat_turn_log):
     starts: list[str] = []
 
     class _Client:
-        async def start_workflow(self, _name, invocation, *, id, task_queue):  # noqa: A002
+        async def start_workflow(self, _name, invocation, *, id, task_queue, **options):  # noqa: A002
+            # `**options` so the fake does not have to be edited every time a
+            # start option is added -- and so a missing one fails the assertion
+            # that checks for it rather than every test in the file.
+            #
             # Appended, never keyed: a second start against the same workflow id
             # is exactly the bug worth catching, and a dict would hide it.
             starts.append(id)
@@ -1345,6 +1363,53 @@ async def test_reconnect_requires_chat_permission(mocker):
     assert response.status_code == 403
 
 
+async def test_a_producer_that_lost_reports_the_recorded_sequence_even_at_zero(mocker, _chat_turn_log):
+    """Zero is a real `last_seq`: the fallback closes a turn that never wrote a
+    batch. Treating it as "no value" and falling back to this producer's own,
+    larger sequence tells every reader to wait for frames that do not exist."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    turn = await _open_turn("test-user-id", "1001")
+    # Someone else got there first and recorded a turn with nothing in it.
+    await chat_turns.report_store.finish_chat_turn(turn.turn_id, "failed", 0)
+
+    status, last_seq = await chat_turns.produce_turn(turn, "1001", ChatTurnRequest(message="Hi"), _current_user())
+
+    assert (status, last_seq) == ("failed", 0)
+
+
+async def test_the_workflow_is_bounded_and_deduplicated(mocker, _chat_turn_log, _fake_temporal):
+    """Two properties the turn id alone cannot provide.
+
+    The status check above the start is a read followed by an act, so Temporal
+    has to be what deduplicates -- under the default policy a *closed*
+    workflow's id is free again, and the repair path would start a finished turn
+    over. And the execution bound has to cover queue time, not just the activity:
+    a workflow queued through a worker outage otherwise begins after the turn's
+    claim on the thread has lapsed and a successor has taken it.
+    """
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    seen: dict[str, Any] = {}
+    real_start = _fake_temporal["client"].start_workflow
+
+    async def _capture(name, invocation, **kwargs):
+        seen.update(kwargs)
+        await real_start(name, invocation, **kwargs)
+
+    mocker.patch.object(_fake_temporal["client"], "start_workflow", _capture)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _admit(client, {"message": "Hi", "thread_id": "1001"})
+
+    assert seen["id_reuse_policy"] == WorkflowIDReusePolicy.REJECT_DUPLICATE
+    lease = settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS
+    assert seen["execution_timeout"] < timedelta(seconds=lease), (
+        "a workflow may outlive the claim its turn holds on the thread"
+    )
+
+
 async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, _fake_temporal):
     """The store commits the turn before the workflow is started, so a handoff
     that fails leaves a turn recorded as running with nothing producing it. It
@@ -1358,12 +1423,12 @@ async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, 
     fail_once = {"pending": True}
     real_start = _fake_temporal["client"].start_workflow
 
-    async def _flaky_start(name, invocation, *, id, task_queue):  # noqa: A002
+    async def _flaky_start(name, invocation, *, id, **options):  # noqa: A002
         if fail_once["pending"]:
             fail_once["pending"] = False
             raise RuntimeError("temporal unreachable")
         started.append(id)
-        await real_start(name, invocation, id=id, task_queue=task_queue)
+        await real_start(name, invocation, id=id, **options)
 
     mocker.patch.object(_fake_temporal["client"], "start_workflow", _flaky_start)
 
@@ -1381,6 +1446,43 @@ async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, 
     assert started == [f"seizu-chat-turn:{second.json()['turn_id']}"], (
         "the retry did not start the workflow the stranded turn was waiting for"
     )
+
+
+async def test_a_key_reused_for_a_different_request_is_refused(mocker, _chat_turn_log, _fake_temporal):
+    """A key says "this is a repeat", not "a repeat of what". It resolves to a
+    turn that may already be running, and that turn's body is what the producer
+    executes -- so honouring a different message under the same key would
+    silently change the work of a turn already in flight."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await _admit(client, {"message": "Summarize", "thread_id": "1001", "idempotency_key": "ik_shared"})
+        # Same key, different message.
+        second = await _admit(client, {"message": "Delete it", "thread_id": "1001", "idempotency_key": "ik_shared"})
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert "different request" in second.json()["error"]
+    assert len(_chat_turn_log) == 1
+
+
+async def test_an_identical_repeat_still_resolves(mocker, _chat_turn_log, _fake_temporal):
+    """The binding must not break the repair path it sits next to: the *same*
+    request under the same key is exactly what a retry sends."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    body = {"message": "Summarize", "thread_id": "1001", "idempotency_key": "ik_identical"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await _admit(client, body)
+        second = await _admit(client, dict(body))
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["turn_id"] == first.json()["turn_id"]
 
 
 async def test_a_repeat_after_the_turn_finished_does_not_start_it_again(mocker, _chat_turn_log, _fake_temporal):

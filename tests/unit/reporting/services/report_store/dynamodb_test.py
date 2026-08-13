@@ -3683,6 +3683,35 @@ async def test_the_key_item_is_written_with_the_turn(patch_table, store):
     assert key_puts[0]["ConditionExpression"] == "attribute_not_exists(PK)"
 
 
+async def test_finishing_is_conditional_on_the_turn_still_running(patch_table, store):
+    """Same rule as the SQL store, asserted separately because each backend
+    writes its own condition: only a running turn may be moved to terminal."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    patch_table.update_item.return_value = {"Attributes": _turn_item(status="completed", last_seq=3)}
+
+    await store.finish_chat_turn("turn-1", "completed", 3)
+
+    condition = patch_table.update_item.call_args_list[0].kwargs["ConditionExpression"]
+    assert "#s = :running" in condition
+    assert patch_table.update_item.call_args_list[0].kwargs["ExpressionAttributeValues"][":running"] == "running"
+
+
+async def test_a_lost_finish_leaves_the_thread_pointer_alone(patch_table, store):
+    """The pointer may belong to a successor by the time a late writer arrives.
+    Releasing it then would clear the *next* turn's claim and let a third start
+    alongside it."""
+    patch_table.get_item.return_value = {"Item": _turn_item(status="completed", last_seq=9)}
+    patch_table.update_item.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+    )
+
+    recorded = await store.finish_chat_turn("turn-1", "failed", 0)
+
+    # Handed what is recorded, so the caller can tell it lost.
+    assert recorded is not None and recorded.status == "completed"
+    assert patch_table.update_item.call_count == 1, "the pointer was released by the writer that lost"
+
+
 async def test_a_running_turns_lease_outlasts_the_turn_itself(patch_table, store):
     """Same rule as the SQL store, asserted separately because the two compute
     this in their own code: a lease shorter than the turn's own timeout lets one
@@ -3903,20 +3932,24 @@ async def test_an_expired_running_turn_is_not_offered_for_reconnect(patch_table,
     assert await store.get_active_chat_turn("u1", "1001") is None
 
 
-async def test_deleting_a_turn_batches_rather_than_transacts(patch_table, store):
-    """A turn has far more batches than a transaction's 100-item cap."""
-    patch_table.get_item.return_value = {"Item": _turn_item()}
-    patch_table.query.return_value = {
-        "Items": [
-            {"PK": "CHAT_TURN#turn-1", "SK": "#METADATA"},
-            {"PK": "CHAT_TURN#turn-1", "SK": "EVENT#0000000001"},
-        ]
-    }
+async def test_deleting_a_turn_batches_events_but_transacts_its_indexes(patch_table, store):
+    """Events are batched -- a turn has far more of them than a transaction's
+    100-item cap, and a half-deleted log is unreachable anyway without its
+    header. The header and every index naming it go together, atomically: an
+    interruption between them leaves an index pointing at a turn that is gone,
+    and an orphaned idempotency-key item refuses that key forever while
+    resolving to nothing."""
+    patch_table.get_item.return_value = {"Item": _turn_item(idempotency_key="ik_orphan")}
+    patch_table.query.return_value = {"Items": [{"PK": "CHAT_TURN#turn-1", "SK": "EVENT#0000000001"}]}
 
     assert await store.delete_chat_turn("turn-1") is True
 
     patch_table.batch_writer.assert_called_once()
-    patch_table.meta.client.transact_write_items.assert_not_called()
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    deleted = {(i["Delete"]["Key"]["PK"], i["Delete"]["Key"]["SK"]) for i in items}
+    assert ("CHAT_TURN#turn-1", "#METADATA") in deleted
+    assert ("CHAT_TURN_THREAD#u1#THREAD#1001", "IKEY#ik_orphan") in deleted
+    assert ("CHAT_TURN_THREAD#u1#THREAD#1001", "TURN#turn-1") in deleted
 
 
 async def test_deleting_a_turn_collects_batches_whose_header_is_gone(patch_table, store):
