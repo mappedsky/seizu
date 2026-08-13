@@ -60,6 +60,7 @@ from reporting.services.report_store.base import (
     chat_turn_lease_expiry,
     initial_report_config,
     require_public_space_member,
+    resolve_chat_turn_for_key,
     validate_chat_turn_batch,
 )
 
@@ -4852,11 +4853,7 @@ class DynamoDBReportStore(ReportStore):
                 # again rather than by racing another write.
                 seen = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
                 if seen is not None:
-                    if request_hash is not None and seen.request_hash is not None and seen.request_hash != request_hash:
-                        # Same key, different request. Resolving here would hand
-                        # back a turn running work this caller did not ask for.
-                        return ChatTurnAdmission(outcome="mismatched")
-                    return ChatTurnAdmission(outcome="existing", turn=seen)
+                    return resolve_chat_turn_for_key(seen, request_hash)
 
             session = table.get_item(
                 Key={"PK": metadata_pk, "SK": thread_id},
@@ -4958,7 +4955,9 @@ class DynamoDBReportStore(ReportStore):
                     # Another attempt of the same request may have won the race.
                     concurrent = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
                     if concurrent is not None:
-                        return ChatTurnAdmission(outcome="existing", turn=concurrent)
+                        # The same rule as the lookup above: losing the race
+                        # must not let a different body resolve to this turn.
+                        return resolve_chat_turn_for_key(concurrent, request_hash)
                 fresh = table.get_item(
                     Key={"PK": metadata_pk, "SK": thread_id},
                     ConsistentRead=True,
@@ -5080,10 +5079,11 @@ class DynamoDBReportStore(ReportStore):
             turn = _get_chat_turn_sync(table, turn_id)
             if turn is None:
                 return None
-            try:
-                resp = table.update_item(
-                    Key={"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
-                    UpdateExpression=(
+            metadata_update = {
+                "Update": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Key": {"PK": _chat_turn_pk(turn_id), "SK": _SK_METADATA},
+                    "UpdateExpression": (
                         "SET #s = :status, last_seq = :last_seq, updated_at = :now, expires_at = :expires_at"
                     ),
                     # Only a *running* turn may be moved to a terminal state.
@@ -5092,46 +5092,60 @@ class DynamoDBReportStore(ReportStore):
                     # without this the later one overwrites the outcome the
                     # earlier one recorded, including its last_seq, which is
                     # what a reader uses to know it has seen everything.
-                    ConditionExpression="attribute_exists(PK) AND #s = :running",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={
+                    "ConditionExpression": "attribute_exists(PK) AND #s = :running",
+                    "ExpressionAttributeNames": {"#s": "status"},
+                    "ExpressionAttributeValues": {
                         ":status": status,
                         ":last_seq": last_seq,
                         ":now": now_iso,
                         ":expires_at": expires_at,
                         ":running": "running",
                     },
-                    ReturnValues="ALL_NEW",
-                )
+                }
+            }
+            pointer_update = {
+                "Update": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Key": {
+                        "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+                        "SK": _SK_CHAT_TURN_ACTIVE,
+                    },
+                    "UpdateExpression": "SET #s = :status",
+                    # Conditioned on this turn's id: a turn that already lost the
+                    # pointer to a successor must not clear it out from under
+                    # them.
+                    "ConditionExpression": "turn_id = :turn_id",
+                    "ExpressionAttributeNames": {"#s": "status"},
+                    "ExpressionAttributeValues": {":status": status, ":turn_id": turn_id},
+                }
+            }
+
+            # Header and pointer together. Terminalizing the header first and
+            # releasing the thread second leaves the thread wedged if the second
+            # write fails: every retry then sees a terminal header, returns
+            # early, and never gets to the pointer -- so nothing new can be
+            # admitted until the lease lapses.
+            try:
+                table.meta.client.transact_write_items(TransactItems=[metadata_update, pointer_update])
             except botocore.exceptions.ClientError as exc:
-                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                    # Already terminal, or gone. Hand back what is recorded so a
-                    # late writer can tell it lost -- and do *not* touch the
-                    # thread pointer below, which by now may belong to a
-                    # successor turn.
+                if not _any_item_condition_failed(exc):
+                    raise
+                # One of the two conditions refused, and they mean different
+                # things. If the pointer already belongs to a successor, this
+                # turn still has to be closed -- so retry the header alone.
+                try:
+                    table.meta.client.transact_write_items(TransactItems=[metadata_update])
+                except botocore.exceptions.ClientError as header_exc:
+                    if not _any_item_condition_failed(header_exc):
+                        raise
+                    # The header was the refused one: already terminal, or gone.
+                    # Hand back what is recorded so a late writer can tell it
+                    # lost, and leave the pointer alone.
                     logger.info(
                         "Chat turn was already finished",
                         extra={"turn_id": turn_id, "attempted": status},
                     )
                     return _get_chat_turn_sync(table, turn_id)
-                raise
-            # Release the thread so the next turn can start. Conditioned on this
-            # turn's id so a turn that already lost the pointer to a successor
-            # cannot clear it out from under them.
-            try:
-                table.update_item(
-                    Key={
-                        "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
-                        "SK": _SK_CHAT_TURN_ACTIVE,
-                    },
-                    UpdateExpression="SET #s = :status",
-                    ConditionExpression="turn_id = :turn_id",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={":status": status, ":turn_id": turn_id},
-                )
-            except botocore.exceptions.ClientError as exc:
-                if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                    raise
             # Keep the sweep entry's copy of the lease in step, so a pass can
             # skip this turn without reading it. Last, and best effort: it is an
             # optimisation, and failing it must not leave the thread unable to
@@ -5153,7 +5167,10 @@ class DynamoDBReportStore(ReportStore):
                     extra={"turn_id": turn_id},
                     exc_info=True,
                 )
-            return _chat_turn_from_item(resp["Attributes"])
+            # A transaction returns no attributes, so this is a read back
+            # rather than the update's own result. The row is already durable by
+            # the time we get here.
+            return _get_chat_turn_sync(table, turn_id)
 
         return await asyncio.to_thread(_op)
 

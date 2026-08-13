@@ -107,6 +107,32 @@ def chat_turn_request_hash(
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) -> ChatTurnAdmission:
+    """Decide what a key that already names a turn means for *this* request.
+
+    Used by both the lookup before the write and the re-read after a lost race:
+    a concurrent collision resolves through exactly the same rule, or two
+    requests sharing a key but not a body can have the loser resolve to the
+    winner's turn and then hand it the wrong work.
+    """
+    if request_hash is not None and turn.request_hash is not None and turn.request_hash != request_hash:
+        return ChatTurnAdmission(outcome="mismatched")
+    return ChatTurnAdmission(outcome="existing", turn=turn)
+
+
+def chat_turn_execution_bound_seconds() -> int:
+    """How long a turn's whole workflow may take, queue time included.
+
+    Derived from the same two settings as the lease, and strictly smaller by
+    construction: the lease adds the full margin, this adds half of it. That
+    relationship is the safety property -- a workflow that outlives its turn's
+    claim on the thread can begin after a successor has taken it, putting two
+    producers on one conversation -- and deriving both here is what stops a
+    change to either setting from quietly inverting it.
+    """
+    return settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS // 2
+
+
 def chat_turn_lease_expiry(now: datetime) -> str:
     """When a *running* turn's claim on its thread lapses.
 

@@ -2271,6 +2271,111 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
+  it('does not let one thread finishing disarm Stop in another', async () => {
+    // The transport outlives any one conversation, and the sidebar can switch
+    // sessions mid-turn. Clearing pending state without checking which thread
+    // finished silently disarms Stop for the turn actually running.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-b', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    // A turn in a *different* conversation reports that it finished.
+    transport.clearPending('thread-other');
+
+    fetchMock.mockClear();
+    await transport.requestStop();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/turns/turn-b/cancel',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('keeps the key when every admission attempt was ambiguous', async () => {
+    // A turn may exist server-side after a 503, and its key is the only route
+    // back to it. Dropping the key strands that turn until its lease lapses --
+    // exactly what the repair path exists to prevent.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 503 }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    await expect(
+      transport.sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    expect(transport.hasUnresolvedSend('thread-1')).toBe(true);
+    // A decision, by contrast, spends the key.
+    fetchMock.mockResolvedValue(new Response('{}', { status: 409 }));
+    await expect(
+      transport.sendMessages(
+        sendArgs([
+          { id: 'u2', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+    expect(transport.hasUnresolvedSend('thread-1')).toBe(false);
+    fetchMock.mockRestore();
+  });
+
+  it('gives admission its own deadline so a hung response cannot pin a send', async () => {
+    // The SDK's abort signal is deliberately not used for admission, so without
+    // a deadline of its own a response that never arrives blocks the retry loop
+    // and any stop waiting on a turn id.
+    jest.useFakeTimers();
+    try {
+      const seen: AbortSignal[] = [];
+      const fetchMock = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (_input, init) => {
+          if (init?.signal) seen.push(init.signal);
+          return new Response('{}', { status: 409 });
+        });
+
+      renderChat({ initialPath: '/app/chat/thread-1' });
+      await act(async () => {});
+
+      await expect(
+        activeTransport().sendMessages(
+          sendArgs([
+            { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+          ]),
+        ),
+      ).rejects.toThrow();
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeInstanceOf(AbortSignal);
+      fetchMock.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('reuses one idempotency key across sends of the same message', async () => {
     // The server promises that repeating a request resolves to the turn it
     // already admitted. A fresh key per attempt puts that out of reach: the

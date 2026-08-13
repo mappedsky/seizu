@@ -44,7 +44,7 @@ from reporting.services import report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
-from reporting.services.report_store.base import chat_turn_request_hash
+from reporting.services.report_store.base import chat_turn_execution_bound_seconds, chat_turn_request_hash
 
 logger = logging.getLogger(__name__)
 
@@ -330,7 +330,7 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             # outage can start after the turn's lease has lapsed and a successor
             # has taken the thread -- two producers, one conversation. Kept
             # comfortably under the lease for that reason.
-            execution_timeout=timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + 60),
+            execution_timeout=timedelta(seconds=chat_turn_execution_bound_seconds()),
         )
     except WorkflowAlreadyStartedError:
         # The first attempt got further than it managed to report. That is the

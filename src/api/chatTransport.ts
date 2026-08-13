@@ -29,6 +29,15 @@ export type ChatTurnAdmission = {
  * stop is applied the moment the turn has an id.
  */
 type PendingSend = {
+  /**
+   * The thread this send belongs to.
+   *
+   * The transport outlives any one conversation -- the sidebar can switch
+   * sessions mid-turn -- so everything acting on the pending send checks this
+   * first. Without it, thread A finishing clears thread B's pending state and
+   * silently disarms Stop for the turn that is actually running.
+   */
+  threadId: string;
   /** The user message this send is for; retries of it reuse the key below. */
   messageId: string;
   /** Stable across retries, so a lost admission response resolves rather than
@@ -38,6 +47,12 @@ type PendingSend = {
   turnId: string | null;
   /** Stop pressed before we had an id. */
   stopRequested: boolean;
+  /**
+   * True once every admission attempt has failed *ambiguously* -- a 503, a
+   * timeout, a dropped connection. The turn may exist server-side, so the key
+   * is the only way back to it and must survive the failure.
+   */
+  unresolved: boolean;
 };
 
 export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
@@ -64,6 +79,9 @@ export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
 
 const csrf = { 'X-Seizu-Csrf': '1' };
 
+/** Per-attempt deadline for admission. Short: it is one small write server-side. */
+const ADMISSION_TIMEOUT_MS = 10_000;
+
 export class SeizuChatTransport<
   UI_MESSAGE extends UIMessage,
 > extends DefaultChatTransport<UI_MESSAGE> {
@@ -84,7 +102,8 @@ export class SeizuChatTransport<
    */
   async requestStop(): Promise<void> {
     const pending = this.pending;
-    if (!pending) return;
+    // Only ever stops the conversation on screen.
+    if (!pending || pending.threadId !== this.seizu.threadId()) return;
     if (pending.turnId === null) {
       // Carried out once the turn has an id; a failure then is reported through
       // `onStopFailed`, since this call is long gone by that point.
@@ -94,9 +113,26 @@ export class SeizuChatTransport<
     await cancelChatTurn(pending.turnId, this.seizu.accessToken());
   }
 
-  /** Forget the finished turn, so a later Stop cannot land on it. */
-  clearPending(): void {
-    this.pending = null;
+  /** Whether this thread has a send whose outcome is still unknown.
+   *
+   * The turn may exist server-side, so its key has to outlive the failure: it
+   * is the only thing that can resolve to that turn rather than admitting a
+   * second one.
+   */
+  hasUnresolvedSend(threadId: string | null): boolean {
+    return this.pending?.threadId === threadId && this.pending.unresolved;
+  }
+
+  /** Forget a finished turn, so a later Stop cannot land on it.
+   *
+   * Scoped to the thread that finished: a turn completing in a conversation the
+   * user has since navigated away from must not disarm Stop for the one they
+   * are now watching.
+   */
+  clearPending(threadId: string | null): void {
+    if (this.pending && this.pending.threadId === threadId) {
+      this.pending = null;
+    }
   }
 
   private authHeaders(): Record<string, string> {
@@ -135,13 +171,17 @@ export class SeizuChatTransport<
     const messageId =
       options.messageId ?? options.messages.at(-1)?.id ?? crypto.randomUUID();
     const pending: PendingSend =
-      this.pending?.messageId === messageId && this.pending.turnId === null
+      this.pending?.threadId === threadId &&
+      this.pending.messageId === messageId &&
+      this.pending.turnId === null
         ? this.pending
         : {
+            threadId,
             messageId,
             idempotencyKey: `ik_${crypto.randomUUID().replace(/-/g, '')}`,
             turnId: null,
             stopRequested: false,
+            unresolved: false,
           };
     this.pending = pending;
 
@@ -171,20 +211,38 @@ export class SeizuChatTransport<
       if (attempt > 0) {
         await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
       }
+      // A deadline of its own, because the SDK's abort signal is deliberately
+      // not used here. Without one, a response that never arrives pins the send
+      // forever: the retry loop cannot advance, and a stop asked for in the
+      // meantime is never delivered because it is waiting on a turn id.
+      // A timeout is ambiguous in exactly the way a 503 is -- the turn may well
+      // have been admitted -- so it retries with the same key.
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), ADMISSION_TIMEOUT_MS);
       try {
         admission = await fetch(
           `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns`,
-          { method: 'POST', headers: this.authHeaders(), body },
+          {
+            method: 'POST',
+            headers: this.authHeaders(),
+            body,
+            signal: deadline.signal,
+          },
         );
       } catch (error) {
         lastError = error;
         continue;
+      } finally {
+        clearTimeout(timer);
       }
       // Only 503 is ambiguous. A 409/404 is a decision, and repeating it just
       // asks the same question again.
       if (admission.status !== 503) break;
     }
     if (admission === null) {
+      // Every attempt failed ambiguously. Keep the key: retrying with it is the
+      // only route back to a turn the server may already have admitted.
+      pending.unresolved = true;
       if (pending.stopRequested) {
         this.seizu.onStopFailed(
           new Error('Could not confirm the turn was stopped'),
@@ -195,6 +253,9 @@ export class SeizuChatTransport<
         : new Error('Could not start this turn; please try again');
     }
     if (!admission.ok) {
+      // A 503 that survived every retry is still ambiguous; a 409/404 is a
+      // decision, and its key is spent.
+      pending.unresolved = admission.status === 503;
       if (pending.stopRequested) {
         // There is no turn id to aim the deferred stop at, and the server may
         // still have admitted one. Say so rather than letting it look handled.
@@ -250,10 +311,12 @@ export class SeizuChatTransport<
     const { turn_id: turnId } = (await active.json()) as ChatTurnAdmission;
     // A turn this tab did not start is still one it can stop.
     this.pending = {
+      threadId,
       messageId: `reconnect:${turnId}`,
       idempotencyKey: '',
       turnId,
       stopRequested: false,
+      unresolved: false,
     };
     return this.attach(turnId);
   }

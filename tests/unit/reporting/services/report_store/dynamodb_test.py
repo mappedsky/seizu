@@ -3687,13 +3687,12 @@ async def test_finishing_is_conditional_on_the_turn_still_running(patch_table, s
     """Same rule as the SQL store, asserted separately because each backend
     writes its own condition: only a running turn may be moved to terminal."""
     patch_table.get_item.return_value = {"Item": _turn_item()}
-    patch_table.update_item.return_value = {"Attributes": _turn_item(status="completed", last_seq=3)}
 
     await store.finish_chat_turn("turn-1", "completed", 3)
 
-    condition = patch_table.update_item.call_args_list[0].kwargs["ConditionExpression"]
-    assert "#s = :running" in condition
-    assert patch_table.update_item.call_args_list[0].kwargs["ExpressionAttributeValues"][":running"] == "running"
+    header = patch_table.meta.client.transact_write_items.call_args_list[0].kwargs["TransactItems"][0]["Update"]
+    assert "#s = :running" in header["ConditionExpression"]
+    assert header["ExpressionAttributeValues"][":running"] == "running"
 
 
 async def test_a_lost_finish_leaves_the_thread_pointer_alone(patch_table, store):
@@ -3886,20 +3885,49 @@ async def test_appending_rejects_a_batch_no_item_could_hold(patch_table, store):
     patch_table.put_item.assert_not_called()
 
 
-async def test_finishing_a_turn_releases_the_thread_only_if_it_still_owns_it(patch_table, store):
-    """A successor turn owns the pointer by then; clearing it blindly would let
-    two producers run on one thread."""
+async def test_finishing_a_turn_releases_the_thread_in_the_same_write(patch_table, store):
+    """Two writes leave the thread wedged: terminalizing the header first and
+    releasing the pointer second means a transient failure on the second leaves
+    every retry seeing a terminal header, returning early, and never reaching
+    the pointer -- so nothing new can be admitted until the lease lapses.
+
+    The pointer's condition stays: a successor may own it by now, and clearing
+    it blindly would let two producers run on one thread."""
     patch_table.get_item.return_value = {"Item": _turn_item()}
-    patch_table.update_item.return_value = {"Attributes": _turn_item(status="completed", last_seq=4)}
 
     await store.finish_chat_turn("turn-1", "completed", 4)
 
-    pointer_update = next(
-        call.kwargs
-        for call in patch_table.update_item.call_args_list
-        if call.kwargs["Key"]["PK"] == "CHAT_TURN_THREAD#u1#THREAD#1001"
-    )
-    assert pointer_update["ConditionExpression"] == "turn_id = :turn_id"
+    items = patch_table.meta.client.transact_write_items.call_args_list[0].kwargs["TransactItems"]
+    keys = [i["Update"]["Key"]["PK"] for i in items]
+    assert keys == ["CHAT_TURN#turn-1", "CHAT_TURN_THREAD#u1#THREAD#1001"]
+    assert items[1]["Update"]["ConditionExpression"] == "turn_id = :turn_id"
+
+
+async def test_a_turn_whose_pointer_moved_on_is_still_closed(patch_table, store):
+    """The two conditions in that transaction mean different things. If only the
+    pointer's fails, a successor already owns the thread -- but this turn still
+    has to reach a terminal state, or a reader waits on it forever."""
+    patch_table.get_item.return_value = {"Item": _turn_item()}
+    attempts: list[int] = []
+
+    def _transact(**kwargs):
+        attempts.append(len(kwargs["TransactItems"]))
+        if len(attempts) == 1:
+            raise botocore.exceptions.ClientError(
+                {
+                    "Error": {"Code": "TransactionCanceledException"},
+                    "CancellationReasons": [{"Code": "None"}, {"Code": "ConditionalCheckFailed"}],
+                },
+                "TransactWriteItems",
+            )
+        return {}
+
+    patch_table.meta.client.transact_write_items.side_effect = _transact
+
+    await store.finish_chat_turn("turn-1", "completed", 4)
+
+    # Retried with the header alone, so the turn is closed regardless.
+    assert attempts == [2, 1]
 
 
 async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, store):
@@ -3911,10 +3939,15 @@ async def test_a_failed_sweep_refresh_does_not_hold_the_thread(patch_table, stor
     def _update(**kwargs):
         if kwargs["Key"]["PK"] == "CHAT_TURN_LIST":
             raise botocore.exceptions.ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
-        released.append(kwargs["Key"]["PK"])
         return {"Attributes": _turn_item(status="completed", last_seq=4)}
 
     patch_table.update_item.side_effect = _update
+
+    def _transact(**kwargs):
+        released.extend(i["Update"]["Key"]["PK"] for i in kwargs["TransactItems"])
+        return {}
+
+    patch_table.meta.client.transact_write_items.side_effect = _transact
 
     finished = await store.finish_chat_turn("turn-1", "completed", 4)
 

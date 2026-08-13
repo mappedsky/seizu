@@ -278,6 +278,13 @@ followed by an act, so the turn can finish in between — and under the default
 start the finished turn over. `REJECT_DUPLICATE` makes the id itself the guard:
 a turn's workflow can exist exactly once, ever.
 
+**Both deadlines come from one helper.** The bound adds *half* the lease margin
+where the lease adds all of it, so it is smaller by construction rather than by
+coincidence. Hard-coding it (`timeout + 60`) while the lease used the
+configurable margin left the invariant true only for the settings the test
+happened to run under — a test that looked like it protected the property and
+did not.
+
 **The execution bound covers queue time, not just the activity.** A
 `start_to_close_timeout` starts when a worker accepts the task, so a workflow
 queued through a worker outage can begin *after* the turn's claim on the thread
@@ -287,6 +294,13 @@ relationship so a settings change cannot quietly reopen it. Belt and braces on
 the worker side: the activity re-checks that its turn is still `running` **and**
 still holds the thread pointer before producing, because a lapsed claim is
 exactly the case the bound is protecting against.
+
+**One resolver, both paths.** The hash comparison runs on the lookup *before*
+the write and on the re-read *after* a lost race
+(`resolve_chat_turn_for_key`). Comparing only on the first means two requests
+sharing a key but not a body can have the loser resolve to the winner's turn —
+and then hand it the wrong work, since the loser may be the one that starts the
+workflow.
 
 **A key names one request.** The key alone says "this is a repeat", not a repeat
 *of what* — and it resolves to a turn that may already be running, whose body is
@@ -388,6 +402,15 @@ well as the read above it, and a sweep that could not assume creation order was
 expiry order). With the workflow bounding the turn, a fixed lease derived from
 that bound is sound and all three disappear.
 
+**A turn's header and its thread pointer terminalize together.** Two writes
+wedge the thread: terminalizing the header first and releasing the pointer
+second means a transient failure on the second leaves every retry seeing a
+terminal header, returning early, and never reaching the pointer — so nothing
+new can be admitted until the lease lapses. **Don't** collapse the fallback
+though: the two conditions mean different things, and when only the *pointer's*
+fails a successor already owns the thread while this turn still has to reach a
+terminal state, or a reader waits on it forever. The header is retried alone.
+
 **Deletion order is load-bearing.** Event batches go first, in a batch write —
 there can be hundreds, far past a transaction's limit, and a half-deleted log is
 unreachable without its header anyway. The header then goes *with* every index
@@ -454,6 +477,21 @@ Three rules fall out of that object, and each was a live defect without it:
   is busy. This retries an idempotent *request*; the turn still runs at most
   once ([AGT-007](#agt-007)). A 409 or 404 is a decision, not ambiguity, and is
   never retried.
+- **The pending send is scoped to its thread.** The transport outlives any one
+  conversation and the sidebar can switch sessions mid-turn, so a turn finishing
+  in a thread the user has navigated away from must not clear the pending state
+  of the one they are watching — that silently disarms Stop for the turn that is
+  actually running.
+- **Admission carries its own deadline.** It deliberately ignores the SDK's
+  abort signal, so without one a response that never arrives pins the send
+  forever: the retry loop cannot advance and a stop asked for meanwhile is never
+  delivered, because it is waiting on a turn id. A timeout is ambiguous in
+  exactly the way a 503 is, and retries with the same key.
+- **"Unknown" is not "failed".** A send whose attempts all ended ambiguously
+  keeps its key (`unresolved`), because the turn may exist server-side and the
+  key is the only route back to it; a 409 or 404 is a decision and spends it.
+  `onFinish` fires for errored sends too, so clearing pending state there
+  unconditionally strands exactly the turn the repair path exists to recover.
 - **A deferred stop reports through a callback, not a return value.** A stop
   asked for before admission answers is carried out later, by which point
   `requestStop` has returned and throwing from the send would be swallowed by

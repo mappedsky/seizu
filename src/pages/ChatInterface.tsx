@@ -997,7 +997,16 @@ export default function ChatInterface() {
       // pending means a Stop pressed during the *next* send -- before that one
       // is admitted -- cancels this finished turn and silently does nothing to
       // the live one.
-      transport.clearPending();
+      //
+      // Except when the send never resolved. `onFinish` fires for an errored
+      // send too, and a send that failed ambiguously may have admitted a turn
+      // we can still reach -- but only with its key. Clearing it there strands
+      // that turn until its lease lapses, which is the failure this whole path
+      // exists to avoid. Scoped to the thread that finished, since the user may
+      // have switched conversations while it ran.
+      if (!transport.hasUnresolvedSend(activeThreadId)) {
+        transport.clearPending(activeThreadId);
+      }
       if (!activeThreadId) return;
       window.setTimeout(() => {
         void fetchConfirmations();

@@ -55,6 +55,7 @@ from reporting.services.report_store.base import (
     chat_turn_lease_expiry,
     initial_report_config,
     require_public_space_member,
+    resolve_chat_turn_for_key,
     validate_chat_turn_batch,
 )
 from reporting.utils.sql import build_database_url
@@ -3448,16 +3449,7 @@ class SQLModelReportStore(ReportStore):
                     .first()
                 )
                 if already is not None:
-                    if (
-                        request_hash is not None
-                        and already.request_hash is not None
-                        and already.request_hash != request_hash
-                    ):
-                        # Same key, different request. The key already names a
-                        # turn, so resolving here would hand back one running
-                        # work this caller did not ask for.
-                        return ChatTurnAdmission(outcome="mismatched")
-                    return ChatTurnAdmission(outcome="existing", turn=_chat_turn_from_record(already))
+                    return resolve_chat_turn_for_key(_chat_turn_from_record(already), request_hash)
 
             # Admission and creation commit together, so a delete cannot slip
             # between them: the session is closed to new turns the moment it is
@@ -3533,7 +3525,10 @@ class SQLModelReportStore(ReportStore):
                     .first()
                 )
                 if concurrent is not None:
-                    return ChatTurnAdmission(outcome="existing", turn=_chat_turn_from_record(concurrent))
+                    # The same rule as above, deliberately: a request that lost
+                    # the race must not resolve to a turn carrying a different
+                    # body just because it arrived second.
+                    return resolve_chat_turn_for_key(_chat_turn_from_record(concurrent), request_hash)
             return ChatTurnAdmission(outcome="busy")
 
     async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
