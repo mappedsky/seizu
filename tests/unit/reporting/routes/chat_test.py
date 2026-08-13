@@ -26,6 +26,8 @@ from reporting.schema.chat import (
 from reporting.schema.report_config import User
 from reporting.services import chat_turns
 from reporting.services.chat_budget import BudgetController
+from reporting.services.report_store import base as base_store
+from reporting.services.report_store.base import chat_turn_execution_bound_seconds
 
 _FAKE_USER = User(
     user_id="test-user-id",
@@ -1437,8 +1439,11 @@ async def test_a_late_repair_is_bounded_by_what_is_left_of_the_claim(mocker, _ch
     )
 
 
-async def test_a_turn_whose_claim_already_lapsed_is_not_started(mocker, _chat_turn_log, _fake_temporal):
-    """Nothing safe is left to start: a successor may already own the thread."""
+async def test_a_turn_whose_claim_already_lapsed_is_closed_not_left_running(mocker, _chat_turn_log, _fake_temporal):
+    """Nothing safe is left to start -- a successor may already own the thread --
+    but returning quietly is not enough either: a turn recorded as running with
+    no producer is one a client attaches to and waits on until the tail
+    deadline, for an answer that is never coming."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     mocker.patch(
@@ -1450,8 +1455,27 @@ async def test_a_turn_whose_claim_already_lapsed_is_not_started(mocker, _chat_tu
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
-    assert response.status_code == 201
+    assert response.status_code == 503
     assert _fake_temporal["starts"] == [], "a turn past its claim was handed to a producer"
+    assert [t.status for t in _chat_turn_log.values()] == ["failed"], (
+        "the turn was left running with nothing to finish it"
+    )
+
+
+async def test_the_execution_bound_leaves_room_to_stop(mocker):
+    """Timing a workflow out does not stop its activity there and then -- the
+    cancellation lands on its next heartbeat. Handing it the claim's whole
+    remainder still lets a producer run past the instant a successor can be
+    admitted."""
+    now = datetime.now(UTC)
+    expires_at = (now + timedelta(seconds=120)).isoformat()
+
+    bound = chat_turn_execution_bound_seconds(expires_at, now=now)
+
+    assert bound == 120 - base_store.CHAT_TURN_CANCELLATION_BUFFER_SECONDS
+    # And a claim with less left than the buffer is refused outright.
+    soon = (now + timedelta(seconds=5)).isoformat()
+    assert chat_turn_execution_bound_seconds(soon, now=now) <= 0
 
 
 async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, _fake_temporal):

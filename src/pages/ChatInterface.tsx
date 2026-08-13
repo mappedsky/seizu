@@ -724,9 +724,12 @@ export default function ChatInterface() {
   // either way, so the UI would otherwise look exactly as if it had worked
   // while the turn keeps generating.
   const [stopError, setStopError] = useState<string | null>(null);
-  // The thread whose last send never resolved, if any. Mirrors transport state
-  // so the recovery banner re-renders when it changes.
-  const [unresolvedThread, setUnresolvedThread] = useState<string | null>(null);
+  // Every thread whose last send never resolved. A set, not one value: a second
+  // ambiguous send in another conversation would otherwise hide the recovery
+  // the first one still needs. Mirrors transport state so the banner re-renders.
+  const [unresolvedThreads, setUnresolvedThreads] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
   // Off by default every visit; bypassing confirmations is an explicit,
   // per-session opt-in for users holding chat:bypass_permissions.
@@ -934,9 +937,13 @@ export default function ChatInterface() {
         onUnresolvedChange: (threadId, unresolved) => {
           // Mirrored into React state: the transport's own copy is a plain
           // object, so without this the recovery banner never renders.
-          setUnresolvedThread((current) =>
-            unresolved ? threadId : current === threadId ? null : current,
-          );
+          setUnresolvedThreads((current) => {
+            if (current.has(threadId) === unresolved) return current;
+            const next = new Set(current);
+            if (unresolved) next.add(threadId);
+            else next.delete(threadId);
+            return next;
+          });
         },
         onStopFailed: () => {
           setStopError(
@@ -1013,7 +1020,7 @@ export default function ChatInterface() {
       // answer -- clearing on that basis disarms Stop for the turn they are
       // actually watching. It also keeps a send whose outcome is unknown: that
       // turn may exist server-side and only its key can reach it.
-      transport.clearFinishedStream();
+      transport.clearFinishedTurn(message.metadata?.turn_id);
       if (!activeThreadId) return;
       window.setTimeout(() => {
         void fetchConfirmations();
@@ -1850,7 +1857,7 @@ export default function ChatInterface() {
               // under its original key is the one thing that can resolve to it
               // -- typing the message again mints a new key and admits a
               // second turn, or is told the thread is busy.
-              unresolvedThread === activeThreadId ? (
+              activeThreadId && unresolvedThreads.has(activeThreadId) ? (
                 <Button
                   color="inherit"
                   size="small"
@@ -1862,7 +1869,7 @@ export default function ChatInterface() {
               ) : null
             }
           >
-            {unresolvedThread === activeThreadId
+            {activeThreadId && unresolvedThreads.has(activeThreadId)
               ? 'We could not confirm your message was received. It may still be running.'
               : error.message}
           </Alert>

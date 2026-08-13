@@ -99,6 +99,10 @@ async def admit_chat_turn(
             status_code=409,
             detail="This idempotency key was used for a different request",
         )
+    if admission.outcome == "expired":
+        # The turn was admitted but its claim ran out before it could be handed
+        # to a producer. Retryable, and distinct from a store failure.
+        raise HTTPException(status_code=503, detail="Could not start this turn; please try again")
     if admission.outcome == "busy":
         raise HTTPException(status_code=409, detail="This conversation already has a turn in progress")
     if admission.turn is None:  # pragma: no cover - defensive

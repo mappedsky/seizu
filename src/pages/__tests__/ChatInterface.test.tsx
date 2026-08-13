@@ -2347,10 +2347,11 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
-  it('clears the thread whose stream ended, not the one on screen', async () => {
-    // A completion callback runs after the user may have switched away, so
-    // "which thread finished" is not "which thread is selected". Clearing on
-    // the latter disarms Stop for the turn they are actually watching.
+  it('clears the turn that ended, not whichever thread started last', async () => {
+    // The case a single "currently streaming" slot cannot express: A is still
+    // streaming when B starts, and A finishes *afterwards*. Anything that
+    // records only the latest stream attributes A's completion to B and
+    // silently disarms Stop for the turn the user is watching.
     let thread = 'thread-1';
     const stops: string[] = [];
     const fetchMock = jest
@@ -2377,7 +2378,7 @@ describe('ChatInterface', () => {
         { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
       ]),
     );
-    // The user switches, and starts a turn in the new conversation.
+    // The user switches and starts a second turn while the first still runs.
     thread = 'thread-2';
     await transport.sendMessages(
       sendArgs([
@@ -2385,15 +2386,17 @@ describe('ChatInterface', () => {
       ]),
     );
 
-    // thread-2's stream ends while thread-2 is on screen.
-    transport.clearFinishedStream();
-    await transport.requestStop();
-    expect(stops).toEqual([]);
+    // Now the *first* one finishes, named by its own turn.
+    transport.clearFinishedTurn('turn-thread-1');
 
-    // thread-1's turn is untouched by that.
+    // thread-2's turn is untouched and still stoppable.
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-2/cancel']);
+
+    // thread-1's is the one that was forgotten.
     thread = 'thread-1';
     await transport.requestStop();
-    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-1/cancel']);
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-2/cancel']);
     fetchMock.mockRestore();
   });
 

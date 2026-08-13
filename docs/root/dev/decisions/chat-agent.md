@@ -278,6 +278,16 @@ followed by an act, so the turn can finish in between — and under the default
 start the finished turn over. `REJECT_DUPLICATE` makes the id itself the guard:
 a turn's workflow can exist exactly once, ever.
 
+**A cancellation buffer comes off the top of that remainder.** Timing a
+workflow out does not stop its activity there and then — the cancellation
+reaches it on its next heartbeat — so handing it the claim's full remainder
+still lets a producer run past the instant a successor can be admitted. Too
+little left for both the work and the stopping means the turn is not started at
+all, and is **closed** rather than left at `running`: a turn with no producer is
+one a client attaches to and waits on until the tail deadline, for an answer
+that is never coming. That case has its own admission outcome (`expired` → 503)
+so it reads as retryable rather than as a store failure.
+
 **The workflow is bounded by what is left of the claim, not by a fresh
 duration.** A duration cannot express the invariant: the claim is an *instant*
 fixed at admission, while a timeout starts whenever the workflow is created — so
@@ -498,11 +508,18 @@ Three rules fall out of that object, and each was a live defect without it:
   outlives any one conversation and the sidebar can switch mid-turn, so a single
   slot means whichever thread acted last owns it and the others silently lose
   Stop. Reattaching in an idle conversation must clear only its own entry.
-- **Completion clears the thread whose *stream* ended**, which is not the thread
-  on screen: a callback runs after the user may have switched away, and clearing
-  on the selected thread disarms Stop for the turn they are watching. The
-  transport records which stream it is reading (`clearFinishedStream`), because
-  the caller cannot know.
+- **Completion is identified by the turn that ended**, not by the thread on
+  screen and not by "the stream currently being read". Several conversations can
+  stream at once, so the latter is not a single thing either — an earlier
+  thread finishing after a later one starts would be attributed to the later
+  one. `clearFinishedTurn(turnId)` takes the id off the finished message; a turn
+  that ended without announcing one is left alone, which keeps it stoppable.
+- **Unresolved threads are a set.** One value means a second ambiguous send in
+  another conversation hides the recovery the first still needs.
+- **Reconnect prefers a turn this client already holds** over asking `/active`,
+  which answers 204 once the turn has finished — losing a response nobody has
+  rendered yet. That is exactly the case after a retry resolves to a turn that
+  completed while the connection was down.
 - **An unresolved send is recoverable from the UI**, or the preserved key is
   unreachable and the repair path is theatre — typing the message again mints a
   new key and admits a second turn. The banner offers Retry, which replays the
@@ -564,6 +581,11 @@ Three rules fall out of that object, and each was a live defect without it:
 - CI's `unit` job blocks network, which catches unmocked store and Temporal
   calls that pass locally because a real Temporal and Postgres are there to fall
   into. A locally green backend suite does not prove the mocks are complete.
+- **When you scope one piece of state to a thread, check its siblings.** Mapping
+  `pending` by thread while leaving `streamingThread` global reproduced the same
+  bug one field over, and the test missed it by having the *later* thread finish
+  — the order a single slot handles correctly. Order the actors so the earlier
+  one finishes last.
 - **Drive client behaviour through the path a user takes.** Two defects here
   were masked by tests that called the transport directly: a `clearPending`
   scoped by an argument the test supplied (so it never exercised the callback

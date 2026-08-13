@@ -306,11 +306,17 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
     # claim can still be producing when a successor takes the thread.
     remaining = chat_turn_execution_bound_seconds(admission.turn.expires_at)
     if remaining <= 0:
+        # Too little of the claim left to run in, and to stop cleanly inside.
+        # Closing it here matters: a turn left at "running" with no producer is
+        # one a client attaches to and waits on until the tail deadline, for an
+        # answer that is never coming.
         logger.warning(
-            "Not starting a chat turn whose claim has already lapsed",
+            "Closing a chat turn whose claim has lapsed before it could start",
             extra={"turn_id": admission.turn.turn_id},
         )
-        return admission
+        with contextlib.suppress(Exception):
+            await report_store.finish_chat_turn(admission.turn.turn_id, "failed", 0)
+        return ChatTurnAdmission(outcome="expired")
 
     client = await schedule_reconciler.get_client()
     try:

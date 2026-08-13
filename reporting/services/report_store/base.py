@@ -138,6 +138,12 @@ def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) ->
     return ChatTurnAdmission(outcome="existing", turn=turn)
 
 
+#: Time reserved at the end of a turn's claim for the cancellation to land.
+#: Comfortably more than the activity's heartbeat interval, which is what bounds
+#: how long a timed-out activity keeps running before it hears about it.
+CHAT_TURN_CANCELLATION_BUFFER_SECONDS = 60
+
+
 def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: datetime | None = None) -> int:
     """How long a turn's whole workflow may take, queue time included.
 
@@ -161,7 +167,11 @@ def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: dateti
     if expires_at is None:
         return bound
     remaining = int((datetime.fromisoformat(expires_at) - (now or datetime.now(tz=UTC))).total_seconds())
-    return min(bound, remaining)
+    # Timing a workflow out does not stop its activity there and then: the
+    # cancellation reaches it on its next heartbeat. Handing it the claim's full
+    # remainder therefore still lets a producer run past the instant a successor
+    # can be admitted, so the buffer comes off the top.
+    return min(bound, remaining - CHAT_TURN_CANCELLATION_BUFFER_SECONDS)
 
 
 def chat_turn_lease_expiry(now: datetime) -> str:

@@ -104,10 +104,6 @@ export class SeizuChatTransport<
   // conversation and the sidebar can switch mid-turn, so a single slot means
   // whichever thread acts last owns it -- and the others silently lose Stop.
   private readonly pending = new Map<string, PendingSend>();
-  // The thread whose stream is currently being read. A completion callback
-  // fires after the user may have switched away, so "which thread finished" is
-  // not the same question as "which thread is selected".
-  private streamingThread: string | null = null;
 
   constructor(options: SeizuChatTransportOptions<UI_MESSAGE>) {
     super({ api: '/api/v1/chat', headers: csrf });
@@ -140,15 +136,19 @@ export class SeizuChatTransport<
    *
    * The same body under the same key, which is the only request the server can
    * resolve to the turn it may already have admitted: anything else is either a
-   * second turn or a fingerprint mismatch. Returns the stream to attach to, or
-   * null when there is nothing outstanding.
+   * second turn or a fingerprint mismatch.
+   *
+   * Resolves the turn and records it; the caller then resumes, which reads it
+   * through `reconnectToStream`. Returning a stream here instead would hand
+   * back one nobody consumes -- the SDK only renders streams it asked for.
+   * Returns whether there was anything outstanding to retry.
    */
-  async retryUnresolved(): Promise<ReadableStream<never> | null> {
+  async retryUnresolved(): Promise<boolean> {
     const threadId = this.seizu.threadId();
     const pending = threadId ? this.pending.get(threadId) : undefined;
-    if (!threadId || !pending?.unresolved || !pending.body) return null;
-    const turnId = await this.admit(threadId, pending.body, pending);
-    return this.attach(turnId, undefined, threadId);
+    if (!threadId || !pending?.unresolved || !pending.body) return false;
+    await this.admit(threadId, pending.body, pending);
+    return true;
   }
 
   /** Whether this thread has a send whose outcome is still unknown.
@@ -171,19 +171,28 @@ export class SeizuChatTransport<
     if (threadId) this.pending.delete(threadId);
   }
 
-  /** Forget the stream that just ended, whichever thread it belonged to.
+  /** Forget the turn that just ended, wherever it belonged.
    *
-   * The caller cannot supply the thread: by the time a completion callback runs
-   * the user may have switched conversations, so the currently selected one is
-   * the wrong answer. The transport knows which stream it was reading.
+   * Identified by the turn itself, because neither the caller nor the transport
+   * can name it any other way: several conversations can be streaming at once,
+   * so "the stream currently being read" is not a single thing, and by the time
+   * a completion callback runs the selected thread may be a different one
+   * entirely. Both of those clear the wrong conversation and silently disarm
+   * Stop for the turn the user is watching.
+   *
+   * A turn that ended without ever announcing an id leaves the pending send
+   * alone, which is the safe direction: it stays stoppable and the next send on
+   * that thread replaces it.
    */
-  clearFinishedStream(): void {
-    const threadId = this.streamingThread;
-    if (!threadId) return;
-    // An unresolved send keeps its key: the turn may exist and only that key
-    // can reach it.
-    if (!this.pending.get(threadId)?.unresolved) this.pending.delete(threadId);
-    this.streamingThread = null;
+  clearFinishedTurn(turnId: string | undefined): void {
+    if (!turnId) return;
+    for (const [threadId, pending] of this.pending) {
+      if (pending.turnId !== turnId) continue;
+      // An unresolved send keeps its key: the turn may exist and only that key
+      // can reach it.
+      if (!pending.unresolved) this.pending.delete(threadId);
+      return;
+    }
   }
 
   private authHeaders(): Record<string, string> {
@@ -297,9 +306,7 @@ export class SeizuChatTransport<
   private async attach(
     turnId: string,
     signal?: AbortSignal,
-    threadId?: string,
   ): Promise<ReadableStream<never>> {
-    if (threadId) this.streamingThread = threadId;
     const res = await fetch(
       `/api/v1/chat/turns/${encodeURIComponent(turnId)}/stream`,
       { headers: this.authHeaders(), signal },
@@ -348,7 +355,7 @@ export class SeizuChatTransport<
     this.pending.set(threadId, pending);
 
     const turnId = await this.admit(threadId, body, pending);
-    return this.attach(turnId, options.abortSignal, threadId);
+    return this.attach(turnId, options.abortSignal);
   }
 
   async reconnectToStream(
@@ -360,6 +367,12 @@ export class SeizuChatTransport<
     // admission. This is the one place that resolves one to the other.
     const threadId = this.seizu.threadId();
     if (!threadId) return null;
+    // A turn this client already holds is read directly. Asking `/active` for
+    // it would answer 204 once it has finished, and the response nobody has
+    // rendered yet would be lost -- which is exactly the case after a retry
+    // resolves to a turn that completed while the connection was down.
+    const known = this.pending.get(threadId)?.turnId;
+    if (known) return this.attach(known);
     const active = await fetch(
       `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns/active`,
       { headers: this.authHeaders() },
@@ -382,7 +395,7 @@ export class SeizuChatTransport<
       stopRequested: false,
       unresolved: false,
     });
-    return this.attach(turnId, undefined, threadId);
+    return this.attach(turnId);
   }
 }
 

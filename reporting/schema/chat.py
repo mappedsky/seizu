@@ -116,7 +116,7 @@ class ChatTurnAdmission(BaseModel):
     #             Never a cancellation: a repeat of a request is a repeat.
     # busy     -- another turn holds the thread.
     # retired  -- the conversation is gone or being deleted.
-    outcome: Literal["created", "existing", "busy", "retired", "mismatched"]
+    outcome: Literal["created", "existing", "busy", "retired", "mismatched", "expired"]
     turn: "ChatTurnItem | None" = None
 
 
