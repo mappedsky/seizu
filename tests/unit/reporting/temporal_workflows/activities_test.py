@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import re
 from types import SimpleNamespace
 from typing import Any, get_type_hints
+from unittest.mock import AsyncMock
 
 import pytest
 from neo4j import Record
@@ -15,7 +17,7 @@ from reporting.schema.report_config import ScheduledQueryItem, User
 from reporting.services.headless_chat import HeadlessChatResult
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 from reporting.services.sandbox_remediation import RemediationRunResult
-from reporting.temporal_workflows import WorkflowSpec
+from reporting.temporal_workflows import WorkflowSpec, activities
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     execute_configured_activity,
@@ -30,6 +32,7 @@ from reporting.temporal_workflows.activities import (
     trigger_configured_workflows,
 )
 from reporting.temporal_workflows.shared import (
+    ChatTurnInvocation,
     CiFixInput,
     CodeWorkflowInputRequest,
     CodeWorkflowOutputRequest,
@@ -971,3 +974,70 @@ async def test_remediation_requires_scheduled_queries_write_at_runtime(mocker):
     assert exc_info.value.non_retryable is True
     assert "workflows:write" in str(exc_info.value)
     run.assert_not_called()
+
+
+def _chat_turn_item():
+    from reporting.schema.chat import ChatTurnItem
+
+    return ChatTurnItem(
+        turn_id="turn-1",
+        thread_id="1001",
+        user_id="user-1",
+        message_id="msg_1",
+        text_id="text_1",
+        created_at="2024-01-01T00:00:00+00:00",
+        updated_at="2024-01-01T00:00:00+00:00",
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+
+async def test_a_silent_turn_still_reports_liveness(mocker):
+    """A turn is quietest exactly when it is slowest -- a model call or a tool
+    can run for minutes producing no chunk. Heartbeating only on output times
+    out *healthy* turns, and the fallback finalizer then frees the thread while
+    this activity is still running and writing the same checkpoint."""
+    mocker.patch.object(activities, "_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    beats: list[int] = []
+    mocker.patch.object(activities.activity, "heartbeat", lambda *a: beats.append(1))
+
+    stored = mocker.Mock()
+    stored.user = User(
+        user_id="user-1",
+        sub="sub123",
+        iss="https://idp.example.com",
+        email="test@example.com",
+        created_at="2024-01-01T00:00:00+00:00",
+        last_login="2024-01-01T00:00:00+00:00",
+    )
+    stored.jwt_claims = {}
+    stored.permissions = frozenset({"chat:use"})
+    mocker.patch.object(activities, "resolve_stored_user", AsyncMock(return_value=stored))
+    mocker.patch.object(
+        activities.report_store,
+        "get_chat_turn",
+        AsyncMock(return_value=_chat_turn_item()),
+    )
+
+    async def _silent_turn(*args, **kwargs):
+        # Produces nothing at all, the way a long tool call looks from here.
+        await asyncio.sleep(0.2)
+        return ("completed", 4)
+
+    mocker.patch.object(activities.chat_turns, "produce_turn", _silent_turn)
+
+    result = await activities.run_chat_turn(
+        ChatTurnInvocation(
+            turn_id="turn-1",
+            thread_id="1001",
+            user_id="user-1",
+            message="Hi",
+            resume_confirmation_id=None,
+            continue_response=False,
+            bypass_confirmations=False,
+            permissions=["chat:use"],
+            timeout_seconds=60,
+        )
+    )
+
+    assert result.status == "completed"
+    assert len(beats) > 1, "a turn producing no output never reported liveness"

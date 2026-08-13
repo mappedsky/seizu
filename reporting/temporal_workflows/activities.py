@@ -6,6 +6,7 @@ MCP runtime freely.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import logging
@@ -72,6 +73,11 @@ from reporting.temporal_workflows.shared import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How often a running chat turn reports liveness to Temporal. Comfortably
+#: inside the workflow's heartbeat timeout, so a couple of missed ticks under
+#: load do not fail a healthy turn.
+_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 _CVE_SKILLSET_ID = "cve_response"
 _CVE_SKILL_ID = "cve_repo_assessment"
@@ -1045,18 +1051,39 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
         # worker picked this up. Nothing to produce and nothing to close.
         raise ApplicationError("Chat turn no longer exists", non_retryable=True)
 
-    status, last_seq = await chat_turns.produce_turn(
-        turn,
-        invocation.thread_id,
-        ChatTurnRequest(
-            message=invocation.message,
-            resume_confirmation_id=invocation.resume_confirmation_id,
-            continue_response=invocation.continue_response,
-            bypass_confirmations=invocation.bypass_confirmations,
-        ),
-        current,
-        on_progress=activity.heartbeat,
-    )
+    async def _heartbeat_until_done() -> None:
+        """Report liveness on a timer, not on output.
+
+        A turn is quietest exactly when it is slowest: a model call or a tool
+        can run for minutes without producing a chunk. Heartbeating only on
+        output therefore times out *healthy* turns, and the fallback finalizer
+        then marks the turn failed and frees the thread while this activity is
+        still running and still writing the same checkpoint -- two producers on
+        one conversation. The activity's start-to-close timeout is what bounds a
+        turn that genuinely runs too long; this only says the worker is alive.
+        """
+        while True:
+            await asyncio.sleep(_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS)
+            activity.heartbeat()
+
+    heartbeat = asyncio.create_task(_heartbeat_until_done())
+    try:
+        status, last_seq = await chat_turns.produce_turn(
+            turn,
+            invocation.thread_id,
+            ChatTurnRequest(
+                message=invocation.message,
+                resume_confirmation_id=invocation.resume_confirmation_id,
+                continue_response=invocation.continue_response,
+                bypass_confirmations=invocation.bypass_confirmations,
+            ),
+            current,
+            on_progress=activity.heartbeat,
+        )
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
     return ChatTurnRunResult(status=status, last_seq=last_seq)
 
 

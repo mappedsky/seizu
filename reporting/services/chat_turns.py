@@ -11,11 +11,11 @@ so a client can disconnect and come back, and the work carries on either way.
 JSON the live stream sent, so the first delivery and every replay are
 byte-identical -- there is no second rendering path that can drift from the
 first. It is also what makes the reader trivial enough to be shared by the
-initial ``POST`` and the reconnecting ``GET``.
+stream route and the reconnecting one.
 
-The producer runs as a detached task in this process today.
-:func:`start_turn` is the seam where it becomes a Temporal workflow instead;
-nothing above it has to change, because the reader only ever sees the log.
+The producer is a Temporal workflow (``seizu_chat_turn``), so a turn outlives
+both the request that asked for it and the web process that served it.
+:func:`start_turn` admits the turn and hands it over; nothing here waits for it.
 """
 
 import asyncio
@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from reporting import settings
 from reporting.authnz import CurrentUser
@@ -250,8 +251,10 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
     """Admit a turn, and hand it to the worker that will produce it.
 
     The store decides and reports which of ``created``, ``existing``, ``busy``
-    or ``retired`` happened; only ``created`` starts a workflow, so a repeat of
-    a request never starts a second producer.
+    or ``retired`` happened. Both ``created`` and ``existing`` then *ensure* the
+    turn's workflow, which is what makes a retry able to repair a handoff that
+    failed after the turn was already committed; the workflow id is derived from
+    the turn id, so ensuring it twice is a no-op rather than a second producer.
     """
     # Reusing the client's message id for a continuation is what makes the
     # continued text land in the same assistant message rather than a new one.
@@ -265,31 +268,52 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
         f"text_{uuid.uuid4().hex}",
         body.idempotency_key,
     )
-    if admission.outcome != "created" or admission.turn is None:
+    if admission.turn is None:
+        return admission
+    # `existing` reaches here too, and deliberately. The store commits the turn
+    # before this call, so a handoff that fails leaves a turn recorded as
+    # running with nothing producing it -- unreadable, and holding the thread
+    # against a successor until its lease lapses. Retrying the request resolves
+    # to that same turn, so this is the only place that can repair it.
+    #
+    # Only while it is still running, though: a repeat that arrives after the
+    # turn finished must not start a second workflow over a completed one and
+    # bill the answer twice.
+    if admission.turn.status != "running":
         return admission
 
     from reporting.temporal_workflows.chat_turn import workflow_id_for
     from reporting.temporal_workflows.shared import ChatTurnInvocation
 
     client = await schedule_reconciler.get_client()
-    await client.start_workflow(
-        "seizu_chat_turn",
-        ChatTurnInvocation(
-            turn_id=admission.turn.turn_id,
-            thread_id=thread_id,
-            user_id=current.user.user_id,
-            message=body.message,
-            resume_confirmation_id=body.resume_confirmation_id,
-            continue_response=body.continue_response,
-            bypass_confirmations=body.bypass_confirmations,
-            # The turn can never exceed these; the worker intersects them with
-            # what the stored user has now.
-            permissions=sorted(current.permissions),
-            timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
-        ),
-        id=workflow_id_for(admission.turn.turn_id),
-        task_queue=settings.TEMPORAL_TASK_QUEUE,
-    )
+    try:
+        await client.start_workflow(
+            "seizu_chat_turn",
+            ChatTurnInvocation(
+                turn_id=admission.turn.turn_id,
+                thread_id=thread_id,
+                user_id=current.user.user_id,
+                message=body.message,
+                resume_confirmation_id=body.resume_confirmation_id,
+                continue_response=body.continue_response,
+                bypass_confirmations=body.bypass_confirmations,
+                # The turn can never exceed these; the worker intersects them with
+                # what the stored user has now.
+                permissions=sorted(current.permissions),
+                timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+            ),
+            # Derived from the turn id, which is what makes this repeatable:
+            # the second attempt names the same workflow as the first.
+            id=workflow_id_for(admission.turn.turn_id),
+            task_queue=settings.TEMPORAL_TASK_QUEUE,
+        )
+    except WorkflowAlreadyStartedError:
+        # The first attempt got further than it managed to report. That is the
+        # outcome we wanted, not a collision.
+        logger.info(
+            "Chat turn workflow was already started",
+            extra={"turn_id": admission.turn.turn_id},
+        )
     return admission
 
 
@@ -438,10 +462,10 @@ async def sweep_expired_turns() -> None:
     Run at the end of each turn rather than from a scheduler. Deleting a session
     takes its logs with it, but a log belongs to a *turn*, and the turns of a
     conversation nobody deletes would otherwise accumulate for as long as the
-    conversation exists. Hanging the sweep off the producer keeps that from
-    needing a Temporal worker -- which is optional -- while rate-limiting it to
-    chat traffic, and it runs after the turn has finished, so no user waits for
-    it. Each pass is bounded; a backlog drains over several turns.
+    conversation exists. Hanging it off the producer rate-limits it to chat
+    traffic and needs no schedule of its own, and it runs after the turn has
+    finished, so no user waits for it. Each pass is bounded; a backlog drains
+    over several turns.
     """
     global _last_sweep_monotonic
     now = time.monotonic()

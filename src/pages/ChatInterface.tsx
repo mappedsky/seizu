@@ -10,7 +10,7 @@ import {
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
-import { SeizuChatTransport, cancelChatTurn } from 'src/api/chatTransport';
+import { SeizuChatTransport } from 'src/api/chatTransport';
 import {
   Alert,
   Accordion,
@@ -720,6 +720,10 @@ export default function ChatInterface() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
+  // A Stop the server never confirmed. Worth saying out loud: the reader stops
+  // either way, so the UI would otherwise look exactly as if it had worked
+  // while the turn keeps generating.
+  const [stopError, setStopError] = useState<string | null>(null);
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
   // Off by default every visit; bypassing confirmations is an explicit,
   // per-session opt-in for users holding chat:bypass_permissions.
@@ -746,8 +750,6 @@ export default function ChatInterface() {
   const accessTokenRef = useRef(accessToken);
   const chatIdRef = useRef('__pending__');
   const resumeConfirmationIdRef = useRef<string | null>(null);
-  // The turn admission handed back, which is what Stop names.
-  const activeTurnIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
   // resumeStream comes back from useChat, which is declared after the onFinish
   // callback that needs it.
@@ -926,9 +928,6 @@ export default function ChatInterface() {
         threadId: () =>
           chatIdRef.current === '__pending__' ? null : chatIdRef.current,
         accessToken: () => accessTokenRef.current,
-        onTurn: (turnId) => {
-          activeTurnIdRef.current = turnId;
-        },
         admissionBody: ({ messages, body }) => {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'
@@ -989,12 +988,17 @@ export default function ChatInterface() {
         void resumeStreamRef.current();
         return;
       }
+      // The turn is over, so it is no longer what Stop should reach: leaving it
+      // pending means a Stop pressed during the *next* send -- before that one
+      // is admitted -- cancels this finished turn and silently does nothing to
+      // the live one.
+      transport.clearPending();
       if (!activeThreadId) return;
       window.setTimeout(() => {
         void fetchConfirmations();
       }, 0);
     },
-    [activeThreadId, fetchConfirmations],
+    [activeThreadId, fetchConfirmations, transport],
   );
 
   const {
@@ -1035,22 +1039,22 @@ export default function ChatInterface() {
     // without being told it keeps generating and can still run the actions it
     // had queued.
     //
-    // One identity, held from the moment admission answered — so a late or
-    // repeated call cannot land on a turn the user started afterwards, and
-    // there is no window where we have nothing to name.
-    const turnId = activeTurnIdRef.current;
-    if (turnId) {
-      void cancelChatTurn(turnId, accessTokenRef.current).catch(() => {
-        // The reader stops regardless, so a lost request leaves the user
-        // looking at a stopped response while the turn runs on. `keepalive`
-        // covers the common cause (navigating away in the same gesture);
-        // beyond that there is nothing useful to do from here, so say so
-        // rather than retrying silently.
-        console.warn('Failed to stop the chat turn on the server');
-      });
-    }
+    // The transport owns this, because it is the only thing that knows whether
+    // the turn has an id yet. Stop is live from `submitted`, before admission
+    // answers, and in that window there is nothing here to name — recording the
+    // intent lets it be applied the moment there is.
+    setStopError(null);
+    void transport.requestStop().catch(() => {
+      // The reader stops regardless, so a lost request leaves the user looking
+      // at a stopped response while the turn runs on. `keepalive` covers the
+      // common cause (navigating away in the same gesture); beyond that there
+      // is nothing useful to do from here, so say so rather than retrying.
+      setStopError(
+        'Failed to stop this turn on the server; it may still be running.',
+      );
+    });
     stop();
-  }, [stop]);
+  }, [stop, transport]);
 
   const busy = status === 'submitted' || status === 'streaming';
   const visibleMessages = useMemo(
@@ -1810,6 +1814,16 @@ export default function ChatInterface() {
             sx={{ flexShrink: 0, my: 0.5 }}
           >
             {autoTitleError}
+          </Alert>
+        ) : null}
+
+        {stopError ? (
+          <Alert
+            severity="warning"
+            onClose={() => setStopError(null)}
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {stopError}
           </Alert>
         ) : null}
 

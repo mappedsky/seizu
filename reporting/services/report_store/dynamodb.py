@@ -140,6 +140,7 @@ _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 # CHAT_TURN_LIST partition -- making one user's delete cost proportional to
 # every other user's retained turns.
 _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
+_SK_CHAT_TURN_KEY_PREFIX = "IKEY#"
 # Pages of the sweep index one pass will read past. Live entries are not in
 # expiry order (a running turn renews its lease), so a pass has to be able to
 # step over them to reach the expired ones behind.
@@ -454,6 +455,10 @@ def _chat_turn_event_sk(seq: int) -> str:
 
 def _chat_turn_thread_turn_sk(turn_id: str) -> str:
     return f"{_SK_CHAT_TURN_THREAD_TURN_PREFIX}{turn_id}"
+
+
+def _chat_turn_key_sk(idempotency_key: str) -> str:
+    return f"{_SK_CHAT_TURN_KEY_PREFIX}{idempotency_key}"
 
 
 def _chat_turn_list_sk(created_at: str, turn_id: str) -> str:
@@ -783,26 +788,23 @@ def _chat_turn_for_key_sync(
 ) -> ChatTurnItem | None:
     """The turn a previous attempt of this request already admitted, if any.
 
-    The thread's own turn index carries the key, so this is a query of one
-    partition rather than a scan -- and it is deleted with the turn, so a
-    repeat after the turn has been swept admits a new one rather than
-    resolving to something that is gone.
+    A dedicated item per key, so this is one read at any thread size. Carrying
+    the key on the thread's turn entries instead meant a filtered query, and
+    DynamoDB charges for every item a filter discards -- making the cost of
+    admitting a turn grow with the conversation's retained history rather than
+    staying flat. Deleted with its turn, so a repeat arriving after the sweep
+    admits a new turn rather than resolving to one that is gone.
     """
-    for item in _query_all_sync(
-        table,
-        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
-        FilterExpression="idempotency_key = :key",
-        ExpressionAttributeValues={
-            ":pk": _chat_turn_thread_pk(user_id, thread_id),
-            ":prefix": _SK_CHAT_TURN_THREAD_TURN_PREFIX,
-            ":key": idempotency_key,
+    item = table.get_item(
+        Key={
+            "PK": _chat_turn_thread_pk(user_id, thread_id),
+            "SK": _chat_turn_key_sk(idempotency_key),
         },
-        ProjectionExpression="turn_id",
-    ):
-        turn = _get_chat_turn_sync(table, str(item["turn_id"]))
-        if turn is not None:
-            return turn
-    return None
+        ConsistentRead=True,
+    ).get("Item")
+    if not item:
+        return None
+    return _get_chat_turn_sync(table, str(item["turn_id"]))
 
 
 def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
@@ -827,6 +829,13 @@ def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
             "SK": _chat_turn_thread_turn_sk(turn.turn_id),
         }
     )
+    if turn.idempotency_key is not None:
+        keys.append(
+            {
+                "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+                "SK": _chat_turn_key_sk(turn.idempotency_key),
+            }
+        )
     with table.batch_writer() as batch:
         for key in keys:
             batch.delete_item(Key=key)
@@ -4879,6 +4888,28 @@ class DynamoDBReportStore(ReportStore):
                                 },
                             }
                         },
+                        # The key's own item, written in the same transaction so
+                        # it can never name a turn that was not committed. Its
+                        # condition is what settles two concurrent attempts of
+                        # the same request: one commits, the other is refused
+                        # and re-reads to find the turn it lost to.
+                        *(
+                            [
+                                {
+                                    "Put": {
+                                        "TableName": settings.DYNAMODB_TABLE_NAME,
+                                        "Item": {
+                                            "PK": _chat_turn_thread_pk(user_id, thread_id),
+                                            "SK": _chat_turn_key_sk(idempotency_key),
+                                            "turn_id": turn_id,
+                                        },
+                                        "ConditionExpression": "attribute_not_exists(PK)",
+                                    }
+                                }
+                            ]
+                            if idempotency_key is not None
+                            else []
+                        ),
                         # The session's timestamp moves in the *same*
                         # transaction, conditioned on it not being retired.
                         *_chat_session_update_transactions(

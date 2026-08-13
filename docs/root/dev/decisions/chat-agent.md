@@ -258,6 +258,29 @@ says a thread has at most one running turn: a partial unique index
 read-committed two requests can both observe no running turn and both commit,
 leaving two producers interleaving two answers into one conversation.
 
+**The handoff is repairable, because the store commits first.** Admission writes
+the turn and *then* starts the workflow, so a failure in between leaves a turn
+recorded as running with nothing producing it: unreadable, and holding the
+thread against a successor until its claim lapses. So `start_turn` ensures the
+workflow for **`existing` as well as `created`**, and treats
+`WorkflowAlreadyStartedError` as the outcome it wanted. The workflow id is
+derived from the turn id, which is what makes ensuring it twice a no-op rather
+than a second producer.
+
+**Don't:** ensure it unconditionally. A repeat can arrive after the turn it
+names has finished, and a closed workflow's id is reusable — ensuring it then
+would run the whole turn again and bill a second answer into the same log. The
+guard is `status == "running"`.
+
+**Cancellation does reach the fallback finalizer.** Worth recording because it
+reads like a bug: the workflow catches `Exception`, and Temporal cancellation is
+often described as arriving as `asyncio.CancelledError`, which is not one. In
+this path it does not — `execute_activity` raises `ActivityError` (wrapping
+temporalio's own `CancelledError`), which *is* an `Exception`, whether the
+cancel lands while the activity is running or while it is still scheduled.
+`chat_turn_test.py` pins both cases, so a future change that lets a cancelled
+turn stay `running` fails there rather than in production.
+
 ### The event log
 
 **The producer renders the parts; the reader only replays them.** The log holds
@@ -350,6 +373,38 @@ and a pass that stopped there would re-read the same entries every time while
 everything behind them accumulated. Queries carry an explicit `Limit`, and the
 sweep is paced per process by `CHAT_TURN_SWEEP_INTERVAL_SECONDS`.
 
+**Heartbeat on a timer, never on output.** A turn is quietest exactly when it is
+slowest — a model call or a tool can run for minutes producing no chunk — so
+heartbeating from the stream loop times out *healthy* turns. The damage is not
+just a failed turn: the fallback finalizer marks it failed and frees the thread
+while the original activity is still running and still writing the same
+checkpoint, which is two producers on one conversation. The activity ticks
+independently (`_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS`); `start_to_close_timeout`
+is what bounds a turn that genuinely runs too long.
+
+### The client holds a pending send
+
+Stop is live from `submitted`, which is *before* admission answers, so there is a
+window where the user can ask to stop a turn the client cannot yet name.
+Aborting the admission request does not close that window — the server may
+already have admitted and started the turn, which then runs with nobody watching
+it. The transport therefore keeps one `PendingSend` per logical message
+(idempotency key, turn id once known, and a `stopRequested` flag), and admission
+is deliberately **not** given the abort signal. A stop with no id yet is
+recorded and applied the instant there is one.
+
+Three rules fall out of that object, and each was a live defect without it:
+
+- **The key is minted per logical message, not per attempt.** A fresh key per
+  attempt puts the server's idempotency promise out of reach: a retry admits a
+  *second* turn instead of resolving to the one a lost response already made.
+- **A finished turn stops being the pending one.** Otherwise a Stop pressed
+  during the *next* send — before that one is admitted — cancels the turn that
+  already ended and silently does nothing to the live one.
+- **A refused cancel raises.** The reader stops either way, so an unchecked
+  401/403/5xx looks exactly like success while the turn keeps generating and
+  running the actions it had queued.
+
 ### Testing notes
 
 - A concurrency test here needs **real connections**. The SQL store's fixture
@@ -364,7 +419,14 @@ sweep is paced per process by `CHAT_TURN_SWEEP_INTERVAL_SECONDS`.
   fails against the version without the fix**.
 - The route tests stand in for Temporal by running the activity inline
   (`_fake_temporal`), so admission, the producer and the reader are exercised
-  together without a worker.
+  together without a worker. The fake records workflow starts in a **list**, not
+  a dict keyed by workflow id — a second start against the same id is precisely
+  the bug worth catching, and a dict silently overwrites it. (That mistake made
+  the first version of the "don't re-run a finished turn" test pass with its own
+  fix removed.)
+- CI's `unit` job blocks network, which catches unmocked store and Temporal
+  calls that pass locally because a real Temporal and Postgres are there to fall
+  into. A locally green backend suite does not prove the mocks are complete.
 - In the frontend suite, `jest.mock` is applied at call time by Bun rather than
   hoisted, so it **cannot** replace the superclass of a class that has already
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`

@@ -2100,6 +2100,127 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
+  it('stops a turn admitted while Stop was already pressed', async () => {
+    // The window the previous design could not express: Stop is live from
+    // `submitted`, so it can be pressed before admission answers. Aborting the
+    // admission does not un-admit it -- the server may already have started the
+    // turn -- so the intent has to be held and applied once there is an id.
+    let releaseAdmission: (() => void) | null = null;
+    const calls: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith('/turns')) {
+          await new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-slow', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/stream')) {
+          return new Response('data: [DONE]\n\n', { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    const sending = transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    await act(async () => {});
+
+    // Stop, while the turn still has no id anywhere.
+    await transport.requestStop();
+    expect(calls.some((url) => url.includes('/cancel'))).toBe(false);
+
+    await act(async () => {
+      releaseAdmission?.();
+      await sending;
+    });
+
+    expect(calls).toContain('/api/v1/chat/turns/turn-slow/cancel');
+    fetchMock.mockRestore();
+  });
+
+  it('reuses one idempotency key when a send is retried', async () => {
+    // The server promises that repeating a request resolves to the turn it
+    // already admitted. A fresh key per attempt puts that out of reach: the
+    // retry admits a *second* turn instead of recovering the first.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          if (keys.length === 1) throw new Error('network dropped');
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-1', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    const message = [
+      {
+        id: 'u1',
+        role: 'user' as const,
+        parts: [{ type: 'text' as const, text: 'Hi' }],
+      },
+    ];
+
+    await expect(transport.sendMessages(sendArgs(message))).rejects.toThrow();
+    await transport.sendMessages(sendArgs(message));
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    fetchMock.mockRestore();
+  });
+
+  it('surfaces a stop the server refused instead of looking successful', async () => {
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-42', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/cancel')) return new Response(null, { status: 403 });
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    await transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    await expect(transport.requestStop()).rejects.toThrow('403');
+    fetchMock.mockRestore();
+  });
+
   it('resolves the running turn before reattaching to it', async () => {
     // A reloaded client has a thread but no turn id -- it never saw the
     // admission -- and the SDK's own reconnect would be an unauthenticated GET

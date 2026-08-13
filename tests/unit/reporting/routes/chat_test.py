@@ -245,8 +245,13 @@ def _fake_temporal(mocker, _chat_turn_log):
             if task is not None and not task.done():
                 task.cancel()
 
+    starts: list[str] = []
+
     class _Client:
         async def start_workflow(self, _name, invocation, *, id, task_queue):  # noqa: A002
+            # Appended, never keyed: a second start against the same workflow id
+            # is exactly the bug worth catching, and a dict would hide it.
+            starts.append(id)
             turn = _chat_turn_log[invocation.turn_id]
             body = ChatTurnRequest(
                 message=invocation.message,
@@ -261,11 +266,15 @@ def _fake_temporal(mocker, _chat_turn_log):
         def get_workflow_handle(self, workflow_id: str) -> "_Handle":
             return _Handle(workflow_id)
 
-    async def _get_client():
-        return _Client()
+    client = _Client()
 
-    mocker.patch("reporting.services.chat_turns.schedule_reconciler.get_client", _get_client)
-    return running
+    async def _get_one() -> "_Client":
+        return client
+
+    mocker.patch("reporting.services.chat_turns.schedule_reconciler.get_client", _get_one)
+    # The client is exposed so a test can make the handoff fail; `running` maps
+    # workflow id to the task standing in for it.
+    return {"client": client, "running": running, "starts": starts}
 
 
 def _current_user(permissions: frozenset[str] = ALL_PERMISSIONS) -> CurrentUser:
@@ -1334,6 +1343,66 @@ async def test_reconnect_requires_chat_permission(mocker):
         response = await _reconnect(client, "1001")
 
     assert response.status_code == 403
+
+
+async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, _fake_temporal):
+    """The store commits the turn before the workflow is started, so a handoff
+    that fails leaves a turn recorded as running with nothing producing it. It
+    holds the thread and no reader can ever finish. Retrying the same request
+    resolves to that same turn, so ensuring the workflow has to happen for
+    `existing` as well -- otherwise the only repair is waiting out the lease."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    started: list[str] = []
+    fail_once = {"pending": True}
+    real_start = _fake_temporal["client"].start_workflow
+
+    async def _flaky_start(name, invocation, *, id, task_queue):  # noqa: A002
+        if fail_once["pending"]:
+            fail_once["pending"] = False
+            raise RuntimeError("temporal unreachable")
+        started.append(id)
+        await real_start(name, invocation, id=id, task_queue=task_queue)
+
+    mocker.patch.object(_fake_temporal["client"], "start_workflow", _flaky_start)
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = {"message": "Hi", "thread_id": "1001", "idempotency_key": "ik_retry"}
+        first = await _admit(client, body)
+        assert first.status_code == 503
+
+        # The same request again, exactly as a client retrying would send it.
+        second = await _admit(client, body)
+
+    assert second.status_code == 200, "the retry should resolve to the turn already admitted"
+    assert second.json()["status"] == "existing"
+    assert started == [f"seizu-chat-turn:{second.json()['turn_id']}"], (
+        "the retry did not start the workflow the stranded turn was waiting for"
+    )
+
+
+async def test_a_repeat_after_the_turn_finished_does_not_start_it_again(mocker, _chat_turn_log, _fake_temporal):
+    """A retry can arrive after the turn it names has already completed. Its own
+    workflow id is free again by then, so ensuring it blindly would run the whole
+    turn a second time and bill a second answer into the same log."""
+    mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
+    _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body = {"message": "Hi", "thread_id": "1001", "idempotency_key": "ik_finished"}
+        first = await _admit(client, body)
+        turn_id = first.json()["turn_id"]
+        await chat_turns.report_store.finish_chat_turn(turn_id, "completed", 2)
+
+        starts_before = len(_fake_temporal["starts"])
+        again = await _admit(client, body)
+
+    assert again.status_code == 200
+    assert again.json()["turn_id"] == turn_id
+    assert len(_fake_temporal["starts"]) == starts_before, "the finished turn was produced a second time"
 
 
 async def test_a_second_turn_on_a_busy_thread_is_refused_rather_than_started(mocker, _chat_turn_log):

@@ -18,6 +18,28 @@ export type ChatTurnAdmission = {
   status: 'created' | 'existing';
 };
 
+/**
+ * One logical send, from before it has a turn until that turn is finished.
+ *
+ * Stop is enabled from the moment a message is submitted, which is *before*
+ * admission answers, so there is a window where the user can ask to stop a turn
+ * the client cannot yet name. Aborting the admission request does not close it:
+ * the server may already have admitted and started the turn, which then runs
+ * with nobody watching or stopping it. Recording the intent instead means the
+ * stop is applied the moment the turn has an id.
+ */
+type PendingSend = {
+  /** The user message this send is for; retries of it reuse the key below. */
+  messageId: string;
+  /** Stable across retries, so a lost admission response resolves rather than
+   *  starting a second turn. */
+  idempotencyKey: string;
+  /** Filled in when admission answers. */
+  turnId: string | null;
+  /** Stop pressed before we had an id. */
+  stopRequested: boolean;
+};
+
 export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
   /** The thread being written to, read at send time rather than captured. */
   threadId: () => string | null;
@@ -28,8 +50,6 @@ export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
     messages: UI_MESSAGE[];
     body?: Record<string, unknown>;
   }) => Record<string, unknown>;
-  /** Called with the turn a send admitted, so Stop can name it. */
-  onTurn: (turnId: string | null) => void;
 };
 
 const csrf = { 'X-Seizu-Csrf': '1' };
@@ -38,10 +58,33 @@ export class SeizuChatTransport<
   UI_MESSAGE extends UIMessage,
 > extends DefaultChatTransport<UI_MESSAGE> {
   private readonly seizu: SeizuChatTransportOptions<UI_MESSAGE>;
+  private pending: PendingSend | null = null;
 
   constructor(options: SeizuChatTransportOptions<UI_MESSAGE>) {
     super({ api: '/api/v1/chat', headers: csrf });
     this.seizu = options;
+  }
+
+  /**
+   * Stop the turn this client is watching, whatever stage it is at.
+   *
+   * Three states, one entry point: a turn we can name is cancelled now; a send
+   * still waiting on admission is marked so it is cancelled the instant it has
+   * an id; and with neither there is nothing running to stop.
+   */
+  async requestStop(): Promise<void> {
+    const pending = this.pending;
+    if (!pending) return;
+    if (pending.turnId === null) {
+      pending.stopRequested = true;
+      return;
+    }
+    await cancelChatTurn(pending.turnId, this.seizu.accessToken());
+  }
+
+  /** Forget the finished turn, so a later Stop cannot land on it. */
+  clearPending(): void {
+    this.pending = null;
   }
 
   private authHeaders(): Record<string, string> {
@@ -73,21 +116,38 @@ export class SeizuChatTransport<
     const threadId = this.seizu.threadId();
     if (!threadId) throw new Error('No conversation selected');
 
+    // One key per logical message, reused while that message has no turn yet.
+    // Minting a fresh one per attempt would make the server's idempotency
+    // promise unreachable from here: a retry would admit a *second* turn rather
+    // than resolving to the one a lost response already created.
+    const messageId =
+      options.messageId ?? options.messages.at(-1)?.id ?? crypto.randomUUID();
+    const pending: PendingSend =
+      this.pending?.messageId === messageId && this.pending.turnId === null
+        ? this.pending
+        : {
+            messageId,
+            idempotencyKey: `ik_${crypto.randomUUID().replace(/-/g, '')}`,
+            turnId: null,
+            stopRequested: false,
+          };
+    this.pending = pending;
+
+    // Deliberately not given `options.abortSignal`. Aborting this request does
+    // not un-admit the turn -- the server may already have started it -- so an
+    // abort here would strand a running turn the client has no id for. Stop is
+    // honoured through `requestStop` below instead.
     const admission = await fetch(
       `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns`,
       {
         method: 'POST',
         headers: this.authHeaders(),
-        signal: options.abortSignal,
         body: JSON.stringify({
           ...this.seizu.admissionBody({
             messages: options.messages,
             body: options.body as Record<string, unknown> | undefined,
           }),
-          // Minted per send. Its only job is making admission idempotent — it
-          // is not a way to address the turn, because admission hands back an
-          // id that is.
-          idempotency_key: `ik_${crypto.randomUUID().replace(/-/g, '')}`,
+          idempotency_key: pending.idempotencyKey,
         }),
       },
     );
@@ -103,7 +163,13 @@ export class SeizuChatTransport<
       throw new Error('Could not start this turn; please try again');
     }
     const { turn_id: turnId } = (await admission.json()) as ChatTurnAdmission;
-    this.seizu.onTurn(turnId);
+    pending.turnId = turnId;
+    if (pending.stopRequested) {
+      // Stop arrived while this was in flight. The turn exists now, so it can
+      // finally be told -- then attach anyway, so the client reads the turn's
+      // own closing frames rather than guessing how it ended.
+      await cancelChatTurn(turnId, this.seizu.accessToken());
+    }
     return this.attach(turnId, options.abortSignal);
   }
 
@@ -121,12 +187,18 @@ export class SeizuChatTransport<
       { headers: this.authHeaders() },
     );
     if (active.status === 204) {
-      this.seizu.onTurn(null);
+      this.pending = null;
       return null;
     }
     if (!active.ok) throw new Error('Failed to look for a running turn');
     const { turn_id: turnId } = (await active.json()) as ChatTurnAdmission;
-    this.seizu.onTurn(turnId);
+    // A turn this tab did not start is still one it can stop.
+    this.pending = {
+      messageId: `reconnect:${turnId}`,
+      idempotencyKey: '',
+      turnId,
+      stopRequested: false,
+    };
     return this.attach(turnId);
   }
 }
@@ -136,12 +208,20 @@ export async function cancelChatTurn(
   turnId: string,
   accessToken: string | null,
 ): Promise<void> {
-  await fetch(`/api/v1/chat/turns/${encodeURIComponent(turnId)}/cancel`, {
-    method: 'POST',
-    keepalive: true,
-    headers: {
-      ...csrf,
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  const res = await fetch(
+    `/api/v1/chat/turns/${encodeURIComponent(turnId)}/cancel`,
+    {
+      method: 'POST',
+      keepalive: true,
+      headers: {
+        ...csrf,
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
     },
-  });
+  );
+  // The reader stops either way, so an unchecked failure here looks exactly
+  // like success while the turn keeps generating and running queued actions.
+  if (!res.ok) {
+    throw new Error(`Failed to stop the chat turn (${res.status})`);
+  }
 }

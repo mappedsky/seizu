@@ -151,9 +151,12 @@ class ChatTurnItem(BaseModel):
     cancel_requested: bool = False
     created_at: str
     updated_at: str
-    # A *lease*, not a fixed lifetime. While the turn runs its producer pushes
-    # this forward, so a long turn is never mistaken for an abandoned one; once
-    # the turn ends it becomes the reconnect window.
+    # Two meanings, one field. While the turn runs this is its claim on the
+    # thread, derived from the turn's own timeout so it always outlasts every
+    # way the turn can still legitimately be running -- admission retires a
+    # lapsed one, and retiring a live turn would put two producers on one
+    # conversation. Once the turn ends it is re-stamped as the reconnect window,
+    # which is far shorter.
     expires_at: str
 
 

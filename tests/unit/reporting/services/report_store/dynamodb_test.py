@@ -3658,6 +3658,31 @@ async def test_admission_writes_the_turn_and_moves_the_session(patch_table, stor
     assert any("Update" in i for i in items), "the session's timestamp moves in the same transaction"
 
 
+async def test_the_idempotency_key_is_read_directly_not_filtered(patch_table, store):
+    """A filtered query over the thread's turns reads -- and bills for -- every
+    retained turn before discarding it, so admitting a turn would get steadily
+    more expensive the longer a conversation lives. The key gets its own item."""
+    patch_table.get_item.return_value = {"Item": None}
+
+    await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_lookup")
+
+    lookup = patch_table.get_item.call_args_list[0].kwargs["Key"]
+    assert lookup == {"PK": "CHAT_TURN_THREAD#u1#THREAD#1001", "SK": "IKEY#ik_lookup"}
+    assert not patch_table.query.called, "the key lookup fell back to a query"
+
+
+async def test_the_key_item_is_written_with_the_turn(patch_table, store):
+    """In the same transaction, or it can name a turn that was never committed."""
+    patch_table.get_item.side_effect = [{"Item": None}, {"Item": _session_item()}]
+
+    await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_written")
+
+    items = patch_table.meta.client.transact_write_items.call_args.kwargs["TransactItems"]
+    key_puts = [i["Put"] for i in items if i.get("Put", {}).get("Item", {}).get("SK") == "IKEY#ik_written"]
+    assert len(key_puts) == 1
+    assert key_puts[0]["ConditionExpression"] == "attribute_not_exists(PK)"
+
+
 async def test_a_running_turns_lease_outlasts_the_turn_itself(patch_table, store):
     """Same rule as the SQL store, asserted separately because the two compute
     this in their own code: a lease shorter than the turn's own timeout lets one
