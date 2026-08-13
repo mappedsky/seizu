@@ -132,11 +132,9 @@ def _chat_turn_log(mocker):
                     thread_id,
                     idempotency_key,
                 ):
-                    # A key names one request, like the real stores: honouring a
-                    # different body would change what an admitted turn runs.
-                    if request_hash is not None and turn.request_hash is not None and turn.request_hash != request_hash:
-                        return ChatTurnAdmission(outcome="mismatched")
-                    return ChatTurnAdmission(outcome="existing", turn=turn)
+                    # Use the production resolver so route tests also preserve
+                    # terminal admission outcomes such as expired-before-start.
+                    return base_store.resolve_chat_turn_for_key(turn, request_hash)
         if (user_id, thread_id) not in _SESSIONS:
             # Admission is the turn's half of the retirement handshake: no
             # session, no turn.
@@ -1285,6 +1283,7 @@ async def test_a_replay_reuses_the_message_id_so_the_client_rebuilds_one_message
 
     turn = next(iter(_chat_turn_log.values()))
     assert f'"messageId":"{turn.message_id}"' in response.text
+    assert f'"messageMetadata":{{"turn_id":"{turn.turn_id}"}}' in response.text
     assert f'"id":"{turn.text_id}"' in response.text
 
 
@@ -1452,12 +1451,19 @@ async def test_a_turn_whose_claim_already_lapsed_is_closed_not_left_running(mock
     )
 
     app = _make_app()
+    body = {"message": "Hi", "thread_id": "1001", "idempotency_key": "ik_expired"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await _admit(client, {"message": "Hi", "thread_id": "1001"})
+        response = await _admit(client, body)
+        # The transport immediately repeats a 503 under the same key. Expiry is
+        # durable, so that repeat must not turn into a successful empty replay.
+        repeated = await _admit(client, body)
 
     assert response.status_code == 503
+    assert repeated.status_code == 503
+    assert response.headers["X-Seizu-Chat-Admission"] == "expired"
+    assert repeated.headers["X-Seizu-Chat-Admission"] == "expired"
     assert _fake_temporal["starts"] == [], "a turn past its claim was handed to a producer"
-    assert [t.status for t in _chat_turn_log.values()] == ["failed"], (
+    assert [t.status for t in _chat_turn_log.values()] == ["expired"], (
         "the turn was left running with nothing to finish it"
     )
 

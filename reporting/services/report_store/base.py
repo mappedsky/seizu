@@ -135,6 +135,12 @@ def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) ->
     """
     if request_hash is not None and turn.request_hash is not None and turn.request_hash != request_hash:
         return ChatTurnAdmission(outcome="mismatched")
+    # This terminal state has no event log to replay: the turn was admitted but
+    # its claim ran too low before a producer could safely be started. Preserve
+    # that result across every repeat of the key instead of turning the second
+    # attempt into an apparently successful ``existing`` empty response.
+    if turn.status == "expired":
+        return ChatTurnAdmission(outcome="expired")
     return ChatTurnAdmission(outcome="existing", turn=turn)
 
 

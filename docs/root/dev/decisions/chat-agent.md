@@ -285,8 +285,12 @@ still lets a producer run past the instant a successor can be admitted. Too
 little left for both the work and the stopping means the turn is not started at
 all, and is **closed** rather than left at `running`: a turn with no producer is
 one a client attaches to and waits on until the tail deadline, for an answer
-that is never coming. That case has its own admission outcome (`expired` → 503)
-so it reads as retryable rather than as a store failure.
+that is never coming. That case is stored with terminal status `expired` and
+has its own admission outcome (`expired` → 503), so every repeat of the same
+idempotency key remains retryable rather than becoming an `existing` empty log.
+That 503 carries `X-Seizu-Chat-Admission: expired`: unlike an ambiguous store
+503, the old key is definitively spent, so the transport retries the same
+logical message once under a fresh key instead of attempting to repair it.
 
 **The workflow is bounded by what is left of the claim, not by a fresh
 duration.** A duration cannot express the invariant: the claim is an *instant*
@@ -514,6 +518,9 @@ Three rules fall out of that object, and each was a live defect without it:
   thread finishing after a later one starts would be attributed to the later
   one. `clearFinishedTurn(turnId)` takes the id off the finished message; a turn
   that ended without announcing one is left alone, which keeps it stoppable.
+  The producer therefore carries `turn_id` in the opening frame's message
+  metadata; defining the TypeScript field without emitting it leaves every
+  completion unidentified.
 - **Unresolved threads are a set.** One value means a second ambiguous send in
   another conversation hides the recovery the first still needs.
 - **Reconnect prefers a turn this client already holds** over asking `/active`,
@@ -530,6 +537,10 @@ Three rules fall out of that object, and each was a live defect without it:
   React cannot observe, so the button never renders and the feature is invisible
   in the product while testing green against the transport directly
   (`onUnresolvedChange` mirrors it into state).
+- **Recovery is rendered from unresolved state, not SDK error state.** Changing
+  threads recreates the SDK chat and its transient error, while the transport's
+  unresolved key deliberately survives. Nesting Retry under `error` therefore
+  hides the only route back to the turn after navigating away and back.
 - **The pending send is scoped to its thread.** The transport outlives any one
   conversation and the sidebar can switch sessions mid-turn, so a turn finishing
   in a thread the user has navigated away from must not clear the pending state

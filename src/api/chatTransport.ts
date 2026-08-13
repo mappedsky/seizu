@@ -92,6 +92,7 @@ export type SeizuChatTransportOptions<UI_MESSAGE extends UIMessage> = {
 };
 
 const csrf = { 'X-Seizu-Csrf': '1' };
+const admissionOutcomeHeader = 'X-Seizu-Chat-Admission';
 
 /** Per-attempt deadline for admission. Short: it is one small write server-side. */
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -215,6 +216,7 @@ export class SeizuChatTransport<
     threadId: string,
     body: string,
     pending: PendingSend,
+    retryExpired = true,
   ): Promise<string> {
     // Deliberately not given the SDK's abort signal. Aborting this request does
     // not un-admit the turn -- the server may already have started it -- so an
@@ -251,6 +253,32 @@ export class SeizuChatTransport<
       // Only 503 is ambiguous. A 409/404 is a decision, and repeating it just
       // asks the same question again.
       if (admission.status !== 503) break;
+      if (admission.headers.get(admissionOutcomeHeader) === 'expired') break;
+    }
+
+    if (
+      admission?.status === 503 &&
+      admission.headers.get(admissionOutcomeHeader) === 'expired'
+    ) {
+      // This is not ambiguous: the old turn is terminal and its key is spent.
+      // Retry the logical message once with a new key and a byte-stable body
+      // apart from that key. A generic 503 must never take this path because it
+      // may have committed the old key and can only be repaired by reusing it.
+      if (!retryExpired) {
+        pending.unresolved = false;
+        this.seizu.onUnresolvedChange(threadId, false);
+        throw new Error(
+          'Could not start this turn; please send your message again',
+        );
+      }
+      pending.idempotencyKey = `ik_${crypto.randomUUID().replace(/-/g, '')}`;
+      pending.turnId = null;
+      const refreshedBody = JSON.stringify({
+        ...(JSON.parse(body) as Record<string, unknown>),
+        idempotency_key: pending.idempotencyKey,
+      });
+      pending.body = refreshedBody;
+      return this.admit(threadId, refreshedBody, pending, false);
     }
 
     if (admission === null || admission.status === 503) {

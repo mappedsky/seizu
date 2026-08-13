@@ -1847,7 +1847,7 @@ export default function ChatInterface() {
           </Card>
         </Box>
 
-        {error ? (
+        {(activeThreadId && unresolvedThreads.has(activeThreadId)) || error ? (
           <Alert
             severity="error"
             sx={{ flexShrink: 0, my: 0.5 }}
@@ -1871,7 +1871,7 @@ export default function ChatInterface() {
           >
             {activeThreadId && unresolvedThreads.has(activeThreadId)
               ? 'We could not confirm your message was received. It may still be running.'
-              : error.message}
+              : error?.message}
           </Alert>
         ) : null}
 

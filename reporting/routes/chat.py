@@ -101,8 +101,14 @@ async def admit_chat_turn(
         )
     if admission.outcome == "expired":
         # The turn was admitted but its claim ran out before it could be handed
-        # to a producer. Retryable, and distinct from a store failure.
-        raise HTTPException(status_code=503, detail="Could not start this turn; please try again")
+        # to a producer. The key is definitively spent, unlike an ambiguous
+        # store 503; tell the transport so it can retry the same logical message
+        # once under a fresh key instead of repairing this terminal turn forever.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not start this turn; please try again",
+            headers={"X-Seizu-Chat-Admission": "expired"},
+        )
     if admission.outcome == "busy":
         raise HTTPException(status_code=409, detail="This conversation already has a turn in progress")
     if admission.turn is None:  # pragma: no cover - defensive

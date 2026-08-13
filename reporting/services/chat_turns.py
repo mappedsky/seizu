@@ -314,9 +314,19 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             "Closing a chat turn whose claim has lapsed before it could start",
             extra={"turn_id": admission.turn.turn_id},
         )
-        with contextlib.suppress(Exception):
-            await report_store.finish_chat_turn(admission.turn.turn_id, "failed", 0)
-        return ChatTurnAdmission(outcome="expired")
+        recorded = await report_store.finish_chat_turn(admission.turn.turn_id, "expired", 0)
+        if recorded is None:
+            # Do not claim that the turn was closed when the store cannot prove
+            # it. The route maps this uncertainty to 503, preserving the same
+            # fail-closed admission rule as every other store failure.
+            raise RuntimeError("Expired chat turn disappeared before it could be closed")
+        if recorded.status == "expired":
+            return ChatTurnAdmission(outcome="expired")
+        if recorded.status == "running":
+            raise RuntimeError("Expired chat turn remained running after terminalization")
+        # Another terminal writer won. Return its real turn so a completed or
+        # failed log remains replayable instead of being relabelled as expiry.
+        return ChatTurnAdmission(outcome="existing", turn=recorded)
 
     client = await schedule_reconciler.get_client()
     try:
@@ -402,7 +412,15 @@ async def produce_turn(
     status = "completed"
     async with ChatTurnPublisher(turn) as publisher:
         opening: list[dict[str, Any]] = [
-            {"type": "start", "messageId": turn.message_id},
+            {
+                "type": "start",
+                "messageId": turn.message_id,
+                # Completion can happen after the user switches conversations.
+                # The callback therefore needs the producing turn's identity;
+                # neither the selected thread nor a global "current stream" can
+                # identify which per-thread pending entry should be cleared.
+                "messageMetadata": {"turn_id": turn.turn_id},
+            },
             {"type": "text-start", "id": turn.text_id},
         ]
         if body.continue_response:

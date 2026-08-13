@@ -631,7 +631,7 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         text_id=item["text_id"],
         idempotency_key=item.get("idempotency_key"),
         request_hash=item.get("request_hash"),
-        status=status if status in ("running", "completed", "failed", "canceled") else "failed",
+        status=status if status in ("running", "completed", "failed", "canceled", "expired") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
         cancel_requested=bool(item.get("cancel_requested", False)),
         created_at=item["created_at"],

@@ -2405,6 +2405,45 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
+  it('clears a finished turn through the id carried in message metadata', async () => {
+    // Exercise the component callback, not just the transport helper: the
+    // server emits this metadata on the opening frame and the SDK gives the
+    // completed message back to onFinish.
+    const fetchMock = mockAdmitThenAttach('turn-finished');
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+      | { onFinish?: ChatOnFinishCallback<UIMessage> }
+      | undefined;
+    await act(async () => {
+      chatOptions?.onFinish?.({
+        message: {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [],
+          metadata: { turn_id: 'turn-finished' },
+        },
+        messages: [],
+        isAbort: false,
+        isDisconnect: false,
+        isError: false,
+        finishReason: 'stop',
+      });
+    });
+
+    fetchMock.mockClear();
+    await transport.requestStop();
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
   it('offers a Retry that replays the unresolved send under its own key', async () => {
     // The repair path is only reachable with the original key and body, and
     // typing the message again mints a new key -- so without an explicit retry
@@ -2471,6 +2510,66 @@ describe('ChatInterface', () => {
     fetchMock.mockRestore();
   });
 
+  it('keeps Retry visible after switching away from an unresolved thread', async () => {
+    // The SDK chat -- including its error -- is recreated per thread, while the
+    // transport deliberately retains an unresolved key. Recovery therefore has
+    // to render from that retained state rather than from the transient error.
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+        {
+          thread_id: 'thread-2',
+          title: 'Session 2',
+          created_at: '2024-01-02T00:00:00+00:00',
+          updated_at: '2024-01-02T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession: jest.fn(),
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession: jest.fn(),
+    });
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 503 }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    // No SDK error was supplied by the mock, yet unresolved state alone makes
+    // the repair reachable.
+    expect(
+      await screen.findByRole('button', { name: /^retry$/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Session 2'));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /^retry$/i }),
+      ).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Session 1'));
+    expect(
+      await screen.findByRole('button', { name: /^retry$/i }),
+    ).toBeInTheDocument();
+    fetchMock.mockRestore();
+  });
+
   it('keeps the key when every admission attempt was ambiguous', async () => {
     // A turn may exist server-side after a 503, and its key is the only route
     // back to it. Dropping the key strands that turn until its lease lapses --
@@ -2502,6 +2601,50 @@ describe('ChatInterface', () => {
       ),
     ).rejects.toThrow();
     expect(transport.hasUnresolvedSend('thread-1')).toBe(false);
+    fetchMock.mockRestore();
+  });
+
+  it('retries an expired admission once under a fresh key', async () => {
+    // Expiry is a definitive terminal outcome, not an ambiguous 503: the old
+    // key can only resolve to the expired turn, so repairing it forever would
+    // never start the user's message. The logical send gets one fresh key.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          if (keys.length === 1) {
+            return new Response('{}', {
+              status: 503,
+              headers: { 'X-Seizu-Chat-Admission': 'expired' },
+            });
+          }
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-fresh', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    await activeTransport().sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      '/api/v1/chat/turns/turn-fresh/stream',
+    );
     fetchMock.mockRestore();
   });
 

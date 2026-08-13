@@ -145,7 +145,11 @@ class ChatTurnItem(BaseModel):
     # here: the key names a turn that may already be running, so honouring the
     # new body would change what that turn executes.
     request_hash: str | None = None
-    status: Literal["running", "completed", "failed", "canceled"] = "running"
+    # ``expired`` is a turn that was admitted but could not be handed to a
+    # producer before the safe portion of its claim elapsed. It is distinct
+    # from a producer failure because repeating the admission must keep
+    # returning the same retryable outcome rather than replaying an empty log.
+    status: Literal["running", "completed", "failed", "canceled", "expired"] = "running"
     # None until the turn finishes. A reader may stop only once the status is
     # terminal *and* it has consumed through last_seq: a terminal status on its
     # own races the visibility of the final batches.
