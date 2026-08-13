@@ -3655,7 +3655,7 @@ async def test_admission_writes_the_turn_and_moves_the_session(patch_table, stor
     """One transaction, because a turn admitted against a session whose
     timestamp did not move can be deleted out from under by a cascade that read
     the stale value."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.get_item.side_effect = [{"Item": None}, {"Item": _session_item()}]
 
     admission = await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_created1", _turn_command())
 
@@ -3732,7 +3732,7 @@ async def test_a_running_turns_lease_outlasts_the_turn_itself(patch_table, store
     this in their own code: a lease shorter than the turn's own timeout lets one
     send retire a turn that is merely slow, and the thread then has two
     producers writing one conversation."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.get_item.side_effect = [{"Item": None}, {"Item": _session_item()}]
 
     await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_lease11", _turn_command())
 
@@ -3745,7 +3745,7 @@ async def test_a_running_turns_lease_outlasts_the_turn_itself(patch_table, store
 async def test_the_active_pointer_expires_so_a_dead_producer_cannot_wedge_a_thread(patch_table, store):
     """Without the expiry clause a producer that died mid-turn would leave the
     conversation permanently unable to start another."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.get_item.side_effect = [{"Item": None}, {"Item": _session_item()}]
 
     await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_pointer1", _turn_command())
 
@@ -3765,7 +3765,10 @@ async def test_admission_to_a_missing_session_is_retired(patch_table, store):
 
 
 async def test_admission_to_a_session_being_retired_is_refused(patch_table, store):
-    patch_table.get_item.return_value = {"Item": _session_item(retiring_at="2024-01-01T00:00:00+00:00")}
+    patch_table.get_item.side_effect = [
+        {"Item": None},
+        {"Item": _session_item(retiring_at="2024-01-01T00:00:00+00:00")},
+    ]
 
     assert (
         await store.admit_chat_turn("u1", "1001", "msg_1", "text_1", "ik_retiring", _turn_command())
@@ -3789,7 +3792,12 @@ async def test_a_refused_admission_is_busy_not_an_inferred_error(patch_table, st
     """Which condition failed is read from the state it was about, rather than
     decoded from the position of the failing transact item."""
     patch_table.query.return_value = {"Items": []}
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.get_item.side_effect = [
+        {"Item": None},
+        {"Item": _session_item()},
+        {"Item": None},
+        {"Item": _session_item()},
+    ]
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
             "Error": {"Code": "TransactionCanceledException"},
@@ -3807,7 +3815,7 @@ async def test_a_throttled_admission_is_not_reported_as_busy(patch_table, store)
     """Throttling, capacity and validation all arrive as the same exception as a
     refused condition. Only a refused *condition* means the request was
     answered; the rest must propagate as the errors they are."""
-    patch_table.get_item.return_value = {"Item": _session_item()}
+    patch_table.get_item.side_effect = [{"Item": None}, {"Item": _session_item()}]
     patch_table.meta.client.transact_write_items.side_effect = botocore.exceptions.ClientError(
         {
             "Error": {"Code": "TransactionCanceledException"},
