@@ -170,8 +170,13 @@ rather than an error** (observed three times under the harness, as
 `IncompleteRead` after ~470 bytes). Separately, a dropped connection **destroyed
 the turn**: Starlette cancels a `StreamingResponse` generator on
 `http.disconnect`, so closing the tab killed minutes of work outright. An
-explicit `timeout = 300` fixes the first; only detaching the turn fixes the
-second.
+explicit `timeout = 300` originally masked the first; only detaching the turn
+fixes the second and makes a web-worker restart recoverable. With production
+now owned by Temporal, keeping a wedged web worker alive for five minutes has no
+chat benefit. The bundled Gunicorn watchdog therefore follows
+`API_REQUEST_TIMEOUT` (60 seconds by default). A healthy `UvicornWorker` keeps
+notifying Gunicorn during a long-lived stream, so chat duration does not set
+this value.
 
 ### Interactive chat now requires Temporal
 

@@ -130,3 +130,39 @@ async def test_a_fresh_database_gets_the_reaper_index_from_the_model(tmp_path):
         assert "ix_chat_sessions_origin_updated_at" in indexes
     finally:
         await engine.dispose()
+
+
+async def test_chat_turn_migration_creates_the_current_schema_after_0006(tmp_path):
+    """The upgrade path from master must not rely on baseline ``create_all``.
+
+    Chat-turn migrations developed on this branch were squashed before merge,
+    so 0007 has to create the final schema directly rather than relying on an
+    intermediate request-hash or client-token shape.
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chat-turn-upgrade.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0006_chat_session_retirement')"))
+
+        await run_schema_migrations(engine)
+
+        tables = await _inspect(engine, lambda i: set(i.get_table_names()))
+        assert {"chat_turns", "chat_turn_events"} <= tables
+
+        turn_columns = await _inspect(engine, lambda i: {c["name"]: c for c in i.get_columns("chat_turns")})
+        assert {"idempotency_key", "command"} <= turn_columns.keys()
+        assert turn_columns["idempotency_key"]["nullable"] is False
+        assert turn_columns["command"]["nullable"] is False
+        assert "request_hash" not in turn_columns
+        assert "client_token" not in turn_columns
+
+        indexes = await _inspect(engine, lambda i: {x["name"] for x in i.get_indexes("chat_turns")})
+        assert {
+            "ix_chat_turns_thread_status",
+            "ix_chat_turns_expires_at",
+            "uq_chat_turns_one_running",
+            "uq_chat_turns_idempotency_key",
+        } <= indexes
+    finally:
+        await engine.dispose()

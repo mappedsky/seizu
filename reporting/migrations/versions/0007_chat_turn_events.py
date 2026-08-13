@@ -32,8 +32,7 @@ _TURN_INDEXES = {
 # many finished turns a thread accumulates do not collide.
 _RUNNING_TURN_INDEX = "uq_chat_turns_one_running"
 # One turn per idempotency key: a repeat of an admission request resolves to
-# the turn it already made rather than making another. NULLs are distinct, so
-# turns admitted without a key do not collide.
+# the turn it already made rather than making another.
 _IDEMPOTENCY_INDEX = "uq_chat_turns_idempotency_key"
 _RUNNING_TURN_WHERE = sa.text("status = 'running'")
 
@@ -63,7 +62,10 @@ def upgrade() -> None:
             sa.Column("thread_id", sa.String(), nullable=False),
             sa.Column("message_id", sa.String(), nullable=False),
             sa.Column("text_id", sa.String(), nullable=False),
-            sa.Column("idempotency_key", sa.String(), nullable=True),
+            sa.Column("idempotency_key", sa.String(), nullable=False),
+            # The admitted command is the durable source of truth for first
+            # dispatch and any later handoff repair.
+            sa.Column("command", sa.JSON(), nullable=False),
             sa.Column("status", sa.String(), nullable=False, server_default="running"),
             sa.Column("last_seq", sa.Integer(), nullable=True),
             sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default=sa.false()),

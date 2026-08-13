@@ -514,8 +514,8 @@ REMEDIATION_FORK_ORG = str_env("REMEDIATION_FORK_ORG", "")
 REMEDIATION_GIT_USER = str_env("REMEDIATION_GIT_USER", "seizu-remediation-bot")
 REMEDIATION_GIT_EMAIL = str_env("REMEDIATION_GIT_EMAIL", "seizu-remediation@localhost")
 
-# Timeout in seconds for the overall FastAPI request handling. Requests that
-# exceed this limit receive a 504 response.
+# Timeout in seconds for overall FastAPI request handling and the Gunicorn
+# worker watchdog. Ordinary requests that exceed this limit receive a 504.
 API_REQUEST_TIMEOUT = int_env("API_REQUEST_TIMEOUT", 60)
 
 # Timeout in seconds for JWKS endpoint HTTP requests used to fetch signing keys.

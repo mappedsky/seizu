@@ -99,19 +99,18 @@ Temporal server and a running `seizu-temporal-worker`**. This is a change: chat
 previously ran entirely in the web process. Turns appear in the Temporal UI
 alongside scheduled chats and workflows.
 
-### Deployment requirement: set a gunicorn timeout
+### Gunicorn worker timeout
 
-Gunicorn's `timeout` defaults to **30 seconds**, and Seizu's `gunicorn.conf` now
-sets it to `300`. **If you run Seizu under your own gunicorn configuration or
-override the timeout, keep it well above 30 seconds when chat is enabled.**
+Seizu's bundled Gunicorn configuration reads `API_REQUEST_TIMEOUT` for its
+worker watchdog, matching the FastAPI request deadline (60 seconds by default).
+Under `UvicornWorker` this is a heartbeat watchdog rather than a per-request
+deadline: a healthy long-lived chat stream continues to notify Gunicorn and is
+not cut short by this value.
 
-Under `UvicornWorker` this is a worker heartbeat watchdog rather than a request
-deadline, so a healthy long-lived stream is never cut short by it. What it kills
-is a worker whose event loop is blocked past the deadline — and because the
-arbiter's `SIGABRT` lands mid-response, the client receives a **truncated body
-rather than an error**. Raising the timeout does not make a blocked loop
-faster; it stops a transient block from silently truncating every stream on that
-worker.
+Chat production runs in Temporal, so replacing a wedged web worker does not
+stop the turn. The client can reconnect and replay the durable event log. If
+you supply your own Gunicorn configuration, choose its watchdog for web-worker
+health rather than for the maximum duration of a chat turn.
 
 ## Orchestration and run budgets
 
