@@ -230,6 +230,11 @@ describe('ChatInterface', () => {
   afterEach(() => {
     cleanup();
     jest.useRealTimers();
+    // Restores every spy, `globalThis.fetch` included. Per-test `mockRestore`
+    // is not enough on its own: a failing assertion skips it, and the spy then
+    // outlives this file -- which strands other suites in a shared process,
+    // with the failure surfacing in whichever file runs next rather than here.
+    jest.restoreAllMocks();
   });
 
   it('persists the active session id and configures the chat stream request body', async () => {
