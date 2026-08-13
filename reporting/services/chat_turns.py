@@ -66,38 +66,8 @@ _TURN_STOP_POLL_SECONDS = 0.05
 _last_sweep_monotonic = 0.0
 
 
-def sse_frame(part: dict[str, Any], event_id: str | None = None) -> str:
-    """One SSE frame, optionally carrying the cursor that names its position.
-
-    The id is ``seq:index`` -- which batch, and how far into it. Batch alone is
-    not enough: a batch holds several parts and a connection can drop between
-    them, so resuming at batch granularity would re-send parts the client has
-    already rendered. For text deltas that is duplicated words on screen.
-    """
-    prefix = f"id: {event_id}\n" if event_id is not None else ""
-    return f"{prefix}data: {json.dumps(part, separators=(',', ':'))}\n\n"
-
-
-def parse_stream_cursor(after: str | None) -> tuple[int, int]:
-    """Read a client's ``seq:index`` cursor back into (batch to re-read, parts to skip).
-
-    Returns the ``after_seq`` to query with and how many parts of the first
-    returned batch have already been delivered. An unparseable cursor replays
-    from the start, which is always safe -- worst case the client sees the turn
-    again, where trusting a bad cursor could silently drop the middle of it.
-    """
-    if not after:
-        return 0, 0
-    seq_text, _, index_text = after.partition(":")
-    try:
-        seq, index = int(seq_text), int(index_text)
-    except ValueError:
-        logger.warning("Ignoring an unparseable chat stream cursor", extra={"cursor": after})
-        return 0, 0
-    if seq < 1 or index < 0:
-        return 0, 0
-    # Re-read the batch the cursor points into, then skip what it already saw.
-    return seq - 1, index + 1
+def sse_frame(part: dict[str, Any]) -> str:
+    return f"data: {json.dumps(part, separators=(',', ':'))}\n\n"
 
 
 def render_parts(chunk: Any, text_id: str) -> list[dict[str, Any]]:
@@ -559,18 +529,13 @@ async def sweep_expired_turns() -> None:
         logger.warning("Failed to sweep expired chat turns", exc_info=True)
 
 
-async def tail_turn(turn_id: str, after: str | None = None) -> AsyncIterator[str]:
+async def tail_turn(turn_id: str, after_seq: int = 0) -> AsyncIterator[str]:
     """Yield a turn's event log as SSE, following it until the turn finishes.
 
     Terminating needs both halves of the store's answer: a terminal status *and*
     a cursor that has reached ``last_seq``. Stopping on the status alone would
     cut the answer off at whatever the last poll happened to see.
-
-    ``after`` is a client's ``seq:index`` cursor. With one, delivery resumes
-    where that client stopped; without one it replays from the first frame,
-    which is what a reloaded page needs -- it has no message to resume into.
     """
-    after_seq, skip_parts = parse_stream_cursor(after)
     cursor = after_seq
     page_limit = 200
     # Adaptive: a turn is quiet for most of its life -- tool calls, model
@@ -589,12 +554,8 @@ async def tail_turn(turn_id: str, after: str | None = None) -> AsyncIterator[str
             # coming, and the client keeps whatever it already received.
             break
         for batch in page.batches:
-            parts = json.loads(batch.parts_json)
-            # Only ever non-zero for the batch the cursor pointed into, and
-            # only on the first page.
-            for index, part in enumerate(parts[skip_parts:], start=skip_parts):
-                yield sse_frame(part, event_id=f"{batch.seq}:{index}")
-            skip_parts = 0
+            for part in json.loads(batch.parts_json):
+                yield sse_frame(part)
             cursor = batch.seq
         poll = min_poll if page.batches else min(poll * 2, max_poll)
         turn = page.turn
