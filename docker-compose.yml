@@ -372,6 +372,11 @@ services:
       - CHAT_SESSION_MEMORY_MAX_RECEIPTS
       - CHAT_SESSION_MEMORY_DIGEST_MAX_CHARS
       - SANDBOX_SESSION_PERSIST
+      # Interactive turns run here, so the turn settings apply to this
+      # service too -- the producer half of them.
+      - CHAT_TURN_RETENTION_SECONDS
+      - CHAT_TURN_STREAM_LATENCY_MS
+      - CHAT_TURN_TIMEOUT_SECONDS
       - CHAT_LLM_SYSTEM_PROMPT
       - CHAT_LLM_PROGRESSIVE_DISCLOSURE
       - CHAT_LLM_MAX_AUTO_ACTIONS
@@ -466,6 +471,12 @@ services:
       target: dev
     user: seizu
     depends_on:
+      # Interactive chat admission starts a Temporal workflow. Waiting for the
+      # frontend here prevents the web service becoming healthy while chat's
+      # required runtime is still starting. The worker may start concurrently:
+      # Temporal durably queues workflows until it begins polling.
+      temporal:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
       dynamodb:
@@ -569,6 +580,11 @@ services:
       # Chat assistant — set CHAT_ENABLED=true in .env to enable the feature
       # (routes + checkpoint init + UI). Defaults to false when unset.
       - CHAT_ENABLED
+      # Chat turns run beside the request rather than inside it, so the
+      # event log they stream through is read by this service.
+      - CHAT_TURN_RETENTION_SECONDS
+      - CHAT_TURN_STREAM_LATENCY_MS
+      - CHAT_TURN_TIMEOUT_SECONDS
       # This worker also reconciles and runs scheduled chats.
       - CHAT_SCHEDULES_ENABLED
       - CHAT_SCHEDULE_TIMEOUT_SECONDS

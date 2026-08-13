@@ -6,6 +6,7 @@ MCP runtime freely.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import logging
@@ -18,12 +19,14 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from reporting import scheduled_query_modules, settings
+from reporting.authnz import CurrentUser
 from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
 from reporting.authnz.permissions import Permission
 from reporting.schema.chat import ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryAction, ScheduledQueryWatchScan
 from reporting.services import (
     agent_run,
+    chat_turns,
     github_checks,
     report_store,
     sandbox_remediation,
@@ -43,6 +46,8 @@ from reporting.temporal_workflows import WORKFLOW_REGISTRY, WorkflowInputContext
 from reporting.temporal_workflows.shared import (
     AgentChatInput,
     AgentChatResult,
+    ChatTurnInvocation,
+    ChatTurnRunResult,
     CiFixInput,
     CiFixResult,
     CodeWorkflowInputRequest,
@@ -68,6 +73,11 @@ from reporting.temporal_workflows.shared import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How often a running chat turn reports liveness to Temporal. Comfortably
+#: inside the workflow's heartbeat timeout, so a couple of missed ticks under
+#: load do not fail a healthy turn.
+_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 _CVE_SKILLSET_ID = "cve_response"
 _CVE_SKILL_ID = "cve_repo_assessment"
@@ -1014,4 +1024,99 @@ async def run_agent_chat_session(input: AgentChatInput) -> AgentChatResult:
         summary=result.summary,
         error=result.error,
         budget=result.budget,
+    )
+
+
+@activity.defn
+async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
+    """Produce one interactive turn, writing its stream into the event log.
+
+    Identity is rebuilt from the store and then **intersected** with the
+    permission cap captured in the admitted command. ``resolve_stored_user``
+    can be staler or broader than the token the request actually arrived with,
+    so the turn can never exceed either (AGT-006).
+
+    Finalizes its own turn, cancellation included: this is the code that owns
+    the log, so it is the code that closes it.
+    """
+    turn = await report_store.get_chat_turn(invocation.turn_id)
+    if turn is None:
+        # Admitted and then deleted -- the conversation went away before the
+        # worker picked this up. Nothing to produce and nothing to close.
+        raise ApplicationError("Chat turn no longer exists", non_retryable=True)
+    if turn.status != "running":
+        # Already closed while this was queued: cancelled, or timed out and
+        # finalized. Producing now would write into a log a reader has already
+        # been told is complete.
+        raise ApplicationError("Chat turn is no longer running", non_retryable=True)
+
+    stored = await resolve_stored_user(turn.user_id)
+    effective = frozenset(stored.permissions) & frozenset(turn.command.permission_cap)
+    current = CurrentUser(user=stored.user, jwt_claims=stored.jwt_claims, permissions=effective)
+    if turn.command.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in effective:
+        raise ApplicationError("Missing permissions to bypass confirmations", non_retryable=True)
+    # Ownership, not just liveness. A workflow queued through a worker outage
+    # can arrive after its turn's claim on the thread lapsed and a successor
+    # took it. Both would then produce into one conversation, driving the same
+    # checkpoint and running tools twice, so the one that no longer owns the
+    # thread must not start.
+    active = await report_store.get_active_chat_turn(turn.user_id, turn.thread_id)
+    if active is None or active.turn_id != invocation.turn_id:
+        raise ApplicationError("Chat turn no longer owns its thread", non_retryable=True)
+
+    async def _heartbeat_until_done() -> None:
+        """Report liveness on a timer, not on output.
+
+        A turn is quietest exactly when it is slowest: a model call or a tool
+        can run for minutes without producing a chunk. Heartbeating only on
+        output therefore times out *healthy* turns, and the fallback finalizer
+        then marks the turn failed and frees the thread while this activity is
+        still running and still writing the same checkpoint -- two producers on
+        one conversation. The activity's start-to-close timeout is what bounds a
+        turn that genuinely runs too long; this only says the worker is alive.
+        """
+        while True:
+            await asyncio.sleep(_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS)
+            activity.heartbeat()
+
+    heartbeat = asyncio.create_task(_heartbeat_until_done())
+    try:
+        status, last_seq = await chat_turns.produce_turn(
+            turn,
+            current,
+        )
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+    return ChatTurnRunResult(status=status, last_seq=last_seq)
+
+
+@activity.defn
+async def finalize_chat_turn(invocation: ChatTurnInvocation) -> None:
+    """Close a turn whose producer did not get to close it itself.
+
+    Only reached when the activity died with its worker or timed out, so no
+    code of ours ran at the end. Idempotent: a turn that is already terminal is
+    left alone.
+
+    The read below is only an early out. The *store* is what settles this: the
+    write moves a turn out of `running` and no further, so a turn that is
+    finishing itself right now -- the spurious-timeout case, where the activity
+    is alive and simply went quiet -- keeps its own outcome rather than having
+    this one overwrite it.
+    """
+    turn = await report_store.get_chat_turn(invocation.turn_id)
+    if turn is None or turn.status != "running":
+        return
+    recorded = await report_store.finish_chat_turn(invocation.turn_id, "failed", turn.last_seq or 0)
+    if recorded is not None and recorded.status != "failed":
+        logger.info(
+            "A chat turn closed itself before the fallback could",
+            extra={"turn_id": invocation.turn_id, "recorded": recorded.status},
+        )
+        return
+    logger.warning(
+        "Closed a chat turn whose producer did not finish it",
+        extra={"turn_id": invocation.turn_id},
     )

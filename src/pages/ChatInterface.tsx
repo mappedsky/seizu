@@ -9,11 +9,8 @@ import {
 } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useChat } from '@ai-sdk/react';
-import {
-  DefaultChatTransport,
-  type ChatOnFinishCallback,
-  type UIMessage,
-} from 'ai';
+import { type ChatOnFinishCallback, type UIMessage } from 'ai';
+import { SeizuChatTransport } from 'src/api/chatTransport';
 import {
   Alert,
   Accordion,
@@ -140,6 +137,10 @@ type SeizuChatMessage = UIMessage<
     created_at?: string;
     // Set by useChatHistory on messages read back from the checkpoint.
     seizu_persisted?: boolean;
+    // Server-side id of the turn that produced this message, carried on the
+    // stream's opening frame. Informational: Stop names the id admission
+    // returned, which the client has without waiting for any frame.
+    turn_id?: string;
   },
   {
     'seizu-detail': SeizuChatDetail;
@@ -719,6 +720,16 @@ export default function ChatInterface() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
+  // A Stop the server never confirmed. Worth saying out loud: the reader stops
+  // either way, so the UI would otherwise look exactly as if it had worked
+  // while the turn keeps generating.
+  const [stopError, setStopError] = useState<string | null>(null);
+  // Every thread whose last send never resolved. A set, not one value: a second
+  // ambiguous send in another conversation would otherwise hide the recovery
+  // the first one still needs. Mirrors transport state so the banner re-renders.
+  const [unresolvedThreads, setUnresolvedThreads] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [confirmationsOpen, setConfirmationsOpen] = useState(false);
   // Off by default every visit; bypassing confirmations is an explicit,
   // per-session opt-in for users holding chat:bypass_permissions.
@@ -746,6 +757,9 @@ export default function ChatInterface() {
   const chatIdRef = useRef('__pending__');
   const resumeConfirmationIdRef = useRef<string | null>(null);
   const consumedResumeParamRef = useRef<string | null>(null);
+  // resumeStream comes back from useChat, which is declared after the onFinish
+  // callback that needs it.
+  const resumeStreamRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const [
     pendingContinuationTargetMessageId,
     setPendingContinuationTargetMessageId,
@@ -916,11 +930,27 @@ export default function ChatInterface() {
 
   const transport = useMemo(
     () =>
-      new DefaultChatTransport<SeizuChatMessage>({
-        api: '/api/v1/chat/stream',
-        headers: { 'X-Seizu-Csrf': '1' },
-        prepareSendMessagesRequest: ({ messages, headers, body }) => {
-          const currentToken = accessTokenRef.current;
+      new SeizuChatTransport<SeizuChatMessage>({
+        threadId: () =>
+          chatIdRef.current === '__pending__' ? null : chatIdRef.current,
+        accessToken: () => accessTokenRef.current,
+        onUnresolvedChange: (threadId, unresolved) => {
+          // Mirrored into React state: the transport's own copy is a plain
+          // object, so without this the recovery banner never renders.
+          setUnresolvedThreads((current) => {
+            if (current.has(threadId) === unresolved) return current;
+            const next = new Set(current);
+            if (unresolved) next.add(threadId);
+            else next.delete(threadId);
+            return next;
+          });
+        },
+        onStopFailed: () => {
+          setStopError(
+            'Failed to stop this turn on the server; it may still be running.',
+          );
+        },
+        admissionBody: ({ messages, body }) => {
           const resumeConfirmationId =
             typeof body?.resume_confirmation_id === 'string'
               ? body.resume_confirmation_id
@@ -932,29 +962,20 @@ export default function ChatInterface() {
               : undefined;
           resumeConfirmationIdRef.current = null;
           return {
-            headers: {
-              ...headers,
-              ...(currentToken
-                ? { Authorization: `Bearer ${currentToken}` }
-                : {}),
-            },
-            body: {
-              message:
-                resumeConfirmationId || continueResponse
-                  ? ''
-                  : latestUserText(messages),
-              thread_id: chatIdRef.current,
-              ...(resumeConfirmationId
-                ? { resume_confirmation_id: resumeConfirmationId }
-                : {}),
-              ...(continueResponse ? { continue_response: true } : {}),
-              ...(continueMessageId
-                ? { continue_message_id: continueMessageId }
-                : {}),
-              ...(bypassConfirmationsRef.current
-                ? { bypass_confirmations: true }
-                : {}),
-            },
+            message:
+              resumeConfirmationId || continueResponse
+                ? ''
+                : latestUserText(messages),
+            ...(resumeConfirmationId
+              ? { resume_confirmation_id: resumeConfirmationId }
+              : {}),
+            ...(continueResponse ? { continue_response: true } : {}),
+            ...(continueMessageId
+              ? { continue_message_id: continueMessageId }
+              : {}),
+            ...(bypassConfirmationsRef.current
+              ? { bypass_confirmations: true }
+              : {}),
           };
         },
       }),
@@ -970,30 +991,116 @@ export default function ChatInterface() {
   } = useConfirmationsApi(activeThreadId);
 
   const handleChatFinish = useCallback<ChatOnFinishCallback<SeizuChatMessage>>(
-    ({ message }) => {
+    ({ message, isDisconnect }) => {
       if (message.role === 'assistant') {
         setPendingContinuationTargetMessageId((current) =>
           current === message.id ? null : current,
         );
       }
+      if (isDisconnect) {
+        // The turn is still running on the server; only our connection to it
+        // died. Reconnecting replays the turn from its first frame, so the
+        // partial assistant message has to go first: the SDK resumes *into*
+        // the last assistant message and text-start pushes a fresh part, so
+        // keeping it would show the answer twice.
+        setMessagesRef.current((current) => {
+          const last = current.at(-1);
+          return last?.role === 'assistant' ? current.slice(0, -1) : current;
+        });
+        void resumeStreamRef.current();
+        return;
+      }
+      // The turn is over, so it is no longer what Stop should reach: leaving it
+      // pending means a Stop pressed during the *next* send -- before that one
+      // is admitted -- cancels this finished turn and silently does nothing to
+      // the live one.
+      //
+      // The transport decides *which* thread finished, because by now the user
+      // may have switched conversations and `activeThreadId` is the wrong
+      // answer -- clearing on that basis disarms Stop for the turn they are
+      // actually watching. It also keeps a send whose outcome is unknown: that
+      // turn may exist server-side and only its key can reach it.
+      transport.clearFinishedTurn(message.metadata?.turn_id);
       if (!activeThreadId) return;
       window.setTimeout(() => {
         void fetchConfirmations();
       }, 0);
     },
-    [activeThreadId, fetchConfirmations],
+    [activeThreadId, fetchConfirmations, transport],
   );
 
-  const { messages, sendMessage, setMessages, status, stop, error } =
-    useChat<SeizuChatMessage>({
-      id: chatId,
-      experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
-      onFinish: handleChatFinish,
-      transport,
-    });
+  const {
+    messages,
+    sendMessage,
+    setMessages,
+    status,
+    stop,
+    error,
+    clearError,
+    resumeStream,
+  } = useChat<SeizuChatMessage>({
+    id: chatId,
+    experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
+    onFinish: handleChatFinish,
+    transport,
+    // Reattach to a turn that outlived the last page view.
+    //
+    // Gated on the real thread id rather than hardcoded true: useChat's resume
+    // effect depends on this flag, not on the chat id, so passing true up front
+    // would fire it once against the placeholder id and never again once the
+    // real one arrived — reload recovery would silently do nothing.
+    //
+    // Gated on hydration too, because history is fetched concurrently. Resuming
+    // first lets the replay start building the assistant message into an empty
+    // chat, and applyHistory then overwrites it when the history it fetched
+    // turns out to be longer. Waiting means the messages present when resume
+    // fires are the persisted ones, which only ever contain finished turns —
+    // so there is never a partial message to resume into.
+    resume: activeThreadId !== null && !historyLoading,
+  });
 
   messagesRef.current = messages;
   setMessagesRef.current = setMessages;
+  resumeStreamRef.current = resumeStream;
+
+  const [retrying, setRetrying] = useState(false);
+  const handleRetryUnresolved = useCallback(() => {
+    // Replays the original request, key and body intact, and hands the stream
+    // back to the SDK exactly as a fresh send would.
+    setRetrying(true);
+    void transport
+      .retryUnresolved()
+      .then(() => {
+        clearError();
+        void resumeStreamRef.current();
+      })
+      .catch(() => {
+        // Left as it was: still unresolved, still retryable.
+      })
+      .finally(() => setRetrying(false));
+  }, [clearError, transport]);
+
+  const handleStop = useCallback(() => {
+    // Closing the stream is not enough: the turn is produced elsewhere, so
+    // without being told it keeps generating and can still run the actions it
+    // had queued.
+    //
+    // The transport owns this, because it is the only thing that knows whether
+    // the turn has an id yet. Stop is live from `submitted`, before admission
+    // answers, and in that window there is nothing here to name — recording the
+    // intent lets it be applied the moment there is.
+    setStopError(null);
+    void transport.requestStop().catch(() => {
+      // The reader stops regardless, so a lost request leaves the user looking
+      // at a stopped response while the turn runs on. `keepalive` covers the
+      // common cause (navigating away in the same gesture); beyond that there
+      // is nothing useful to do from here, so say so rather than retrying.
+      setStopError(
+        'Failed to stop this turn on the server; it may still be running.',
+      );
+    });
+    stop();
+  }, [stop, transport]);
 
   const busy = status === 'submitted' || status === 'streaming';
   const visibleMessages = useMemo(
@@ -1740,9 +1847,31 @@ export default function ChatInterface() {
           </Card>
         </Box>
 
-        {error ? (
-          <Alert severity="error" sx={{ flexShrink: 0, my: 0.5 }}>
-            {error.message}
+        {(activeThreadId && unresolvedThreads.has(activeThreadId)) || error ? (
+          <Alert
+            severity="error"
+            sx={{ flexShrink: 0, my: 0.5 }}
+            action={
+              // Only offered when the outcome was never established. The turn
+              // may be running server-side, and replaying the original request
+              // under its original key is the one thing that can resolve to it
+              // -- typing the message again mints a new key and admits a
+              // second turn, or is told the thread is busy.
+              activeThreadId && unresolvedThreads.has(activeThreadId) ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={retrying}
+                  onClick={handleRetryUnresolved}
+                >
+                  {retrying ? 'Retrying…' : 'Retry'}
+                </Button>
+              ) : null
+            }
+          >
+            {activeThreadId && unresolvedThreads.has(activeThreadId)
+              ? 'We could not confirm your message was received. It may still be running.'
+              : error?.message}
           </Alert>
         ) : null}
 
@@ -1753,6 +1882,16 @@ export default function ChatInterface() {
             sx={{ flexShrink: 0, my: 0.5 }}
           >
             {autoTitleError}
+          </Alert>
+        ) : null}
+
+        {stopError ? (
+          <Alert
+            severity="warning"
+            onClose={() => setStopError(null)}
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {stopError}
           </Alert>
         ) : null}
 
@@ -1792,7 +1931,7 @@ export default function ChatInterface() {
           busy={busy}
           disabled={disabled}
           onSubmit={handleSubmit}
-          onStop={stop}
+          onStop={handleStop}
         />
       </Box>
       <ChatConfirmationsPanel

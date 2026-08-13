@@ -20,6 +20,18 @@ const mockUsePermissionState =
     typeof usePermissionsModule.usePermissionState
   >;
 
+// Stubbed for the same reason every sibling suite stubs it: unmocked,
+// `UserDisplay` calls `useUser`, and what it renders depends on whether that
+// resolves. It falls back to the raw id (which is an email here), but a `fetch`
+// mock left ambient by another file makes the hook resolve to *something* and
+// the component then renders that user's display name instead -- so this
+// assertion passed or failed on file order rather than on anything this suite
+// controls.
+jest.mock('src/components/UserDisplay', () => ({
+  __esModule: true,
+  default: ({ userId }: { userId: string }) => <>{userId}</>,
+}));
+
 jest.mock('react-helmet', () => ({
   Helmet: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));

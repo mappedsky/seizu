@@ -1,8 +1,20 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 
-from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
+from reporting import settings
+from reporting.schema.chat import (
+    CHAT_TURN_MAX_BATCH_BYTES,
+    CHAT_TURN_MAX_SEQ,
+    ChatSessionItem,
+    ChatTurnAdmission,
+    ChatTurnCommand,
+    ChatTurnEventPage,
+    ChatTurnItem,
+    IdleChatSession,
+    ScheduledChatItem,
+    ScheduledChatVersion,
+)
 from reporting.schema.confirmations import (
     ActionConfirmation,
     ConfirmationDecision,
@@ -56,6 +68,85 @@ def require_public_space_member(access: ReportAccess, space_id: str | None) -> N
 def initial_report_config(name: str) -> dict[str, Any]:
     """Return the minimal valid config stored with a newly created report."""
     return {"name": name, "rows": [], "schema_version": 1}
+
+
+def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
+    """Reject a batch no backend could store, before any I/O.
+
+    The byte length is measured rather than the character count: pydantic's
+    ``max_length`` counts characters, so a batch of multi-byte content would
+    pass that and still exceed the DynamoDB item limit.
+    """
+    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
+        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
+    size = len(parts_json.encode("utf-8"))
+    if size > CHAT_TURN_MAX_BATCH_BYTES:
+        raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
+
+
+def resolve_chat_turn_for_key(turn: "ChatTurnItem") -> ChatTurnAdmission:
+    """Resolve a repeated key to its immutable admitted turn."""
+    # This terminal state has no event log to replay: the turn was admitted but
+    # its claim ran too low before a producer could safely be started. Preserve
+    # that result across every repeat of the key instead of turning the second
+    # attempt into an apparently successful ``existing`` empty response.
+    if turn.status == "expired":
+        return ChatTurnAdmission(outcome="expired")
+    return ChatTurnAdmission(outcome="existing", turn=turn)
+
+
+#: Time reserved at the end of a turn's claim for the cancellation to land.
+#: Comfortably more than the activity's heartbeat interval, which is what bounds
+#: how long a timed-out activity keeps running before it hears about it.
+CHAT_TURN_CANCELLATION_BUFFER_SECONDS = 60
+
+
+def chat_turn_lease_margin_seconds() -> int:
+    """Derived safety room between the activity bound and thread takeover."""
+    return max(CHAT_TURN_CANCELLATION_BUFFER_SECONDS * 2, settings.CHAT_TURN_TIMEOUT_SECONDS // 3)
+
+
+def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: datetime | None = None) -> int:
+    """How long a turn's whole workflow may take, queue time included.
+
+    The safety property is that a workflow never outlives its turn's claim on
+    the thread: past the claim, a successor can be admitted, and two producers
+    then write one conversation.
+
+    A duration alone cannot express that. The claim is an *instant* fixed at
+    admission, while a timeout starts whenever the workflow is finally created
+    -- and a handoff repaired minutes later restarts it, so the workflow can run
+    past a claim that has already lapsed. Given the turn's ``expires_at``, this
+    returns whatever is left of it instead, which is the same instant no matter
+    when the workflow starts.
+
+    Without one it falls back to the derived duration, which is smaller than a
+    fresh lease by construction: the lease adds the whole margin, this adds half.
+    Zero or negative means the claim is already gone and there is nothing safe
+    to start.
+    """
+    margin = chat_turn_lease_margin_seconds()
+    bound = settings.CHAT_TURN_TIMEOUT_SECONDS + margin // 2
+    if expires_at is None:
+        return bound
+    remaining = int((datetime.fromisoformat(expires_at) - (now or datetime.now(tz=UTC))).total_seconds())
+    # Timing a workflow out does not stop its activity there and then: the
+    # cancellation reaches it on its next heartbeat. Handing it the claim's full
+    # remainder therefore still lets a producer run past the instant a successor
+    # can be admitted, so the buffer comes off the top.
+    return min(bound, remaining - CHAT_TURN_CANCELLATION_BUFFER_SECONDS)
+
+
+def chat_turn_lease_expiry(now: datetime) -> str:
+    """When a *running* turn's claim on its thread lapses.
+
+    Derived from the turn's own timeout rather than from the retention window:
+    the lease is what tells admission a producer still holds the thread, and
+    retiring a turn that is merely slow puts a second producer on the same
+    conversation. A finished turn is re-stamped with the (much shorter)
+    retention window instead -- that one is a replay deadline, not a claim.
+    """
+    return (now + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + chat_turn_lease_margin_seconds())).isoformat()
 
 
 class ReportStore(ABC):
@@ -876,7 +967,140 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
-        """Delete a session. Returns False if not found."""
+        """Delete a session. Returns False if not found.
+
+        Deletes the thread's chat turn event logs with it: a turn log is
+        meaningless once its conversation is gone, and nothing else would ever
+        find it.
+        """
+
+    # ------------------------------------------------------------------
+    # Chat turn event log
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def admit_chat_turn(
+        self,
+        user_id: str,
+        thread_id: str,
+        message_id: str,
+        text_id: str,
+        idempotency_key: str,
+        command: ChatTurnCommand,
+    ) -> ChatTurnAdmission:
+        """Reserve a thread for a turn, and say what happened.
+
+        ``command`` is captured in the same commit. A repeat always dispatches
+        that immutable work and permission cap, never the retrying request.
+
+        Returns an outcome rather than raising one of several errors the caller
+        must interpret: ``created``, ``existing``, ``busy`` or ``retired``. The
+        store knows which of those it did, so it reports it -- earlier versions
+        inferred it afterwards from whichever constraint rejected the write,
+        and a single collision could legitimately mean any of them.
+
+        **Admission is a request of its own, answered before anything streams.**
+        The turn exists, with an id, before the client can need one. That is
+        what removes an entire class of problem: there is never a command
+        against a turn that does not exist yet, so nothing has to be parked,
+        replayed against a placeholder, or addressed by a second identity.
+
+        ``idempotency_key`` makes a repeat resolve to the turn it already
+        admitted (``existing``). A lost response is therefore fixed by asking
+        again. A repeat is never read as a cancellation.
+
+        The session's ``updated_at`` moves in the same commit, conditioned on
+        the session not being claimed for retirement -- the turn's half of the
+        handshake in SBX-011. Two writes would leave a window where a delete
+        reads the fresh timestamp, claims the session, sees no running turn and
+        cascades, and the turn is then admitted to a conversation that is gone.
+
+        A thread holds at most one running, unexpired turn. The exclusion has to
+        expire, or a producer that died without finishing wedges the
+        conversation forever.
+        """
+
+    @abstractmethod
+    async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
+        """Return the thread's running, unexpired turn, or None.
+
+        The reconnect endpoint's entry point. An expired running turn reads as
+        None: its producer is gone and nothing will ever finish it.
+        """
+
+    @abstractmethod
+    async def get_chat_turn(self, turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+        """Return a turn by id, optionally scoped to its owner."""
+
+    @abstractmethod
+    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
+        """Append one already-rendered batch of UI-stream parts.
+
+        ``parts_json`` is stored verbatim -- it is the exact JSON array text the
+        live stream sent -- so a replay is byte-identical rather than
+        re-serialized from a decoded copy.
+
+        Idempotent, returning False when ``seq`` is already present: a producer
+        that is retried or fails over must not rewrite a batch a tailing reader
+        has already replayed. Raises ValueError when the batch exceeds
+        ``CHAT_TURN_MAX_BATCH_BYTES``; splitting is the producer's job.
+        """
+
+    @abstractmethod
+    async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+        """Return the turn plus up to ``limit`` batches with seq > after_seq, in order.
+
+        The page is **truncated at the first gap** in ``seq``. A store can make
+        a later batch visible before an earlier one; a reader that accepted the
+        gap would advance its cursor past the missing batch and lose it
+        permanently, which is a hole in the replay rather than a delay. Callers
+        advance from the last batch actually returned, never from
+        ``after_seq + len(batches)``.
+        """
+
+    @abstractmethod
+    async def request_chat_turn_cancel(self, turn_id: str, user_id: str) -> ChatTurnItem | None:
+        """Ask a running turn to stop, returning it, or None.
+
+        **Only ever marks a turn that exists.** It creates nothing: a stop for a
+        turn that has not been admitted is not this method's problem, because a
+        client cannot name a turn before admission gives it one.
+
+        A request, not a signal -- the turn runs elsewhere, so it is told
+        through the record. Scoped to the owner, so a guessed id stops nothing.
+        """
+
+    @abstractmethod
+    async def finish_chat_turn(
+        self,
+        turn_id: str,
+        status: Literal["completed", "failed", "canceled", "expired"],
+        last_seq: int,
+    ) -> ChatTurnItem | None:
+        """Move a *running* turn to a terminal status, first writer wins.
+
+        ``last_seq`` is what lets a reader tell "finished" from "finished, and
+        you have seen all of it": a terminal status alone races the visibility
+        of the final batches. Also sets ``expires_at`` to the retention horizon.
+
+        **Conditional on the turn still being ``running``.** Two writers can
+        reach here for one turn -- the turn closing itself, and the workflow's
+        fallback closing it after the activity timed out -- and a turn that
+        timed out spuriously is still alive, so the later write would replace a
+        recorded outcome (and its ``last_seq``) with a stale one.
+
+        Returns what is *recorded*, which is not necessarily what was asked for:
+        a caller that lost sees the winning status rather than its own, and
+        ``None`` only when the turn is gone.
+        """
+
+    @abstractmethod
+    async def delete_chat_turn(self, turn_id: str) -> bool:
+        """Delete a turn and every one of its batches. Returns False if not found."""
+
+    @abstractmethod
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
+        """IDs of turns whose ``expires_at`` has passed, oldest first."""
 
     # ------------------------------------------------------------------
     # Scheduled chats

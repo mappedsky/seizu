@@ -220,7 +220,17 @@ _PLANNER_PROMPT = (
     " file holds it so the sub-agent reads rather than re-queries. Plan a fresh"
     " fetch only for what is genuinely missing, stale, or was truncated — and if"
     " everything the request needs is already established, an answer step is the"
-    " whole plan."
+    " whole plan. 'Already established' means the evidence contains every fact"
+    " needed to meet the step's success criteria; a prior summary mentioning the"
+    " subject is not enough. Never mark a determine, verify, investigate,"
+    " cross-check, or trace step as answer-only when the provided context itself"
+    " identifies missing evidence. Use an available tool or skill to gather that"
+    " evidence. For iterative graph investigations such as attack-path or"
+    " internet-exposure analysis, use a graph tool directly when one call is"
+    " sufficient, or sandbox delegation when exploration and multiple queries"
+    " are needed. If no available action can obtain the missing evidence, plan an"
+    " answer step that explicitly reports the limitation instead of presenting an"
+    " inference as a determination."
 )
 
 _SYNTHESIZER_PROMPT = (

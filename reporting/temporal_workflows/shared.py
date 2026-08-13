@@ -394,3 +394,23 @@ def group_rows_by_repo_package(rows: list[dict[str, Any]]) -> dict[tuple[str, st
             continue
         grouped.setdefault((repo, package), []).append(row)
     return grouped
+
+
+@dataclass
+class ChatTurnInvocation:
+    """Stable input needed to run one admitted interactive turn.
+
+    The work and its permission cap live on the turn record. Keeping them out
+    of this payload leaves one durable source of truth while retaining the
+    timeout here because the workflow must schedule deterministically.
+    """
+
+    turn_id: str = ""
+    timeout_seconds: int = 600
+
+
+@dataclass
+class ChatTurnRunResult:
+    # completed | failed | canceled
+    status: str = "completed"
+    last_seq: int = 0

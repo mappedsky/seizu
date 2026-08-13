@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, type ComponentType } from 'react';
 import { Helmet } from 'react-helmet';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -14,7 +14,7 @@ import {
 } from '@mui/material';
 import Error from '@mui/icons-material/Error';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
-import ReportPane from 'src/components/ReportPane';
+import ReportPane, { type ReportPaneProps } from 'src/components/ReportPane';
 import SpaceReportsPanel from 'src/components/SpaceReportsPanel';
 import { useReportsMutations } from 'src/hooks/useReportsApi';
 import {
@@ -26,7 +26,11 @@ import { usePermissions } from 'src/hooks/usePermissions';
 import { DASHBOARD_NAVBAR_HEIGHT } from 'src/components/dashboardLayoutConstants';
 import { pageContentSx } from 'src/theme/layout';
 
-function SpaceDetail() {
+interface SpaceDetailProps {
+  ReportPaneComponent?: ComponentType<ReportPaneProps>;
+}
+
+function SpaceDetail({ ReportPaneComponent = ReportPane }: SpaceDetailProps) {
   const { spaceId, reportId } = useParams();
   const navigate = useNavigate();
   const hasPermission = usePermissions();
@@ -168,7 +172,7 @@ function SpaceDetail() {
       );
     }
     return (
-      <ReportPane
+      <ReportPaneComponent
         // Same reason as the standalone report route: never carry one report's
         // editor state into another.
         key={activeReportId}

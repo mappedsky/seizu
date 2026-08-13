@@ -45,8 +45,8 @@ Each schedule is reconciled into a **Temporal Schedule** that starts a
 `seizu_scheduled_chat` workflow; the workflow runs one activity, which drives a
 headless agent session **owned by the schedule's creator**. The
 `seizu-temporal-worker` service hosts both the workflow and the reconciliation
-loop, so **scheduled chats require a reachable Temporal server** (interactive
-chat does not).
+loop, so **scheduled chats require a reachable Temporal server** — as does
+interactive chat, which runs each turn as a workflow of its own.
 
 Triggers map onto Temporal directly: hourly schedules become interval specs
 anchored on the last run, daily/monthly become calendar specs, and a

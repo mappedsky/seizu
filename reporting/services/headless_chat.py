@@ -29,9 +29,9 @@ from reporting.services import report_store
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import (
     ChatState,
+    build_turn_config,
     get_chat_graph,
     load_thread_messages,
-    namespaced_thread_id,
 )
 from reporting.services.chat_messages import message_text
 
@@ -81,16 +81,13 @@ async def run_headless_chat(
 
     graph = get_chat_graph()
     budget_controller = BudgetController(initial_budget_ledger())
-    config = {
-        "configurable": {
-            "current_user": current_user,
-            "thread_id": namespaced_thread_id(current_user, session.thread_id),
-            "client_thread_id": session.thread_id,
-            "headless": True,
-            "bypass_confirmations": bypass,
-            "budget_controller": budget_controller,
-        }
-    }
+    config = build_turn_config(
+        current_user,
+        session.thread_id,
+        budget_controller=budget_controller,
+        headless=True,
+        bypass_confirmations=bypass,
+    )
     graph_input: ChatState = {
         "messages": [HumanMessage(content=prompt, id=f"msg_{uuid.uuid4().hex}")],
         "budget": budget_controller.snapshot(),

@@ -4,7 +4,9 @@ Uses an in-memory async SQLite database (aiosqlite + StaticPool) so all
 sessions within a test share the same underlying connection.
 """
 
-from datetime import UTC
+import asyncio
+import itertools
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
+from reporting import settings
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
@@ -470,6 +474,496 @@ async def test_partial_scheduled_chat_result_clears_stale_errors(store, mocker):
     assert item is not None
     assert item.last_run_status == "partial"
     assert item.last_errors == []
+
+
+# ---------------------------------------------------------------------------
+# Chat turn admission and event log
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_session(user_id: str = "user-1", thread_id: str = "1001") -> None:
+    """Give a thread a session row.
+
+    Admission moves the session's timestamp in the same commit as the turn, so
+    a turn cannot exist without a session to admit it -- which is the point.
+    Written directly because ``create_chat_session`` mints its own thread id.
+    """
+    async with AsyncSession(sql_module._get_engine()) as session:
+        existing = (
+            (
+                await session.execute(
+                    select(sql_module.ChatSessionRecord).where(
+                        sql_module.ChatSessionRecord.user_id == user_id,
+                        sql_module.ChatSessionRecord.thread_id == thread_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            return
+        session.add(
+            sql_module.ChatSessionRecord(
+                user_id=user_id,
+                thread_id=thread_id,
+                title="",
+                created_at="2024-01-01T00:00:00+00:00",
+                updated_at="2024-01-01T00:00:00+00:00",
+            )
+        )
+        await session.commit()
+
+
+_TURN_KEYS = itertools.count()
+
+
+def _turn_command(message: str = "hello") -> ChatTurnCommand:
+    return ChatTurnCommand(
+        message=message,
+        permission_cap=[],
+        timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+    )
+
+
+async def _admit(store, user_id: str = "user-1", thread_id: str = "1001", key: str | None = None):
+    await _ensure_session(user_id, thread_id)
+    key = key or f"ik_test_{next(_TURN_KEYS)}"
+    return await store.admit_chat_turn(user_id, thread_id, "msg_1", "text_1", key, _turn_command())
+
+
+async def _open_turn(store, user_id: str = "user-1", thread_id: str = "1001"):
+    admission = await _admit(store, user_id, thread_id)
+    assert admission.turn is not None, admission.outcome
+    return admission.turn
+
+
+async def _expire_turn(store, turn_id: str, expires_at: str) -> None:
+    """Age a turn directly; the store only ever pushes expiry forward."""
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = await session.get(sql_module.ChatTurnRecord, turn_id)
+        record.expires_at = expires_at
+        session.add(record)
+        await session.commit()
+
+
+# --- admission -------------------------------------------------------------
+
+
+async def test_a_running_turns_lease_outlasts_the_turn_itself(store):
+    """Admission retires a turn whose lease has lapsed, so a lease shorter than
+    the turn's own timeout lets one send retire a turn that is merely slow --
+    and the thread ends up with two producers writing one conversation. The
+    replay retention window is far shorter than a turn may legitimately run, so
+    it is the wrong clock for this."""
+    turn = await _open_turn(store)
+
+    latest_possible_finish = datetime.now(tz=UTC) + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS)
+    assert turn.expires_at > latest_possible_finish.isoformat()
+
+
+async def test_admission_reports_what_it_did(store):
+    """An outcome, not an exception the caller has to interpret. Admission used
+    to raise one of four errors inferred from whichever constraint rejected the
+    write, so one collision could mean any of them."""
+    admission = await _admit(store)
+
+    assert admission.outcome == "created"
+    assert admission.turn is not None
+
+
+async def test_a_repeat_of_a_request_resolves_to_the_turn_it_made(store):
+    """How a lost response is fixed: ask again. It is never read as anything
+    else -- and in particular never as a cancellation."""
+    first = await _admit(store, key="ik_repeated1")
+    second = await _admit(store, key="ik_repeated1")
+
+    assert first.outcome == "created"
+    assert second.outcome == "existing"
+    assert second.turn is not None and first.turn is not None
+    assert second.turn.turn_id == first.turn.turn_id
+
+
+async def test_a_different_key_on_a_busy_thread_is_busy(store):
+    await _admit(store, key="ik_thefirst1")
+
+    admission = await _admit(store, key="ik_thesecond")
+
+    assert admission.outcome == "busy"
+    assert admission.turn is None
+
+
+async def test_admission_to_a_missing_session_is_retired(store):
+    admission = await store.admit_chat_turn("user-1", "9999", "msg_1", "text_1", "ik_missing1", _turn_command())
+
+    assert admission.outcome == "retired"
+
+
+async def test_admission_to_a_session_being_retired_is_refused(store):
+    """The claim is what closes a conversation to new turns; admitting one
+    afterwards is the race the single write exists to remove."""
+    await _ensure_session()
+    async with AsyncSession(sql_module._get_engine()) as session:
+        record = (
+            (
+                await session.execute(
+                    select(sql_module.ChatSessionRecord).where(sql_module.ChatSessionRecord.thread_id == "1001")
+                )
+            )
+            .scalars()
+            .first()
+        )
+        record.retiring_at = "2024-01-01T00:00:00+00:00"
+        session.add(record)
+        await session.commit()
+
+    assert (await _admit(store)).outcome == "retired"
+
+
+async def test_admission_moves_the_session_timestamp(store):
+    """The same write, so a delete cannot read the fresh timestamp, claim the
+    session and cascade in between."""
+    await _ensure_session()
+
+    await _admit(store)
+
+    session_item = await store.get_chat_session("user-1", "1001")
+    assert session_item is not None
+    assert session_item.updated_at > "2024-01-01T00:00:00+00:00"
+
+
+async def test_a_new_turn_takes_over_from_an_expired_lease(store):
+    """An expired lease means the producer is gone, so it must not keep holding
+    the thread."""
+    stale = await _open_turn(store)
+    await _expire_turn(store, stale.turn_id, "2020-01-01T00:00:00+00:00")
+
+    fresh = await _admit(store)
+
+    assert fresh.outcome == "created"
+    assert fresh.turn is not None and fresh.turn.turn_id != stale.turn_id
+    assert (await store.get_chat_turn(stale.turn_id)).status == "failed"
+
+
+async def test_admission_does_not_retire_a_live_lease(store):
+    """Retiring a turn whose producer is alive would put a second producer on
+    the thread. The retirement and the insert are one transaction, and the
+    retirement only matches a lease that has already lapsed."""
+    live = await _open_turn(store)
+
+    assert (await _admit(store)).outcome == "busy"
+    assert (await store.get_chat_turn(live.turn_id)).status == "running"
+
+
+async def test_only_a_running_turn_can_be_finished(store):
+    """First writer wins. Two writers reach here for one turn -- the turn
+    closing itself, and the workflow's fallback closing it after the activity
+    timed out -- and a turn that timed out *spuriously* is still alive. Without
+    this the late one replaces the recorded outcome, including the `last_seq` a
+    reader uses to know it has seen the whole answer."""
+    turn = await _open_turn(store)
+
+    won = await store.finish_chat_turn(turn.turn_id, "completed", 7)
+    lost = await store.finish_chat_turn(turn.turn_id, "failed", 0)
+
+    assert won is not None and won.status == "completed"
+    # The loser is handed what is recorded, not what it asked for, so it can
+    # tell the difference.
+    assert lost is not None
+    assert lost.status == "completed"
+    assert lost.last_seq == 7
+    stored = await store.get_chat_turn(turn.turn_id)
+    assert stored is not None and (stored.status, stored.last_seq) == ("completed", 7)
+
+
+async def test_finishing_a_missing_turn_is_still_none(store):
+    """`None` keeps meaning "no such turn", so a caller can tell a turn that is
+    gone from one another writer already closed."""
+    assert await store.finish_chat_turn("turn-nope", "completed", 1) is None
+
+
+async def test_two_concurrent_finishes_cannot_both_win(store, tmp_path):
+    """The database settles this, not a read above the write.
+
+    Its own file-backed engine for the reason given below: under StaticPool the
+    two sessions share one connection, so a broken read-then-write passes with
+    both callers reporting success.
+    """
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/finish.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
+            concurrent = SQLModelReportStore()
+            async with AsyncSession(engine) as session:
+                session.add(
+                    sql_module.ChatSessionRecord(
+                        user_id="user-1",
+                        thread_id="1001",
+                        title="",
+                        created_at="2024-01-01T00:00:00+00:00",
+                        updated_at="2024-01-01T00:00:00+00:00",
+                    )
+                )
+                await session.commit()
+            admission = await concurrent.admit_chat_turn(
+                "user-1", "1001", "msg_1", "text_1", "ik_finish1", _turn_command()
+            )
+            assert admission.turn is not None
+            turn_id = admission.turn.turn_id
+
+            results = await asyncio.gather(
+                concurrent.finish_chat_turn(turn_id, "completed", 5),
+                concurrent.finish_chat_turn(turn_id, "failed", 0),
+            )
+
+            # Both see the same recorded outcome, whichever of them wrote it.
+            statuses = {r.status for r in results if r is not None}
+            assert len(statuses) == 1
+            async with AsyncSession(engine) as session:
+                row = await session.get(sql_module.ChatTurnRecord, turn_id)
+            assert row is not None
+            assert (row.status, row.last_seq) in {("completed", 5), ("failed", 0)}
+    finally:
+        await engine.dispose()
+
+
+async def test_two_concurrent_admissions_cannot_both_win(store, tmp_path):
+    """The database is the authority, not a read above the insert.
+
+    Uses its own file-backed engine: the shared ``store`` fixture's StaticPool
+    hands every session the same connection, so two "concurrent" sessions
+    interleave inside one transaction and the race cannot occur -- both callers
+    appear to succeed even though only one row lands.
+    """
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/turns.db")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    try:
+        with patch("reporting.services.report_store.sql._get_engine", return_value=engine):
+            concurrent = SQLModelReportStore()
+            async with AsyncSession(engine) as session:
+                session.add(
+                    sql_module.ChatSessionRecord(
+                        user_id="user-1",
+                        thread_id="1001",
+                        title="",
+                        created_at="2024-01-01T00:00:00+00:00",
+                        updated_at="2024-01-01T00:00:00+00:00",
+                    )
+                )
+                await session.commit()
+            results = await asyncio.gather(
+                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1", "ik_concurrent1", _turn_command()),
+                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1", "ik_concurrent2", _turn_command()),
+            )
+
+            assert sorted(r.outcome for r in results) == ["busy", "created"]
+            async with AsyncSession(engine) as session:
+                rows = (await session.execute(select(sql_module.ChatTurnRecord))).scalars().all()
+            assert len(rows) == 1
+    finally:
+        await engine.dispose()
+
+
+# --- cancellation ----------------------------------------------------------
+
+
+async def test_cancel_flags_the_running_turn(store):
+    turn = await _open_turn(store)
+
+    flagged = await store.request_chat_turn_cancel(turn.turn_id, "user-1")
+
+    assert flagged is not None and flagged.cancel_requested is True
+    assert (await store.get_chat_turn(turn.turn_id)).cancel_requested is True
+
+
+async def test_cancel_is_scoped_to_the_owner(store):
+    turn = await _open_turn(store)
+
+    assert await store.request_chat_turn_cancel(turn.turn_id, "someone-else") is None
+
+
+async def test_cancel_of_a_finished_turn_reports_nothing(store):
+    turn = await _open_turn(store)
+    await store.finish_chat_turn(turn.turn_id, "completed", 1)
+
+    assert await store.request_chat_turn_cancel(turn.turn_id, "user-1") is None
+
+
+async def test_cancel_creates_nothing(store):
+    """It only ever marks a turn that exists. A client cannot name a turn before
+    admission gives it one, so there is nothing here to create or park."""
+    await _ensure_session()
+
+    assert await store.request_chat_turn_cancel("no-such-turn", "user-1") is None
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        rows = (await session.execute(select(sql_module.ChatTurnRecord))).scalars().all()
+    assert rows == []
+
+
+# --- the event log ---------------------------------------------------------
+
+
+async def test_chat_turn_round_trips_a_batch(store):
+    turn = await _open_turn(store)
+    assert await store.append_chat_turn_events(turn.turn_id, 1, '[{"type":"start"}]') is True
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert [(b.seq, b.parts_json) for b in page.batches] == [(1, '[{"type":"start"}]')]
+    assert page.turn.status == "running"
+
+
+async def test_chat_turn_events_are_returned_verbatim(store):
+    """The stored text is what the live stream sent. Re-encoding it -- which a
+    JSON column would do -- makes a replay differ from the original."""
+    turn = await _open_turn(store)
+    parts = '[{"type":"data-seizu-detail","id":"d1","data":{"body":null,"ratio":0.5}}]'
+    await store.append_chat_turn_events(turn.turn_id, 1, parts)
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert page.batches[0].parts_json == parts
+
+
+async def test_chat_turn_append_is_idempotent_per_seq(store):
+    """A producer that is retried must not rewrite a batch a reader may already
+    have replayed, so a duplicate seq is a no-op rather than an overwrite."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["first"]')
+
+    assert await store.append_chat_turn_events(turn.turn_id, 1, '["second"]') is False
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+    assert page is not None
+    assert page.batches[0].parts_json == '["first"]'
+
+
+async def test_chat_turn_read_truncates_at_the_first_gap(store):
+    """A reader advances its cursor to the last batch it received. Handing it
+    seq 3 while 2 is missing would move the cursor past 2 forever."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    await store.append_chat_turn_events(turn.turn_id, 3, '["three"]')
+
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+
+    assert page is not None
+    assert [b.seq for b in page.batches] == [1]
+
+
+async def test_chat_turn_read_resumes_from_a_cursor(store):
+    turn = await _open_turn(store)
+    for seq in (1, 2, 3):
+        await store.append_chat_turn_events(turn.turn_id, seq, f'["{seq}"]')
+
+    page = await store.read_chat_turn_events(turn.turn_id, 1, limit=10)
+
+    assert page is not None
+    assert [b.seq for b in page.batches] == [2, 3]
+
+
+async def test_chat_turn_rejects_an_oversized_batch(store):
+    turn = await _open_turn(store)
+    with pytest.raises(ValueError):
+        await store.append_chat_turn_events(turn.turn_id, 1, "x" * (CHAT_TURN_MAX_BATCH_BYTES + 1))
+
+
+async def test_finish_chat_turn_records_the_final_sequence(store):
+    """last_seq is what lets a reader tell "finished" from "finished, and you
+    have seen all of it"."""
+    turn = await _open_turn(store)
+    finished = await store.finish_chat_turn(turn.turn_id, "completed", 7)
+
+    assert finished is not None
+    assert (finished.status, finished.last_seq) == ("completed", 7)
+
+
+async def test_get_active_chat_turn_ignores_finished_turns(store):
+    turn = await _open_turn(store)
+    assert await store.get_active_chat_turn("user-1", "1001") is not None
+    await store.finish_chat_turn(turn.turn_id, "completed", 1)
+    assert await store.get_active_chat_turn("user-1", "1001") is None
+
+
+async def test_an_expired_running_turn_is_not_offered_for_reconnect(store):
+    """Its producer is gone, so there is nothing to reattach to."""
+    turn = await _open_turn(store)
+    await _expire_turn(store, turn.turn_id, "2020-01-01T00:00:00+00:00")
+
+    assert await store.get_active_chat_turn("user-1", "1001") is None
+
+
+async def test_get_chat_turn_is_scoped_to_its_owner(store):
+    turn = await _open_turn(store)
+    assert await store.get_chat_turn(turn.turn_id, user_id="user-1") is not None
+    assert await store.get_chat_turn(turn.turn_id, user_id="someone-else") is None
+
+
+async def test_delete_chat_turn_removes_its_batches(store):
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+
+    assert await store.delete_chat_turn(turn.turn_id) is True
+
+    assert await store.read_chat_turn_events(turn.turn_id, 0, limit=10) is None
+
+
+async def test_deleting_a_turn_collects_batches_whose_header_is_gone(store):
+    """A producer that kept writing after its conversation was deleted leaves
+    headerless batches; gating the batch delete on the header meant the only
+    rows worth collecting were the ones skipped."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    async with AsyncSession(sql_module._get_engine()) as session:
+        await session.execute(
+            sql_module.delete(sql_module.ChatTurnRecord).where(
+                sql_module.col(sql_module.ChatTurnRecord.turn_id) == turn.turn_id
+            )
+        )
+        await session.commit()
+
+    assert await store.delete_chat_turn(turn.turn_id) is True
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        remaining = (
+            (
+                await session.execute(
+                    select(sql_module.ChatTurnEventRecord).where(sql_module.ChatTurnEventRecord.turn_id == turn.turn_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert remaining == []
+
+
+async def test_deleting_a_session_deletes_its_turn_logs(store):
+    """A turn log is only reachable through its session, so one that outlived
+    its session is a row nothing will ever look for again."""
+    turn = await _open_turn(store)
+    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+
+    assert await store.delete_chat_session("user-1", "1001") is True
+
+    assert await store.get_chat_turn(turn.turn_id) is None
+
+
+async def test_list_expired_chat_turns_selects_only_expired(store):
+    live = await _open_turn(store)
+    stale = await _open_turn(store, "user-2", "2002")
+    await _expire_turn(store, stale.turn_id, "2020-01-01T00:00:00+00:00")
+
+    expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=10)
+
+    assert expired == [stale.turn_id]
+    assert live.turn_id not in expired
 
 
 # ---------------------------------------------------------------------------

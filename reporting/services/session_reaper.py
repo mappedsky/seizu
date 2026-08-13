@@ -126,7 +126,7 @@ async def reap_idle_sessions(summary: ReapSummary, *, now: datetime) -> None:
             summary.sessions_kept += 1
             continue
         try:
-            await _delete_session(session.user_id, session.thread_id)
+            await delete_session_state(session.user_id, session.thread_id)
         except Exception:
             summary.failed += 1
             logger.warning(
@@ -142,22 +142,24 @@ async def reap_idle_sessions(summary: ReapSummary, *, now: datetime) -> None:
         )
 
 
-async def _delete_session(user_id: str, thread_id: str) -> None:
+async def delete_session_state(user_id: str, thread_id: str) -> None:
     """Destroy the sandbox and checkpoint first; delete the record last.
 
-    **The opposite order from the user-facing delete route, deliberately.** The
-    session record is the only thing that makes a thread findable: delete it
+    The session record is the only thing that makes a thread findable: delete it
     first and a failed checkpoint deletion leaves a transcript stored forever,
     with nothing left to retry from — the retention promise quietly broken, and
     worst on PostgreSQL checkpoints, which have no TTL to catch it later.
-    Deleting it last makes the record its own tombstone. A pass that dies
-    part-way leaves a claimed, still-idle session that the next sweep re-claims
-    and finishes; every step is idempotent (a dead sandbox id kills nothing, a
+    Deleting it last makes the record its own tombstone. A caller that dies
+    part-way leaves a claimed session that the next attempt re-claims and
+    finishes; every step is idempotent (a dead sandbox id kills nothing, a
     missing checkpoint deletes nothing).
 
-    The route keeps the other order for the opposite reason: an interactive
-    delete should disappear from the UI immediately, and a user watching it can
-    retry themselves.
+    **The interactive delete route uses this too.** It once kept the opposite
+    order so the conversation left the UI immediately, on the reasoning that a
+    user could retry — but it also swallowed the cleanup failure and returned
+    204, so there was nothing to retry from and nothing to say it was needed.
+    Shared here rather than reimplemented, so the ordering cannot drift apart
+    again.
     """
     from reporting.services.chat_graph import delete_thread_state
 

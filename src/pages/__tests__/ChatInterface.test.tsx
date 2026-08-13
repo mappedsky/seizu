@@ -17,11 +17,8 @@ import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
-import {
-  DefaultChatTransport,
-  type ChatOnFinishCallback,
-  type UIMessage,
-} from 'ai';
+import { type ChatOnFinishCallback, type UIMessage } from 'ai';
+import { SeizuChatTransport } from 'src/api/chatTransport';
 
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissionState: jest.fn(),
@@ -43,12 +40,6 @@ jest.mock('@ai-sdk/react', () => ({
   useChat: jest.fn(),
 }));
 
-jest.mock('ai', () => ({
-  DefaultChatTransport: jest.fn().mockImplementation((options: object) => ({
-    options,
-  })),
-}));
-
 const mockUsePermissionState =
   usePermissionsModule.usePermissionState as jest.MockedFunction<
     typeof usePermissionsModule.usePermissionState
@@ -66,9 +57,86 @@ const mockUseConfirmationsApi =
     typeof useConfirmationsApiModule.useConfirmationsApi
   >;
 const mockUseChat = useChat as jest.MockedFunction<typeof useChat>;
-const mockDefaultChatTransport = DefaultChatTransport as jest.MockedClass<
-  typeof DefaultChatTransport
->;
+
+/** The transport the component handed to `useChat` on its last render.
+ *
+ * Its response parsing is stubbed to a passthrough: jsdom's `Response.body` is
+ * not a real `ReadableStream`, and what these tests are about is which requests
+ * the transport makes, not the SDK's own parser.
+ */
+function activeTransport(): SeizuChatTransport<UIMessage> {
+  // useChat's options are a union whose other arm takes a prebuilt Chat, so
+  // `transport` is not on the common type.
+  const options = mockUseChat.mock.calls.at(-1)?.[0] as
+    | { transport?: unknown }
+    | undefined;
+  if (!options?.transport) throw new Error('missing transport');
+  const transport = options.transport as SeizuChatTransport<UIMessage>;
+  jest
+    .spyOn(
+      transport as unknown as {
+        processResponseStream: (s: unknown) => unknown;
+      },
+      'processResponseStream',
+    )
+    .mockImplementation((stream) => stream);
+  return transport;
+}
+
+/** A transport whose thread the test controls, stubbed the same way
+ * `activeTransport` stubs the component's: jsdom's `Response.body` is not a
+ * real `ReadableStream`, and these tests are about which requests get made. */
+function standaloneTransport(
+  threadId: () => string | null,
+  onUnresolvedChange: (
+    threadId: string,
+    unresolved: boolean,
+  ) => void = () => {},
+) {
+  const transport = new SeizuChatTransport<UIMessage>({
+    threadId,
+    accessToken: () => 'token',
+    onStopFailed: () => {},
+    onUnresolvedChange,
+    admissionBody: () => ({ message: 'Hi' }),
+  });
+  jest
+    .spyOn(
+      transport as unknown as {
+        processResponseStream: (s: unknown) => unknown;
+      },
+      'processResponseStream',
+    )
+    .mockImplementation((stream) => stream);
+  return transport;
+}
+
+/** Stub `fetch` for the admit-then-attach pair a send makes. */
+function mockAdmitThenAttach(turnId = 'turn-42') {
+  return jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const url = String(input);
+    if (url.includes('/turns') && !url.includes('/stream')) {
+      return new Response(
+        JSON.stringify({ turn_id: turnId, status: 'created' }),
+        {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
+    return new Response('data: [DONE]\n\n', { status: 200 });
+  });
+}
+
+function sendArgs(messages: UIMessage[]) {
+  return {
+    chatId: 'chat-id',
+    messageId: messages.at(-1)?.id,
+    messages,
+    abortSignal: undefined,
+    trigger: 'submit-message',
+  } as unknown as Parameters<SeizuChatTransport<UIMessage>['sendMessages']>[0];
+}
 const theme = createTheme();
 
 type ChatRenderOptions = {
@@ -168,6 +236,11 @@ describe('ChatInterface', () => {
   afterEach(() => {
     cleanup();
     jest.useRealTimers();
+    // Restores every spy, `globalThis.fetch` included. Per-test `mockRestore`
+    // is not enough on its own: a failing assertion skips it, and the spy then
+    // outlives this file -- which strands other suites in a shared process,
+    // with the failure surfacing in whichever file runs next rather than here.
+    jest.restoreAllMocks();
   });
 
   it('persists the active session id and configures the chat stream request body', async () => {
@@ -187,43 +260,43 @@ describe('ChatInterface', () => {
       );
     });
 
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    expect(transportOptions).toBeDefined();
-    if (!transportOptions) throw new Error('missing transport options');
-    expect(transportOptions.api).toBe('/api/v1/chat/stream');
-    expect(transportOptions.headers).toEqual({
-      'X-Seizu-Csrf': '1',
-    });
-
-    const prepared = transportOptions.prepareSendMessagesRequest?.({
-      id: 'chat-id',
-      messages: [
+    const fetchMock = mockAdmitThenAttach();
+    await activeTransport().sendMessages(
+      sendArgs([
         {
           id: 'user-message',
           role: 'user',
           parts: [{ type: 'text', text: 'Hello graph' }],
         },
-      ],
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: transportOptions.headers as HeadersInit,
-      api: '/api/v1/chat/stream',
-      trigger: 'submit-message',
-      messageId: 'user-message',
-    }) as
-      | {
-          headers: Record<string, string>;
-          body: { message: string; thread_id: string };
-        }
-      | undefined;
+      ]),
+    );
 
-    expect(prepared?.headers).toEqual({
-      Authorization: 'Bearer token-123',
-      'X-Seizu-Csrf': '1',
-    });
-    expect(prepared?.body.message).toBe('Hello graph');
-    expect(prepared?.body.thread_id).toBe(threadId);
+    // Two requests, in order: ask for the turn, then read it.
+    const [admitUrl, admitInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(admitUrl).toBe(`/api/v1/chat/threads/${threadId}/turns`);
+    expect(admitInit.method).toBe('POST');
+    expect(admitInit.headers).toEqual(
+      expect.objectContaining({
+        Authorization: 'Bearer token-123',
+        'X-Seizu-Csrf': '1',
+      }),
+    );
+    const body = JSON.parse(String(admitInit.body)) as {
+      message: string;
+      idempotency_key: string;
+      thread_id?: string;
+    };
+    expect(body.message).toBe('Hello graph');
+    // The thread is in the path now, so it has no business in the body too.
+    expect(body.thread_id).toBeUndefined();
+    expect(body.idempotency_key).toMatch(/^ik_/);
+
+    const [attachUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(attachUrl).toBe('/api/v1/chat/turns/turn-42/stream');
+    fetchMock.mockRestore();
   });
 
   it('uses the latest access token when preparing chat stream requests', async () => {
@@ -258,27 +331,22 @@ describe('ChatInterface', () => {
       </MemoryRouter>,
     );
 
-    const transportOptions = mockDefaultChatTransport.mock.calls.at(-1)?.[0];
-    if (!transportOptions) throw new Error('missing transport options');
-    const prepared = transportOptions.prepareSendMessagesRequest?.({
-      id: 'chat-id',
-      messages: [
+    const fetchMock = mockAdmitThenAttach();
+    await activeTransport().sendMessages(
+      sendArgs([
         {
           id: 'user-message',
           role: 'user',
           parts: [{ type: 'text', text: 'Fresh token please' }],
         },
-      ],
-      requestMetadata: undefined,
-      body: undefined,
-      credentials: 'same-origin',
-      headers: transportOptions.headers as HeadersInit,
-      api: '/api/v1/chat/stream',
-      trigger: 'submit-message',
-      messageId: 'user-message',
-    }) as { headers: Record<string, string> } | undefined;
+      ]),
+    );
 
-    expect(prepared?.headers.Authorization).toBe('Bearer token-2');
+    const [, admitInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((admitInit.headers as Record<string, string>).Authorization).toBe(
+      'Bearer token-2',
+    );
+    fetchMock.mockRestore();
   });
 
   it('shows a disabled message when the chat feature is off', () => {
@@ -1877,5 +1945,930 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Bypass confirmations')).toBeInTheDocument();
     const toggle = screen.getByRole('switch');
     expect(toggle).not.toBeChecked();
+  });
+  it('reattaches only once the real thread id is known, not to the placeholder', async () => {
+    // useChat's resume effect depends on the flag, not on the chat id, so a
+    // hardcoded `true` would fire once against the placeholder id and never
+    // again — reload recovery would silently do nothing.
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const calls = mockUseChat.mock.calls.map(
+      ([options]) => options as { id?: string; resume?: boolean },
+    );
+    const placeholderCalls = calls.filter((c) => c.id === '__pending__');
+    const realCalls = calls.filter((c) => c.id === 'thread-1');
+
+    // The placeholder must never resume; the real thread must end up resuming.
+    // Early real-thread renders legitimately carry false while history loads —
+    // see the hydration test below — so this asserts where it settles, not
+    // every intermediate value.
+    expect(realCalls.length).toBeGreaterThan(0);
+    expect(placeholderCalls.every((c) => c.resume === false)).toBe(true);
+    expect(realCalls.at(-1)?.resume).toBe(true);
+  });
+
+  it('waits for history before reattaching, so hydration cannot overwrite it', async () => {
+    // History is fetched concurrently. Resuming first lets the replay start
+    // building the assistant message into an empty chat, and applyHistory then
+    // overwrites it once the history it fetched turns out to be longer.
+    let releaseHistory: (messages: never[]) => void = () => {};
+    mockUseChatHistory.mockReturnValue(
+      () =>
+        new Promise((resolve) => {
+          releaseHistory = resolve as (messages: never[]) => void;
+        }),
+    );
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const resumeWhileLoading = mockUseChat.mock.calls
+      .map(([options]) => options as { id?: string; resume?: boolean })
+      .filter((c) => c.id === 'thread-1');
+    expect(resumeWhileLoading.length).toBeGreaterThan(0);
+    expect(resumeWhileLoading.every((c) => c.resume === false)).toBe(true);
+
+    await act(async () => {
+      releaseHistory([]);
+    });
+
+    const after = mockUseChat.mock.calls
+      .map(([options]) => options as { id?: string; resume?: boolean })
+      .filter((c) => c.id === 'thread-1');
+    expect(after.at(-1)?.resume).toBe(true);
+  });
+
+  it('tells the server to stop the turn, not just the reader', async () => {
+    // The turn runs beside the request now, so closing the stream on its own
+    // leaves it generating and able to run the actions it had queued. This one
+    // learns the turn by reattaching -- the reloaded-client path, where the id
+    // was never handed to this tab at admission.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        if (String(input).endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-42', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (String(input).endsWith('/stream')) {
+          return new Response('data: [DONE]\n\n', { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      });
+    const stop = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        {
+          id: 'a1',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Working' }],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop,
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'streaming',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+    fetchMock.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }));
+    await act(async () => {});
+
+    // Addressed at the turn being watched, not at the thread: this request can
+    // be retried, and by then the thread may be running a different turn.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/turns/turn-42/cancel',
+      expect.objectContaining({ method: 'POST', keepalive: true }),
+    );
+    expect(stop).toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it.each([
+    [409, 'This conversation already has a turn in progress'],
+    [404, 'This conversation is no longer available'],
+    [503, 'Could not start this turn; please try again'],
+  ])('reports a refused admission distinctly (%i)', async (status, message) => {
+    // The server distinguishes these and only one is worth retrying, so a
+    // single "something went wrong" would tell the user the wrong thing.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow(message);
+    fetchMock.mockRestore();
+  });
+
+  it('can stop a turn as soon as it has been sent', async () => {
+    // Stop is enabled from `submitted`, before any frame arrives. Admission is
+    // what closes that window: the id comes back from the send itself, so the
+    // whole period the button is live is a period it can act on.
+    const fetchMock = mockAdmitThenAttach('turn-77');
+    const stop = jest.fn();
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop,
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'submitted',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    // Drive the send the way the SDK does; nothing has streamed yet.
+    await activeTransport().sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    fetchMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /stop/i }));
+    await act(async () => {});
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/turns/turn-77/cancel',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('stops a turn admitted while Stop was already pressed', async () => {
+    // The window the previous design could not express: Stop is live from
+    // `submitted`, so it can be pressed before admission answers. Aborting the
+    // admission does not un-admit it -- the server may already have started the
+    // turn -- so the intent has to be held and applied once there is an id.
+    let releaseAdmission: (() => void) | null = null;
+    const calls: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.endsWith('/turns')) {
+          await new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-slow', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/stream')) {
+          return new Response('data: [DONE]\n\n', { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    const sending = transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    await act(async () => {});
+
+    // Stop, while the turn still has no id anywhere. Not awaited on the
+    // deferred path -- the cancel it asks for cannot happen until admission
+    // answers, which this test has not released yet.
+    void transport.requestStop();
+    expect(calls.some((url) => url.includes('/cancel'))).toBe(false);
+
+    await act(async () => {
+      releaseAdmission?.();
+      await sending;
+    });
+
+    expect(calls).toContain('/api/v1/chat/turns/turn-slow/cancel');
+    fetchMock.mockRestore();
+  });
+
+  it('retries an ambiguous admission itself, with the same key', async () => {
+    // A 503 means the turn may already have been admitted, and the server's
+    // repair path is reachable only by asking again with the same key. Waiting
+    // for the user to resend does not work: their next message gets a new id,
+    // so a new key, which admits nothing and is told the thread is busy.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          if (keys.length === 1) {
+            return new Response('{}', { status: 503 });
+          }
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-repaired', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await activeTransport().sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) => String(url) === '/api/v1/chat/turns/turn-repaired/stream',
+      ),
+    ).toBe(true);
+    fetchMock.mockRestore();
+  });
+
+  it('does not retry a decision the server already made', async () => {
+    // 409 and 404 are answers, not ambiguity. Repeating them just asks the
+    // same question again.
+    const attempts: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        attempts.push(String(input));
+        return new Response('{}', { status: 409 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow('already has a turn in progress');
+
+    expect(attempts).toHaveLength(1);
+    fetchMock.mockRestore();
+  });
+
+  it('reports a deferred stop that the server refused', async () => {
+    // The stop is recorded before the turn has an id, so it is carried out
+    // later -- by which point `requestStop` has returned and throwing from the
+    // send would be swallowed by the SDK as an expected abort. The warning is
+    // the only channel left, and this is the exact race the deferral exists
+    // for, so it is the one that must not fail silently.
+    let releaseAdmission: (() => void) | null = null;
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          await new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-x', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/cancel')) return new Response(null, { status: 500 });
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+
+    const sending = transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    await act(async () => {});
+    await transport.requestStop();
+
+    await act(async () => {
+      releaseAdmission?.();
+      await sending;
+    });
+
+    expect(
+      await screen.findByText(/may still be running/i),
+    ).toBeInTheDocument();
+    fetchMock.mockRestore();
+  });
+
+  it("keeps each thread's turn stoppable independently", async () => {
+    // The transport outlives any one conversation and the sidebar can switch
+    // mid-turn, so its state has to be keyed by thread. Built directly here
+    // because the component binds `threadId` to whatever is on screen, and the
+    // bug is precisely about a second conversation existing.
+    let thread = 'thread-1';
+    const stops: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/cancel')) {
+          stops.push(url);
+          return new Response(null, { status: 204 });
+        }
+        if (url.endsWith('/turns/active')) {
+          // The conversation switched to has nothing running.
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          return new Response(
+            JSON.stringify({ turn_id: `turn-${thread}`, status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    const transport = standaloneTransport(() => thread);
+
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    // Switch away, and reattach in a conversation that is idle.
+    thread = 'thread-2';
+    await transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+    // Nothing running here, so there is nothing to stop.
+    await transport.requestStop();
+    expect(stops).toEqual([]);
+
+    // Back to the first, whose turn is still running.
+    thread = 'thread-1';
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-1/cancel']);
+    fetchMock.mockRestore();
+  });
+
+  it('clears the turn that ended, not whichever thread started last', async () => {
+    // The case a single "currently streaming" slot cannot express: A is still
+    // streaming when B starts, and A finishes *afterwards*. Anything that
+    // records only the latest stream attributes A's completion to B and
+    // silently disarms Stop for the turn the user is watching.
+    let thread = 'thread-1';
+    const stops: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/cancel')) {
+          stops.push(url);
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          return new Response(
+            JSON.stringify({ turn_id: `turn-${thread}`, status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    const transport = standaloneTransport(() => thread);
+
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    // The user switches and starts a second turn while the first still runs.
+    thread = 'thread-2';
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u2', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    // Now the *first* one finishes, named by its own turn.
+    transport.clearFinishedTurn('turn-thread-1');
+
+    // thread-2's turn is untouched and still stoppable.
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-2/cancel']);
+
+    // thread-1's is the one that was forgotten.
+    thread = 'thread-1';
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-2/cancel']);
+    fetchMock.mockRestore();
+  });
+
+  it('clears a finished turn through the id carried in message metadata', async () => {
+    // Exercise the component callback, not just the transport helper: the
+    // server emits this metadata on the opening frame and the SDK gives the
+    // completed message back to onFinish.
+    const fetchMock = mockAdmitThenAttach('turn-finished');
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+      | { onFinish?: ChatOnFinishCallback<UIMessage> }
+      | undefined;
+    await act(async () => {
+      chatOptions?.onFinish?.({
+        message: {
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [],
+          metadata: { turn_id: 'turn-finished' },
+        },
+        messages: [],
+        isAbort: false,
+        isDisconnect: false,
+        isError: false,
+        finishReason: 'stop',
+      });
+    });
+
+    fetchMock.mockClear();
+    await transport.requestStop();
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it('offers a Retry that replays the unresolved send under its own key', async () => {
+    // The repair path is only reachable with the original key and body, and
+    // typing the message again mints a new key -- so without an explicit retry
+    // the preserved key is unreachable and the turn stays stranded.
+    const bodies: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          bodies.push(String(init?.body));
+          if (bodies.length <= 3) return new Response('{}', { status: 503 });
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-repaired', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn().mockResolvedValue(undefined),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: new Error('Could not start this turn; please try again'),
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    // A send whose outcome was never established.
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    // The banner now offers recovery, and taking it replays the same request.
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+
+    expect(bodies).toHaveLength(4);
+    const keys = bodies.map(
+      (b) => (JSON.parse(b) as { idempotency_key: string }).idempotency_key,
+    );
+    expect(new Set(keys).size).toBe(1);
+    // Recovery repeats the same logical request under the same key.
+    expect(new Set(bodies).size).toBe(1);
+    fetchMock.mockRestore();
+  });
+
+  it('keeps Retry visible after switching away from an unresolved thread', async () => {
+    // The SDK chat -- including its error -- is recreated per thread, while the
+    // transport deliberately retains an unresolved key. Recovery therefore has
+    // to render from that retained state rather than from the transient error.
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+        {
+          thread_id: 'thread-2',
+          title: 'Session 2',
+          created_at: '2024-01-02T00:00:00+00:00',
+          updated_at: '2024-01-02T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession: jest.fn(),
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession: jest.fn(),
+    });
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 503 }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    await expect(
+      activeTransport().sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    // No SDK error was supplied by the mock, yet unresolved state alone makes
+    // the repair reachable.
+    expect(
+      await screen.findByRole('button', { name: /^retry$/i }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Session 2'));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /^retry$/i }),
+      ).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Session 1'));
+    expect(
+      await screen.findByRole('button', { name: /^retry$/i }),
+    ).toBeInTheDocument();
+    fetchMock.mockRestore();
+  });
+
+  it('keeps the key when every admission attempt was ambiguous', async () => {
+    // A turn may exist server-side after a 503, and its key is the only route
+    // back to it. Dropping the key strands that turn until its lease lapses --
+    // exactly what the repair path exists to prevent.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 503 }));
+
+    const unresolved: boolean[] = [];
+    const transport = standaloneTransport(
+      () => 'thread-1',
+      (_threadId, value) => unresolved.push(value),
+    );
+
+    await expect(
+      transport.sendMessages(
+        sendArgs([
+          { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+
+    expect(unresolved.at(-1)).toBe(true);
+    // A decision, by contrast, spends the key.
+    fetchMock.mockResolvedValue(new Response('{}', { status: 409 }));
+    await expect(
+      transport.sendMessages(
+        sendArgs([
+          { id: 'u2', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+        ]),
+      ),
+    ).rejects.toThrow();
+    expect(unresolved.at(-1)).toBe(false);
+    fetchMock.mockRestore();
+  });
+
+  it('retries an expired admission once under a fresh key', async () => {
+    // Expiry is a definitive terminal outcome, not an ambiguous 503: the old
+    // key can only resolve to the expired turn, so repairing it forever would
+    // never start the user's message. The logical send gets one fresh key.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          if (keys.length === 1) {
+            return new Response('{}', {
+              status: 503,
+              headers: { 'X-Seizu-Chat-Admission': 'expired' },
+            });
+          }
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-fresh', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    await activeTransport().sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      '/api/v1/chat/turns/turn-fresh/stream',
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('gives admission its own deadline so a hung response cannot pin a send', async () => {
+    // The SDK's abort signal is deliberately not used for admission, so without
+    // a deadline of its own a response that never arrives blocks the retry loop
+    // and any stop waiting on a turn id.
+    jest.useFakeTimers();
+    try {
+      const seen: AbortSignal[] = [];
+      const fetchMock = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (_input, init) => {
+          if (init?.signal) seen.push(init.signal);
+          return new Response('{}', { status: 409 });
+        });
+
+      renderChat({ initialPath: '/app/chat/thread-1' });
+      await act(async () => {});
+
+      await expect(
+        activeTransport().sendMessages(
+          sendArgs([
+            { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+          ]),
+        ),
+      ).rejects.toThrow();
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toBeInstanceOf(AbortSignal);
+      fetchMock.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('reuses one idempotency key across sends of the same message', async () => {
+    // The server promises that repeating a request resolves to the turn it
+    // already admitted. A fresh key per attempt puts that out of reach: the
+    // repeat admits a *second* turn instead of recovering the first.
+    const keys: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/turns')) {
+          keys.push(
+            (JSON.parse(String(init?.body)) as { idempotency_key: string })
+              .idempotency_key,
+          );
+          return new Response('{}', { status: 503 });
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    const message = [
+      {
+        id: 'u1',
+        role: 'user' as const,
+        parts: [{ type: 'text' as const, text: 'Hi' }],
+      },
+    ];
+
+    await expect(transport.sendMessages(sendArgs(message))).rejects.toThrow();
+    await expect(transport.sendMessages(sendArgs(message))).rejects.toThrow();
+
+    // Every attempt, internal retries included, carries one key.
+    expect(keys.length).toBeGreaterThan(1);
+    expect(new Set(keys).size).toBe(1);
+    fetchMock.mockRestore();
+  });
+
+  it('surfaces a stop the server refused instead of looking successful', async () => {
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-42', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (url.endsWith('/cancel')) return new Response(null, { status: 403 });
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    const transport = activeTransport();
+    await transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    await expect(transport.requestStop()).rejects.toThrow('403');
+    fetchMock.mockRestore();
+  });
+
+  it('resolves the running turn before reattaching to it', async () => {
+    // A reloaded client has a thread but no turn id -- it never saw the
+    // admission -- and the SDK's own reconnect would be an unauthenticated GET
+    // at a URL that no longer identifies anything.
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        if (String(input).endsWith('/turns/active')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-99', status: 'existing' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    fetchMock.mockClear();
+
+    await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    const [activeUrl, activeInit] = fetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(activeUrl).toBe('/api/v1/chat/threads/thread-1/turns/active');
+    expect(activeInit.headers).toEqual(
+      expect.objectContaining({ Authorization: 'Bearer token-123' }),
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      '/api/v1/chat/turns/turn-99/stream',
+    );
+    fetchMock.mockRestore();
+  });
+
+  it('reports no running turn rather than attaching to nothing', async () => {
+    // 204 is how the server says the thread is idle; the SDK maps a null return
+    // to "nothing to resume".
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+    fetchMock.mockClear();
+
+    const result = await activeTransport().reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+
+    expect(result).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockRestore();
+  });
+
+  it('drops the partial reply before resuming after a dropped connection', async () => {
+    // The replay starts at the turn's first frame and text-start pushes a fresh
+    // part, so keeping the partial message would render the answer twice.
+    const setMessages = jest.fn();
+    const resumeStream = jest.fn().mockResolvedValue(undefined);
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream,
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages,
+      clearError: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat/thread-1' });
+    await act(async () => {});
+
+    const chatOptions = mockUseChat.mock.calls.at(-1)?.[0] as
+      | { onFinish?: ChatOnFinishCallback<UIMessage> }
+      | undefined;
+    await act(async () => {
+      chatOptions?.onFinish?.({
+        message: { id: 'partial', role: 'assistant', parts: [] },
+        messages: [],
+        isAbort: false,
+        isDisconnect: true,
+        isError: true,
+        finishReason: undefined,
+      });
+    });
+
+    expect(resumeStream).toHaveBeenCalled();
+    const trim = setMessages.mock.calls.at(-1)?.[0] as (
+      messages: UIMessage[],
+    ) => UIMessage[];
+    expect(
+      trim([
+        { id: 'user-1', role: 'user', parts: [] },
+        { id: 'partial', role: 'assistant', parts: [] },
+      ]),
+    ).toEqual([{ id: 'user-1', role: 'user', parts: [] }]);
+    // A turn that dropped before any assistant text arrived has nothing to trim.
+    expect(trim([{ id: 'user-1', role: 'user', parts: [] }])).toEqual([
+      { id: 'user-1', role: 'user', parts: [] },
+    ]);
   });
 });

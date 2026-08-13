@@ -514,8 +514,8 @@ REMEDIATION_FORK_ORG = str_env("REMEDIATION_FORK_ORG", "")
 REMEDIATION_GIT_USER = str_env("REMEDIATION_GIT_USER", "seizu-remediation-bot")
 REMEDIATION_GIT_EMAIL = str_env("REMEDIATION_GIT_EMAIL", "seizu-remediation@localhost")
 
-# Timeout in seconds for the overall FastAPI request handling. Requests that
-# exceed this limit receive a 504 response.
+# Timeout in seconds for overall FastAPI request handling and the Gunicorn
+# worker watchdog. Ordinary requests that exceed this limit receive a 504.
 API_REQUEST_TIMEOUT = int_env("API_REQUEST_TIMEOUT", 60)
 
 # Timeout in seconds for JWKS endpoint HTTP requests used to fetch signing keys.
@@ -890,6 +890,19 @@ MCP_TOOL_RESULT_MAX_BYTES = int_env("MCP_TOOL_RESULT_MAX_BYTES", 25_000_000)
 
 # Maximum lifetime for an approved or denied mutating-action confirmation.
 ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 1800)
+
+# How long a finished chat turn's event log stays replayable. This is the window
+# a client has to reconnect and replay a turn; it is not conversation history
+# (that lives in the checkpoint), so it can be short.
+CHAT_TURN_RETENTION_SECONDS = int_env("CHAT_TURN_RETENTION_SECONDS", 600)
+# Target added latency for flushing and reading stream batches. The idle poll
+# ceiling is derived from it; the two sides cannot be tuned into disagreement.
+CHAT_TURN_STREAM_LATENCY_MS = int_env("CHAT_TURN_STREAM_LATENCY_MS", 200)
+# How long one interactive turn may run before its workflow gives up. The
+# activity gets this plus a margin; a turn that hits it is recorded as failed
+# rather than left running. It is also what bounds a *running* turn's lease --
+# see ``chat_turn_lease_expiry``.
+CHAT_TURN_TIMEOUT_SECONDS = int_env("CHAT_TURN_TIMEOUT_SECONDS", 900)
 
 # Optional public browser origin used when MCP clients need to show a user an
 # approval URL. When unset, Seizu derives the origin from MCP_RESOURCE_URL.

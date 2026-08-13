@@ -1,8 +1,17 @@
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from reporting.schema.chat import ChatSessionItem, IdleChatSession, ScheduledChatItem, ScheduledChatVersion
+from reporting.schema.chat import (
+    ChatSessionItem,
+    ChatTurnAdmission,
+    ChatTurnCommand,
+    ChatTurnEventPage,
+    ChatTurnItem,
+    IdleChatSession,
+    ScheduledChatItem,
+    ScheduledChatVersion,
+)
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
     SkillItem,
@@ -847,6 +856,58 @@ async def update_chat_session_title(user_id: str, thread_id: str, title: str) ->
 
 async def delete_chat_session(user_id: str, thread_id: str) -> bool:
     return await get_store().delete_chat_session(user_id, thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Chat turn event log convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def admit_chat_turn(
+    user_id: str,
+    thread_id: str,
+    message_id: str,
+    text_id: str,
+    idempotency_key: str,
+    command: ChatTurnCommand,
+) -> ChatTurnAdmission:
+    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, command)
+
+
+async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
+    return await get_store().get_active_chat_turn(user_id, thread_id)
+
+
+async def get_chat_turn(turn_id: str, user_id: str | None = None) -> ChatTurnItem | None:
+    return await get_store().get_chat_turn(turn_id, user_id=user_id)
+
+
+async def append_chat_turn_events(turn_id: str, seq: int, parts_json: str) -> bool:
+    return await get_store().append_chat_turn_events(turn_id, seq, parts_json)
+
+
+async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
+    return await get_store().read_chat_turn_events(turn_id, after_seq, limit)
+
+
+async def request_chat_turn_cancel(turn_id: str, user_id: str) -> ChatTurnItem | None:
+    return await get_store().request_chat_turn_cancel(turn_id, user_id)
+
+
+async def finish_chat_turn(
+    turn_id: str,
+    status: Literal["completed", "failed", "canceled", "expired"],
+    last_seq: int,
+) -> ChatTurnItem | None:
+    return await get_store().finish_chat_turn(turn_id, status, last_seq)
+
+
+async def delete_chat_turn(turn_id: str) -> bool:
+    return await get_store().delete_chat_turn(turn_id)
+
+
+async def list_expired_chat_turns(expired_before: str, limit: int) -> list[str]:
+    return await get_store().list_expired_chat_turns(expired_before, limit)
 
 
 # ---------------------------------------------------------------------------

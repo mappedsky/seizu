@@ -7,24 +7,54 @@ from reporting.schema.reporting_config import ScheduleSpec
 CHAT_THREAD_ID_PATTERN = r"^[0-9]+$"
 
 
-class ChatStreamRequest(BaseModel):
+class ChatTurnRequest(BaseModel):
     # Cap the message so a single turn can't store an unbounded payload in the
     # checkpoint (and, once a model is wired in, can't blow the token budget).
     message: str = Field(default="", max_length=32000)
-    thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
     resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
     continue_response: bool = False
     continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # Client-minted key making admission idempotent. A repeat of this request
+    # returns the turn it already admitted rather than starting a second one,
+    # which is how a lost response is resolved -- by asking again, not by
+    # racing a different kind of write.
+    idempotency_key: str = Field(min_length=8, max_length=64)
     # Run the turn with action confirmations bypassed. Requires the
     # chat:bypass_permissions permission (403 otherwise); every bypassed tool
     # execution is audit-logged.
     bypass_confirmations: bool = False
 
     @model_validator(mode="after")
-    def require_message_or_resume(self) -> "ChatStreamRequest":
+    def require_message_or_resume(self) -> "ChatTurnRequest":
         if not self.message and not self.resume_confirmation_id and not self.continue_response:
             raise ValueError("message, resume_confirmation_id, or continue_response is required")
         return self
+
+
+class ChatTurnCommand(BaseModel):
+    """The immutable work and authority captured when a turn is admitted.
+
+    A retry may be the request that successfully hands the turn to Temporal, so
+    dispatch must use this stored command rather than the retry's mutable body
+    or its caller's current permissions.
+    """
+
+    message: str = Field(default="", max_length=32000)
+    resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    continue_response: bool = False
+    continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    bypass_confirmations: bool = False
+    permission_cap: list[str] = Field(default_factory=list)
+    timeout_seconds: int = Field(gt=0)
+
+
+class ChatTurnAdmissionResponse(BaseModel):
+    """What admission did, and the turn to attach to."""
+
+    turn_id: str
+    # "created" started a turn; "existing" resolved a repeat of the same
+    # request to the turn it already made.
+    status: Literal["created", "existing"]
 
 
 class ChatHistoryMessage(BaseModel):
@@ -76,6 +106,100 @@ class CreateChatSessionRequest(BaseModel):
 
 class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+
+# A batch has to fit one DynamoDB item (400KB hard limit), with room left for the
+# keys and the rest of the item. The producer splits rather than the store, so
+# this is a validation bound, not a chunking hint.
+CHAT_TURN_MAX_BATCH_BYTES = 320_000
+# Ceiling on batches per turn, so a runaway producer cannot write without bound.
+CHAT_TURN_MAX_SEQ = 5_000
+
+
+class ChatTurnAdmission(BaseModel):
+    """What happened when a turn was asked for, and the turn if there is one.
+
+    An outcome rather than an exception per outcome. Admission used to raise
+    four different errors, each inferred after the fact from whichever database
+    constraint happened to reject the write -- so a single uniqueness collision
+    could mean "duplicate request", "a stop got here first", "another turn is
+    running" or "the conversation is being deleted", and both backends read
+    mutable state afterwards to guess which. The store knows which it did; this
+    is it saying so.
+    """
+
+    # created  -- a new turn, admitted and reserved.
+    # existing -- this exact request was already admitted; here is that turn.
+    #             Never a cancellation: a repeat of a request is a repeat.
+    # busy     -- another turn holds the thread.
+    # retired  -- the conversation is gone or being deleted.
+    outcome: Literal["created", "existing", "busy", "retired", "expired"]
+    turn: "ChatTurnItem | None" = None
+
+
+class ChatTurnItem(BaseModel):
+    """The header of one in-flight chat turn's replayable event log.
+
+    Ephemeral: retained only long enough for a dropped SSE connection to come
+    back, then swept by ``expires_at``. ``message_id``/``text_id`` live here
+    rather than being minted per delivery because a replay has to reproduce the
+    ids the first delivery used -- a fresh id reads to the client as a second
+    assistant message rather than the same one.
+    """
+
+    turn_id: str
+    thread_id: str = Field(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN)
+    user_id: str
+    message_id: str = Field(min_length=1, max_length=128)
+    text_id: str = Field(min_length=1, max_length=128)
+    # The key the admitting request carried. Kept so a repeat of that
+    # request resolves to this turn. It is *not* a way to address the turn:
+    # everything acting on a turn names its ``turn_id``, which the client has
+    # from the moment admission returns.
+    idempotency_key: str = Field(min_length=8, max_length=64)
+    # The producer always dispatches this stored command. Repeating an
+    # idempotency key can therefore resolve safely even if the retrying request
+    # or the caller's permissions changed after admission.
+    command: ChatTurnCommand
+    # ``expired`` is a turn that was admitted but could not be handed to a
+    # producer before the safe portion of its claim elapsed. It is distinct
+    # from a producer failure because repeating the admission must keep
+    # returning the same retryable outcome rather than replaying an empty log.
+    status: Literal["running", "completed", "failed", "canceled", "expired"] = "running"
+    # None until the turn finishes. A reader may stop only once the status is
+    # terminal *and* it has consumed through last_seq: a terminal status on its
+    # own races the visibility of the final batches.
+    last_seq: int | None = None
+    # Set by Stop, and by deleting the conversation. The producer may be in
+    # another process, so it is asked through the record rather than signalled
+    # directly; it checks on its heartbeat and stops.
+    cancel_requested: bool = False
+    created_at: str
+    updated_at: str
+    # Two meanings, one field. While the turn runs this is its claim on the
+    # thread, derived from the turn's own timeout so it always outlasts every
+    # way the turn can still legitimately be running -- admission retires a
+    # lapsed one, and retiring a live turn would put two producers on one
+    # conversation. Once the turn ends it is re-stamped as the reconnect window,
+    # which is far shorter.
+    expires_at: str
+
+
+ChatTurnAdmission.model_rebuild()
+
+
+class ChatTurnEventBatch(BaseModel):
+    """One flush: the exact JSON array text the live stream sent."""
+
+    seq: int = Field(ge=1, le=CHAT_TURN_MAX_SEQ)
+    parts_json: str
+
+
+class ChatTurnEventPage(BaseModel):
+    """A tail read: the turn's current state plus the batches after a cursor."""
+
+    turn: ChatTurnItem
+    batches: list[ChatTurnEventBatch] = Field(default_factory=list)
 
 
 class ChatScheduleSpec(ScheduleSpec):

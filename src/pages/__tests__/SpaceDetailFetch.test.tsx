@@ -21,12 +21,9 @@ jest.mock('src/hooks/usePermissions', () => ({
 }));
 
 // Keep the report body out of it; this is only about the tree fetch.
-jest.mock('src/components/ReportPane', () => ({
-  __esModule: true,
-  default: ({ id }: { id: string | undefined }) => (
-    <div data-testid="report-pane">{id}</div>
-  ),
-}));
+function StubReportPane({ id }: { id: string | undefined }) {
+  return <div data-testid="report-pane">{id}</div>;
+}
 
 const theme = createTheme();
 const mockUsePermissions =
@@ -149,10 +146,13 @@ describe('SpaceDetail tree fetching', () => {
         >
           <ThemeProvider theme={theme}>
             <Routes>
-              <Route path="/app/spaces/:spaceId" element={<SpaceDetail />} />
+              <Route
+                path="/app/spaces/:spaceId"
+                element={<SpaceDetail ReportPaneComponent={StubReportPane} />}
+              />
               <Route
                 path="/app/spaces/:spaceId/reports/:reportId"
-                element={<SpaceDetail />}
+                element={<SpaceDetail ReportPaneComponent={StubReportPane} />}
               />
             </Routes>
           </ThemeProvider>

@@ -1,0 +1,115 @@
+"""Add the chat turn event log: turn headers and their append-only batches.
+
+A turn's stream parts are written by whichever process runs the turn and read
+back by whichever process is serving the client's SSE connection, so they need
+a store both can reach. The records are ephemeral -- they exist only for as long
+as a dropped connection might come back -- which is why they carry ``expires_at``
+and are swept rather than kept.
+
+Every operation is inspector-guarded. That is load-bearing rather than
+defensive: on a fresh database the baseline revision runs
+``SQLModel.metadata.create_all``, which has already created both tables and both
+indexes by the time this revision runs.
+"""
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "0007_chat_turn_events"
+down_revision = "0006_chat_session_retirement"
+branch_labels = None
+depends_on = None
+
+_TURNS = "chat_turns"
+_EVENTS = "chat_turn_events"
+_TURN_INDEXES = {
+    "ix_chat_turns_thread_status": ["user_id", "thread_id", "status"],
+    "ix_chat_turns_expires_at": ["expires_at"],
+}
+# One running turn per thread, enforced by the database rather than by a read
+# above the insert -- two concurrent requests can both see no running turn and
+# both commit, leaving two producers on one LangGraph thread. Partial, so the
+# many finished turns a thread accumulates do not collide.
+_RUNNING_TURN_INDEX = "uq_chat_turns_one_running"
+# One turn per idempotency key: a repeat of an admission request resolves to
+# the turn it already made rather than making another.
+_IDEMPOTENCY_INDEX = "uq_chat_turns_idempotency_key"
+_RUNNING_TURN_WHERE = sa.text("status = 'running'")
+
+
+def _inspector() -> sa.Inspector:
+    return sa.inspect(op.get_bind())
+
+
+def _tables() -> set[str]:
+    return set(_inspector().get_table_names())
+
+
+def _indexes(table: str) -> set[str]:
+    inspector = _inspector()
+    if table not in inspector.get_table_names():
+        return set()
+    return {index["name"] for index in inspector.get_indexes(table)}
+
+
+def upgrade() -> None:
+    existing = _tables()
+    if _TURNS not in existing:
+        op.create_table(
+            _TURNS,
+            sa.Column("turn_id", sa.String(), primary_key=True),
+            sa.Column("user_id", sa.String(), nullable=False),
+            sa.Column("thread_id", sa.String(), nullable=False),
+            sa.Column("message_id", sa.String(), nullable=False),
+            sa.Column("text_id", sa.String(), nullable=False),
+            sa.Column("idempotency_key", sa.String(), nullable=False),
+            # The admitted command is the durable source of truth for first
+            # dispatch and any later handoff repair.
+            sa.Column("command", sa.JSON(), nullable=False),
+            sa.Column("status", sa.String(), nullable=False, server_default="running"),
+            sa.Column("last_seq", sa.Integer(), nullable=True),
+            sa.Column("cancel_requested", sa.Boolean(), nullable=False, server_default=sa.false()),
+            sa.Column("created_at", sa.String(), nullable=False),
+            sa.Column("updated_at", sa.String(), nullable=False),
+            sa.Column("expires_at", sa.String(), nullable=False),
+        )
+    turn_indexes = _indexes(_TURNS)
+    for name, columns in _TURN_INDEXES.items():
+        if name not in turn_indexes:
+            op.create_index(name, _TURNS, columns)
+    if _IDEMPOTENCY_INDEX not in turn_indexes:
+        op.create_index(_IDEMPOTENCY_INDEX, _TURNS, ["user_id", "thread_id", "idempotency_key"], unique=True)
+    if _RUNNING_TURN_INDEX not in turn_indexes:
+        op.create_index(
+            _RUNNING_TURN_INDEX,
+            _TURNS,
+            ["user_id", "thread_id"],
+            unique=True,
+            postgresql_where=_RUNNING_TURN_WHERE,
+            sqlite_where=_RUNNING_TURN_WHERE,
+        )
+
+    if _EVENTS not in existing:
+        op.create_table(
+            _EVENTS,
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+            sa.Column("turn_id", sa.String(), nullable=False),
+            sa.Column("seq", sa.Integer(), nullable=False),
+            # Text, not JSON: a replay has to reproduce the exact bytes the live
+            # stream sent, and a JSON column renormalises them.
+            sa.Column("parts_json", sa.Text(), nullable=False),
+            sa.Column("created_at", sa.String(), nullable=False),
+            sa.UniqueConstraint("turn_id", "seq", name="uq_chat_turn_events_turn_seq"),
+        )
+
+
+def downgrade() -> None:
+    existing = _tables()
+    if _EVENTS in existing:
+        op.drop_table(_EVENTS)
+    if _TURNS in existing:
+        turn_indexes = _indexes(_TURNS)
+        for name in (*_TURN_INDEXES, _RUNNING_TURN_INDEX, _IDEMPOTENCY_INDEX):
+            if name in turn_indexes:
+                op.drop_index(name, table_name=_TURNS)
+        op.drop_table(_TURNS)

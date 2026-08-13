@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
+import { useEffect } from 'react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
@@ -18,22 +19,17 @@ jest.mock('src/hooks/usePermissions', () => ({
 }));
 
 // The report body is exercised by ReportPane.test.tsx; here we only care which
-// report is handed to it, and that each one gets a fresh instance. The mock
-// records every mount so a missing `key` (which would reuse the instance
-// across a report switch) is detectable.
-jest.mock('src/components/ReportPane', () => {
-  const react = require('react');
-  return {
-    __esModule: true,
-    default: ({ id }: { id: string | undefined }) => {
-      react.useEffect(() => {
-        const g = globalThis as { __paneMounts?: string[] };
-        g.__paneMounts = [...(g.__paneMounts ?? []), id ?? ''];
-      }, []);
-      return react.createElement('div', { 'data-testid': 'report-pane' }, id);
-    },
-  };
-});
+// report is handed to it, and that each one gets a fresh instance. This local
+// component records every mount so a missing `key` (which would reuse the
+// instance across a report switch) is detectable without leaking a module mock
+// into other test files in Bun's shared process.
+function MountTrackingReportPane({ id }: { id: string | undefined }) {
+  useEffect(() => {
+    const g = globalThis as { __paneMounts?: string[] };
+    g.__paneMounts = [...(g.__paneMounts ?? []), id ?? ''];
+  }, []);
+  return <div data-testid="report-pane">{id}</div>;
+}
 
 function paneMounts(): string[] {
   return (globalThis as { __paneMounts?: string[] }).__paneMounts ?? [];
@@ -117,7 +113,7 @@ function renderAt(path: string) {
             path="/app/spaces/:spaceId"
             element={
               <>
-                <SpaceDetail />
+                <SpaceDetail ReportPaneComponent={MountTrackingReportPane} />
                 <LocationTracker />
               </>
             }
@@ -126,7 +122,7 @@ function renderAt(path: string) {
             path="/app/spaces/:spaceId/reports/:reportId"
             element={
               <>
-                <SpaceDetail />
+                <SpaceDetail ReportPaneComponent={MountTrackingReportPane} />
                 <LocationTracker />
               </>
             }

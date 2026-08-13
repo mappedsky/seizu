@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from reporting.schema.chat import ChatTurnCommand
 from reporting.schema.space_config import SpaceDeleteResult
 from reporting.services import report_store
 from reporting.services.report_store.dynamodb import DynamoDBReportStore
@@ -97,6 +98,15 @@ def mock_store():
         "get_scheduled_chat_version": None,
         "list_scheduled_chat_sessions": [],
         "complete_chat_session_run": None,
+        "admit_chat_turn": None,
+        "get_active_chat_turn": None,
+        "get_chat_turn": None,
+        "append_chat_turn_events": True,
+        "read_chat_turn_events": None,
+        "request_chat_turn_cancel": None,
+        "finish_chat_turn": None,
+        "delete_chat_turn": True,
+        "list_expired_chat_turns": [],
         "list_scheduled_query_versions": [],
         "get_scheduled_query_version": None,
         "list_toolsets": [],
@@ -630,6 +640,34 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         "partial",
         ["Planner fallback"],
     )
+
+    command = ChatTurnCommand(message="Hi", permission_cap=[], timeout_seconds=60)
+    await report_store.admit_chat_turn("u1", "thread-1", "msg_1", "text_1", "ik_key0001", command)
+    mock_store.admit_chat_turn.assert_awaited_once_with("u1", "thread-1", "msg_1", "text_1", "ik_key0001", command)
+
+    await report_store.get_active_chat_turn("u1", "thread-1")
+    mock_store.get_active_chat_turn.assert_awaited_once_with("u1", "thread-1")
+
+    await report_store.get_chat_turn("turn-1", user_id="u1")
+    mock_store.get_chat_turn.assert_awaited_once_with("turn-1", user_id="u1")
+
+    await report_store.append_chat_turn_events("turn-1", 1, '["one"]')
+    mock_store.append_chat_turn_events.assert_awaited_once_with("turn-1", 1, '["one"]')
+
+    await report_store.read_chat_turn_events("turn-1", 0, 200)
+    mock_store.read_chat_turn_events.assert_awaited_once_with("turn-1", 0, 200)
+
+    await report_store.request_chat_turn_cancel("turn-1", "u1")
+    mock_store.request_chat_turn_cancel.assert_awaited_once_with("turn-1", "u1")
+
+    await report_store.finish_chat_turn("turn-1", "completed", 4)
+    mock_store.finish_chat_turn.assert_awaited_once_with("turn-1", "completed", 4)
+
+    await report_store.delete_chat_turn("turn-1")
+    mock_store.delete_chat_turn.assert_awaited_once_with("turn-1")
+
+    await report_store.list_expired_chat_turns("2024-01-01T00:00:00+00:00", 50)
+    mock_store.list_expired_chat_turns.assert_awaited_once_with("2024-01-01T00:00:00+00:00", 50)
 
     await report_store.delete_scheduled_chat("sc1")
     mock_store.delete_scheduled_chat.assert_awaited_once_with("sc1")

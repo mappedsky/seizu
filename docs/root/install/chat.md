@@ -56,6 +56,62 @@ Assistant turns include an expandable details section showing thinking and tool 
 
 Sessions created by scheduled chats are excluded from the sidebar and are read-only; see [scheduled chats](chat-schedules.html).
 
+## Turns outlive the connection watching them
+
+A turn does not run inside its HTTP request. Sending a message admits a **turn**
+— a Temporal workflow on `seizu-temporal-worker` — which writes to a short-lived
+**turn event log**; the request is a reader over that log, so closing
+the tab, losing the network, or navigating away neither stops the turn nor loses
+what it has already produced. Coming back replays the turn from its first token
+and then follows it live — the browser reattaches automatically on load, and
+after a dropped connection.
+
+**Stop** ends the turn on the server, not just the stream. That is a separate
+request, because closing the connection no longer stops anything: the turn would
+carry on generating and could still run the actions it had queued. It takes
+effect immediately, including while the turn is blocked on a slow model call or
+tool.
+
+Deleting a conversation closes it to new turns, stops the one running, and only
+then removes anything. If the turn cannot be stopped, the delete **fails with a
+503 and changes nothing** — the conversation stays closed, so retrying is safe
+and is a plain repeat.
+
+Two things this does *not* recover:
+
+- **A failed turn is not retried.** An agent turn is expensive and not
+  idempotent, so a failure is reported rather than repeated.
+- **A stopped turn stays stopped.** Cancelling is a decision, not a fault, so
+  nothing restarts it.
+
+A restart of the `seizu` web process no longer ends a turn: the turn runs as a
+Temporal workflow on `seizu-temporal-worker`, and the browser reattaches to it
+when the page comes back.
+
+Turn logs are deleted `CHAT_TURN_RETENTION_SECONDS` after the turn finishes, and
+immediately when the session is deleted. Expired logs are collected at the end
+of each turn, in small batches — there is no scheduler to run. They are not
+conversation history: that lives in the checkpoint and is served by
+`/api/v1/chat/history`.
+
+Because each turn is a workflow, **interactive chat requires a reachable
+Temporal server and a running `seizu-temporal-worker`**. This is a change: chat
+previously ran entirely in the web process. Turns appear in the Temporal UI
+alongside scheduled chats and workflows.
+
+### Gunicorn worker timeout
+
+Seizu's bundled Gunicorn configuration reads `API_REQUEST_TIMEOUT` for its
+worker watchdog, matching the FastAPI request deadline (60 seconds by default).
+Under `UvicornWorker` this is a heartbeat watchdog rather than a per-request
+deadline: a healthy long-lived chat stream continues to notify Gunicorn and is
+not cut short by this value.
+
+Chat production runs in Temporal, so replacing a wedged web worker does not
+stop the turn. The client can reconnect and replay the durable event log. If
+you supply your own Gunicorn configuration, choose its watchdog for web-worker
+health rather than for the maximum duration of a chat turn.
+
 ## Orchestration and run budgets
 
 For multi-step requests, chat can route a turn through a plan → dispatch → verify orchestration instead of the single-agent path. A cheap router classifies each turn; simple turns take the direct path with no extra LLM call, while complex ones get a planner, scoped sub-agent workers (run in parallel when steps are independent), and a verify gate with bounded retry. This is on by default and controlled by the `CHAT_ORCHESTRATOR_*` settings below.
@@ -277,6 +333,9 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_TOOL_RESULT_MAX_ROWS` | `100` | Maximum rows returned to chat from one tool call (normal MCP calls are unaffected). |
 | `CHAT_TOOL_RESULT_MAX_BYTES` | `200000` | Maximum serialized bytes returned to chat from one tool call. |
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
+| `CHAT_TURN_RETENTION_SECONDS` | `600` | How long a finished turn stays replayable — the window a client has to reconnect. Not conversation history. |
+| `CHAT_TURN_STREAM_LATENCY_MS` | `200` | Target delay for flushing produced parts and polling their log. Polling backs off automatically while a turn is quiet. |
+| `CHAT_TURN_TIMEOUT_SECONDS` | `900` | How long one turn may run before its workflow gives up. A turn that hits this is recorded as failed rather than left running. |
 | `CHAT_SESSION_REAP_ENABLED` | `false` | Retire sessions nobody has come back to. **Deletes chat history.** |
 | `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
 | `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |
