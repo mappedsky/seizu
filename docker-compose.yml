@@ -375,11 +375,8 @@ services:
       # Interactive turns run here, so the turn settings apply to this
       # service too -- the producer half of them.
       - CHAT_TURN_RETENTION_SECONDS
-      - CHAT_TURN_FLUSH_MS
-      - CHAT_TURN_HEARTBEAT_SECONDS
-      - CHAT_TURN_SWEEP_INTERVAL_SECONDS
+      - CHAT_TURN_STREAM_LATENCY_MS
       - CHAT_TURN_TIMEOUT_SECONDS
-      - CHAT_TURN_LEASE_MARGIN_SECONDS
       - CHAT_LLM_SYSTEM_PROMPT
       - CHAT_LLM_PROGRESSIVE_DISCLOSURE
       - CHAT_LLM_MAX_AUTO_ACTIONS
@@ -474,6 +471,12 @@ services:
       target: dev
     user: seizu
     depends_on:
+      # Interactive chat admission starts a Temporal workflow. Waiting for the
+      # frontend here prevents the web service becoming healthy while chat's
+      # required runtime is still starting. The worker may start concurrently:
+      # Temporal durably queues workflows until it begins polling.
+      temporal:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
       dynamodb:
@@ -580,15 +583,8 @@ services:
       # Chat turns run beside the request rather than inside it, so the
       # event log they stream through is read by this service.
       - CHAT_TURN_RETENTION_SECONDS
-      - CHAT_TURN_FLUSH_MS
-      - CHAT_TURN_POLL_MS
-      - CHAT_TURN_POLL_MAX_MS
-      - CHAT_TURN_HEARTBEAT_SECONDS
-      - CHAT_TURN_STOP_WAIT_SECONDS
-      - CHAT_TURN_SWEEP_INTERVAL_SECONDS
-      - CHAT_TURN_TAIL_MAX_SECONDS
+      - CHAT_TURN_STREAM_LATENCY_MS
       - CHAT_TURN_TIMEOUT_SECONDS
-      - CHAT_TURN_LEASE_MARGIN_SECONDS
       # This worker also reconciles and runs scheduled chats.
       - CHAT_SCHEDULES_ENABLED
       - CHAT_SCHEDULE_TIMEOUT_SECONDS

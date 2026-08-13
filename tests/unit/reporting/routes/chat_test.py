@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -17,11 +18,11 @@ from reporting.routes import chat
 from reporting.schema.chat import (
     ChatSessionItem,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
     ChatTurnRequest,
-    ExpiredChatTurn,
 )
 from reporting.schema.report_config import User
 from reporting.services import chat_turns
@@ -100,6 +101,20 @@ def _chat_enabled(mocker):
 #: has none -- the store makes that decision in the same write, so the fake has
 #: to as well.
 _SESSIONS: dict[tuple[str, str], ChatSessionItem] = {}
+_REQUEST_KEYS = itertools.count()
+
+
+def _command(message: str = "Hi") -> ChatTurnCommand:
+    return ChatTurnCommand(
+        message=message,
+        permission_cap=sorted(ALL_PERMISSIONS),
+        timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+    )
+
+
+def _request(message: str = "Hi", **values: Any) -> ChatTurnRequest:
+    values.setdefault("idempotency_key", f"ik_direct_{next(_REQUEST_KEYS)}")
+    return ChatTurnRequest(message=message, **values)
 
 
 @pytest.fixture(autouse=True)
@@ -111,30 +126,25 @@ def _chat_turn_log(mocker):
     poll intervals drop to a tick so a test is not paced by the production
     cadence.
     """
-    mocker.patch("reporting.settings.CHAT_TURN_FLUSH_MS", 1)
-    mocker.patch("reporting.settings.CHAT_TURN_POLL_MS", 1)
-    mocker.patch("reporting.settings.CHAT_TURN_POLL_MAX_MS", 1)
-    mocker.patch("reporting.settings.CHAT_TURN_HEARTBEAT_SECONDS", 1)
-    mocker.patch("reporting.settings.CHAT_TURN_STOP_WAIT_SECONDS", 0.3)
+    mocker.patch("reporting.settings.CHAT_TURN_STREAM_LATENCY_MS", 1)
+    mocker.patch("reporting.services.chat_turns._TURN_CANCEL_POLL_SECONDS", 0.01)
+    mocker.patch("reporting.services.chat_turns.TURN_STOP_WAIT_SECONDS", 0.3)
     mocker.patch("reporting.services.chat_turns._last_sweep_monotonic", 0.0)
-    mocker.patch("reporting.settings.CHAT_TURN_SWEEP_INTERVAL_SECONDS", 0.0)
+    mocker.patch("reporting.services.chat_turns._TURN_SWEEP_INTERVAL_SECONDS", 0.0)
 
     turns: dict[str, ChatTurnItem] = {}
     events: dict[str, dict[int, str]] = {}
     counter = 0
 
-    async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key=None, request_hash=None):
+    async def admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, command):
         nonlocal counter
-        if idempotency_key is not None:
-            for turn in turns.values():
-                if (turn.user_id, turn.thread_id, turn.idempotency_key) == (
-                    user_id,
-                    thread_id,
-                    idempotency_key,
-                ):
-                    # Use the production resolver so route tests also preserve
-                    # terminal admission outcomes such as expired-before-start.
-                    return base_store.resolve_chat_turn_for_key(turn, request_hash)
+        for turn in turns.values():
+            if (turn.user_id, turn.thread_id, turn.idempotency_key) == (
+                user_id,
+                thread_id,
+                idempotency_key,
+            ):
+                return base_store.resolve_chat_turn_for_key(turn)
         if (user_id, thread_id) not in _SESSIONS:
             # Admission is the turn's half of the retirement handshake: no
             # session, no turn.
@@ -150,7 +160,7 @@ def _chat_turn_log(mocker):
             message_id=message_id,
             text_id=text_id,
             idempotency_key=idempotency_key,
-            request_hash=request_hash,
+            command=command,
             created_at="2024-01-01T00:00:00+00:00",
             updated_at="2024-01-01T00:00:00+00:00",
             expires_at="2099-01-01T00:00:00+00:00",
@@ -210,11 +220,7 @@ def _chat_turn_log(mocker):
         return turns[turn_id]
 
     async def list_expired_chat_turns(expired_before: str, limit: int):
-        return [
-            ExpiredChatTurn(turn_id=t.turn_id, user_id=t.user_id, thread_id=t.thread_id, expires_at=t.expires_at)
-            for t in turns.values()
-            if t.expires_at <= expired_before
-        ][:limit]
+        return [t.turn_id for t in turns.values() if t.expires_at <= expired_before][:limit]
 
     async def delete_chat_turn(turn_id: str) -> bool:
         events.pop(turn_id, None)
@@ -271,15 +277,7 @@ def _fake_temporal(mocker, _chat_turn_log):
             # is exactly the bug worth catching, and a dict would hide it.
             starts.append(id)
             turn = _chat_turn_log[invocation.turn_id]
-            body = ChatTurnRequest(
-                message=invocation.message,
-                resume_confirmation_id=invocation.resume_confirmation_id,
-                continue_response=invocation.continue_response,
-                bypass_confirmations=invocation.bypass_confirmations,
-            )
-            running[id] = asyncio.create_task(
-                chat_turns.produce_turn(turn, invocation.thread_id, body, _current_user())
-            )
+            running[id] = asyncio.create_task(chat_turns.produce_turn(turn, _current_user()))
 
         def get_workflow_handle(self, workflow_id: str) -> "_Handle":
             return _Handle(workflow_id)
@@ -309,6 +307,7 @@ async def _admit(client: AsyncClient, body: dict[str, Any]):
     """Ask for a turn. Half of what one `client.post` used to do."""
     payload = dict(body)
     thread_id = payload.pop("thread_id")
+    payload.setdefault("idempotency_key", f"ik_test_{next(_REQUEST_KEYS)}")
     return await client.post(f"/api/v1/chat/threads/{thread_id}/turns", json=payload)
 
 
@@ -337,7 +336,14 @@ def _require_turn(admission: ChatTurnAdmission) -> ChatTurnItem:
 
 async def _open_turn(user_id: str, thread_id: str, message_id: str = "msg_9", text_id: str = "text_9"):
     """Put a running turn in the log without going through a route."""
-    admission = await chat_turns.report_store.admit_chat_turn(user_id, thread_id, message_id, text_id, None)
+    admission = await chat_turns.report_store.admit_chat_turn(
+        user_id,
+        thread_id,
+        message_id,
+        text_id,
+        f"ik_open_{next(_REQUEST_KEYS)}",
+        _command(),
+    )
     assert admission.turn is not None
     return admission.turn
 
@@ -1374,7 +1380,7 @@ async def test_a_producer_that_lost_reports_the_recorded_sequence_even_at_zero(m
     # Someone else got there first and recorded a turn with nothing in it.
     await chat_turns.report_store.finish_chat_turn(turn.turn_id, "failed", 0)
 
-    status, last_seq = await chat_turns.produce_turn(turn, "1001", ChatTurnRequest(message="Hi"), _current_user())
+    status, last_seq = await chat_turns.produce_turn(turn, _current_user())
 
     assert (status, last_seq) == ("failed", 0)
 
@@ -1405,7 +1411,7 @@ async def test_the_workflow_is_bounded_and_deduplicated(mocker, _chat_turn_log, 
         await _admit(client, {"message": "Hi", "thread_id": "1001"})
 
     assert seen["id_reuse_policy"] == WorkflowIDReusePolicy.REJECT_DUPLICATE
-    lease = settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS
+    lease = settings.CHAT_TURN_TIMEOUT_SECONDS + base_store.chat_turn_lease_margin_seconds()
     assert seen["execution_timeout"] < timedelta(seconds=lease), (
         "a workflow may outlive the claim its turn holds on the thread"
     )
@@ -1522,11 +1528,8 @@ async def test_a_failed_handoff_is_repaired_by_retrying(mocker, _chat_turn_log, 
     )
 
 
-async def test_a_key_reused_for_a_different_request_is_refused(mocker, _chat_turn_log, _fake_temporal):
-    """A key says "this is a repeat", not "a repeat of what". It resolves to a
-    turn that may already be running, and that turn's body is what the producer
-    executes -- so honouring a different message under the same key would
-    silently change the work of a turn already in flight."""
+async def test_a_key_reused_for_a_different_request_keeps_the_admitted_command(mocker, _chat_turn_log, _fake_temporal):
+    """Idempotency resolves to immutable admitted work, never the retry body."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
 
@@ -1537,17 +1540,14 @@ async def test_a_key_reused_for_a_different_request_is_refused(mocker, _chat_tur
         second = await _admit(client, {"message": "Delete it", "thread_id": "1001", "idempotency_key": "ik_shared"})
 
     assert first.status_code == 201
-    assert second.status_code == 409
-    assert "different request" in second.json()["error"]
+    assert second.status_code == 200
+    assert second.json()["turn_id"] == first.json()["turn_id"]
     assert len(_chat_turn_log) == 1
+    assert next(iter(_chat_turn_log.values())).command.message == "Summarize"
 
 
-async def test_a_repeat_with_widened_permissions_is_refused(mocker, _chat_turn_log, _fake_temporal):
-    """A repair dispatches from the *retrying* request, so the permission cap has
-    to be part of what a key names. Otherwise a turn admitted before a role was
-    widened could be started afterwards with the wider one -- the turn would run
-    above the authority it was admitted under, which is the one thing the cap
-    exists to prevent."""
+async def test_a_repeat_with_widened_permissions_keeps_the_admitted_cap(mocker, _chat_turn_log, _fake_temporal):
+    """A repairing caller cannot widen the authority stored at admission."""
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=FakeChatGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     body = {"message": "Summarize", "thread_id": "1001", "idempotency_key": "ik_elevated"}
@@ -1562,8 +1562,8 @@ async def test_a_repeat_with_widened_permissions_is_refused(mocker, _chat_turn_l
     async with AsyncClient(transport=ASGITransport(app=wide), base_url="http://test") as client:
         second = await _admit(client, body)
 
-    assert second.status_code == 409
-    assert "different request" in second.json()["error"]
+    assert second.status_code == 200
+    assert next(iter(_chat_turn_log.values())).command.permission_cap == [Permission.CHAT_USE.value]
 
 
 async def test_an_identical_repeat_still_resolves(mocker, _chat_turn_log, _fake_temporal):
@@ -1658,7 +1658,7 @@ async def test_the_turn_runs_without_anyone_reading_it(mocker, _chat_turn_log):
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    admission = await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user())
+    admission = await chat_turns.start_turn("1001", _request(), _current_user())
     turn = admission.turn
     assert turn is not None
 
@@ -1717,7 +1717,7 @@ async def test_stop_ends_the_turn_and_not_just_the_reader(mocker, _chat_turn_log
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=SlowGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
+    turn = _require_turn(await chat_turns.start_turn("1001", _request(), _current_user()))
 
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1862,7 +1862,7 @@ async def test_a_cancelled_producer_still_records_its_terminal_state(mocker, _ch
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
+    turn = _require_turn(await chat_turns.start_turn("1001", _request(), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
     await chat_turns.cancel_turn(turn.turn_id)
@@ -1900,7 +1900,7 @@ async def test_cancel_interrupts_a_turn_blocked_mid_call(mocker, _chat_turn_log)
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
+    turn = _require_turn(await chat_turns.start_turn("1001", _request(), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
     # Flag only: no local task cancel, which is what another worker sees.
@@ -2017,7 +2017,7 @@ async def test_a_repeated_cancel_cannot_interrupt_terminal_cleanup(mocker, _chat
 
     mocker.patch("reporting.services.chat_turns.get_chat_graph", return_value=BlockedGraph())
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
-    turn = _require_turn(await chat_turns.start_turn("1001", ChatTurnRequest(message="Hi"), _current_user()))
+    turn = _require_turn(await chat_turns.start_turn("1001", _request(), _current_user()))
     await asyncio.wait_for(started.wait(), timeout=5)
 
     # Every repeat, from whatever source, must land harmlessly while the first

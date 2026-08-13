@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import boto3
 import botocore.config
@@ -17,10 +17,10 @@ from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
-    ExpiredChatTurn,
     IdleChatSession,
     ScheduledChatItem,
     ScheduledChatVersion,
@@ -129,7 +129,7 @@ _PK_CHAT_SESSION_LIST_PREFIX = "CHAT_SESSION_LIST#"
 _PK_CHAT_SESSION_REAP_CURSOR = "CHAT_SESSION_REAP_CURSOR"
 # Chat turn event log — one partition per turn holding the turn's #METADATA item
 # and its EVENT# batches, plus a per-thread pointer to the running turn and a
-# created_at-ordered sweep index. The pointer's PK is what makes "one running
+# expiry-ordered sweep index. The pointer's PK is what makes "one running
 # turn per thread" a conditional write rather than a read-then-write.
 _PK_CHAT_TURN_PREFIX = "CHAT_TURN#"
 _PK_CHAT_TURN_THREAD_PREFIX = "CHAT_TURN_THREAD#"
@@ -142,18 +142,6 @@ _SK_CHAT_TURN_EVENT_PREFIX = "EVENT#"
 # every other user's retained turns.
 _SK_CHAT_TURN_THREAD_TURN_PREFIX = "TURN#"
 _SK_CHAT_TURN_KEY_PREFIX = "IKEY#"
-# Pages of the sweep index one pass will read past. Live entries are not in
-# expiry order (a running turn renews its lease), so a pass has to be able to
-# step over them to reach the expired ones behind.
-_CHAT_TURN_SWEEP_MAX_PAGES = 5
-# Entries read per sweep query. Without an explicit Limit a single pass can
-# pull a megabyte of index and issue a GetItem for every entry in it.
-_CHAT_TURN_SWEEP_PAGE_SIZE = 50
-# Where the last sweep stopped. The index is in creation order and a running
-# turn renews its lease, so live entries sit at the head indefinitely; without
-# a durable cursor every pass re-reads them and anything behind them is never
-# reached. Mirrors the session reaper's cursor for the same reason.
-_PK_CHAT_TURN_SWEEP_CURSOR = "CHAT_TURN_SWEEP_CURSOR"
 _PK_ACTION_CONFIRMATION_PREFIX = "ACTION_CONFIRMATION#"
 # Group mappings — list index PK for listing all group-to-role mappings.
 # Query history — per-user SK prefix; items sorted newest-first by snowflake ID.
@@ -462,14 +450,9 @@ def _chat_turn_key_sk(idempotency_key: str) -> str:
     return f"{_SK_CHAT_TURN_KEY_PREFIX}{idempotency_key}"
 
 
-def _chat_turn_list_sk(created_at: str, turn_id: str) -> str:
-    """Sweep-index sort key.
-
-    Keyed on ``created_at``, not ``expires_at``: an immutable key means
-    finishing a turn is a single metadata update rather than a
-    delete-old-SK/put-new-SK dance on every state change.
-    """
-    return f"CREATED#{created_at}#TURN#{turn_id}"
+def _chat_turn_list_sk(expires_at: str, turn_id: str) -> str:
+    """Sweep-index key ordered by the time the turn becomes collectible."""
+    return f"EXPIRES#{expires_at}#TURN#{turn_id}"
 
 
 @dataclass(frozen=True)
@@ -629,8 +612,8 @@ def _chat_turn_from_item(item: dict[str, Any]) -> ChatTurnItem:
         user_id=item["user_id"],
         message_id=item["message_id"],
         text_id=item["text_id"],
-        idempotency_key=item.get("idempotency_key"),
-        request_hash=item.get("request_hash"),
+        idempotency_key=item["idempotency_key"],
+        command=ChatTurnCommand.model_validate(item["command"]),
         status=status if status in ("running", "completed", "failed", "canceled", "expired") else "failed",
         last_seq=int(last_seq) if last_seq is not None else None,
         cancel_requested=bool(item.get("cancel_requested", False)),
@@ -843,19 +826,18 @@ def _delete_chat_turn_sync(table: Any, turn: ChatTurnItem) -> None:
     # Header plus every index that names it, atomically. Four items at most.
     deletes = [
         {"PK": _chat_turn_pk(turn.turn_id), "SK": _SK_METADATA},
-        {"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.created_at, turn.turn_id)},
+        {"PK": _PK_CHAT_TURN_LIST, "SK": _chat_turn_list_sk(turn.expires_at, turn.turn_id)},
         {
             "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
             "SK": _chat_turn_thread_turn_sk(turn.turn_id),
         },
     ]
-    if turn.idempotency_key is not None:
-        deletes.append(
-            {
-                "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
-                "SK": _chat_turn_key_sk(turn.idempotency_key),
-            }
-        )
+    deletes.append(
+        {
+            "PK": _chat_turn_thread_pk(turn.user_id, turn.thread_id),
+            "SK": _chat_turn_key_sk(turn.idempotency_key),
+        }
+    )
     table.meta.client.transact_write_items(
         TransactItems=[{"Delete": {"TableName": settings.DYNAMODB_TABLE_NAME, "Key": key}} for key in deletes]
     )
@@ -893,37 +875,6 @@ def _delete_thread_chat_turns_sync(table: Any, user_id: str, thread_id: str) -> 
         if turn is not None:
             _delete_chat_turn_sync(table, turn)
     table.delete_item(Key={"PK": _chat_turn_thread_pk(user_id, thread_id), "SK": _SK_CHAT_TURN_ACTIVE})
-
-
-def _chat_turn_sweep_cursor_sync(table: Any) -> dict[str, Any] | None:
-    """Where the last sweep pass stopped, or None to start from the head."""
-    item = table.get_item(
-        Key={"PK": _PK_CHAT_TURN_SWEEP_CURSOR, "SK": _SK_METADATA},
-        ConsistentRead=True,
-    ).get("Item")
-    key = item.get("start_key") if item else None
-    return dict(key) if isinstance(key, dict) and key else None
-
-
-def _save_chat_turn_sweep_cursor_sync(table: Any, start_key: dict[str, Any] | None) -> None:
-    """Record where the next pass should resume; ``None`` means the head.
-
-    Best effort: losing a cursor costs a pass that re-reads what it already
-    read, which is the behaviour this replaces, not a correctness failure.
-    """
-    try:
-        if start_key:
-            table.put_item(
-                Item={
-                    "PK": _PK_CHAT_TURN_SWEEP_CURSOR,
-                    "SK": _SK_METADATA,
-                    "start_key": start_key,
-                }
-            )
-        else:
-            table.delete_item(Key={"PK": _PK_CHAT_TURN_SWEEP_CURSOR, "SK": _SK_METADATA})
-    except botocore.exceptions.ClientError:
-        logger.warning("Failed to record the chat turn sweep cursor", exc_info=True)
 
 
 def _transaction_cancelled(exc: botocore.exceptions.ClientError) -> bool:
@@ -4820,8 +4771,8 @@ class DynamoDBReportStore(ReportStore):
         thread_id: str,
         message_id: str,
         text_id: str,
-        idempotency_key: str | None = None,
-        request_hash: str | None = None,
+        idempotency_key: str,
+        command: ChatTurnCommand,
     ) -> ChatTurnAdmission:
         turn_id = generate_report_id()
         now = datetime.now(tz=UTC)
@@ -4838,7 +4789,7 @@ class DynamoDBReportStore(ReportStore):
             "message_id": message_id,
             "text_id": text_id,
             "idempotency_key": idempotency_key,
-            "request_hash": request_hash,
+            "command": command.model_dump(mode="json"),
             "status": "running",
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -4847,13 +4798,10 @@ class DynamoDBReportStore(ReportStore):
 
         def _op() -> ChatTurnAdmission:
             table = _get_table()
-            if idempotency_key is not None:
-                # A repeat of this request resolves to the turn it already
-                # admitted. Read first, so a lost response is answered by asking
-                # again rather than by racing another write.
-                seen = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
-                if seen is not None:
-                    return resolve_chat_turn_for_key(seen, request_hash)
+            # A repeat resolves to the immutable command already admitted.
+            seen = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
+            if seen is not None:
+                return resolve_chat_turn_for_key(seen)
 
             session = table.get_item(
                 Key={"PK": metadata_pk, "SK": thread_id},
@@ -4891,11 +4839,8 @@ class DynamoDBReportStore(ReportStore):
                                 "TableName": settings.DYNAMODB_TABLE_NAME,
                                 "Item": {
                                     "PK": _PK_CHAT_TURN_LIST,
-                                    "SK": _chat_turn_list_sk(now_iso, turn_id),
+                                    "SK": _chat_turn_list_sk(expires_at, turn_id),
                                     "turn_id": turn_id,
-                                    "user_id": user_id,
-                                    "thread_id": thread_id,
-                                    "expires_at": expires_at,
                                 },
                             }
                         },
@@ -4915,23 +4860,17 @@ class DynamoDBReportStore(ReportStore):
                         # condition is what settles two concurrent attempts of
                         # the same request: one commits, the other is refused
                         # and re-reads to find the turn it lost to.
-                        *(
-                            [
-                                {
-                                    "Put": {
-                                        "TableName": settings.DYNAMODB_TABLE_NAME,
-                                        "Item": {
-                                            "PK": _chat_turn_thread_pk(user_id, thread_id),
-                                            "SK": _chat_turn_key_sk(idempotency_key),
-                                            "turn_id": turn_id,
-                                        },
-                                        "ConditionExpression": "attribute_not_exists(PK)",
-                                    }
-                                }
-                            ]
-                            if idempotency_key is not None
-                            else []
-                        ),
+                        {
+                            "Put": {
+                                "TableName": settings.DYNAMODB_TABLE_NAME,
+                                "Item": {
+                                    "PK": _chat_turn_thread_pk(user_id, thread_id),
+                                    "SK": _chat_turn_key_sk(idempotency_key),
+                                    "turn_id": turn_id,
+                                },
+                                "ConditionExpression": "attribute_not_exists(PK)",
+                            }
+                        },
                         # The session's timestamp moves in the *same*
                         # transaction, conditioned on it not being retired.
                         *_chat_session_update_transactions(
@@ -4951,13 +4890,10 @@ class DynamoDBReportStore(ReportStore):
                     # exception; only a refused condition means the request was
                     # answered.
                     raise
-                if idempotency_key is not None:
-                    # Another attempt of the same request may have won the race.
-                    concurrent = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
-                    if concurrent is not None:
-                        # The same rule as the lookup above: losing the race
-                        # must not let a different body resolve to this turn.
-                        return resolve_chat_turn_for_key(concurrent, request_hash)
+                # Another attempt of the same request may have won the race.
+                concurrent = _chat_turn_for_key_sync(table, user_id, thread_id, idempotency_key)
+                if concurrent is not None:
+                    return resolve_chat_turn_for_key(concurrent)
                 fresh = table.get_item(
                     Key={"PK": metadata_pk, "SK": thread_id},
                     ConsistentRead=True,
@@ -5007,9 +4943,6 @@ class DynamoDBReportStore(ReportStore):
             "SK": _chat_turn_event_sk(seq),
             "seq": seq,
             "parts_json": parts_json,
-            # Nothing reads this yet; it is here so the payload can be
-            # compressed later without a data migration.
-            "encoding": "json",
             "created_at": datetime.now(tz=UTC).isoformat(),
         }
 
@@ -5069,7 +5002,12 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+    async def finish_chat_turn(
+        self,
+        turn_id: str,
+        status: Literal["completed", "failed", "canceled", "expired"],
+        last_seq: int,
+    ) -> ChatTurnItem | None:
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
         expires_at = (now + timedelta(seconds=settings.CHAT_TURN_RETENTION_SECONDS)).isoformat()
@@ -5119,6 +5057,27 @@ class DynamoDBReportStore(ReportStore):
                     "ExpressionAttributeValues": {":status": status, ":turn_id": turn_id},
                 }
             }
+            old_sweep_key = {
+                "PK": _PK_CHAT_TURN_LIST,
+                "SK": _chat_turn_list_sk(turn.expires_at, turn_id),
+            }
+            new_sweep_key = {
+                "PK": _PK_CHAT_TURN_LIST,
+                "SK": _chat_turn_list_sk(expires_at, turn_id),
+            }
+            sweep_rekey = (
+                []
+                if old_sweep_key == new_sweep_key
+                else [
+                    {"Delete": {"TableName": settings.DYNAMODB_TABLE_NAME, "Key": old_sweep_key}},
+                    {
+                        "Put": {
+                            "TableName": settings.DYNAMODB_TABLE_NAME,
+                            "Item": {**new_sweep_key, "turn_id": turn_id},
+                        }
+                    },
+                ]
+            )
 
             # Header and pointer together. Terminalizing the header first and
             # releasing the thread second leaves the thread wedged if the second
@@ -5126,7 +5085,7 @@ class DynamoDBReportStore(ReportStore):
             # early, and never gets to the pointer -- so nothing new can be
             # admitted until the lease lapses.
             try:
-                table.meta.client.transact_write_items(TransactItems=[metadata_update, pointer_update])
+                table.meta.client.transact_write_items(TransactItems=[metadata_update, pointer_update, *sweep_rekey])
             except botocore.exceptions.ClientError as exc:
                 if not _any_item_condition_failed(exc):
                     raise
@@ -5134,7 +5093,7 @@ class DynamoDBReportStore(ReportStore):
                 # things. If the pointer already belongs to a successor, this
                 # turn still has to be closed -- so retry the header alone.
                 try:
-                    table.meta.client.transact_write_items(TransactItems=[metadata_update])
+                    table.meta.client.transact_write_items(TransactItems=[metadata_update, *sweep_rekey])
                 except botocore.exceptions.ClientError as header_exc:
                     if not _any_item_condition_failed(header_exc):
                         raise
@@ -5146,27 +5105,6 @@ class DynamoDBReportStore(ReportStore):
                         extra={"turn_id": turn_id, "attempted": status},
                     )
                     return _get_chat_turn_sync(table, turn_id)
-            # Keep the sweep entry's copy of the lease in step, so a pass can
-            # skip this turn without reading it. Last, and best effort: it is an
-            # optimisation, and failing it must not leave the thread unable to
-            # start another turn until the lease expires. A stale copy only ever
-            # costs the sweep a confirming read.
-            try:
-                table.update_item(
-                    Key={
-                        "PK": _PK_CHAT_TURN_LIST,
-                        "SK": _chat_turn_list_sk(turn.created_at, turn_id),
-                    },
-                    UpdateExpression="SET expires_at = :expires_at",
-                    ConditionExpression="attribute_exists(PK)",
-                    ExpressionAttributeValues={":expires_at": expires_at},
-                )
-            except botocore.exceptions.ClientError:
-                logger.warning(
-                    "Could not refresh a chat turn's sweep entry",
-                    extra={"turn_id": turn_id},
-                    exc_info=True,
-                )
             # A transaction returns no attributes, so this is a read back
             # rather than the update's own result. The row is already durable by
             # the time we get here.
@@ -5204,72 +5142,28 @@ class DynamoDBReportStore(ReportStore):
 
         return await asyncio.to_thread(_op)
 
-    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
-        def _op() -> list[ExpiredChatTurn]:
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
+        def _op() -> list[str]:
             table = _get_table()
-            expired: list[ExpiredChatTurn] = []
-            # The sweep index is ordered by created_at, which is *not* expiry
-            # order: a running turn renews its lease, so the oldest-created turn
-            # can be the last to expire. A pass therefore reads *past* entries
-            # that are still live rather than stopping at them -- otherwise a
-            # handful of long-running turns at the head of the partition would
-            # be re-read and skipped by every pass while everything behind them
-            # accumulated forever.
-            #
-            # Bounded by pages rather than by entries so the walk is still
-            # cheap: the live entries it steps over are the currently running
-            # turns, which is bounded by concurrent chat volume.
-            kwargs: dict[str, Any] = {
-                "KeyConditionExpression": "PK = :pk",
-                "ExpressionAttributeValues": {":pk": _PK_CHAT_TURN_LIST},
-                "ScanIndexForward": True,
-                "Limit": _CHAT_TURN_SWEEP_PAGE_SIZE,
-            }
-            start_key = _chat_turn_sweep_cursor_sync(table)
-            if start_key:
-                kwargs["ExclusiveStartKey"] = start_key
-            last_key: dict[str, Any] | None = start_key
-            for _ in range(_CHAT_TURN_SWEEP_MAX_PAGES):
-                resp = table.query(**kwargs)
-                for item in resp.get("Items", []):
-                    # The entry's own copy of the lease is the cheap filter: a
-                    # turn that is plainly not due yet costs nothing to skip.
-                    # It can only be *early* for a turn still renewing, so a
-                    # candidate is confirmed against the record before it is
-                    # collected -- never the other way round.
-                    entry_expires_at = item.get("expires_at")
-                    if isinstance(entry_expires_at, str) and entry_expires_at > expired_before:
-                        continue
-                    turn = _get_chat_turn_sync(table, str(item["turn_id"]))
-                    if turn is None:
-                        # The turn is gone but its sweep entry survived — delete
-                        # the stray so the pass cannot stall on it forever.
-                        table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
-                        continue
-                    if turn.expires_at > expired_before:
-                        continue
-                    expired.append(
-                        ExpiredChatTurn(
-                            turn_id=turn.turn_id,
-                            user_id=turn.user_id,
-                            thread_id=turn.thread_id,
-                            expires_at=turn.expires_at,
-                        )
-                    )
-                    if len(expired) >= limit:
-                        _save_chat_turn_sweep_cursor_sync(table, resp.get("LastEvaluatedKey"))
-                        return expired
-                last_key = resp.get("LastEvaluatedKey")
-                if not last_key:
-                    # Reached the end; the next pass starts from the head again,
-                    # where entries that were live during this one now sit.
-                    _save_chat_turn_sweep_cursor_sync(table, None)
-                    return expired
-                kwargs["ExclusiveStartKey"] = last_key
-            # Ran out of pages with live entries still ahead. Saving where we got
-            # to is what stops the next pass re-reading them and lets it reach
-            # whatever is behind.
-            _save_chat_turn_sweep_cursor_sync(table, last_key)
+            resp = table.query(
+                KeyConditionExpression="PK = :pk AND SK <= :cutoff",
+                ExpressionAttributeValues={
+                    ":pk": _PK_CHAT_TURN_LIST,
+                    ":cutoff": f"EXPIRES#{expired_before}#TURN#\uffff",
+                },
+                ScanIndexForward=True,
+                Limit=limit,
+                ConsistentRead=True,
+            )
+            expired: list[str] = []
+            for item in resp.get("Items", []):
+                turn_id = str(item["turn_id"])
+                turn = _get_chat_turn_sync(table, turn_id)
+                if turn is None:
+                    table.delete_item(Key={"PK": item["PK"], "SK": item["SK"]})
+                    continue
+                if turn.expires_at <= expired_before:
+                    expired.append(turn_id)
             return expired
 
         return await asyncio.to_thread(_op)

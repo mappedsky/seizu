@@ -190,9 +190,11 @@ turn it was running.
 `ChatTurnWorkflow` replaces all of it. It exists, it is addressable by a name
 derived from the turn id (`workflow_id_for`), and Temporal is what guarantees it
 reaches an end — so stopping a turn needs no stored handle, liveness needs no
-lease, and a turn survives a web-process restart. The price is that
+renewable lease, and a turn survives a web-process restart. The price is that
 `CHAT_ENABLED` now implies a reachable Temporal server, the same as scheduled
-chats ([AGT-007](#agt-007)).
+chats ([AGT-007](#agt-007)). In Docker Compose the web service therefore waits
+for Temporal's health check before starting; it need not wait for the worker,
+because Temporal durably queues an admitted workflow until a worker polls it.
 
 **Don't:** add a retry policy. `maximum_attempts=1`, for the same reason as
 AGT-007 — a turn is expensive and not idempotent, and a retry both re-bills it
@@ -209,8 +211,8 @@ from admitting another.
 **Identity is intersected, never unioned.** An interactive turn's `CurrentUser`
 comes from a live JWT and is not serializable, so the activity rebuilds it with
 `resolve_stored_user` ([AGT-006](#agt-006)) and **intersects** the result with
-the permissions carried in the invocation. `resolve_stored_user` reads the last
-seen role claim, which can be staler *or broader* than the live token.
+the permission cap stored in the admitted command. `resolve_stored_user` reads
+the last seen role claim, which can be staler *or broader* than the live token.
 
 ### Admission is its own request
 
@@ -317,29 +319,13 @@ the worker side: the activity re-checks that its turn is still `running` **and**
 still holds the thread pointer before producing, because a lapsed claim is
 exactly the case the bound is protecting against.
 
-**One resolver, both paths.** The hash comparison runs on the lookup *before*
-the write and on the re-read *after* a lost race
-(`resolve_chat_turn_for_key`). Comparing only on the first means two requests
-sharing a key but not a body can have the loser resolve to the winner's turn —
-and then hand it the wrong work, since the loser may be the one that starts the
-workflow.
-
-**The permission cap is part of the fingerprint.** A repair dispatches from the
-*retrying* request, so without this a turn admitted before a role was widened
-could be started afterwards with the wider cap — precisely what the cap exists
-to prevent ([AGT-006](#agt-006)). The cost is deliberate and worth knowing: a
-turn is **not repairable across a permission change**, becoming unrecoverable
-rather than running above its admitted authority. Persisting the whole
-invocation would let such repairs succeed instead; that is a schema change, and
-a different decision.
-
-**A key names one request.** The key alone says "this is a repeat", not a repeat
-*of what* — and it resolves to a turn that may already be running, whose body is
-what the producer executes. So a `request_hash` (`chat_turn_request_hash`, over
-every field that reaches the invocation) is stored with the turn and compared on
-admission; a repeat carrying the same key with a different body is `mismatched`
-→ **409**, never resolved. Nullable and compared only when both sides have one,
-so turns admitted before the fingerprint existed keep resolving.
+**The admitted command is immutable.** The turn record stores the message,
+continuation/confirmation fields, bypass flag, permission cap, and timeout.
+Every first handoff or later repair dispatches that stored command; the retrying
+request is only a lookup by its required idempotency key. This keeps one durable
+source of truth, makes repair safe across request or permission changes, and
+removes a parallel request-fingerprint protocol. A client must mint a key per
+logical send and reuse it for ambiguous retries.
 
 **Cancellation does reach the fallback finalizer.** Worth recording because it
 reads like a bug: the workflow catches `Exception`, and Temporal cancellation is
@@ -409,7 +395,7 @@ findable, so that left the transcript stored forever with nothing to retry from
 and nothing saying so.
 
 Every uncertainty on that path is a **503**, never a delete: a failed cancel, a
-lost claim, or a turn that does not stop within `CHAT_TURN_STOP_WAIT_SECONDS`.
+lost claim, or a turn that does not stop within the internal stop deadline.
 The claim is re-claimable by design, so the session stays closed and the retry
 is a plain repeat; a conversation half-removed from under a live producer cannot
 be put back.
@@ -418,10 +404,8 @@ be put back.
 
 `expires_at` on a **running** turn is a claim on the thread, and admission
 retires a lapsed one. It is therefore derived from the turn's own timeout
-(`CHAT_TURN_TIMEOUT_SECONDS + CHAT_TURN_LEASE_MARGIN_SECONDS`, in the shared
-`chat_turn_lease_expiry`), **not** from the replay retention window — which is
-much shorter than a turn may legitimately run, so using it let one send retire a
-turn that was merely slow and put two producers on one conversation. On finish
+(`CHAT_TURN_TIMEOUT_SECONDS` plus an internal safety margin, in the shared
+`chat_turn_lease_expiry`), **not** from the replay retention window. On finish
 the record is re-stamped with `CHAT_TURN_RETENTION_SECONDS`, which is a replay
 deadline rather than a claim.
 
@@ -450,14 +434,11 @@ case that motivates this: it names a missing turn, and its
 `attribute_not_exists` condition then refuses that key forever while resolving
 to nothing — a request that can be neither admitted nor repaired.
 
-**Note:** expired logs are swept at the end of each turn, not by a scheduler. A
-log belongs to a *turn*, so `delete_chat_session`'s cascade is not enough — the
-turns of a conversation nobody deletes would accumulate. The DynamoDB sweep
-still reads *past* live entries and persists where it got to, because its index
-is keyed by `created_at`: a long-running turn sits at the head of the partition,
-and a pass that stopped there would re-read the same entries every time while
-everything behind them accumulated. Queries carry an explicit `Limit`, and the
-sweep is paced per process by `CHAT_TURN_SWEEP_INTERVAL_SECONDS`.
+**Note:** expired logs are swept at the end of turns, not by a scheduler. A log
+belongs to a *turn*, so `delete_chat_session`'s cascade is not enough. DynamoDB's
+sparse sweep partition is ordered by the turn's actual `expires_at`; finishing a
+turn rekeys that entry in the same transaction. A bounded range query can
+therefore read only expired entries, with no scan cursor or renewal path.
 
 **Heartbeat on a timer, never on output.** A turn is quietest exactly when it is
 slowest — a model call or a tool can run for minutes producing no chunk — so
@@ -530,9 +511,8 @@ Three rules fall out of that object, and each was a live defect without it:
 - **An unresolved send is recoverable from the UI**, or the preserved key is
   unreachable and the repair path is theatre — typing the message again mints a
   new key and admits a second turn. The banner offers Retry, which replays the
-  stored body **verbatim** under the stored key; a recomposed body would not
-  match the fingerprint and would be refused. First send and retry share one
-  admission path so they cannot drift.
+  stored body under the stored key. First send and retry share one admission
+  path so they cannot drift.
 - **Don't** hold that state only in the transport. It lives on plain objects
   React cannot observe, so the button never renders and the feature is invisible
   in the product while testing green against the transport directly
@@ -615,3 +595,31 @@ Three rules fall out of that object, and each was a live defect without it:
   hoisted, so it **cannot** replace the superclass of a class that has already
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
+
+## AGT-009 — Answer-only plan steps require complete evidence
+
+**Applies to:** `chat_orchestrator._PLANNER_PROMPT`
+
+The planner may reuse facts established earlier, but an answer-only step is
+valid only when those facts satisfy the step's success criteria. A prior answer
+mentioning the subject is not evidence for a missing property. If a request asks
+to determine, verify, investigate, cross-check, or trace something and the
+conversation identifies an evidence gap, the plan must gather that evidence
+with an available tool/skill or explicitly say the determination cannot be
+made.
+
+Attack-path and internet-exposure work illustrates the distinction: selecting
+CVEs from a prior ranked list may be answer-only, while claiming reachability
+when the prior result contains no deployment or network data may not. Use a
+direct graph tool for a bounded lookup and `sandbox__delegate` for iterative
+exploration. Do not manufacture tool activity merely for display; tool and
+subagent details represent actions that actually ran.
+
+**Why:** an attack-path follow-up asked which previously ranked CVEs were
+accessible from the internet. The prior result contained vulnerability and
+repository facts, but no deployment endpoints or network-exposure metadata.
+The planner nevertheless made both worker steps answer-only, recorded the
+missing evidence as an assumption, and then presented an accessibility
+conclusion without making an action call. The execution trace was accurate—the
+absence of tool/subagent rows reflected that no evidence gathering occurred—but
+the answer overstated what the available evidence could establish.

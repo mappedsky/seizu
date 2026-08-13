@@ -24,9 +24,9 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage
 from temporalio.common import WorkflowIDReusePolicy
@@ -37,6 +37,7 @@ from reporting.authnz import CurrentUser
 from reporting.schema.chat import (
     CHAT_TURN_MAX_BATCH_BYTES,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnItem,
     ChatTurnRequest,
 )
@@ -44,7 +45,7 @@ from reporting.services import report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
-from reporting.services.report_store.base import chat_turn_execution_bound_seconds, chat_turn_request_hash
+from reporting.services.report_store.base import chat_turn_execution_bound_seconds, chat_turn_lease_margin_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,12 @@ _EXPIRED_TURNS_PER_SWEEP = 25
 
 # How often a caller waiting for a turn to stop re-reads it.
 _TURN_STOP_POLL_SECONDS = 0.05
+# Internal coordination cadences. Operators choose the turn timeout, retention,
+# and stream latency; these are derived implementation details rather than an
+# independent configuration matrix.
+_TURN_CANCEL_POLL_SECONDS = 2.0
+TURN_STOP_WAIT_SECONDS = 10.0
+_TURN_SWEEP_INTERVAL_SECONDS = 300.0
 
 
 # When this process last swept expired logs. Paced rather than run on every
@@ -152,7 +159,7 @@ class ChatTurnPublisher:
         await self.flush()
 
     async def _flush_loop(self) -> None:
-        interval = max(settings.CHAT_TURN_FLUSH_MS, 1) / 1000
+        interval = max(settings.CHAT_TURN_STREAM_LATENCY_MS, 1) / 1000
         while True:
             await asyncio.sleep(interval)
             await self.flush()
@@ -166,7 +173,7 @@ class ChatTurnPublisher:
         which covers the ordinary path; this covers a stop recorded on the turn
         without one -- and it is why the flag exists at all.
         """
-        interval = max(settings.CHAT_TURN_HEARTBEAT_SECONDS, 1)
+        interval = _TURN_CANCEL_POLL_SECONDS
         while True:
             await asyncio.sleep(interval)
             try:
@@ -220,7 +227,7 @@ class ChatTurnPublisher:
         self._buffered_bytes = 0
 
 
-def build_graph_input(body: ChatTurnRequest, budget_controller: BudgetController) -> ChatState:
+def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController) -> ChatState:
     """Build the turn's opening message.
 
     Confirmation resumes and continuations are tagged ephemeral: they are
@@ -263,26 +270,22 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
     message_id = (
         body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
     )
+    command = ChatTurnCommand(
+        message=body.message,
+        resume_confirmation_id=body.resume_confirmation_id,
+        continue_response=body.continue_response,
+        continue_message_id=body.continue_message_id,
+        bypass_confirmations=body.bypass_confirmations,
+        permission_cap=sorted(current.permissions),
+        timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+    )
     admission = await report_store.admit_chat_turn(
         current.user.user_id,
         thread_id,
         message_id,
         f"text_{uuid.uuid4().hex}",
         body.idempotency_key,
-        # Binds the key to this request. Without it a repeat carrying the same
-        # key but a different body resolves to the admitted turn and the repair
-        # below hands the *new* body to a turn that may already be running.
-        chat_turn_request_hash(
-            body.message,
-            body.resume_confirmation_id,
-            body.continue_response,
-            body.continue_message_id,
-            body.bypass_confirmations,
-            # The cap this turn is admitted under. A repair dispatches from the
-            # retrying request, so leaving it out lets a turn admitted before a
-            # role widened be started afterwards with the wider one.
-            sorted(current.permissions),
-        ),
+        command,
     )
     if admission.turn is None:
         return admission
@@ -334,16 +337,7 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
             "seizu_chat_turn",
             ChatTurnInvocation(
                 turn_id=admission.turn.turn_id,
-                thread_id=thread_id,
-                user_id=current.user.user_id,
-                message=body.message,
-                resume_confirmation_id=body.resume_confirmation_id,
-                continue_response=body.continue_response,
-                bypass_confirmations=body.bypass_confirmations,
-                # The turn can never exceed these; the worker intersects them with
-                # what the stored user has now.
-                permissions=sorted(current.permissions),
-                timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+                timeout_seconds=admission.turn.command.timeout_seconds,
             ),
             # Derived from the turn id, which is what makes this repeatable:
             # the second attempt names the same workflow as the first.
@@ -394,10 +388,7 @@ async def cancel_turn(turn_id: str) -> None:
 
 async def produce_turn(
     turn: ChatTurnItem,
-    thread_id: str,
-    body: ChatTurnRequest,
     current: CurrentUser,
-    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, int]:
     """Drive one turn to completion, publishing as it goes.
 
@@ -408,8 +399,9 @@ async def produce_turn(
     ``uncancel()``, a first-writer-wins guard and an abandoned-task finalizer to
     approximate.
     """
+    body = turn.command
     finish_reason = "stop"
-    status = "completed"
+    status: Literal["completed", "failed", "canceled"] = "completed"
     async with ChatTurnPublisher(turn) as publisher:
         opening: list[dict[str, Any]] = [
             {
@@ -430,7 +422,7 @@ async def produce_turn(
         budget_controller = BudgetController(initial_budget_ledger())
         config = build_turn_config(
             current,
-            thread_id,
+            turn.thread_id,
             budget_controller=budget_controller,
             bypass_confirmations=body.bypass_confirmations,
         )
@@ -448,8 +440,6 @@ async def produce_turn(
                         finish_reason = "length"
                     continue
                 await publisher.publish(render_parts(chunk, turn.text_id))
-                if on_progress is not None:
-                    on_progress()
 
         child = asyncio.create_task(_drive())
         stopped = asyncio.create_task(publisher.stopped.wait())
@@ -501,6 +491,7 @@ async def produce_turn(
     # recorded. Report what the store actually holds, so the workflow's result
     # and the log a reader sees cannot disagree.
     recorded = await report_store.finish_chat_turn(turn.turn_id, status, last_seq)
+    final_status: str = status
     if recorded is not None and recorded.status != status:
         logger.warning(
             "Chat turn was already closed by another writer",
@@ -510,11 +501,11 @@ async def produce_turn(
         # the fallback closed the turn before any batch was written, and `or`
         # would quietly substitute this producer's larger sequence for it --
         # telling every reader to wait for frames that do not exist.
-        status = recorded.status
+        final_status = recorded.status
         if recorded.last_seq is not None:
             last_seq = recorded.last_seq
     await sweep_expired_turns()
-    return status, last_seq
+    return final_status, last_seq
 
 
 async def await_turn_stopped(turn_id: str, timeout_seconds: float) -> bool:
@@ -549,7 +540,7 @@ async def sweep_expired_turns() -> None:
     """
     global _last_sweep_monotonic
     now = time.monotonic()
-    if now - _last_sweep_monotonic < settings.CHAT_TURN_SWEEP_INTERVAL_SECONDS:
+    if now - _last_sweep_monotonic < _TURN_SWEEP_INTERVAL_SECONDS:
         # Once per completed turn is far more often than expiry needs, and each
         # pass is a query plus a read per candidate. Pacing it per process keeps
         # the total proportional to time and replicas rather than to chat
@@ -561,8 +552,8 @@ async def sweep_expired_turns() -> None:
             datetime.now(tz=UTC).isoformat(),
             limit=_EXPIRED_TURNS_PER_SWEEP,
         )
-        for entry in expired:
-            await report_store.delete_chat_turn(entry.turn_id)
+        for turn_id in expired:
+            await report_store.delete_chat_turn(turn_id)
     except Exception:
         # Housekeeping. A failure here costs storage, never a turn.
         logger.warning("Failed to sweep expired chat turns", exc_info=True)
@@ -582,10 +573,12 @@ async def tail_turn(turn_id: str, after_seq: int = 0) -> AsyncIterator[str]:
     # that quiet as it does mid-sentence. Back off while nothing arrives and
     # snap back the moment it does, so responsiveness costs reads only when
     # there is something to be responsive to.
-    min_poll = max(settings.CHAT_TURN_POLL_MS, 1) / 1000
-    max_poll = max(settings.CHAT_TURN_POLL_MAX_MS, settings.CHAT_TURN_POLL_MS) / 1000
+    min_poll = max(settings.CHAT_TURN_STREAM_LATENCY_MS, 1) / 1000
+    max_poll = max(min_poll * 5, 1.0)
     poll = min_poll
-    deadline = time.monotonic() + settings.CHAT_TURN_TAIL_MAX_SECONDS
+    deadline = time.monotonic() + (
+        settings.CHAT_TURN_TIMEOUT_SECONDS + chat_turn_lease_margin_seconds() + settings.CHAT_TURN_RETENTION_SECONDS
+    )
     while True:
         page = await report_store.read_chat_turn_events(turn_id, cursor, limit=page_limit)
         if page is None:

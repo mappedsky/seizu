@@ -25,13 +25,6 @@ _FINALIZED: list[str] = []
 def _invocation(**kwargs) -> ChatTurnInvocation:
     defaults = dict(
         turn_id="turn-1",
-        thread_id="1001",
-        user_id="user-1",
-        message="Hi",
-        resume_confirmation_id=None,
-        continue_response=False,
-        bypass_confirmations=False,
-        permissions=["chat:use"],
         timeout_seconds=60,
     )
     defaults.update(kwargs)

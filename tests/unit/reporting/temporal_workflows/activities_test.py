@@ -977,7 +977,7 @@ async def test_remediation_requires_scheduled_queries_write_at_runtime(mocker):
 
 
 def _chat_turn_item(turn_id: str = "turn-1"):
-    from reporting.schema.chat import ChatTurnItem
+    from reporting.schema.chat import ChatTurnCommand, ChatTurnItem
 
     return ChatTurnItem(
         turn_id=turn_id,
@@ -985,6 +985,12 @@ def _chat_turn_item(turn_id: str = "turn-1"):
         user_id="user-1",
         message_id="msg_1",
         text_id="text_1",
+        idempotency_key="ik_turn_1",
+        command=ChatTurnCommand(
+            message="Hi",
+            permission_cap=["chat:use"],
+            timeout_seconds=60,
+        ),
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
         expires_at="2099-01-01T00:00:00+00:00",
@@ -1033,13 +1039,6 @@ async def test_a_silent_turn_still_reports_liveness(mocker):
     result = await activities.run_chat_turn(
         ChatTurnInvocation(
             turn_id="turn-1",
-            thread_id="1001",
-            user_id="user-1",
-            message="Hi",
-            resume_confirmation_id=None,
-            continue_response=False,
-            bypass_confirmations=False,
-            permissions=["chat:use"],
             timeout_seconds=60,
         )
     )
@@ -1078,13 +1077,6 @@ async def test_a_turn_that_no_longer_owns_its_thread_does_not_run(mocker):
         await activities.run_chat_turn(
             ChatTurnInvocation(
                 turn_id="turn-1",
-                thread_id="1001",
-                user_id="user-1",
-                message="Hi",
-                resume_confirmation_id=None,
-                continue_response=False,
-                bypass_confirmations=False,
-                permissions=["chat:use"],
                 timeout_seconds=60,
             )
         )

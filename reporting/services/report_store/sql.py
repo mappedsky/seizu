@@ -1,6 +1,6 @@
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from snowflake import SnowflakeGenerator
 from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, text, update
@@ -12,10 +12,10 @@ from reporting import settings
 from reporting.schema.chat import (
     ChatSessionItem,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnEventBatch,
     ChatTurnEventPage,
     ChatTurnItem,
-    ExpiredChatTurn,
     IdleChatSession,
     ScheduledChatItem,
     ScheduledChatVersion,
@@ -367,8 +367,7 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
         # producers interleaving state on one LangGraph thread. Partial so
         # finished turns, of which a thread has many, do not collide.
         # One turn per idempotency key: a repeat of an admission request
-        # resolves to the turn it already made rather than making another.
-        # NULLs are distinct, so turns admitted without a key do not collide.
+        # resolves to the immutable command it already admitted.
         UniqueConstraint("user_id", "thread_id", "idempotency_key", name="uq_chat_turns_idempotency_key"),
         Index(
             "uq_chat_turns_one_running",
@@ -384,8 +383,8 @@ class ChatTurnRecord(SQLModel, table=True):  # type: ignore
     thread_id: str
     message_id: str
     text_id: str
-    idempotency_key: str | None = None
-    request_hash: str | None = None
+    idempotency_key: str
+    command: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     status: str = "running"
     # None until the turn finishes; see ChatTurnItem for why a reader needs it.
     last_seq: int | None = None
@@ -675,7 +674,7 @@ def _chat_turn_from_record(record: ChatTurnRecord) -> ChatTurnItem:
             "message_id": record.message_id,
             "text_id": record.text_id,
             "idempotency_key": record.idempotency_key,
-            "request_hash": record.request_hash,
+            "command": record.command,
             "status": record.status,
             "last_seq": record.last_seq,
             "cancel_requested": record.cancel_requested,
@@ -3425,31 +3424,28 @@ class SQLModelReportStore(ReportStore):
         thread_id: str,
         message_id: str,
         text_id: str,
-        idempotency_key: str | None = None,
-        request_hash: str | None = None,
+        idempotency_key: str,
+        command: ChatTurnCommand,
     ) -> ChatTurnAdmission:
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
         async with AsyncSession(_get_engine()) as session:
-            if idempotency_key is not None:
-                # A repeat of this request resolves to the turn it already
-                # admitted. Checked first so a lost response is answered by
-                # asking again -- never mistaken for anything else.
-                already = (
-                    (
-                        await session.execute(
-                            select(ChatTurnRecord).where(
-                                col(ChatTurnRecord.user_id) == user_id,
-                                col(ChatTurnRecord.thread_id) == thread_id,
-                                col(ChatTurnRecord.idempotency_key) == idempotency_key,
-                            )
+            # A repeat resolves to the immutable command already admitted.
+            already = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord).where(
+                            col(ChatTurnRecord.user_id) == user_id,
+                            col(ChatTurnRecord.thread_id) == thread_id,
+                            col(ChatTurnRecord.idempotency_key) == idempotency_key,
                         )
                     )
-                    .scalars()
-                    .first()
                 )
-                if already is not None:
-                    return resolve_chat_turn_for_key(_chat_turn_from_record(already), request_hash)
+                .scalars()
+                .first()
+            )
+            if already is not None:
+                return resolve_chat_turn_for_key(_chat_turn_from_record(already))
 
             # Admission and creation commit together, so a delete cannot slip
             # between them: the session is closed to new turns the moment it is
@@ -3489,7 +3485,7 @@ class SQLModelReportStore(ReportStore):
                 "message_id": message_id,
                 "text_id": text_id,
                 "idempotency_key": idempotency_key,
-                "request_hash": request_hash,
+                "command": command.model_dump(mode="json"),
                 "status": "running",
                 "created_at": now_iso,
                 "updated_at": now_iso,
@@ -3510,25 +3506,21 @@ class SQLModelReportStore(ReportStore):
             # idempotency key was already checked above, so this is the thread
             # being held -- either by a turn that is running or by one admitted
             # concurrently under the same key.
-            if idempotency_key is not None:
-                concurrent = (
-                    (
-                        await session.execute(
-                            select(ChatTurnRecord).where(
-                                col(ChatTurnRecord.user_id) == user_id,
-                                col(ChatTurnRecord.thread_id) == thread_id,
-                                col(ChatTurnRecord.idempotency_key) == idempotency_key,
-                            )
+            concurrent = (
+                (
+                    await session.execute(
+                        select(ChatTurnRecord).where(
+                            col(ChatTurnRecord.user_id) == user_id,
+                            col(ChatTurnRecord.thread_id) == thread_id,
+                            col(ChatTurnRecord.idempotency_key) == idempotency_key,
                         )
                     )
-                    .scalars()
-                    .first()
                 )
-                if concurrent is not None:
-                    # The same rule as above, deliberately: a request that lost
-                    # the race must not resolve to a turn carrying a different
-                    # body just because it arrived second.
-                    return resolve_chat_turn_for_key(_chat_turn_from_record(concurrent), request_hash)
+                .scalars()
+                .first()
+            )
+            if concurrent is not None:
+                return resolve_chat_turn_for_key(_chat_turn_from_record(concurrent))
             return ChatTurnAdmission(outcome="busy")
 
     async def get_active_chat_turn(self, user_id: str, thread_id: str) -> ChatTurnItem | None:
@@ -3640,7 +3632,12 @@ class SQLModelReportStore(ReportStore):
             await session.refresh(record)
             return _chat_turn_from_record(record)
 
-    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+    async def finish_chat_turn(
+        self,
+        turn_id: str,
+        status: Literal["completed", "failed", "canceled", "expired"],
+        last_seq: int,
+    ) -> ChatTurnItem | None:
         now = datetime.now(tz=UTC)
         async with AsyncSession(_get_engine()) as session:
             # Conditional in the statement, not a read followed by a write: two
@@ -3687,7 +3684,7 @@ class SQLModelReportStore(ReportStore):
             await session.commit()
             return result.rowcount > 0 or events.rowcount > 0
 
-    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
         async with AsyncSession(_get_engine()) as session:
             rows = (
                 (
@@ -3701,15 +3698,7 @@ class SQLModelReportStore(ReportStore):
                 .scalars()
                 .all()
             )
-            return [
-                ExpiredChatTurn(
-                    turn_id=row.turn_id,
-                    user_id=row.user_id,
-                    thread_id=row.thread_id,
-                    expires_at=row.expires_at,
-                )
-                for row in rows
-            ]
+            return [row.turn_id for row in rows]
 
     # ------------------------------------------------------------------
     # Action confirmations

@@ -22,7 +22,7 @@ from reporting import scheduled_query_modules, settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
 from reporting.authnz.permissions import Permission
-from reporting.schema.chat import ChatTurnRequest, ScheduledChatItem
+from reporting.schema.chat import ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryAction, ScheduledQueryWatchScan
 from reporting.services import (
     agent_run,
@@ -1032,19 +1032,13 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
     """Produce one interactive turn, writing its stream into the event log.
 
     Identity is rebuilt from the store and then **intersected** with the
-    permissions the request actually arrived with. ``resolve_stored_user``
-    reconstructs from the last role claim seen, which can be staler or broader
-    than the caller's token, so the turn can never exceed either (AGT-006).
+    permission cap captured in the admitted command. ``resolve_stored_user``
+    can be staler or broader than the token the request actually arrived with,
+    so the turn can never exceed either (AGT-006).
 
     Finalizes its own turn, cancellation included: this is the code that owns
     the log, so it is the code that closes it.
     """
-    stored = await resolve_stored_user(invocation.user_id)
-    effective = frozenset(stored.permissions) & frozenset(invocation.permissions)
-    current = CurrentUser(user=stored.user, jwt_claims=stored.jwt_claims, permissions=effective)
-    if invocation.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in effective:
-        raise ApplicationError("Missing permissions to bypass confirmations", non_retryable=True)
-
     turn = await report_store.get_chat_turn(invocation.turn_id)
     if turn is None:
         # Admitted and then deleted -- the conversation went away before the
@@ -1055,12 +1049,18 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
         # finalized. Producing now would write into a log a reader has already
         # been told is complete.
         raise ApplicationError("Chat turn is no longer running", non_retryable=True)
+
+    stored = await resolve_stored_user(turn.user_id)
+    effective = frozenset(stored.permissions) & frozenset(turn.command.permission_cap)
+    current = CurrentUser(user=stored.user, jwt_claims=stored.jwt_claims, permissions=effective)
+    if turn.command.bypass_confirmations and Permission.CHAT_BYPASS_PERMISSIONS.value not in effective:
+        raise ApplicationError("Missing permissions to bypass confirmations", non_retryable=True)
     # Ownership, not just liveness. A workflow queued through a worker outage
     # can arrive after its turn's claim on the thread lapsed and a successor
     # took it. Both would then produce into one conversation, driving the same
     # checkpoint and running tools twice, so the one that no longer owns the
     # thread must not start.
-    active = await report_store.get_active_chat_turn(invocation.user_id, invocation.thread_id)
+    active = await report_store.get_active_chat_turn(turn.user_id, turn.thread_id)
     if active is None or active.turn_id != invocation.turn_id:
         raise ApplicationError("Chat turn no longer owns its thread", non_retryable=True)
 
@@ -1083,15 +1083,7 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
     try:
         status, last_seq = await chat_turns.produce_turn(
             turn,
-            invocation.thread_id,
-            ChatTurnRequest(
-                message=invocation.message,
-                resume_confirmation_id=invocation.resume_confirmation_id,
-                continue_response=invocation.continue_response,
-                bypass_confirmations=invocation.bypass_confirmations,
-            ),
             current,
-            on_progress=activity.heartbeat,
         )
     finally:
         heartbeat.cancel()

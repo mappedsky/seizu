@@ -1,13 +1,13 @@
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from reporting.schema.chat import (
     ChatSessionItem,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnEventPage,
     ChatTurnItem,
-    ExpiredChatTurn,
     IdleChatSession,
     ScheduledChatItem,
     ScheduledChatVersion,
@@ -868,10 +868,10 @@ async def admit_chat_turn(
     thread_id: str,
     message_id: str,
     text_id: str,
-    idempotency_key: str | None = None,
-    request_hash: str | None = None,
+    idempotency_key: str,
+    command: ChatTurnCommand,
 ) -> ChatTurnAdmission:
-    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, request_hash)
+    return await get_store().admit_chat_turn(user_id, thread_id, message_id, text_id, idempotency_key, command)
 
 
 async def get_active_chat_turn(user_id: str, thread_id: str) -> ChatTurnItem | None:
@@ -894,7 +894,11 @@ async def request_chat_turn_cancel(turn_id: str, user_id: str) -> ChatTurnItem |
     return await get_store().request_chat_turn_cancel(turn_id, user_id)
 
 
-async def finish_chat_turn(turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+async def finish_chat_turn(
+    turn_id: str,
+    status: Literal["completed", "failed", "canceled", "expired"],
+    last_seq: int,
+) -> ChatTurnItem | None:
     return await get_store().finish_chat_turn(turn_id, status, last_seq)
 
 
@@ -902,7 +906,7 @@ async def delete_chat_turn(turn_id: str) -> bool:
     return await get_store().delete_chat_turn(turn_id)
 
 
-async def list_expired_chat_turns(expired_before: str, limit: int) -> list[ExpiredChatTurn]:
+async def list_expired_chat_turns(expired_before: str, limit: int) -> list[str]:
     return await get_store().list_expired_chat_turns(expired_before, limit)
 
 

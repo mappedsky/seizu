@@ -18,7 +18,7 @@ class ChatTurnRequest(BaseModel):
     # returns the turn it already admitted rather than starting a second one,
     # which is how a lost response is resolved -- by asking again, not by
     # racing a different kind of write.
-    idempotency_key: str | None = Field(default=None, min_length=8, max_length=64)
+    idempotency_key: str = Field(min_length=8, max_length=64)
     # Run the turn with action confirmations bypassed. Requires the
     # chat:bypass_permissions permission (403 otherwise); every bypassed tool
     # execution is audit-logged.
@@ -29,6 +29,23 @@ class ChatTurnRequest(BaseModel):
         if not self.message and not self.resume_confirmation_id and not self.continue_response:
             raise ValueError("message, resume_confirmation_id, or continue_response is required")
         return self
+
+
+class ChatTurnCommand(BaseModel):
+    """The immutable work and authority captured when a turn is admitted.
+
+    A retry may be the request that successfully hands the turn to Temporal, so
+    dispatch must use this stored command rather than the retry's mutable body
+    or its caller's current permissions.
+    """
+
+    message: str = Field(default="", max_length=32000)
+    resume_confirmation_id: str | None = Field(default=None, min_length=1, max_length=64)
+    continue_response: bool = False
+    continue_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    bypass_confirmations: bool = False
+    permission_cap: list[str] = Field(default_factory=list)
+    timeout_seconds: int = Field(gt=0)
 
 
 class ChatTurnAdmissionResponse(BaseModel):
@@ -116,7 +133,7 @@ class ChatTurnAdmission(BaseModel):
     #             Never a cancellation: a repeat of a request is a repeat.
     # busy     -- another turn holds the thread.
     # retired  -- the conversation is gone or being deleted.
-    outcome: Literal["created", "existing", "busy", "retired", "mismatched", "expired"]
+    outcome: Literal["created", "existing", "busy", "retired", "expired"]
     turn: "ChatTurnItem | None" = None
 
 
@@ -135,16 +152,15 @@ class ChatTurnItem(BaseModel):
     user_id: str
     message_id: str = Field(min_length=1, max_length=128)
     text_id: str = Field(min_length=1, max_length=128)
-    # The key the admitting request carried, if any. Kept so a repeat of that
+    # The key the admitting request carried. Kept so a repeat of that
     # request resolves to this turn. It is *not* a way to address the turn:
     # everything acting on a turn names its ``turn_id``, which the client has
     # from the moment admission returns.
-    idempotency_key: str | None = None
-    # Fingerprint of the request admitted under that key. A repeat carrying the
-    # same key but a different fingerprint is refused rather than resolving
-    # here: the key names a turn that may already be running, so honouring the
-    # new body would change what that turn executes.
-    request_hash: str | None = None
+    idempotency_key: str = Field(min_length=8, max_length=64)
+    # The producer always dispatches this stored command. Repeating an
+    # idempotency key can therefore resolve safely even if the retrying request
+    # or the caller's permissions changed after admission.
+    command: ChatTurnCommand
     # ``expired`` is a turn that was admitted but could not be handed to a
     # producer before the safe portion of its claim elapsed. It is distinct
     # from a producer failure because repeating the admission must keep
@@ -184,15 +200,6 @@ class ChatTurnEventPage(BaseModel):
 
     turn: ChatTurnItem
     batches: list[ChatTurnEventBatch] = Field(default_factory=list)
-
-
-class ExpiredChatTurn(BaseModel):
-    """A turn the sweeper may collect, with the owner needed to scope the delete."""
-
-    turn_id: str
-    user_id: str
-    thread_id: str
-    expires_at: str
 
 
 class ChatScheduleSpec(ScheduleSpec):

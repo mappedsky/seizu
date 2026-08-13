@@ -86,12 +86,18 @@ function activeTransport(): SeizuChatTransport<UIMessage> {
 /** A transport whose thread the test controls, stubbed the same way
  * `activeTransport` stubs the component's: jsdom's `Response.body` is not a
  * real `ReadableStream`, and these tests are about which requests get made. */
-function standaloneTransport(threadId: () => string | null) {
+function standaloneTransport(
+  threadId: () => string | null,
+  onUnresolvedChange: (
+    threadId: string,
+    unresolved: boolean,
+  ) => void = () => {},
+) {
   const transport = new SeizuChatTransport<UIMessage>({
     threadId,
     accessToken: () => 'token',
     onStopFailed: () => {},
-    onUnresolvedChange: () => {},
+    onUnresolvedChange,
     admissionBody: () => ({ message: 'Hi' }),
   });
   jest
@@ -2505,7 +2511,7 @@ describe('ChatInterface', () => {
       (b) => (JSON.parse(b) as { idempotency_key: string }).idempotency_key,
     );
     expect(new Set(keys).size).toBe(1);
-    // Byte-identical, or the fingerprint the key is bound to would not match.
+    // Recovery repeats the same logical request under the same key.
     expect(new Set(bodies).size).toBe(1);
     fetchMock.mockRestore();
   });
@@ -2578,9 +2584,11 @@ describe('ChatInterface', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 503 }));
 
-    renderChat({ initialPath: '/app/chat/thread-1' });
-    await act(async () => {});
-    const transport = activeTransport();
+    const unresolved: boolean[] = [];
+    const transport = standaloneTransport(
+      () => 'thread-1',
+      (_threadId, value) => unresolved.push(value),
+    );
 
     await expect(
       transport.sendMessages(
@@ -2590,7 +2598,7 @@ describe('ChatInterface', () => {
       ),
     ).rejects.toThrow();
 
-    expect(transport.hasUnresolvedSend('thread-1')).toBe(true);
+    expect(unresolved.at(-1)).toBe(true);
     // A decision, by contrast, spends the key.
     fetchMock.mockResolvedValue(new Response('{}', { status: 409 }));
     await expect(
@@ -2600,7 +2608,7 @@ describe('ChatInterface', () => {
         ]),
       ),
     ).rejects.toThrow();
-    expect(transport.hasUnresolvedSend('thread-1')).toBe(false);
+    expect(unresolved.at(-1)).toBe(false);
     fetchMock.mockRestore();
   });
 

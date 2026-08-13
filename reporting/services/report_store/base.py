@@ -1,9 +1,6 @@
-import hashlib
-import json
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from reporting import settings
 from reporting.schema.chat import (
@@ -11,9 +8,9 @@ from reporting.schema.chat import (
     CHAT_TURN_MAX_SEQ,
     ChatSessionItem,
     ChatTurnAdmission,
+    ChatTurnCommand,
     ChatTurnEventPage,
     ChatTurnItem,
-    ExpiredChatTurn,
     IdleChatSession,
     ScheduledChatItem,
     ScheduledChatVersion,
@@ -87,54 +84,8 @@ def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
         raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
 
 
-def chat_turn_request_hash(
-    message: str,
-    resume_confirmation_id: str | None,
-    continue_response: bool,
-    continue_message_id: str | None,
-    bypass_confirmations: bool,
-    permissions: Sequence[str],
-) -> str:
-    """Fingerprint of what a turn was asked to do, and with what authority.
-
-    Bound to the idempotency key so a repeat cannot quietly change the work of a
-    turn that is already running -- the key resolves to that turn, and the
-    repeating request's body is what gets dispatched. Covers every field that
-    reaches the invocation; adding one to the request means adding it here.
-
-    **Permissions are part of it.** They are the cap the turn runs under, and a
-    repair dispatches from the *retrying* request -- so without this, a turn
-    admitted before a role was widened could be started afterwards with the
-    wider cap, which is exactly what the cap exists to prevent
-    (:ref:`AGT-006 <agt>`). Including them means such a repeat is refused
-    instead: the turn is not repairable across a permission change, which costs
-    an unrecoverable turn and buys never executing one above its admitted
-    authority.
-    """
-    payload = json.dumps(
-        [
-            message,
-            resume_confirmation_id,
-            continue_response,
-            continue_message_id,
-            bypass_confirmations,
-            sorted(permissions),
-        ],
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) -> ChatTurnAdmission:
-    """Decide what a key that already names a turn means for *this* request.
-
-    Used by both the lookup before the write and the re-read after a lost race:
-    a concurrent collision resolves through exactly the same rule, or two
-    requests sharing a key but not a body can have the loser resolve to the
-    winner's turn and then hand it the wrong work.
-    """
-    if request_hash is not None and turn.request_hash is not None and turn.request_hash != request_hash:
-        return ChatTurnAdmission(outcome="mismatched")
+def resolve_chat_turn_for_key(turn: "ChatTurnItem") -> ChatTurnAdmission:
+    """Resolve a repeated key to its immutable admitted turn."""
     # This terminal state has no event log to replay: the turn was admitted but
     # its claim ran too low before a producer could safely be started. Preserve
     # that result across every repeat of the key instead of turning the second
@@ -148,6 +99,11 @@ def resolve_chat_turn_for_key(turn: "ChatTurnItem", request_hash: str | None) ->
 #: Comfortably more than the activity's heartbeat interval, which is what bounds
 #: how long a timed-out activity keeps running before it hears about it.
 CHAT_TURN_CANCELLATION_BUFFER_SECONDS = 60
+
+
+def chat_turn_lease_margin_seconds() -> int:
+    """Derived safety room between the activity bound and thread takeover."""
+    return max(CHAT_TURN_CANCELLATION_BUFFER_SECONDS * 2, settings.CHAT_TURN_TIMEOUT_SECONDS // 3)
 
 
 def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: datetime | None = None) -> int:
@@ -169,7 +125,8 @@ def chat_turn_execution_bound_seconds(expires_at: str | None = None, now: dateti
     Zero or negative means the claim is already gone and there is nothing safe
     to start.
     """
-    bound = settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS // 2
+    margin = chat_turn_lease_margin_seconds()
+    bound = settings.CHAT_TURN_TIMEOUT_SECONDS + margin // 2
     if expires_at is None:
         return bound
     remaining = int((datetime.fromisoformat(expires_at) - (now or datetime.now(tz=UTC))).total_seconds())
@@ -189,9 +146,7 @@ def chat_turn_lease_expiry(now: datetime) -> str:
     conversation. A finished turn is re-stamped with the (much shorter)
     retention window instead -- that one is a replay deadline, not a claim.
     """
-    return (
-        now + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + settings.CHAT_TURN_LEASE_MARGIN_SECONDS)
-    ).isoformat()
+    return (now + timedelta(seconds=settings.CHAT_TURN_TIMEOUT_SECONDS + chat_turn_lease_margin_seconds())).isoformat()
 
 
 class ReportStore(ABC):
@@ -1030,15 +985,13 @@ class ReportStore(ABC):
         thread_id: str,
         message_id: str,
         text_id: str,
-        idempotency_key: str | None = None,
-        request_hash: str | None = None,
+        idempotency_key: str,
+        command: ChatTurnCommand,
     ) -> ChatTurnAdmission:
         """Reserve a thread for a turn, and say what happened.
 
-        ``request_hash`` binds the key to the request it was minted for. A
-        repeat carrying the same key but a different fingerprint returns
-        ``mismatched``: the key resolves to a turn that may already be running,
-        so honouring the new body would change what that turn executes.
+        ``command`` is captured in the same commit. A repeat always dispatches
+        that immutable work and permission cap, never the retrying request.
 
         Returns an outcome rather than raising one of several errors the caller
         must interpret: ``created``, ``existing``, ``busy`` or ``retired``. The
@@ -1118,7 +1071,12 @@ class ReportStore(ABC):
         """
 
     @abstractmethod
-    async def finish_chat_turn(self, turn_id: str, status: str, last_seq: int) -> ChatTurnItem | None:
+    async def finish_chat_turn(
+        self,
+        turn_id: str,
+        status: Literal["completed", "failed", "canceled", "expired"],
+        last_seq: int,
+    ) -> ChatTurnItem | None:
         """Move a *running* turn to a terminal status, first writer wins.
 
         ``last_seq`` is what lets a reader tell "finished" from "finished, and
@@ -1141,12 +1099,8 @@ class ReportStore(ABC):
         """Delete a turn and every one of its batches. Returns False if not found."""
 
     @abstractmethod
-    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[ExpiredChatTurn]:
-        """Turns whose ``expires_at`` has passed, oldest first.
-
-        The one turn read that spans users. These records are ephemeral and
-        nothing else deletes the log of a producer that died mid-turn.
-        """
+    async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
+        """IDs of turns whose ``expires_at`` has passed, oldest first."""
 
     # ------------------------------------------------------------------
     # Scheduled chats

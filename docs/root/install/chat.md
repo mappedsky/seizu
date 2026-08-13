@@ -335,15 +335,8 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_TOOL_RESULT_MAX_BYTES` | `200000` | Maximum serialized bytes returned to chat from one tool call. |
 | `ACTION_CONFIRMATION_TTL_SECONDS` | `1800` | Lifetime of an approved or denied mutating-action confirmation. |
 | `CHAT_TURN_RETENTION_SECONDS` | `600` | How long a finished turn stays replayable — the window a client has to reconnect. Not conversation history. |
-| `CHAT_TURN_FLUSH_MS` | `200` | How often a running turn flushes buffered stream parts to its log. |
-| `CHAT_TURN_POLL_MS` | `200` | How often a connected client's request polls that log while output is arriving. Together with the flush interval this is the latency between a token being produced and reaching the browser. |
-| `CHAT_TURN_POLL_MAX_MS` | `1000` | Ceiling the poll backs off to while a turn produces nothing (tool calls, model latency). Resets to the floor as soon as a batch lands. |
-| `CHAT_TURN_HEARTBEAT_SECONDS` | `2` | How often a running turn checks for a stop request. Also the worst-case delay before **Stop** takes effect when the request lands on a replica that did not start the turn. |
+| `CHAT_TURN_STREAM_LATENCY_MS` | `200` | Target delay for flushing produced parts and polling their log. Polling backs off automatically while a turn is quiet. |
 | `CHAT_TURN_TIMEOUT_SECONDS` | `900` | How long one turn may run before its workflow gives up. A turn that hits this is recorded as failed rather than left running. |
-| `CHAT_TURN_LEASE_MARGIN_SECONDS` | `300` | Added to the timeout above to get a running turn's claim on its thread. Must outlast every way a turn can legitimately still be running, or a concurrent send can retire a live one. |
-| `CHAT_TURN_STOP_WAIT_SECONDS` | `10` | How long deleting a conversation waits for its running turn to actually stop before cascading. |
-| `CHAT_TURN_SWEEP_INTERVAL_SECONDS` | `300` | Minimum gap between expired-log sweeps in one process. Sweeps are driven by turns completing, which is far more often than expiry needs. |
-| `CHAT_TURN_TAIL_MAX_SECONDS` | `1800` | Hard bound on how long one request will follow a turn, so a producer that dies without writing a terminal status cannot hold a connection open indefinitely. |
 | `CHAT_SESSION_REAP_ENABLED` | `false` | Retire sessions nobody has come back to. **Deletes chat history.** |
 | `CHAT_SESSION_REAP_IDLE_SECONDS` | `2592000` (30d) | How long a session may sit untouched before it is retired, measured from its last update. `0` disables reaping. |
 | `CHAT_SESSION_REAP_INTERVAL_SECONDS` | `3600` | Time between sweeps. |

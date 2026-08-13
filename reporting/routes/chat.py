@@ -94,11 +94,6 @@ async def admit_chat_turn(
         raise HTTPException(status_code=503, detail="Could not start this turn; please try again") from exc
     if admission.outcome == "retired":
         raise HTTPException(status_code=404, detail="This conversation has been retired")
-    if admission.outcome == "mismatched":
-        raise HTTPException(
-            status_code=409,
-            detail="This idempotency key was used for a different request",
-        )
     if admission.outcome == "expired":
         # The turn was admitted but its claim ran out before it could be handed
         # to a producer. The key is definitively spent, unlike an ambiguous
@@ -411,7 +406,7 @@ async def _close_session_for_deletion(user_id: str, thread_id: str) -> bool:
         logger.exception("Failed to cancel the running turn before deletion", extra={"thread_id": thread_id})
         raise HTTPException(status_code=503, detail="Failed to delete chat session") from exc
     await chat_turns.cancel_turn(running.turn_id)
-    if not await chat_turns.await_turn_stopped(running.turn_id, settings.CHAT_TURN_STOP_WAIT_SECONDS):
+    if not await chat_turns.await_turn_stopped(running.turn_id, chat_turns.TURN_STOP_WAIT_SECONDS):
         # Deleting now would leave the producer writing behind the cascade,
         # which no cleanup undoes. The session stays claimed, so nothing new can
         # start and the retry is a plain repeat.

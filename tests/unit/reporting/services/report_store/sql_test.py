@@ -5,6 +5,7 @@ sessions within a test share the same underlying connection.
 """
 
 import asyncio
+import itertools
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from reporting import settings
-from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES
+from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
@@ -514,9 +515,21 @@ async def _ensure_session(user_id: str = "user-1", thread_id: str = "1001") -> N
         await session.commit()
 
 
+_TURN_KEYS = itertools.count()
+
+
+def _turn_command(message: str = "hello") -> ChatTurnCommand:
+    return ChatTurnCommand(
+        message=message,
+        permission_cap=[],
+        timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+    )
+
+
 async def _admit(store, user_id: str = "user-1", thread_id: str = "1001", key: str | None = None):
     await _ensure_session(user_id, thread_id)
-    return await store.admit_chat_turn(user_id, thread_id, "msg_1", "text_1", key)
+    key = key or f"ik_test_{next(_TURN_KEYS)}"
+    return await store.admit_chat_turn(user_id, thread_id, "msg_1", "text_1", key, _turn_command())
 
 
 async def _open_turn(store, user_id: str = "user-1", thread_id: str = "1001"):
@@ -581,7 +594,7 @@ async def test_a_different_key_on_a_busy_thread_is_busy(store):
 
 
 async def test_admission_to_a_missing_session_is_retired(store):
-    admission = await store.admit_chat_turn("user-1", "9999", "msg_1", "text_1")
+    admission = await store.admit_chat_turn("user-1", "9999", "msg_1", "text_1", "ik_missing1", _turn_command())
 
     assert admission.outcome == "retired"
 
@@ -694,7 +707,9 @@ async def test_two_concurrent_finishes_cannot_both_win(store, tmp_path):
                     )
                 )
                 await session.commit()
-            admission = await concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1")
+            admission = await concurrent.admit_chat_turn(
+                "user-1", "1001", "msg_1", "text_1", "ik_finish1", _turn_command()
+            )
             assert admission.turn is not None
             turn_id = admission.turn.turn_id
 
@@ -741,8 +756,8 @@ async def test_two_concurrent_admissions_cannot_both_win(store, tmp_path):
                 )
                 await session.commit()
             results = await asyncio.gather(
-                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1"),
-                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1"),
+                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1", "ik_concurrent1", _turn_command()),
+                concurrent.admit_chat_turn("user-1", "1001", "msg_1", "text_1", "ik_concurrent2", _turn_command()),
             )
 
             assert sorted(r.outcome for r in results) == ["busy", "created"]
@@ -947,8 +962,8 @@ async def test_list_expired_chat_turns_selects_only_expired(store):
 
     expired = await store.list_expired_chat_turns("2021-01-01T00:00:00+00:00", limit=10)
 
-    assert [e.turn_id for e in expired] == [stale.turn_id]
-    assert live.turn_id not in {e.turn_id for e in expired}
+    assert expired == [stale.turn_id]
+    assert live.turn_id not in expired
 
 
 # ---------------------------------------------------------------------------

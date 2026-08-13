@@ -29,15 +29,6 @@ export type ChatTurnAdmission = {
  * stop is applied the moment the turn has an id.
  */
 type PendingSend = {
-  /**
-   * The thread this send belongs to.
-   *
-   * The transport outlives any one conversation -- the sidebar can switch
-   * sessions mid-turn -- so everything acting on the pending send checks this
-   * first. Without it, thread A finishing clears thread B's pending state and
-   * silently disarms Stop for the turn that is actually running.
-   */
-  threadId: string;
   /** The user message this send is for; retries of it reuse the key below. */
   messageId: string;
   /** Stable across retries, so a lost admission response resolves rather than
@@ -48,9 +39,8 @@ type PendingSend = {
   /** Stop pressed before we had an id. */
   stopRequested: boolean;
   /**
-   * The exact body that was sent. Retained so a retry can replay *this*
-   * request rather than composing a new one -- a fresh body would not match the
-   * fingerprint the key is bound to, and would be refused.
+   * The body that was sent. Retained so recovery repeats the same logical
+   * request; the server dispatches the immutable command stored at admission.
    */
   body: string;
   /**
@@ -136,8 +126,8 @@ export class SeizuChatTransport<
    * Replay a send whose outcome was never established.
    *
    * The same body under the same key, which is the only request the server can
-   * resolve to the turn it may already have admitted: anything else is either a
-   * second turn or a fingerprint mismatch.
+   * resolve to the turn it may already have admitted rather than creating a
+   * second turn.
    *
    * Resolves the turn and records it; the caller then resumes, which reads it
    * through `reconnectToStream`. Returning a stream here instead would hand
@@ -150,26 +140,6 @@ export class SeizuChatTransport<
     if (!threadId || !pending?.unresolved || !pending.body) return false;
     await this.admit(threadId, pending.body, pending);
     return true;
-  }
-
-  /** Whether this thread has a send whose outcome is still unknown.
-   *
-   * The turn may exist server-side, so its key has to outlive the failure: it
-   * is the only thing that can resolve to that turn rather than admitting a
-   * second one.
-   */
-  hasUnresolvedSend(threadId: string | null): boolean {
-    return threadId ? (this.pending.get(threadId)?.unresolved ?? false) : false;
-  }
-
-  /** Forget a finished turn, so a later Stop cannot land on it.
-   *
-   * Scoped to the thread that finished: a turn completing in a conversation the
-   * user has since navigated away from must not disarm Stop for the one they
-   * are now watching.
-   */
-  clearPending(threadId: string | null): void {
-    if (threadId) this.pending.delete(threadId);
   }
 
   /** Forget the turn that just ended, wherever it belonged.
@@ -362,7 +332,6 @@ export class SeizuChatTransport<
       existing?.messageId === messageId && existing.turnId === null
         ? existing
         : {
-            threadId,
             messageId,
             idempotencyKey: `ik_${crypto.randomUUID().replace(/-/g, '')}`,
             turnId: null,
@@ -377,8 +346,7 @@ export class SeizuChatTransport<
       }),
       idempotency_key: pending.idempotencyKey,
     });
-    // Retained so a retry can replay *this* request: a recomposed body would
-    // not match the fingerprint the key is bound to, and would be refused.
+    // Retained so a retry replays the same logical request under the same key.
     pending.body = body;
     this.pending.set(threadId, pending);
 
@@ -415,7 +383,6 @@ export class SeizuChatTransport<
     const { turn_id: turnId } = (await active.json()) as ChatTurnAdmission;
     // A turn this tab did not start is still one it can stop.
     this.pending.set(threadId, {
-      threadId,
       messageId: `reconnect:${turnId}`,
       idempotencyKey: '',
       body: '',

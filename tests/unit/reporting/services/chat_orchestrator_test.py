@@ -2400,6 +2400,15 @@ def test_the_planner_is_told_to_plan_around_data_earlier_turns_saved():
     assert "genuinely missing, stale, or was truncated" in prompt
 
 
+def test_the_planner_does_not_treat_missing_evidence_as_an_answer_only_step():
+    prompt = chat_orchestrator._PLANNER_PROMPT
+
+    assert "a prior summary mentioning the subject is not enough" in prompt
+    assert "identifies missing evidence" in prompt
+    assert "attack-path or internet-exposure analysis" in prompt
+    assert "presenting an inference as a determination" in prompt
+
+
 async def test_a_worker_step_publishes_its_tools_to_its_sub_agents(mocker):
     """A step's sub-agent may reach what the step may reach — no more.
 

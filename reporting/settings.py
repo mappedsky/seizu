@@ -895,45 +895,14 @@ ACTION_CONFIRMATION_TTL_SECONDS = int_env("ACTION_CONFIRMATION_TTL_SECONDS", 180
 # a client has to reconnect and replay a turn; it is not conversation history
 # (that lives in the checkpoint), so it can be short.
 CHAT_TURN_RETENTION_SECONDS = int_env("CHAT_TURN_RETENTION_SECONDS", 600)
-# How often the producer flushes buffered stream parts to the event log, and how
-# often a tailing reader polls it. Together these set the added latency between
-# a token being produced and reaching the browser, so keep them small; the write
-# volume they imply is one item per flush per turn.
-CHAT_TURN_FLUSH_MS = int_env("CHAT_TURN_FLUSH_MS", 200)
-CHAT_TURN_POLL_MS = int_env("CHAT_TURN_POLL_MS", 200)
-# Ceiling the poll interval backs off to while a turn produces nothing. A turn
-# is quiet for most of its life (tool calls, model latency), and polling at the
-# floor throughout costs the same reads per viewer whether or not anything is
-# arriving. The interval resets to the floor as soon as a batch lands.
-CHAT_TURN_POLL_MAX_MS = int_env("CHAT_TURN_POLL_MAX_MS", 1_000)
-# How often a running turn re-reads its own record to pick up a stop request,
-# which is also the worst-case delay before Stop takes effect on a replica that
-# did not start the turn.
-CHAT_TURN_HEARTBEAT_SECONDS = int_env("CHAT_TURN_HEARTBEAT_SECONDS", 2)
-# How long deleting a conversation waits for its running turn to actually
-# stop before cascading. Bounded by the heartbeat above: a producer on another
-# replica cannot notice sooner than that.
-CHAT_TURN_STOP_WAIT_SECONDS = float_env("CHAT_TURN_STOP_WAIT_SECONDS", 10.0)
-# Minimum gap between expired-log sweeps in one process. The sweep is driven
-# by turns completing, which is far more often than expiry needs; pacing it
-# keeps the cost proportional to time rather than to chat volume.
-CHAT_TURN_SWEEP_INTERVAL_SECONDS = float_env("CHAT_TURN_SWEEP_INTERVAL_SECONDS", 300.0)
+# Target added latency for flushing and reading stream batches. The idle poll
+# ceiling is derived from it; the two sides cannot be tuned into disagreement.
+CHAT_TURN_STREAM_LATENCY_MS = int_env("CHAT_TURN_STREAM_LATENCY_MS", 200)
 # How long one interactive turn may run before its workflow gives up. The
 # activity gets this plus a margin; a turn that hits it is recorded as failed
 # rather than left running. It is also what bounds a *running* turn's lease --
-# see CHAT_TURN_LEASE_MARGIN_SECONDS.
+# see ``chat_turn_lease_expiry``.
 CHAT_TURN_TIMEOUT_SECONDS = int_env("CHAT_TURN_TIMEOUT_SECONDS", 900)
-# Added to CHAT_TURN_TIMEOUT_SECONDS to get a running turn's lease. The lease
-# says "a producer still holds this thread", and admission retires a lapsed one,
-# so it must outlast every way the turn can legitimately still be running --
-# including the workflow's own grace period after the activity timeout. Too
-# short and a concurrent send retires a live turn, putting two producers on one
-# conversation; too long only delays the recovery of a genuinely dead one.
-CHAT_TURN_LEASE_MARGIN_SECONDS = int_env("CHAT_TURN_LEASE_MARGIN_SECONDS", 300)
-# Hard bound on how long a reader will tail one turn before giving up, so a
-# producer that dies without writing a terminal status cannot hold a request
-# open forever.
-CHAT_TURN_TAIL_MAX_SECONDS = int_env("CHAT_TURN_TAIL_MAX_SECONDS", 1800)
 
 # Optional public browser origin used when MCP clients need to show a user an
 # approval URL. When unset, Seizu derives the origin from MCP_RESOURCE_URL.
