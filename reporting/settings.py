@@ -935,7 +935,9 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 # External MCP servers reached through an identity-aware proxy. JSON array; see
 # docs/root/install/external-mcp.md. Parsing at startup makes malformed security
 # mappings a configuration error rather than silently dropping a proxy.
-MCP_EXTERNAL_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
+MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
+_MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
+MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.

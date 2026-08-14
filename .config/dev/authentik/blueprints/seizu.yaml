@@ -176,6 +176,57 @@ entries:
         - [name, seizu]
       policy_engine_mode: any
 
+  # Confidential client for the local external MCP proxy. It is intentionally
+  # a separate OAuth client from Seizu's public PKCE/device client, while using
+  # the same Authentik users and browser SSO session.
+  - model: authentik_providers_oauth2.oauth2provider
+    state: present
+    identifiers:
+      name: seizu-external-mcp-proxy
+    attrs:
+      name: seizu-external-mcp-proxy
+      client_type: confidential
+      client_id: seizu-external-mcp-proxy
+      client_secret: seizu-external-mcp-proxy-dev-secret
+      authorization_flow: !Find
+        - authentik_flows.flow
+        - [slug, default-provider-authorization-explicit-consent]
+      invalidation_flow: !Find
+        - authentik_flows.flow
+        - [slug, default-provider-invalidation-flow]
+      redirect_uris:
+        - url: http://localhost:8081/callback
+          matching_mode: strict
+      signing_key: !Find
+        - authentik_crypto.certificatekeypair
+        - [name, "authentik Self-signed Certificate"]
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find
+          - authentik_providers_oauth2.scopemapping
+          - [managed, "goauthentik.io/providers/oauth2/scope-openid"]
+        - !Find
+          - authentik_providers_oauth2.scopemapping
+          - [managed, "goauthentik.io/providers/oauth2/scope-email"]
+        - !Find
+          - authentik_providers_oauth2.scopemapping
+          - [managed, "goauthentik.io/providers/oauth2/scope-profile"]
+        - !Find
+          - authentik_providers_oauth2.scopemapping
+          - [managed, "goauthentik.io/providers/oauth2/scope-offline_access"]
+
+  - model: authentik_core.application
+    state: present
+    identifiers:
+      slug: seizu-external-mcp-proxy
+    attrs:
+      name: Seizu External MCP Proxy
+      slug: seizu-external-mcp-proxy
+      provider: !Find
+        - authentik_providers_oauth2.oauth2provider
+        - [name, seizu-external-mcp-proxy]
+      policy_engine_mode: any
+
   # Brand: apply Seizu theme to the default-domain login page
   - model: authentik_brands.brand
     state: present

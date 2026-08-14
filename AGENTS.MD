@@ -71,6 +71,7 @@ make generate_openapi   # export schema/openapi.json (no running server)
 make generate_client LANG=go
 make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
+make external_mcp_enable / external_mcp_disable
 make build_cartography_worker     # build the cartography sync-worker image
 make cartography_contract_test    # verify registry flags against the pinned CLI
 make lock_proxy_requirements [REQUIREMENTS=... PYTHON_VERSION=... OUTPUT=...]  # re-lock the proxy's deps
@@ -186,6 +187,8 @@ PostgreSQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
 
 ### External MCP Proxies (`reporting/services/external_mcp.py`)
 
+`MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
+Compose profile (`make external_mcp_enable` / `make external_mcp_disable`).
 `MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
 definitions used by the chat agent. External tools are dynamically discovered,
 namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from

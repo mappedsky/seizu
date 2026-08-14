@@ -230,24 +230,57 @@ services:
       start_period: 10s
     networks:
       database:
-  # Lightweight external MCP OAuth proxy for local integration testing.
-  # Opt in with `docker compose --profile external-mcp up`; see
-  # docs/root/install/external-mcp.md for the required OAuth/upstream values.
+  # Lightweight external MCP OAuth proxy plus the official GitHub MCP server
+  # for local integration testing. `make external_mcp_enable` also enables the
+  # local Authentik profile: proxy users authenticate through the same IDP and
+  # SSO session as Seizu.
   external-mcp-proxy:
-    image: ghcr.io/obot-platform/mcp-oauth-proxy:latest
+    build:
+      context: .
+      dockerfile: .config/dev/external-mcp-proxy/Dockerfile
+    profiles:
+      - external-mcp
+    depends_on:
+      - external-mcp-github-auth
+    environment:
+      - OAUTH_CLIENT_ID=${DEV_MCP_PROXY_OAUTH_CLIENT_ID:-seizu-external-mcp-proxy}
+      - OAUTH_CLIENT_SECRET=${DEV_MCP_PROXY_OAUTH_CLIENT_SECRET:-seizu-external-mcp-proxy-dev-secret}
+      - OAUTH_AUTHORIZE_URL=${DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL:-http://localhost:9000/application/o/seizu-external-mcp-proxy}
+      - SCOPES_SUPPORTED=${DEV_MCP_PROXY_SCOPES:-openid,email,profile}
+      - MCP_SERVER_URL=${DEV_MCP_PROXY_UPSTREAM_URL:-http://external-mcp-github-auth:8080}
+      - ENCRYPTION_KEY=${DEV_MCP_PROXY_ENCRYPTION_KEY:-}
+      - HOST=0.0.0.0
+      # Authentik derives its issuer and discovery endpoints from the request
+      # host. The wrapper's supervised loopback forwarder keeps this identical
+      # to the browser-facing localhost:9000 authority (AUTH-002).
+      - DEV_OIDC_LOOPBACK_TARGET=authentik-server:9000
+    ports:
+      - 8081:8080
+    networks:
+      database:
+      auth:
+  # Obot owns the inbound Authorization header. This internal-only adapter
+  # supplies the separate development PAT expected by GitHub's HTTP MCP server.
+  external-mcp-github-auth:
+    image: caddy:2-alpine
+    profiles:
+      - external-mcp
+    depends_on:
+      - external-mcp-github
+    environment:
+      - GITHUB_PERSONAL_ACCESS_TOKEN=${DEV_GITHUB_MCP_TOKEN:-}
+    volumes:
+      - .config/dev/github-mcp/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      database:
+  external-mcp-github:
+    image: ghcr.io/github/github-mcp-server:latest
+    command: ["http"]
     profiles:
       - external-mcp
     environment:
-      - OAUTH_CLIENT_ID=${DEV_MCP_PROXY_OAUTH_CLIENT_ID:-}
-      - OAUTH_CLIENT_SECRET=${DEV_MCP_PROXY_OAUTH_CLIENT_SECRET:-}
-      - OAUTH_AUTHORIZE_URL=${DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL:-}
-      - SCOPES_SUPPORTED=${DEV_MCP_PROXY_SCOPES:-openid,email,profile}
-      - MCP_SERVER_URL=${DEV_MCP_PROXY_UPSTREAM_URL:-}
-      - ENCRYPTION_KEY=${DEV_MCP_PROXY_ENCRYPTION_KEY:-}
-    ports:
-      - 8081:8080
-    extra_hosts:
-      - host.docker.internal:host-gateway
+      - GITHUB_READ_ONLY=${DEV_GITHUB_MCP_READ_ONLY:-1}
+      - GITHUB_TOOLSETS=${DEV_GITHUB_MCP_TOOLSETS:-default}
     networks:
       database:
   seizu-temporal-worker:
@@ -359,6 +392,7 @@ services:
       # External MCP proxy discovery and per-user/M2M delegation. The named
       # token is the convenient default used by the documentation; production
       # orchestrators may inject any token_env referenced by the JSON config.
+      - MCP_EXTERNAL_ENABLED
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
       - MCP_EXTERNAL_PROXY_TOKEN
@@ -605,6 +639,7 @@ services:
       - MCP_RESOURCE_URL=http://localhost:8080/api/v1/mcp
       # External MCP servers used by the chat agent (also passed to the worker,
       # which is where interactive and headless turns actually execute).
+      - MCP_EXTERNAL_ENABLED
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
       - MCP_EXTERNAL_PROXY_TOKEN

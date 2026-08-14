@@ -193,6 +193,10 @@ Seizu exposes a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
   Known groups: ``graph``, ``reports``, ``scheduled_queries``, ``spaces``, ``toolsets``, ``roles``.
 
+* ``MCP_EXTERNAL_ENABLED``: Enables external MCP discovery and invocation;
+  default: ``False``. In local development, use ``make external_mcp_enable`` or
+  ``make external_mcp_disable`` so ``make up`` also selects the optional Compose
+  profile.
 * ``MCP_EXTERNAL_PROXIES``: JSON array of identity-aware external MCP proxy
   definitions used by the chat agent. The same value and referenced token
   environment variables must be provided to the Temporal worker. External

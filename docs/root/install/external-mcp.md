@@ -13,12 +13,13 @@ stored toolsets, or another proxy.
 
 ## Proxy configuration
 
-Set `MCP_EXTERNAL_PROXIES` to a JSON array. The web service and
+Set `MCP_EXTERNAL_ENABLED=true` and `MCP_EXTERNAL_PROXIES` to a JSON array. The web service and
 `seizu-temporal-worker` must receive identical configuration and token
 environment variables because interactive and headless turns execute in the
 Temporal worker.
 
 ```text
+MCP_EXTERNAL_ENABLED=true
 MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","email":"X-Target-Email"}}]
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=ext__drive__delete_file,ext__drive__share_file
 MCP_EXTERNAL_PROXY_TOKEN=<short-lived-service-jwt>
@@ -98,37 +99,74 @@ user or a broader process identity.
 
 The optional Compose profile runs
 [`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)
-on `http://localhost:8081`. Obot is intentionally opt-in: it needs an OAuth
-application and an upstream Streamable HTTP MCP server. Register
-`http://localhost:8081/callback` with the OAuth provider, then add this to
-`.env`:
+on `http://localhost:8081`, the
+[`github/github-mcp-server`](https://github.com/github/github-mcp-server) in
+Streamable HTTP mode, and a network-internal Caddy adapter between them. The
+GitHub server gives the profile a real, annotation-bearing MCP implementation
+without requiring developers to launch a separate upstream.
+
+Obot authenticates access to the local proxy through the same local Authentik
+instance, users, and browser SSO session as Seizu; the GitHub MCP server
+separately uses a development GitHub PAT. Obot deliberately strips its inbound bearer
+before forwarding and exposes the OAuth provider token in an identity header,
+while GitHub's HTTP server requires a GitHub token in `Authorization`. The Caddy
+adapter supplies the PAT and removes Obot's forwarded identity headers. It and
+the GitHub server have no host ports.
+
+The Authentik development blueprint creates a dedicated confidential client and
+registers `http://localhost:8081/callback`. It stays separate from Seizu's
+public PKCE/device client because Obot requires a client secret, but both
+applications use the same identity store and SSO login. Add this to `.env`:
 
 ```text
-DEV_MCP_PROXY_OAUTH_CLIENT_ID=<provider-client-id>
-DEV_MCP_PROXY_OAUTH_CLIENT_SECRET=<provider-client-secret>
-DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL=https://accounts.google.com
+DEV_MCP_PROXY_OAUTH_CLIENT_ID=seizu-external-mcp-proxy
+DEV_MCP_PROXY_OAUTH_CLIENT_SECRET=seizu-external-mcp-proxy-dev-secret
+DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL=http://localhost:9000/application/o/seizu-external-mcp-proxy
 DEV_MCP_PROXY_SCOPES=openid,email,profile
-DEV_MCP_PROXY_UPSTREAM_URL=http://host.docker.internal:9000/mcp/example
 DEV_MCP_PROXY_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+DEV_GITHUB_MCP_TOKEN=<fine-grained-development-pat>
+DEV_GITHUB_MCP_READ_ONLY=1
+DEV_GITHUB_MCP_TOOLSETS=default
 
-MCP_EXTERNAL_PROXIES=[{"name":"local","url":"http://external-mcp-proxy:8080/mcp/example","transport":"streamable_http","auth_mode":"bearer","token_env":"MCP_EXTERNAL_PROXY_TOKEN"}]
+MCP_EXTERNAL_ENABLED=true
+MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-proxy:8080/mcp/github","transport":"streamable_http","auth_mode":"bearer","token_env":"MCP_EXTERNAL_PROXY_TOKEN"}]
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=
 MCP_EXTERNAL_PROXY_TOKEN=<access-token-issued-by-the-local-proxy>
 ```
 
-Generate the encryption key with `openssl rand -base64 32`. Start the stack:
+Grant the PAT only the repositories and permissions needed for testing. The
+profile defaults GitHub MCP to read-only mode; set
+`DEV_GITHUB_MCP_READ_ONLY=0` to expose mutating tools and exercise Seizu's
+annotation-based confirmation flow. `DEV_GITHUB_MCP_TOOLSETS` accepts the
+GitHub server's comma-separated toolset names. Generate the encryption key with
+`openssl rand -base64 32`, then enable the integration and start the stack:
 
 ```bash
-docker compose --profile external-mcp up
+make external_mcp_enable
+make up
 ```
+
+The make target enables local Authentik and persists
+`MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose
+profiles automatically. The proxy container uses a supervised loopback
+forwarder so its Authentik discovery and token exchange retain the browser's
+`localhost:9000` issuer (AUTH-002). To turn off the agent capability and its
+local proxy services, run `make external_mcp_disable`, then restart the stack
+with `make down && make up`. This does not disable Authentik independently.
 
 With `MCP_EXTERNAL_PROXY_TOKEN` empty, ask chat to use the external server to
 exercise the 401/RFC 9728 path. Complete the proxy's OAuth flow with an MCP OAuth
 client, put the issued development access token in the variable, recreate the
-Seizu and worker containers, and retry to exercise discovery and invocation.
-This copied bearer is suitable only for a single-user local test. Multi-user
-deployments should use a gateway/M2M exchange or a proxy integration that maps a
-Seizu identity to its own per-user token vault.
+Seizu and worker containers, and retry to exercise GitHub tool discovery and
+invocation. This copied proxy bearer and shared development PAT are suitable
+only for a single-user local test. Multi-user deployments should use a
+gateway/M2M exchange or a proxy integration that maps a Seizu identity to its
+own per-user token vault.
+
+To proxy a different Streamable HTTP MCP server, set
+`DEV_MCP_PROXY_UPSTREAM_URL` to its internal or host-reachable URL. Such an
+upstream is responsible for understanding Obot's forwarded identity headers;
+the GitHub-specific PAT adapter is used only by the default URL.
 
 ## Enterprise gateway example
 
@@ -137,6 +175,7 @@ gateway validate a short-lived Seizu service JWT and authorize the target-user
 header before proxying to MCP. The Seizu side is vendor-neutral:
 
 ```text
+MCP_EXTERNAL_ENABLED=true
 MCP_EXTERNAL_PROXIES=[{"name":"corp","url":"https://gateway.example/mcp","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","issuer":"X-Target-Issuer"},"require_confirmation":true}]
 MCP_EXTERNAL_PROXY_TOKEN=<gateway-audience-service-jwt>
 ```
