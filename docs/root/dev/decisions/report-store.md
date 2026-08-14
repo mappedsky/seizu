@@ -6,6 +6,18 @@ for breaking migrations see the [upgrade guide](../../install/upgrading.md).
 
 Primary code: `reporting/services/report_store/`.
 
+## STO-001 — The persistence backend is selected behind `get_store()` — superseded by STO-005
+
+**Superseded by:** STO-005. Seizu exposed DynamoDB and SQL implementations through one backend-neutral report-store facade.
+
+## STO-002 — DynamoDB report-list records duplicate report metadata — superseded by STO-005
+
+**Superseded by:** STO-005. DynamoDB list queries read a full metadata duplicate rather than the report's canonical metadata item.
+
+## STO-003 — The DynamoDB spaces index is optional — superseded by STO-005
+
+**Superseded by:** STO-005. Space report listing used an optional sparse GSI with a full-partition fallback.
+
 ## STO-004 — Alembic is the sole startup schema owner
 
 **Applies to:** `report_store/migrations.py`, `reporting/migrations/versions/`
