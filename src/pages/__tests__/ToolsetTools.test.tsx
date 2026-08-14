@@ -68,6 +68,21 @@ function Wrapper({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ExternalWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <MemoryRouter initialEntries={['/app/toolsets/__external_github__/tools']}>
+      <ThemeProvider theme={theme}>
+        <Routes>
+          <Route
+            path="/app/toolsets/:toolsetId/tools"
+            element={<>{children}</>}
+          />
+        </Routes>
+      </ThemeProvider>
+    </MemoryRouter>
+  );
+}
+
 describe('ToolsetTools', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -98,5 +113,34 @@ describe('ToolsetTools', () => {
     expect(screen.getByText('Recent CVEs')).toBeInTheDocument();
     expect(screen.getByText('v3')).toBeInTheDocument();
     expect(screen.getByText('bob')).toBeInTheDocument();
+  });
+
+  it('renders external MCP tools as read-only', () => {
+    mockUseToolsList.mockReturnValue({
+      tools: [
+        {
+          ...TOOL,
+          tool_id: '__external_ext__github__get_file_contents__',
+          toolset_id: '__external_github__',
+          name: 'get_file_contents',
+          current_version: 0,
+          created_at: '',
+          updated_at: '',
+          created_by: '',
+          updated_by: null,
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+
+    render(<ToolsetTools />, { wrapper: ExternalWrapper });
+
+    expect(screen.getByText('External MCP')).toBeInTheDocument();
+    expect(
+      screen.getByText('ext__github__get_file_contents'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New tool' })).toBeNull();
   });
 });

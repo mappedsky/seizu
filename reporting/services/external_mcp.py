@@ -24,11 +24,16 @@ from reporting.schema.external_mcp import (
     ExternalMCPProxy,
     ExternalMCPTransport,
 )
+from reporting.schema.mcp_config import ToolItem, ToolsetListItem
+from reporting.services.mcp_builtins.synthetic import params_from_input_schema
 
 logger = logging.getLogger(__name__)
 
 NAMESPACE_PREFIX = "ext"
 AUTHENTICATE_TOOL_NAME = "seizu_authenticate"
+EXTERNAL_TOOLSET_PREFIX = "__external_"
+_SYNTHETIC_SUFFIX = "__"
+_EPOCH = "1970-01-01T00:00:00+00:00"
 _RESOURCE_METADATA_RE = re.compile(r"(?:^|[,\s])resource_metadata\s*=\s*(?:\"([^\"]+)\"|([^,\s]+))", re.I)
 
 
@@ -60,6 +65,59 @@ class ExternalToolResult:
 
 def namespaced_tool_name(proxy_name: str, remote_name: str) -> str:
     return f"{NAMESPACE_PREFIX}__{proxy_name}__{remote_name}"
+
+
+def external_toolset_id(proxy_name: str) -> str:
+    return f"{EXTERNAL_TOOLSET_PREFIX}{proxy_name}{_SYNTHETIC_SUFFIX}"
+
+
+def external_tool_id(namespaced_name: str) -> str:
+    return f"{EXTERNAL_TOOLSET_PREFIX}{namespaced_name}{_SYNTHETIC_SUFFIX}"
+
+
+def parse_external_toolset_id(toolset_id: str) -> ExternalMCPProxy | None:
+    if not toolset_id.startswith(EXTERNAL_TOOLSET_PREFIX) or not toolset_id.endswith(_SYNTHETIC_SUFFIX):
+        return None
+    proxy_name = toolset_id[len(EXTERNAL_TOOLSET_PREFIX) : -len(_SYNTHETIC_SUFFIX)]
+    return next((proxy for proxy in settings.MCP_EXTERNAL_PROXIES if proxy.enabled and proxy.name == proxy_name), None)
+
+
+def external_toolsets() -> list[ToolsetListItem]:
+    """Configured proxies as read-only synthetic toolsets for the web catalog."""
+    return [
+        ToolsetListItem(
+            toolset_id=external_toolset_id(proxy.name),
+            name=proxy.name,
+            description=f"Tools discovered dynamically from external MCP proxy {proxy.name}.",
+            enabled=proxy.enabled,
+            current_version=0,
+            created_at=_EPOCH,
+            updated_at=_EPOCH,
+            created_by="",
+            updated_by=None,
+        )
+        for proxy in settings.MCP_EXTERNAL_PROXIES
+        if proxy.enabled
+    ]
+
+
+def external_tool_to_item(proxy: ExternalMCPProxy, tool: Tool) -> ToolItem:
+    namespaced_name = tool.name
+    remote_name = namespaced_name.removeprefix(f"{NAMESPACE_PREFIX}__{proxy.name}__")
+    return ToolItem(
+        tool_id=external_tool_id(namespaced_name),
+        toolset_id=external_toolset_id(proxy.name),
+        name=tool.title or remote_name,
+        description=tool.description or "",
+        cypher=f"-- External MCP handler: {namespaced_name}",
+        parameters=params_from_input_schema(tool.input_schema),
+        enabled=True,
+        current_version=0,
+        created_at=_EPOCH,
+        updated_at=_EPOCH,
+        created_by="",
+        updated_by=None,
+    )
 
 
 def parse_namespaced_tool_name(name: str) -> tuple[ExternalMCPProxy, str] | None:
@@ -162,7 +220,11 @@ def build_headers(proxy: ExternalMCPProxy, current_user: CurrentUser) -> dict[st
 
 
 @asynccontextmanager
-async def _transport(proxy: ExternalMCPProxy, headers: dict[str, str]) -> AsyncIterator[tuple[Any, Any]]:
+async def _transport(
+    proxy: ExternalMCPProxy,
+    headers: dict[str, str],
+    oauth_challenges: list[OAuthChallenge],
+) -> AsyncIterator[tuple[Any, Any]]:
     if proxy.transport == ExternalMCPTransport.SSE:
         async with sse_client(
             proxy.url,
@@ -173,8 +235,18 @@ async def _transport(proxy: ExternalMCPProxy, headers: dict[str, str]) -> AsyncI
             yield streams
         return
 
+    async def capture_oauth_challenge(response: httpx2.Response) -> None:
+        challenge = _oauth_challenge_from_response(response, proxy.name)
+        if challenge is not None:
+            oauth_challenges.append(challenge)
+
     timeout = httpx2.Timeout(proxy.connect_timeout_seconds, read=proxy.read_timeout_seconds)
-    async with httpx2.AsyncClient(headers=headers, timeout=timeout, follow_redirects=False) as http_client:
+    async with httpx2.AsyncClient(
+        headers=headers,
+        timeout=timeout,
+        follow_redirects=False,
+        event_hooks={"response": [capture_oauth_challenge]},
+    ) as http_client:
         async with streamable_http_client(proxy.url, http_client=http_client) as streams:
             yield streams
 
@@ -185,15 +257,19 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     # delegated identity. A fresh context per operation is the confused-deputy
     # boundary when multiple chat turns share a worker process.
     headers = build_headers(proxy, current_user)
+    oauth_challenges: list[OAuthChallenge] = []
     try:
-        async with _transport(proxy, headers) as streams:
+        async with _transport(proxy, headers, oauth_challenges) as streams:
             async with ClientSession(*streams, read_timeout_seconds=proxy.read_timeout_seconds) as session:
                 await session.initialize()
                 yield session
     except ExternalMCPAuthenticationRequired:
         raise
     except BaseException as exc:
-        challenge = _oauth_challenge(exc, proxy.name)
+        # StreamableHTTP turns non-2xx responses into an MCPError delivered on
+        # its message stream. That exception has no response attached, so keep
+        # the challenge captured by the underlying HTTP client's response hook.
+        challenge = oauth_challenges[-1] if oauth_challenges else _oauth_challenge(exc, proxy.name)
         if challenge is not None:
             error_type = (
                 ExternalMCPTokenExpired
@@ -206,9 +282,7 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
         raise
 
 
-def _oauth_challenge(exc: BaseException, proxy_name: str) -> OAuthChallenge | None:
-    """Find a 401 response even when AnyIO wrapped it in an exception group."""
-    response = getattr(exc, "response", None)
+def _oauth_challenge_from_response(response: Any, proxy_name: str) -> OAuthChallenge | None:
     if response is not None and getattr(response, "status_code", None) == 401:
         authenticate = response.headers.get("WWW-Authenticate", "")
         match = _RESOURCE_METADATA_RE.search(authenticate)
@@ -218,6 +292,14 @@ def _oauth_challenge(exc: BaseException, proxy_name: str) -> OAuthChallenge | No
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 resource_metadata = None
         return OAuthChallenge(proxy_name=proxy_name, resource_metadata=resource_metadata)
+    return None
+
+
+def _oauth_challenge(exc: BaseException, proxy_name: str) -> OAuthChallenge | None:
+    """Find a 401 response even when AnyIO wrapped it in an exception group."""
+    challenge = _oauth_challenge_from_response(getattr(exc, "response", None), proxy_name)
+    if challenge is not None:
+        return challenge
     if isinstance(exc, BaseExceptionGroup):
         for child in exc.exceptions:
             challenge = _oauth_challenge(child, proxy_name)
@@ -292,6 +374,26 @@ async def list_tools_for_user(
             # configured server (or the Seizu-native tools) from a chat turn.
             logger.exception("Invalid tool listing from external MCP proxy %s", proxy.name)
     return tools
+
+
+async def list_tool_items_for_proxy(proxy: ExternalMCPProxy, current_user: CurrentUser) -> list[ToolItem]:
+    """Discover one proxy for the read-only web tool catalog."""
+    try:
+        tools = await list_proxy_tools(proxy, current_user)
+    except ExternalMCPAuthenticationRequired as exc:
+        metadata = exc.challenge.resource_metadata
+        detail = f" Authentication metadata: {metadata}" if metadata else ""
+        tools = [
+            Tool(
+                name=namespaced_tool_name(proxy.name, AUTHENTICATE_TOOL_NAME),
+                description=(
+                    f"Authenticate the current user with external MCP proxy {proxy.name} before using its tools."
+                    f"{detail}"
+                ),
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            )
+        ]
+    return [external_tool_to_item(proxy, tool) for tool in tools]
 
 
 def authentication_payload(exc: ExternalMCPAuthenticationRequired) -> dict[str, Any]:

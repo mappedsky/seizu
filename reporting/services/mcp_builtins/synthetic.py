@@ -71,7 +71,7 @@ _JSON_TYPE_MAP = {
 }
 
 
-def _params_from_input_schema(schema: dict[str, Any]) -> list[ToolParamDef]:
+def params_from_input_schema(schema: dict[str, Any]) -> list[ToolParamDef]:
     """Best-effort mapping from a JSON Schema object to ``ToolParamDef``s.
 
     ``ToolParamDef`` only models scalar types, so nested objects/arrays are
@@ -123,7 +123,7 @@ def builtin_tool_to_tool_item(tool: BuiltinTool) -> ToolItem:
         name=tool.name,
         description=tool.description,
         cypher=f"-- Built-in handler: {tool.name}",
-        parameters=_params_from_input_schema(tool.input_schema),
+        parameters=params_from_input_schema(tool.input_schema),
         enabled=True,
         current_version=1,
         created_at=_EPOCH,

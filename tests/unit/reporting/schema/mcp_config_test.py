@@ -10,6 +10,7 @@ from reporting.schema.mcp_config import (
     undeclared_cypher_parameters,
     validate_lower_snake_id,
     validate_mcp_slug_component,
+    validate_mcp_tool_refs,
     validate_skill_template,
 )
 
@@ -87,6 +88,12 @@ def test_create_tool_id_still_uses_mcp_slug_limit():
             name="Too long",
             cypher="MATCH (n) RETURN n",
         )
+
+
+def test_external_mcp_tool_names_are_valid_skill_requirements():
+    name = "ext__github__get_file_contents"
+
+    assert validate_mcp_tool_refs([name]) == [name]
 
 
 def test_template_placeholders_finds_vars():

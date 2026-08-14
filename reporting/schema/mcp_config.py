@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+EXTERNAL_MCP_TOOL_NAME_RE = re.compile(r"^ext__[a-z][a-z0-9_-]{0,62}__[A-Za-z0-9_.-]{1,128}$")
 
 # The MCP name is "{parent}__{child}" (toolset__tool / skillset__skill) and the
 # provider tool-call APIs cap names at 64 chars. Capping each component at 31
@@ -47,8 +48,10 @@ def validate_string_list(values: list[str], field_name: str) -> list[str]:
 def validate_mcp_tool_refs(values: list[str]) -> list[str]:
     result = validate_string_list(values, "tools_required")
     for value in result:
-        if not MCP_TOOL_NAME_RE.fullmatch(value):
-            raise ValueError("tools_required entries must use MCP tool names like toolset_id__tool_id")
+        if not (MCP_TOOL_NAME_RE.fullmatch(value) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(value)):
+            raise ValueError(
+                "tools_required entries must use MCP tool names like toolset_id__tool_id or ext__proxy__tool"
+            )
     return result
 
 

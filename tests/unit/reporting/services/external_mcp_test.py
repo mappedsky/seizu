@@ -242,6 +242,35 @@ async def test_unauthorized_discovery_exposes_authentication_tool(mocker) -> Non
     assert "https://proxy.example/.well-known/mcp" in (tools[0].description or "")
 
 
+async def test_web_catalog_converts_external_tools_to_read_only_items(mocker) -> None:
+    proxy = _proxy()
+    mocker.patch.object(
+        external_mcp,
+        "list_proxy_tools",
+        return_value=[
+            Tool(
+                name="ext__drive__search_files",
+                title="Search files",
+                description="Search Drive files",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Search text"}},
+                    "required": ["query"],
+                },
+                annotations=ToolAnnotations(read_only_hint=True),
+            )
+        ],
+    )
+
+    items = await external_mcp.list_tool_items_for_proxy(proxy, _user())
+
+    assert len(items) == 1
+    assert items[0].toolset_id == "__external_drive__"
+    assert items[0].tool_id == "__external_ext__drive__search_files__"
+    assert items[0].name == "Search files"
+    assert items[0].parameters[0].name == "query"
+
+
 async def test_call_tool_bounds_text_output(mocker) -> None:
     session = mocker.AsyncMock()
     session.call_tool.return_value = SimpleNamespace(

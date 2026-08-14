@@ -26,6 +26,7 @@ import AddIcon from '@mui/icons-material/Add';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import BadgeIcon from '@mui/icons-material/Badge';
+import HubIcon from '@mui/icons-material/Hub';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import HistoryIcon from '@mui/icons-material/History';
@@ -72,9 +73,16 @@ import { pageContentSx } from 'src/theme/layout';
 // a prefix check to gate edit/delete actions.
 
 const BUILTIN_PREFIX = '__builtin_';
+const EXTERNAL_PREFIX = '__external_';
 
 const isBuiltinToolset = (id: string | undefined | null): boolean =>
   !!id && id.startsWith(BUILTIN_PREFIX) && id.endsWith('__');
+
+const isExternalToolset = (id: string | undefined | null): boolean =>
+  !!id && id.startsWith(EXTERNAL_PREFIX) && id.endsWith('__');
+
+const isReadOnlyToolset = (id: string | undefined | null): boolean =>
+  isBuiltinToolset(id) || isExternalToolset(id);
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 // Cap each slug component so the full "toolset__tool" MCP name stays <= 64 chars
@@ -442,6 +450,8 @@ function ToolsetTools() {
   const hasPermission = usePermissions();
 
   const isBuiltin = isBuiltinToolset(toolsetId);
+  const isExternal = isExternalToolset(toolsetId);
+  const isReadOnly = isReadOnlyToolset(toolsetId);
   const { tools, loading, error, refresh } = useToolsList(toolsetId ?? null);
   const mutations = useToolMutations(toolsetId ?? '');
 
@@ -488,7 +498,10 @@ function ToolsetTools() {
   const canDelete = hasPermission('tools:delete');
 
   const rowActions = (item: ToolItem): RowMenuAction[] => {
-    const itemIsBuiltin = isBuiltinToolset(item.toolset_id);
+    const itemIsReadOnly = isReadOnlyToolset(item.toolset_id);
+    const readOnlyLabel = isExternalToolset(item.toolset_id)
+      ? 'External MCP'
+      : 'Built-in';
     return [
       {
         key: 'detail',
@@ -501,9 +514,9 @@ function ToolsetTools() {
         label: 'Edit',
         icon: <EditIcon fontSize="small" />,
         onClick: () => openEdit(item),
-        disabled: itemIsBuiltin || !canWrite,
-        tooltip: itemIsBuiltin
-          ? 'Built-in tools cannot be edited'
+        disabled: itemIsReadOnly || !canWrite,
+        tooltip: itemIsReadOnly
+          ? `${readOnlyLabel} tools cannot be edited`
           : !canWrite
             ? 'You do not have permission to edit tools'
             : undefined,
@@ -516,9 +529,9 @@ function ToolsetTools() {
           navigate(`/app/toolsets/${toolsetId}/tools/${item.tool_id}/history`, {
             state: { fromLabel: 'Tools' } satisfies BackState,
           }),
-        disabled: itemIsBuiltin,
-        tooltip: itemIsBuiltin
-          ? 'Built-in tools have no version history'
+        disabled: itemIsReadOnly,
+        tooltip: itemIsReadOnly
+          ? `${readOnlyLabel} tools have no version history`
           : undefined,
       },
       {
@@ -526,9 +539,9 @@ function ToolsetTools() {
         label: 'Delete',
         icon: <DeleteIcon fontSize="small" />,
         onClick: () => setDeleteTarget(item),
-        disabled: itemIsBuiltin || !canDelete,
-        tooltip: itemIsBuiltin
-          ? 'Built-in tools cannot be deleted'
+        disabled: itemIsReadOnly || !canDelete,
+        tooltip: itemIsReadOnly
+          ? `${readOnlyLabel} tools cannot be deleted`
           : !canDelete
             ? 'You do not have permission to delete tools'
             : undefined,
@@ -609,7 +622,7 @@ function ToolsetTools() {
       hideBelow: 'sm',
       cellSx: versionColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) ? '—' : `v${item.current_version}`,
+        isReadOnlyToolset(item.toolset_id) ? '—' : `v${item.current_version}`,
     },
     {
       key: 'updated_at',
@@ -617,7 +630,7 @@ function ToolsetTools() {
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) || !item.updated_at
+        isReadOnlyToolset(item.toolset_id) || !item.updated_at
           ? '—'
           : new Date(item.updated_at).toLocaleString(),
     },
@@ -627,7 +640,7 @@ function ToolsetTools() {
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) ? (
+        isReadOnlyToolset(item.toolset_id) ? (
           '—'
         ) : item.updated_by ? (
           <UserDisplay userId={item.updated_by} />
@@ -655,10 +668,16 @@ function ToolsetTools() {
           matches: (item) => isBuiltinToolset(item.toolset_id),
         },
         {
+          key: 'external',
+          label: 'External MCP',
+          icon: <HubIcon fontSize="small" />,
+          matches: (item) => isExternalToolset(item.toolset_id),
+        },
+        {
           key: 'user_defined',
           label: 'User-defined',
           icon: <PersonOutlineIcon fontSize="small" />,
-          matches: (item) => !isBuiltinToolset(item.toolset_id),
+          matches: (item) => !isReadOnlyToolset(item.toolset_id),
         },
       ],
     },
@@ -709,10 +728,19 @@ function ToolsetTools() {
                   sx={{ ml: 1, verticalAlign: 'middle' }}
                 />
               )}
+              {isExternal && (
+                <Chip
+                  label="External MCP"
+                  size="small"
+                  variant="outlined"
+                  color="secondary"
+                  sx={{ ml: 1, verticalAlign: 'middle' }}
+                />
+              )}
             </Typography>
           }
           action={
-            !isBuiltin &&
+            !isReadOnly &&
             canWrite && (
               <Button
                 variant="contained"
@@ -734,13 +762,17 @@ function ToolsetTools() {
             rows={displayTools}
             columns={columns}
             getRowKey={(item) => item.tool_id}
-            emptyMessage="No tools yet. Create one above."
+            emptyMessage={
+              isExternal
+                ? 'No tools were discovered from this external MCP proxy.'
+                : 'No tools yet. Create one above.'
+            }
             filterGroups={filterGroups}
           />
         </ListViewState>
       </Box>
 
-      {!isBuiltin && (
+      {!isReadOnly && (
         <ToolDialog
           key={editTarget?.tool_id ?? 'new'}
           open={dialogOpen}

@@ -122,6 +122,9 @@ export function mcpNameForTool(tool: {
   tool_id: string;
   toolset_id: string;
 }): string {
+  if (tool.tool_id.startsWith('__external_') && tool.tool_id.endsWith('__')) {
+    return tool.tool_id.slice('__external_'.length, -2);
+  }
   if (tool.tool_id.startsWith('__builtin_') && tool.tool_id.endsWith('__')) {
     return tool.tool_id.slice('__builtin_'.length, -2);
   }

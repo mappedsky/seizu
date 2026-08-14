@@ -192,7 +192,9 @@ Compose profile (`make external_mcp_enable` / `make external_mcp_disable`).
 `MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
 definitions used by the chat agent. External tools are dynamically discovered,
 namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from
-Seizu's own MCP endpoint. Each discovery/call creates a new transport with
+Seizu's own MCP endpoint. The `/app/toolsets` catalog exposes configured proxies
+and their per-user discovery results as read-only synthetic toolsets. Each
+discovery/call creates a new transport with
 headers derived for exactly one `CurrentUser`; never pool these transports or
 their delegated identity headers across users. Bearer/M2M secrets are named by
 `token_env`, not embedded in JSON. The web and Temporal worker must receive the

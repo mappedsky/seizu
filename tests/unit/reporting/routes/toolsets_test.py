@@ -5,8 +5,10 @@ from httpx import ASGITransport, AsyncClient
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
+from reporting.schema.external_mcp import ExternalMCPProxy
 from reporting.schema.mcp_config import ToolItem, ToolsetListItem, ToolsetVersion, ToolVersion
 from reporting.schema.report_config import User
+from reporting.services import external_mcp
 from reporting.services.query_validator import ValidationResult
 
 _FAKE_USER = User(
@@ -23,6 +25,7 @@ _UNPRIVILEGED_CURRENT_USER = CurrentUser(user=_FAKE_USER, jwt_claims={}, permiss
 
 _TS_ID = "ts_abc123"
 _TOOL_ID = "tool_xyz456"
+_EXTERNAL_TOOLSET_ID = "__external_github__"
 
 
 def _make_app():
@@ -75,6 +78,16 @@ def _tool_item(tool_id: str = _TOOL_ID, ts_id: str = _TS_ID, version: int = 1) -
         created_at="2024-01-01T00:00:00+00:00",
         updated_at="2024-01-01T00:00:00+00:00",
         created_by="test-user-id",
+    )
+
+
+def _external_proxy() -> ExternalMCPProxy:
+    return ExternalMCPProxy(
+        name="github",
+        url="https://proxy.example/mcp/github",
+        transport="streamable_http",
+        auth_mode="bearer",
+        token_env="MCP_EXTERNAL_PROXY_TOKEN",
     )
 
 
@@ -159,9 +172,23 @@ async def test_list_toolsets_empty_user_still_returns_builtins(mocker):
         ret = await client.get("/api/v1/toolsets")
     assert ret.status_code == 200
     items = ret.json()["toolsets"]
-    # No user toolsets, but built-ins are always listed.
-    assert all(t["toolset_id"].startswith("__builtin_") for t in items)
-    assert len(items) >= 1
+    # No user toolsets, but built-ins are always listed. Configured external
+    # proxies may also be present in this synthetic catalog.
+    assert any(t["toolset_id"].startswith("__builtin_") for t in items)
+
+
+async def test_list_toolsets_includes_configured_external_proxy(mocker):
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [_external_proxy()])
+    mocker.patch(
+        "reporting.routes.toolsets.report_store.list_toolsets",
+        new=AsyncMock(return_value=[]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get("/api/v1/toolsets")
+    assert ret.status_code == 200
+    external = next(item for item in ret.json()["toolsets"] if item["toolset_id"] == _EXTERNAL_TOOLSET_ID)
+    assert external["name"] == "github"
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +388,26 @@ async def test_list_tools_success(mocker):
     assert ret.json()["tools"][0]["tool_id"] == _TOOL_ID
     assert ret.json()["tools"][0]["effective_enabled"] is True
     assert ret.json()["tools"][0]["disabled_reason"] is None
+
+
+async def test_list_tools_discovers_external_proxy_tools(mocker):
+    proxy = _external_proxy()
+    item = _tool_item(
+        tool_id="__external_ext__github__get_file_contents__",
+        ts_id=_EXTERNAL_TOOLSET_ID,
+    )
+    mocker.patch.object(external_mcp, "parse_external_toolset_id", return_value=proxy)
+    discover = mocker.patch.object(
+        external_mcp,
+        "list_tool_items_for_proxy",
+        new=AsyncMock(return_value=[item]),
+    )
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.get(f"/api/v1/toolsets/{_EXTERNAL_TOOLSET_ID}/tools")
+    assert ret.status_code == 200
+    assert ret.json()["tools"][0]["tool_id"] == item.tool_id
+    discover.assert_awaited_once_with(proxy, _FAKE_CURRENT_USER)
 
 
 async def test_list_tools_marks_parent_disabled_tools_effectively_disabled(mocker):

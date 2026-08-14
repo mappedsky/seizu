@@ -1,6 +1,7 @@
 import dataclasses
 import json
 
+import pytest
 from mcp.types import ToolAnnotations
 
 from reporting.authnz import CurrentUser
@@ -13,6 +14,12 @@ from reporting.services import action_confirmations, external_mcp, mcp_runtime, 
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _LATER = "2099-01-01T00:30:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _no_deployment_external_proxies(mocker):
+    """Keep unit listing tests independent of the developer's .env."""
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [])
 
 
 def _user(permissions: frozenset[str]) -> CurrentUser:

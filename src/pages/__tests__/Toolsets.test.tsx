@@ -42,6 +42,17 @@ const TOOLSETS: toolsetsApiModule.ToolsetListItem[] = [
     updated_by: null,
   },
   {
+    toolset_id: '__external_github__',
+    name: 'github',
+    description: 'External GitHub MCP tools',
+    enabled: true,
+    current_version: 0,
+    created_at: '',
+    updated_at: '',
+    created_by: '',
+    updated_by: null,
+  },
+  {
     toolset_id: 'security_tools',
     name: 'Security Tools',
     description: 'Custom security tooling',
@@ -98,6 +109,8 @@ describe('Toolsets', () => {
 
     expect(screen.getByText('Graph')).toBeInTheDocument();
     expect(screen.getByText('Built-in')).toBeInTheDocument();
+    expect(screen.getByText('github')).toBeInTheDocument();
+    expect(screen.getByText('External MCP')).toBeInTheDocument();
     expect(screen.getByText('Security Tools')).toBeInTheDocument();
     expect(screen.getByText('User-defined')).toBeInTheDocument();
     expect(screen.getByText('v2')).toBeInTheDocument();

@@ -641,3 +641,10 @@ proxy, keeps an exact local force-confirm list for known-sensitive tools, and
 uses a fail-closed fallback by default when annotations do not establish a
 clear profile. Per-operation connections prevent one worker's pooled headers
 from turning a subsequent user's call into a confused-deputy request.
+
+The web tool catalog surfaces configured proxies and their dynamically
+discovered tools as read-only synthetic toolsets. This is observability and a
+skill-authoring aid, not federation: external tools remain absent from Seizu's
+own MCP `tools/list`, and the catalog REST routes do not execute them. When a
+proxy returns an OAuth challenge, its catalog contains the synthetic
+`seizu_authenticate` tool until credentials are available.

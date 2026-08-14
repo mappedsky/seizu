@@ -163,6 +163,13 @@ only for a single-user local test. Multi-user deployments should use a
 gateway/M2M exchange or a proxy integration that maps a Seizu identity to its
 own per-user token vault.
 
+Configured proxies also appear as read-only **External MCP** rows under
+`/app/toolsets`. Opening one performs the same per-user discovery used by chat.
+Before the proxy bearer is configured, the tools view contains
+`ext__<proxy>__seizu_authenticate`; after authentication it contains the
+remote server's namespaced tools and input parameters. This catalog does not
+re-export external tools from Seizu's own MCP endpoint.
+
 To proxy a different Streamable HTTP MCP server, set
 `DEV_MCP_PROXY_UPSTREAM_URL` to its internal or host-reachable URL. Such an
 upstream is responsible for understanding Obot's forwarded identity headers;
