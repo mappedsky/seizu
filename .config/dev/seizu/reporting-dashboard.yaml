@@ -22,14 +22,12 @@ reports:
         ORDER BY runtime
       seizu-store-count: |-
         UNWIND [
-          {backend: 'DynamoDB', stores: 'Reports, report versions, roles, toolsets, skillsets, and scheduled queries', used_for: 'Default local/dev backend and AWS-style deployments'},
-          {backend: 'PostgreSQL', stores: 'The same versioned Seizu metadata through SQLModel tables', used_for: 'SQL-backed deployments via REPORT_STORE_BACKEND=sqlmodel'}
+          {backend: 'PostgreSQL', stores: 'Reports, versions, roles, toolsets, skillsets, schedules, chat sessions, and turn logs', used_for: 'Sole Seizu application store; LangGraph checkpoints use a separately configurable PostgreSQL database'}
         ] AS row
         RETURN count(row.backend) AS total
       seizu-store-details: |-
         UNWIND [
-          {backend: 'DynamoDB', stores: 'Reports, report versions, roles, toolsets, skillsets, and scheduled queries', used_for: 'Default local/dev backend and AWS-style deployments'},
-          {backend: 'PostgreSQL', stores: 'The same versioned Seizu metadata through SQLModel tables', used_for: 'SQL-backed deployments via REPORT_STORE_BACKEND=sqlmodel'}
+          {backend: 'PostgreSQL', stores: 'Reports, versions, roles, toolsets, skillsets, schedules, chat sessions, and turn logs', used_for: 'Sole Seizu application store; LangGraph checkpoints use a separately configurable PostgreSQL database'}
         ] AS row
         RETURN row.backend AS backend,
                row.stores AS stores,

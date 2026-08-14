@@ -17,7 +17,7 @@ works that way*.
 | `AGT` | [Chat agent](chat-agent.md) | Orchestration, progressive disclosure, tool permissions, headless runs |
 | `SBX` | [Sandbox](sandbox.md) | Delegation, sandbox lifecycle, tool binding, session memory |
 | `SPC` | [Spaces](spaces.md) | Membership invariants, visibility, the overview pointer |
-| `STO` | [Report store](report-store.md) | PostgreSQL persistence, legacy records, SQL migrations |
+| `STO` | [Report store](report-store.md) | PostgreSQL persistence and SQL migrations |
 | `WF` | [Workflows](workflows.md) | Temporal pipelines, cartography sync, remediation isolation |
 | `QV` | [Query validation](query-validation.md) | The three validator layers and the fuzzing corpus |
 | `AUTH` | [Authentication](authentication.md) | Identity resolution and the OIDC configuration guards |

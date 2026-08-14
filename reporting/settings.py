@@ -576,7 +576,7 @@ def validate_persistence_settings() -> None:
         "Legacy DynamoDB persistence configuration is no longer supported: "
         f"{names}. Migrate durable data before upgrading, remove these settings, "
         "and configure SQL_DATABASE_* plus CHAT_CHECKPOINT_DATABASE_* instead. "
-        "See docs/root/install/backend.md#transitioning-from-dynamodb."
+        "See docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql."
     )
 
 

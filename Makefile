@@ -187,7 +187,7 @@ config_setup:
 check_legacy_persistence_config:
 	@if grep -Eq '^(REPORT_STORE_BACKEND|DYNAMODB_TABLE_NAME|DYNAMODB_REGION|DYNAMODB_ENDPOINT_URL|DYNAMODB_CREATE_TABLE|CHAT_CHECKPOINT_BACKEND|CHAT_CHECKPOINT_TABLE_NAME|CHAT_CHECKPOINT_ENABLE_COMPRESSION|CHAT_CHECKPOINT_S3_BUCKET|CHAT_CHECKPOINT_S3_ENDPOINT_URL|CHAT_CHECKPOINT_S3_KEY_PREFIX|CHAT_CHECKPOINT_TTL_SECONDS)=' .env 2>/dev/null; then \
 		echo "Removed DynamoDB persistence settings remain in .env." >&2; \
-		echo "Migrate first, then remove them; see docs/root/install/backend.md#transitioning-from-dynamodb." >&2; \
+		echo "Migrate first, then remove them; see docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql." >&2; \
 		exit 1; \
 	fi
 

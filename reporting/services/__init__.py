@@ -21,18 +21,6 @@ def get_boto_session(
     )
 
 
-def get_boto_resource(
-    resource: str,
-    region: str | None = None,
-    aws_access_key_id: str | None = None,
-    aws_secret_access_key: str | None = None,
-    endpoint_url: str | None = None,
-) -> Any:
-    """Return a boto3 resource."""
-    session = get_boto_session(region, aws_access_key_id, aws_secret_access_key)
-    return session.resource(resource, endpoint_url=endpoint_url)
-
-
 def get_boto_client(
     client: str,
     region: str | None = None,

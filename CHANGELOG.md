@@ -19,7 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Alembic. Operators migrating from DynamoDB must export and back up before the
   cutover; DynamoDB checkpoint history is not migrated. The deployment order,
   data limitations, backup, and rollback boundary are documented under
-  [Transitioning from DynamoDB](install/backend.md#transitioning-from-dynamodb).
+  [Migrating from DynamoDB to PostgreSQL](install/upgrading.md#migrating-from-dynamodb-to-postgresql).
   Rationale: [STO-005](dev/decisions/report-store.md).
 
 - **Scheduled chats now require Temporal.** The `seizu-scheduled-chats` worker

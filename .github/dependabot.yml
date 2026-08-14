@@ -50,15 +50,6 @@ updates:
       timezone: "Etc/UTC"
     open-pull-requests-limit: 0
 
-  - package-ecosystem: "docker"
-    directory: "/.config/dev/dynamodb"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:15"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 0
-
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:
