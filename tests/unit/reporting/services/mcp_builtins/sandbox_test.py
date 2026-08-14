@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import StructuredTool
-from mcp.types import Prompt, Tool
+from mcp.types import Prompt, Tool, ToolAnnotations
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
@@ -899,6 +899,25 @@ async def test_build_seizu_tools_bounds_tool_results() -> None:
     # ...and the text was byte-capped as a final guard.
     assert len(out.encode()) <= 100 + len("\n[truncated]")
     assert out.endswith("[truncated]")
+
+
+async def test_build_seizu_tools_forwards_external_annotations() -> None:
+    annotations = ToolAnnotations(read_only_hint=True)
+    external_tool = Tool(
+        name="ext__drive__search",
+        description="Search",
+        input_schema={"type": "object", "properties": {}},
+        annotations=annotations,
+    )
+    call_mock = AsyncMock(return_value=MagicMock(blocked=None, text="ok"))
+    with (
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=[external_tool])),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", call_mock),
+    ):
+        tools = await _build_seizu_tools(_current_user(), requested=[external_tool.name])
+        await tools[0].coroutine()  # type: ignore[misc]
+
+    assert call_mock.await_args.kwargs["external_tool_annotations"] == annotations
 
 
 async def test_build_sandbox_tools_caps_result_bytes() -> None:

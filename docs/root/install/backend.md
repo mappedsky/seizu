@@ -193,6 +193,15 @@ Seizu exposes a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 
   Known groups: ``graph``, ``reports``, ``scheduled_queries``, ``spaces``, ``toolsets``, ``roles``.
 
+* ``MCP_EXTERNAL_PROXIES``: JSON array of identity-aware external MCP proxy
+  definitions used by the chat agent. The same value and referenced token
+  environment variables must be provided to the Temporal worker. External
+  servers support SSE and Streamable HTTP and are not re-exported through
+  Seizu's MCP endpoint. See [External MCP proxies](external-mcp.html).
+* ``MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS``: Comma-separated, fully
+  namespaced external tool names that always require action confirmation,
+  regardless of MCP annotations or the proxy fallback.
+
 #### Connecting MCP clients
 
 Point MCP clients at the backend endpoint directly:

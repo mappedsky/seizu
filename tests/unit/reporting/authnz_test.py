@@ -285,6 +285,7 @@ async def test_get_current_user_extracts_sub_and_iss(mocker):
         role=None,
     )
     assert result.user.user_id == "uid1"
+    assert result.jwt_claims["access_token"] == encoded
 
 
 async def test_get_current_user_allows_missing_email(mocker):

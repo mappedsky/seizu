@@ -610,3 +610,34 @@ missing evidence as an assumption, and then presented an accessibility
 conclusion without making an action call. The execution trace was accurate—the
 absence of tool/subagent rows reflected that no evidence gathering occurred—but
 the answer overstated what the available evidence could establish.
+
+## AGT-010 — External MCP confirmation uses annotations with a local override
+
+**Applies to:** `reporting/services/external_mcp.py`,
+`mcp_runtime.list_tools_for_user(chat_safe_only=True)`
+
+External MCP tools are agent-only capabilities, namespaced as
+`ext__<proxy>__<tool>`. Confirmation policy is evaluated per tool. An exact
+match in `MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS` always requires
+confirmation. Otherwise an explicit `readOnlyHint:true` does not; a complete
+mutating profile of `destructiveHint:false`, `idempotentHint:true`, and
+`openWorldHint:false` also does not. An explicit mutation or risk hint requires
+confirmation. Missing or incomplete guidance falls back to the proxy's
+`require_confirmation` value, which defaults true. The same confirmation bypass
+permission and audit path used by built-ins applies to external calls. The
+autonomous sandbox subagent receives only the individual external tools that
+this policy classifies as confirmation-free.
+
+The client creates a fresh transport and header dictionary for every discovery
+or call. It does not pool an authenticated connection across users. Detached
+interactive turns and headless runs use a service credential plus target-user
+delegation because the browser bearer token is deliberately not persisted in a
+Temporal turn command (AGT-008).
+
+**Why:** the MCP protocol provides standard behavioral hints at the individual
+tool boundary, which is more precise than treating an entire proxy as mutating.
+They remain advisory, so Seizu accepts them only from an operator-configured
+proxy, keeps an exact local force-confirm list for known-sensitive tools, and
+uses a fail-closed fallback by default when annotations do not establish a
+clear profile. Per-operation connections prevent one worker's pooled headers
+from turning a subsequent user's call into a confused-deputy request.

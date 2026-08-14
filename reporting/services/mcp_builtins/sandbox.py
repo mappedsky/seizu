@@ -383,6 +383,7 @@ async def _build_seizu_tools(
     )
     # Never pass sandbox__delegate to the inner agent (prevents recursive delegation).
     reachable = [t for t in all_tools if t.name != "sandbox__delegate"]
+    reachable_by_name = {tool.name: tool for tool in reachable}
     seizu_tools = [t for t in reachable if t.name in _bound_tool_names(reachable, disclosed, requested)]
 
     _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
@@ -411,6 +412,10 @@ async def _build_seizu_tools(
             max_rows = max(_settings.CHAT_TOOL_RESULT_MAX_ROWS, _settings.SANDBOX_FILE_RESULT_MAX_ROWS)
             max_bytes = max(_settings.CHAT_TOOL_RESULT_MAX_BYTES, _settings.SANDBOX_FILE_RESULT_MAX_BYTES)
 
+        call_kwargs: dict[str, Any] = {}
+        tool = reachable_by_name.get(tool_name)
+        if tool is not None and tool.annotations is not None:
+            call_kwargs["external_tool_annotations"] = tool.annotations
         outcome = await _rt.call_tool_for_chat(
             current_user,
             tool_name,
@@ -419,6 +424,7 @@ async def _build_seizu_tools(
             chat_safe_only=True,
             result_max_rows=max_rows,
             result_max_bytes=max_bytes,
+            **call_kwargs,
         )
         if outcome.blocked:
             return f"[blocked: {outcome.blocked}]"

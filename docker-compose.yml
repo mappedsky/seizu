@@ -230,6 +230,26 @@ services:
       start_period: 10s
     networks:
       database:
+  # Lightweight external MCP OAuth proxy for local integration testing.
+  # Opt in with `docker compose --profile external-mcp up`; see
+  # docs/root/install/external-mcp.md for the required OAuth/upstream values.
+  external-mcp-proxy:
+    image: ghcr.io/obot-platform/mcp-oauth-proxy:latest
+    profiles:
+      - external-mcp
+    environment:
+      - OAUTH_CLIENT_ID=${DEV_MCP_PROXY_OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${DEV_MCP_PROXY_OAUTH_CLIENT_SECRET:-}
+      - OAUTH_AUTHORIZE_URL=${DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL:-}
+      - SCOPES_SUPPORTED=${DEV_MCP_PROXY_SCOPES:-openid,email,profile}
+      - MCP_SERVER_URL=${DEV_MCP_PROXY_UPSTREAM_URL:-}
+      - ENCRYPTION_KEY=${DEV_MCP_PROXY_ENCRYPTION_KEY:-}
+    ports:
+      - 8081:8080
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks:
+      database:
   seizu-temporal-worker:
     image: ghcr.io/mappedsky/seizu
     restart: on-failure
@@ -336,6 +356,12 @@ services:
       - GEMINI_API_KEY
       - GOOGLE_API_KEY
       - DEEPSEEK_API_KEY
+      # External MCP proxy discovery and per-user/M2M delegation. The named
+      # token is the convenient default used by the documentation; production
+      # orchestrators may inject any token_env referenced by the JSON config.
+      - MCP_EXTERNAL_PROXIES
+      - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
+      - MCP_EXTERNAL_PROXY_TOKEN
       - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
       - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
       - CHAT_CHECKPOINT_DATABASE_PASSWORD=${CHAT_CHECKPOINT_DATABASE_PASSWORD:-seizu}
@@ -577,6 +603,11 @@ services:
       # MCP_OAUTH_TOKEN_ENDPOINT=
       # MCP_OAUTH_ISSUER=
       - MCP_RESOURCE_URL=http://localhost:8080/api/v1/mcp
+      # External MCP servers used by the chat agent (also passed to the worker,
+      # which is where interactive and headless turns actually execute).
+      - MCP_EXTERNAL_PROXIES
+      - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
+      - MCP_EXTERNAL_PROXY_TOKEN
       # Sandbox delegation — set SANDBOX_ENABLED=true + SANDBOX_API_KEY to enable
       # the sandbox__delegate chat tool (E2B cloud or OpenKruise Agents).
       - SANDBOX_ENABLED

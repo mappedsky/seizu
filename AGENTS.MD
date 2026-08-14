@@ -184,6 +184,29 @@ Exposed at `/api/v1/mcp` when `MCP_ENABLED=true` (default). LLM agents connect a
 
 PostgreSQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
 
+### External MCP Proxies (`reporting/services/external_mcp.py`)
+
+`MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
+definitions used by the chat agent. External tools are dynamically discovered,
+namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from
+Seizu's own MCP endpoint. Each discovery/call creates a new transport with
+headers derived for exactly one `CurrentUser`; never pool these transports or
+their delegated identity headers across users. Bearer/M2M secrets are named by
+`token_env`, not embedded in JSON. The web and Temporal worker must receive the
+same proxy config and token env vars.
+
+Confirmation is decided per tool: the local
+`MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS` exact-name list wins, then MCP
+`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint` annotations,
+then the proxy's `require_confirmation` fallback (default true). Bypass still
+requires `chat:bypass_permissions` and is audit-logged. RFC 9728 401 challenges
+surface as a structured authentication block, and M2M 401s have a distinct
+`ExternalMCPTokenExpired` exception before chat normalization. Interactive
+Temporal turns do not persist the browser bearer token, so use M2M plus a target
+user header (or trusted header delegation) for detached/headless execution.
+Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
+`docs/root/install/external-mcp.md`.
+
 ### Chat (`reporting/services/chat_graph.py`, `reporting/routes/chat.py`)
 
 A LangGraph-backed chat assistant at `/api/v1/chat/*` (frontend `src/pages/ChatInterface.tsx`, route `/app/chat`), gated by the `CHAT_ENABLED` setting (default false). When off, the chat routes aren't registered, checkpoint storage isn't initialized, and the frontend hides the Chat UI — `GET /api/v1/config` returns `features.chat`, consumed via `src/features.context.ts` (`useFeature('chat')`); add new feature flags the same way (`settings.<X>_ENABLED` → `features.<x>` → `useFeature`). `CHAT_LLM_PROVIDER` is a sentinel: `mock` echoes user input (keyless, deterministic), and any other value routes through **LiteLLM** (`ChatLiteLLM`), so the provider/model surface is whatever LiteLLM supports rather than a fixed allowlist. `CHAT_LLM_MODEL` is the LiteLLM model id (prefer provider-namespaced, e.g. `anthropic/claude-sonnet-4-6`); legacy `CHAT_LLM_PROVIDER` values (`openai`/`anthropic`/`gemini`/`deepseek`) still namespace a bare model name. `CHAT_LLM_BASE_URL` (LiteLLM `api_base`) points chat at a self-hosted LiteLLM proxy or other OpenAI-compatible gateway — the proxy is an opt-in deployment, not a dependency. LiteLLM owns the cross-provider quirks (base_url/api_key handling, DeepSeek-shape endpoints, `reasoning_content` normalization) Seizu used to special-case; reasoning surfaces both as `additional_kwargs["reasoning_content"]` and injected `{"type":"thinking"}` content blocks, both read by `_chunk_reasoning_delta` and stripped from model context by `_strip_reasoning_context`. Real providers use native structured tool calls.

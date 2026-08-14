@@ -40,6 +40,7 @@ Documentation
 * `Sandbox delegation documentation <https://mappedsky.github.io/seizu/install/sandbox.html>`_
 * `MCP Toolsets documentation <https://mappedsky.github.io/seizu/install/mcp-toolsets.html>`_
 * `MCP Skillsets documentation <https://mappedsky.github.io/seizu/install/mcp-skillsets.html>`_
+* `External MCP proxy documentation <https://mappedsky.github.io/seizu/install/external-mcp.html>`_
 * `Basic development documentation <https://mappedsky.github.io/seizu/dev/dependencies.html>`_
 * `Decision log <https://mappedsky.github.io/seizu/dev/decisions/index.html>`_ — why the code is the way it is, per product area
 
@@ -64,6 +65,7 @@ Documentation
     install/sandbox
     install/mcp-toolsets
     install/mcp-skillsets
+    install/external-mcp
 
 .. toctree::
     :caption: Development

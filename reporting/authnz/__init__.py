@@ -180,6 +180,10 @@ async def get_current_user(
         "preferred_username": preferred_username,
         "token_iat": token_iat,
         "token_exp": token_exp,
+        # Ephemeral request credential for a directly invoked downstream
+        # identity proxy. It is never copied into a stored User or Temporal chat
+        # command; detached/headless turns use M2M delegation instead.
+        "access_token": token,
     }
 
     role_claim = payload.get(settings.RBAC_ROLE_CLAIM)
