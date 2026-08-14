@@ -55,7 +55,7 @@ def validate_mcp_tool_refs(values: list[str]) -> list[str]:
     return result
 
 
-def _coerce_argument(param: "ToolParamDef", value: Any) -> tuple[Any | None, str | None]:
+def _coerce_argument(param: "ToolDisplayParamDef", value: Any) -> tuple[Any | None, str | None]:
     if param.type == "string":
         if isinstance(value, str):
             return value, None
@@ -102,8 +102,13 @@ def _coerce_decimal(value: Any) -> Any:
     return value
 
 
-class ToolParamDef(BaseModel):
-    """Definition of a single parameter accepted by an MCP tool."""
+class ToolDisplayParamDef(BaseModel):
+    """Parameter metadata returned by the tool catalog.
+
+    External MCP input schemas may use any JSON property name (for example,
+    GitHub's ``perPage``). Catalog responses preserve those names verbatim.
+    Seizu-authored tools use the stricter :class:`ToolParamDef` subclass.
+    """
 
     name: str
     type: Literal["string", "integer", "float", "boolean"]
@@ -111,15 +116,19 @@ class ToolParamDef(BaseModel):
     required: bool = True
     default: Any | None = None
 
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
-
     @field_validator("default", mode="before")
     @classmethod
     def coerce_default(cls, v: Any) -> Any:
         return _coerce_decimal(v)
+
+
+class ToolParamDef(ToolDisplayParamDef):
+    """Strict parameter definition for a Seizu-authored MCP tool."""
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return validate_lower_snake_id(v)
 
 
 def _skip_cypher_quoted(cypher: str, start: int, quote: str) -> int:
@@ -272,7 +281,7 @@ class ToolItem(BaseModel):
     name: str
     description: str = ""
     cypher: str
-    parameters: list[ToolParamDef] = Field(default_factory=list)
+    parameters: list[ToolDisplayParamDef] = Field(default_factory=list)
     enabled: bool = True
     current_version: int = 0
     created_at: str
@@ -351,7 +360,7 @@ class ToolIdResponse(BaseModel):
     tool_id: str
 
 
-def validate_tool_arguments(parameters: list["ToolParamDef"], arguments: dict[str, Any]) -> list[str]:
+def validate_tool_arguments(parameters: list[ToolDisplayParamDef], arguments: dict[str, Any]) -> list[str]:
     """Validate *arguments* against the tool's parameter definitions.
 
     Returns a list of error strings; empty means the arguments are valid.

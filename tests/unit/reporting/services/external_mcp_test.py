@@ -254,7 +254,10 @@ async def test_web_catalog_converts_external_tools_to_read_only_items(mocker) ->
                 description="Search Drive files",
                 input_schema={
                     "type": "object",
-                    "properties": {"query": {"type": "string", "description": "Search text"}},
+                    "properties": {
+                        "query": {"type": "string", "description": "Search text"},
+                        "perPage": {"type": "number", "description": "Results per page"},
+                    },
                     "required": ["query"],
                 },
                 annotations=ToolAnnotations(read_only_hint=True),
@@ -269,6 +272,8 @@ async def test_web_catalog_converts_external_tools_to_read_only_items(mocker) ->
     assert items[0].tool_id == "__external_ext__drive__search_files__"
     assert items[0].name == "Search files"
     assert items[0].parameters[0].name == "query"
+    assert items[0].parameters[1].name == "perPage"
+    assert items[0].parameters[1].type == "float"
 
 
 async def test_call_tool_bounds_text_output(mocker) -> None:

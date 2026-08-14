@@ -647,4 +647,7 @@ discovered tools as read-only synthetic toolsets. This is observability and a
 skill-authoring aid, not federation: external tools remain absent from Seizu's
 own MCP `tools/list`, and the catalog REST routes do not execute them. When a
 proxy returns an OAuth challenge, its catalog contains the synthetic
-`seizu_authenticate` tool until credentials are available.
+`seizu_authenticate` tool until credentials are available. Catalog parameter
+metadata preserves the external JSON Schema property names verbatim (including
+names such as `perPage`); the lower-snake-case rule remains limited to
+Seizu-authored Cypher tool definitions.

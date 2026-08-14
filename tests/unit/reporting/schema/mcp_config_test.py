@@ -3,6 +3,7 @@ import pytest
 from reporting.schema.mcp_config import (
     MAX_SLUG_COMPONENT_LEN,
     CreateToolRequest,
+    ToolDisplayParamDef,
     ToolParamDef,
     cypher_parameter_names,
     render_skill_template,
@@ -79,6 +80,13 @@ def test_tool_parameter_names_are_not_capped_by_mcp_slug_limit():
     assert len(long_param) > MAX_SLUG_COMPONENT_LEN
     assert validate_lower_snake_id(long_param) == long_param
     assert ToolParamDef(name=long_param, type="string").name == long_param
+
+
+def test_catalog_parameters_preserve_external_json_schema_names() -> None:
+    assert ToolDisplayParamDef(name="perPage", type="float").name == "perPage"
+
+    with pytest.raises(ValueError, match="lower_snake_case"):
+        ToolParamDef(name="perPage", type="float")
 
 
 def test_create_tool_id_still_uses_mcp_slug_limit():
