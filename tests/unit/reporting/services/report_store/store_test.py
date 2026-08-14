@@ -7,7 +7,6 @@ import pytest
 from reporting.schema.chat import ChatTurnCommand
 from reporting.schema.space_config import SpaceDeleteResult
 from reporting.services import report_store
-from reporting.services.report_store.dynamodb import DynamoDBReportStore
 from reporting.services.report_store.sql import SQLModelReportStore
 
 
@@ -25,26 +24,12 @@ def reset_store():
 # ---------------------------------------------------------------------------
 
 
-def test_get_store_dynamodb_default(mocker):
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
-    store = report_store.get_store()
-    assert isinstance(store, DynamoDBReportStore)
-
-
-def test_get_store_sqlmodel(mocker):
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "sqlmodel")
+def test_get_store_returns_postgres_store():
     store = report_store.get_store()
     assert isinstance(store, SQLModelReportStore)
 
 
-def test_get_store_unknown_backend_raises(mocker):
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "unknown")
-    with pytest.raises(ValueError, match="Unknown report store backend"):
-        report_store.get_store()
-
-
-def test_get_store_returns_singleton(mocker):
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
+def test_get_store_returns_singleton():
     s1 = report_store.get_store()
     s2 = report_store.get_store()
     assert s1 is s2

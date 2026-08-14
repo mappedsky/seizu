@@ -1,9 +1,8 @@
 /**
  * Guards the space tree against being refetched on every in-space navigation.
  *
- * The tree endpoint is the expensive one on the space detail page (on DynamoDB
- * it reads every report's list item to filter by space), so browsing report to
- * report inside a space must reuse the tree it already has.
+ * The tree endpoint is the expensive one on the space detail page, so browsing
+ * report to report inside a space must reuse the tree it already has.
  */
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';

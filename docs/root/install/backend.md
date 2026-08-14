@@ -53,7 +53,7 @@ When using the docker image, the defaults should be sufficient for basic configu
 ### Frontend configuration
 
 seizu passes configuration to the frontend via a configuration endpoint.
-Report and dashboard configurations are stored in the configured report store, which supports DynamoDB and SQL backends. Use ``seizu seed`` to populate the store from a YAML file.
+Report and dashboard configurations are stored in PostgreSQL. Use ``seizu seed`` to populate the store from a YAML file.
 
 ### Neo4j configuration
 
@@ -67,27 +67,14 @@ Report and dashboard configurations are stored in the configured report store, w
 
 ### Report storage configuration
 
-* ``REPORT_STORE_BACKEND``: storage backend to use for Seizu-managed configuration objects, including reports, dashboards, scheduled queries, roles, toolsets, tools, skillsets, and skills. Supported values: ``dynamodb`` (default), ``sqlmodel``
 * ``REPORT_QUERY_SIGNING_SECRET``: cryptographically random secret used to sign report-query capability tokens. Use at least 32 bytes of entropy, 64 bytes preferred. Encode it as hex or base64, store it in a secret manager or deployment env var, and keep it stable across restarts so existing report tokens remain valid until they expire. If you use hex, 32 bytes becomes 64 characters and 64 bytes becomes 128 characters; if you use base64, 32 bytes is typically 44 characters with padding. Rotate it if exposed; rotation invalidates outstanding report tokens.
-
-### DynamoDB configuration
-
-Used when ``REPORT_STORE_BACKEND=dynamodb``. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).
-
-* ``DYNAMODB_TABLE_NAME``: name of the DynamoDB table; default: ``seizu-reports``
-* ``DYNAMODB_REGION``: AWS region for DynamoDB; default: ``us-east-1``
-* ``DYNAMODB_ENDPOINT_URL``: override the DynamoDB endpoint URL (e.g. ``http://dynamodb:8000`` for local DynamoDB); default: ``""`` (uses AWS endpoint)
-* ``DYNAMODB_CREATE_TABLE``: when ``true``, creates the table automatically on startup if it does not exist. Enable in local development; default: ``false``
 * ``SNOWFLAKE_MACHINE_ID``: Snowflake ID generator machine ID (0–1023). Set a unique value per instance when running multiple replicas to avoid ID collisions; default: ``1``
 
-### SQL configuration
+### PostgreSQL configuration
 
-Used when ``REPORT_STORE_BACKEND=sqlmodel``.
-
-* ``SQL_DATABASE_URL``: SQLAlchemy database URL without credentials. Any SQLAlchemy-compatible database is supported. Credential-bearing URLs remain supported for backward compatibility. Examples:
+* ``SQL_DATABASE_URL``: PostgreSQL URL without credentials. Credential-bearing URLs remain supported for backward compatibility. Example:
 
   * ``postgresql://host:5432/seizu``
-  * ``sqlite:///./seizu.db``
 
   default: ``""``
 * ``SQL_DATABASE_USER``: optional username overlaid on ``SQL_DATABASE_URL``; default: ``""``
@@ -95,24 +82,11 @@ Used when ``REPORT_STORE_BACKEND=sqlmodel``.
 
 ### Chat checkpoint storage
 
-LangGraph chat history can use DynamoDB or PostgreSQL independently of the report store.
+LangGraph chat history uses PostgreSQL. Keep it in a dedicated database so its
+migrations, retention, permissions, backups, and deletion can be managed
+independently from application records.
 
-* ``CHAT_CHECKPOINT_BACKEND``: checkpoint backend. Supported values: ``dynamodb`` (default), ``postgres``
 * ``CHAT_CHECKPOINT_CREATE_TABLE``: create or migrate the configured checkpoint tables during startup; default: ``false``
-
-#### DynamoDB checkpoint configuration
-
-Used when ``CHAT_CHECKPOINT_BACKEND=dynamodb``. In production, standard AWS credential resolution applies (instance profile, environment variables, etc.).
-
-* ``CHAT_CHECKPOINT_TABLE_NAME``: name of the DynamoDB checkpoint table; default: ``seizu-chat-checkpoints``
-* ``CHAT_CHECKPOINT_ENABLE_COMPRESSION``: compress serialized checkpoint payloads; default: ``true``
-* ``CHAT_CHECKPOINT_S3_BUCKET``: S3 bucket used to offload checkpoint payloads larger than 350 KB; default: ``""``
-* ``CHAT_CHECKPOINT_S3_ENDPOINT_URL``: override the S3 endpoint URL (for example, ``http://minio:9000`` for local development); default: ``""`` (uses the AWS endpoint)
-* ``CHAT_CHECKPOINT_S3_KEY_PREFIX``: object key prefix for checkpoint payloads stored in S3; default: ``seizu/langgraph``
-
-#### SQL checkpoint configuration
-
-Used when ``CHAT_CHECKPOINT_BACKEND=postgres``. The current SQL checkpointer requires PostgreSQL.
 
 * ``CHAT_CHECKPOINT_DATABASE_URL``: checkpoint database URL without credentials. A dedicated database is recommended so checkpoint migrations, retention, backups, and deletion remain isolated from application tables. Credential-bearing URLs remain supported for backward compatibility. Example:
 
@@ -124,7 +98,52 @@ Used when ``CHAT_CHECKPOINT_BACKEND=postgres``. The current SQL checkpointer req
 * ``CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE``: minimum async database connections per application process; default: ``1``
 * ``CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE``: maximum async database connections per application process; default: ``10``
 
-For local development, ``make sqlmodel_enable`` selects both the SQLModel report store and PostgreSQL chat checkpoints. Compose idempotently creates a dedicated ``seizu-chat-checkpoints`` database before starting Seizu. ``make sqlmodel_disable`` restores both to DynamoDB.
+Compose starts PostgreSQL by default and idempotently creates a dedicated
+``seizu-chat-checkpoints`` database before starting Seizu.
+
+### Transitioning from DynamoDB
+
+The release that removes the DynamoDB backends is a hard storage boundary. Do
+not point it at an empty PostgreSQL database and start accepting traffic.
+
+1. On the last release that supports DynamoDB, block external writes and stop
+   every Temporal worker. Leave one API process reachable only by the migration
+   operator, then take recoverable backups of the application table, checkpoint
+   table, and any checkpoint-offload bucket.
+2. Run ``seizu export --config /safe/path/seizu-export.yaml`` against that
+   isolated API, then stop it. The export contains the
+   durable product configuration supported by seed/export: spaces, reports,
+   workflows, toolsets, skillsets, and their cross-references. Preserve this
+   file with the database backups.
+3. Provision and back up two PostgreSQL databases: one for ``SQL_DATABASE_*``
+   and one for ``CHAT_CHECKPOINT_DATABASE_*``. Start this release with
+   ``CHAT_CHECKPOINT_CREATE_TABLE=true`` and without any removed backend or
+   DynamoDB checkpoint settings; Alembic upgrades the application schema and
+   LangGraph creates the checkpoint schema.
+4. Import the exported configuration with ``seizu seed --force --config
+   /safe/path/seizu-export.yaml`` and verify report, workflow, space, toolset,
+   and skillset counts before reopening traffic.
+
+User profiles are rebuilt from the identity provider on the next authenticated
+request. Query history, user-defined role history, action confirmations,
+scheduled/chat run transcripts, and report version history are not represented
+by the seed/export format. If those records are retention requirements, remain
+on the last dual-backend release and perform a deployment-specific database
+migration before upgrading; this release deliberately refuses stale backend
+settings instead of pretending those records were copied.
+
+Existing DynamoDB LangGraph checkpoints and their offloaded objects are not
+migrated. Conversation history therefore starts empty on PostgreSQL; remove the
+corresponding chat-session records during a deployment-specific migration so
+the sidebar cannot point at missing checkpoints. Keep the old tables and bucket
+unchanged until the verification window closes. Rollback means stopping all new
+writes, restoring the pre-cutover backups, and redeploying the last release that
+supports DynamoDB—never pointing that older release at data written by this one.
+
+Startup rejects ``REPORT_STORE_BACKEND``, ``CHAT_CHECKPOINT_BACKEND``, and all
+removed persistence-specific DynamoDB/S3 settings even when they contain the
+old SQL-selecting values. This makes an incomplete cutover fail before any
+schema or application write.
 
 ### Auth configuration
 

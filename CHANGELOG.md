@@ -8,24 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### ⚠️ Breaking changes
 
-- **`CHAT_CHECKPOINT_TTL_SECONDS` is removed.** A checkpoint TTL was stamped on
-  every item at write time, including a thread's *latest* checkpoint, so any
-  conversation idle longer than it lost its transcript while its session stayed
-  listed in the sidebar — retirement without any of the things retirement does.
-  Retention now belongs to session reaping (below), which removes the session
-  record, its checkpoint and its sandbox together. Seizu stops stamping new
-  items, but **items written earlier keep the expiry they already carry**, so a
-  deployment that set a TTL should also disable it on the checkpoint table (the
-  attribute name is required even when disabling):
-
-  ```shell
-  aws dynamodb update-time-to-live --table-name seizu-chat-checkpoints \
-    --time-to-live-specification 'Enabled=false,AttributeName=ttl'
-  ```
-
-  Superseded per-turn checkpoints now accumulate until a thread is retired; that
-  is an accepted trade, recorded in
-  [SBX-011](dev/decisions/sandbox.md).
+- **PostgreSQL is now required for application storage and LangGraph chat
+  checkpoints** (#269). The DynamoDB report store, DynamoDB checkpoint saver,
+  checkpoint S3/MinIO offload, backend selectors, and local DynamoDB/MinIO
+  services are removed. PostgreSQL and the independently named checkpoint
+  database now start in the default Compose stack. Remove
+  `REPORT_STORE_BACKEND`, `CHAT_CHECKPOINT_BACKEND`, `DYNAMODB_*`, and removed
+  checkpoint table/offload settings; startup rejects them before touching the
+  target databases. Existing PostgreSQL application databases continue through
+  Alembic. Operators migrating from DynamoDB must export and back up before the
+  cutover; DynamoDB checkpoint history is not migrated. The deployment order,
+  data limitations, backup, and rollback boundary are documented under
+  [Transitioning from DynamoDB](install/backend.md#transitioning-from-dynamodb).
+  Rationale: [STO-005](dev/decisions/report-store.md).
 
 - **Scheduled chats now require Temporal.** The `seizu-scheduled-chats` worker
   (`python -m reporting.scheduled_chats`), its Compose service, and its
@@ -70,8 +65,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   space's overview. Reports are filed via **Move to space…** on the Reports list
   or inside a report; a report filed in a space is public, so publish a draft
   before filing it and remove a report from its space before unpublishing it.
-  The rule is enforced by the store itself (a create-time check, conditional
-  writes on DynamoDB, a row lock on SQL), so it holds under concurrent requests.
+  The rule is enforced by the store itself (a create-time check and a
+  transactional row lock), so it holds under concurrent requests.
   In chat, `reports__create` now requires confirmation when the new report would
   land in a space, and `reports__clone` always does — publishing is a visible
   change, unlike the private draft those tools normally produce.
@@ -83,13 +78,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   endpoints under `/api/v1/spaces`, plus
   `PUT /api/v1/reports/<id>/space`; new `seizu spaces list` / `seizu spaces show`
   CLI commands; migration `0005_spaces`. Docs: `docs/root/install/spaces.md`.
-- **DynamoDB `space_reports_index` GSI** (`space_id` + `SK`, sparse, `ALL`
-  projection) backs the space report list, so it costs read capacity
-  proportional to the space rather than to the whole table. The app creates it
-  when `DYNAMODB_CREATE_TABLE` is enabled, including on an existing table;
-  **operators managing the table with IaC should add it there**. Without it
-  Seizu falls back to filtering the full report list — correct, but the old
-  cost — and logs `Space reports GSI unavailable`. No backfill is required.
 - `ReportListItem` and `ReportVersion` now carry `space_id` and `subspace_id`.
   MCP consumers of `reports__list` and `reports__get` see these
   fields automatically. There is no `spaces` MCP builtin group yet.
@@ -133,9 +121,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in practice it caps tool *arguments* — a very large Cypher query sent to
   `graph__query`, say. Responses are unaffected and stay governed by
   `MCP_TOOL_RESULT_MAX_BYTES`.
-- `GET /api/v1/reports` follows DynamoDB's `LastEvaluatedKey`, so deployments
-  whose report-list partition exceeds the 1 MB query cap no longer get a
-  silently truncated list.
 - `seizu export` warns when exported reports belong to a space: YAML has no
   `spaces:` section, so space membership does not round-trip through
   seed/export.

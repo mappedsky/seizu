@@ -134,11 +134,9 @@ first act is a conditional activity write, so exactly one of the two commits. A
 turn that loses the race is refused with *"This conversation has been retired"*
 rather than running against state being deleted underneath it.
 
-On DynamoDB each sweep walks a bounded number of users and records where it
-stopped — both which user, and how far into that user's own sessions — resuming
-there next time, so a large deployment takes several passes to work through
-everyone rather than timing out on one. (SQL answers the same question globally
-with a single indexed query.)
+PostgreSQL finds idle sessions globally through the indexed
+`(origin, updated_at)` query, so each sweep can select the oldest eligible
+sessions directly.
 
 **Set `SEIZU_DEPLOYMENT_ID` whenever the sandbox credentials are shared** with
 another Seizu installation (production and staging on one E2B account, say). It
@@ -213,7 +211,7 @@ No other code needs to change: `_build_sandbox_tools`, `_handle_delegate`, the r
 
 ## Security model
 
-The sandbox is ephemeral and isolated from Seizu's data stores and credentials — isolation is the safety mechanism. No confirmation gate is needed because the sandbox cannot reach Neo4j, DynamoDB, or any Seizu API. Outbound internet access from the sandbox is **off by default** and only enabled when you set `SANDBOX_ALLOW_INTERNET=true`.
+The sandbox is ephemeral and isolated from Seizu's data stores and credentials — isolation is the safety mechanism. No confirmation gate is needed because the sandbox cannot reach Neo4j, PostgreSQL, or any Seizu API. Outbound internet access from the sandbox is **off by default** and only enabled when you set `SANDBOX_ALLOW_INTERNET=true`.
 
 The sandbox subagent can call read-only Seizu tools (and user-defined toolset tools) on the user's behalf, but never confirmation-gated mutating tools: those stay with the outer chat agent, where the user approves them interactively. The subagent runs to completion inside a single tool call and cannot drive the confirmation round-trip, so gated mutations are filtered out of its tool set and the runtime additionally refuses any gated tool reached without a confirmation context.
 

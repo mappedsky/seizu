@@ -11,7 +11,7 @@ Rows are rendered in the order specified, and panels within rows are also render
 
 ## Configuration Storage
 
-Report and dashboard configurations are stored in the configured report store, not in the YAML configuration file. The report store supports DynamoDB and SQL backends.
+Report and dashboard configurations are stored in PostgreSQL, not in the YAML configuration file.
 The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, a `spaces` section, a `reports` section, a `toolsets` section, and a `skillsets` section — all used to seed the report store.
 A report may name a `space` (and optionally a `subspace`) from the `spaces` section to be filed into it — see [Spaces](spaces.html#seeding).
 Each report has its own `queries` dict for named Cypher strings used by its panels.

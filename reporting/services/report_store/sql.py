@@ -739,18 +739,17 @@ def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionIte
 def _get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
+        if not settings.SQL_DATABASE_URL.strip():
+            raise ValueError("SQL_DATABASE_URL is required and must be a PostgreSQL URL")
         url = build_database_url(
             settings.SQL_DATABASE_URL,
             user=settings.SQL_DATABASE_USER,
             password=settings.SQL_DATABASE_PASSWORD,
         )
-        connect_args: dict[str, Any] = {}
-        if url.get_backend_name() == "postgresql":
-            url = url.set(drivername="postgresql+asyncpg")
-            connect_args["command_timeout"] = settings.SQL_STATEMENT_TIMEOUT
-        elif url.get_backend_name() == "sqlite":
-            # sqlite+aiosqlite for async sqlite (not commonly used in prod)
-            url = url.set(drivername="sqlite+aiosqlite")
+        if url.get_backend_name() != "postgresql":
+            raise ValueError("SQL_DATABASE_URL must be a PostgreSQL URL")
+        url = url.set(drivername="postgresql+asyncpg")
+        connect_args = {"command_timeout": settings.SQL_STATEMENT_TIMEOUT}
         _engine = create_async_engine(url, connect_args=connect_args)
     return _engine
 
@@ -761,10 +760,7 @@ def _get_engine() -> AsyncEngine:
 
 
 class SQLModelReportStore(ReportStore):
-    """ReportStore implementation backed by any SQLAlchemy-compatible database.
-
-    Configured via the ``SQL_DATABASE_*`` settings.
-    """
+    """PostgreSQL implementation configured via ``SQL_DATABASE_*``."""
 
     def generate_id(self) -> str:
         return generate_report_id()

@@ -3092,18 +3092,6 @@ def test_trim_messages_keeps_window_starting_at_user_turn(mocker):
     assert [r.id for r in removals] == ["h1", "a1"]
 
 
-def test_aws_config_default_uses_virtual_hosted_style(mocker):
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "")
-    config = chat_graph._aws_config()
-    assert config.s3 is None
-
-
-def test_aws_config_with_s3_endpoint_uses_path_style(mocker):
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://localhost:9000")
-    config = chat_graph._aws_config()
-    assert config.s3 == {"addressing_style": "path"}
-
-
 def test_validate_chat_llm_config_accepts_mock_and_rejects_missing_model(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "mock")
     chat_graph.validate_chat_llm_config()
@@ -3154,61 +3142,6 @@ def test_legacy_provider_api_key_prefers_gemini_then_google(mocker):
     assert chat_graph._legacy_provider_api_key("unknown") == ""
 
 
-def test_build_dynamodb_checkpointer_forwards_s3_offload_settings_and_no_ttl(mocker):
-    """No ttl_seconds, deliberately: a checkpoint TTL expires a thread's latest
-    checkpoint as readily as a superseded one, emptying conversations that still
-    exist. Retiring them is the session reaper's job (SBX-011)."""
-    saver = object()
-    saver_factory = mocker.patch("reporting.services.chat_graph.DynamoDBSaver", return_value=saver)
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_BUCKET", "chat-checkpoints")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL", "http://minio:9000")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_S3_KEY_PREFIX", "threads/")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
-    mocker.patch("reporting.settings.DYNAMODB_REGION", "us-east-1")
-    mocker.patch("reporting.settings.DYNAMODB_ENDPOINT_URL", "http://dynamodb:8000")
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
-
-    assert chat_graph._build_dynamodb_checkpointer() is saver
-    saver_factory.assert_called_once_with(
-        table_name="chat-table",
-        region_name="us-east-1",
-        endpoint_url="http://dynamodb:8000",
-        boto_config=mocker.ANY,
-        enable_checkpoint_compression=True,
-        s3_offload_config={
-            "bucket_name": "chat-checkpoints",
-            "endpoint_url": "http://minio:9000",
-            "key_prefix": "threads/",
-        },
-    )
-
-
-async def test_initialize_chat_checkpoints_respects_create_table_setting(mocker):
-    initialize = mocker.patch("reporting.services.chat_graph._initialize_chat_checkpoints_sync")
-    to_thread = mocker.patch("reporting.services.chat_graph.asyncio.to_thread", new=mocker.AsyncMock())
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "dynamodb")
-
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_CREATE_TABLE", False)
-    await chat_graph.initialize_chat_checkpoints()
-    to_thread.assert_not_awaited()
-
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_CREATE_TABLE", True)
-    await chat_graph.initialize_chat_checkpoints()
-    to_thread.assert_awaited_once_with(initialize)
-
-
-def test_chat_checkpoint_backend_normalizes_postgres_aliases_and_rejects_unknown(mocker):
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "postgresql")
-    assert chat_graph._chat_checkpoint_backend() == "postgres"
-
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "sql")
-    assert chat_graph._chat_checkpoint_backend() == "postgres"
-
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "unknown")
-    with pytest.raises(ValueError, match="Unknown chat checkpoint backend"):
-        chat_graph._chat_checkpoint_backend()
-
-
 def test_postgres_checkpoint_url_accepts_postgres_and_converts_asyncpg(mocker):
     mocker.patch(
         "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
@@ -3234,7 +3167,6 @@ async def test_initialize_postgres_chat_checkpoints_builds_pool_and_graph(mocker
     saver_factory = mocker.patch("reporting.services.chat_graph.AsyncPostgresSaver", return_value=saver)
     graph = object()
     build_graph = mocker.patch("reporting.services.chat_graph.build_chat_graph", return_value=graph)
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "postgres")
     mocker.patch(
         "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
         "postgresql://postgres:5432/seizu",
@@ -3274,7 +3206,6 @@ async def test_initialize_postgres_chat_checkpoints_builds_pool_and_graph(mocker
 
 
 async def test_initialize_postgres_chat_checkpoints_rejects_invalid_pool_bounds(mocker):
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_BACKEND", "postgres")
     mocker.patch(
         "reporting.settings.CHAT_CHECKPOINT_DATABASE_URL",
         "postgresql://postgres:5432/seizu",
@@ -3323,67 +3254,6 @@ async def test_setup_postgres_checkpointer_serializes_migrations(mocker):
         mocker.call("SELECT pg_try_advisory_lock(hashtextextended('seizu-chat-checkpoint-setup', 0)) AS acquired"),
         mocker.call("SELECT pg_advisory_unlock(hashtextextended('seizu-chat-checkpoint-setup', 0))"),
     ]
-
-
-def test_initialize_chat_checkpoints_creates_missing_table_and_ttl(mocker):
-    class _Waiter:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def wait(self, **kwargs):
-            self.calls.append(kwargs)
-
-    class _Client:
-        def __init__(self) -> None:
-            self.created = []
-            self.ttl = []
-            self.waiter = _Waiter()
-
-        def describe_table(self, **_kwargs):
-            raise chat_graph.ClientError(
-                {"Error": {"Code": "ResourceNotFoundException", "Message": "missing"}},
-                "DescribeTable",
-            )
-
-        def create_table(self, **kwargs):
-            self.created.append(kwargs)
-
-        def get_waiter(self, name):
-            assert name == "table_exists"
-            return self.waiter
-
-        def update_time_to_live(self, **kwargs):
-            self.ttl.append(kwargs)
-
-    client = _Client()
-    mocker.patch(
-        "reporting.services.chat_graph._build_dynamodb_checkpointer",
-        return_value=type("_Saver", (), {"client": client})(),
-    )
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
-
-    chat_graph._initialize_chat_checkpoints_sync()
-
-    assert client.created[0]["TableName"] == "chat-table"
-    assert client.waiter.calls == [{"TableName": "chat-table"}]
-    # Never enabled: nothing writes a ttl attribute, so a table-level expiry
-    # would only be a trap for whoever set one by hand.
-    assert client.ttl == []
-
-
-def test_initialize_chat_checkpoints_accepts_existing_table(mocker):
-    client = mocker.Mock()
-    mocker.patch(
-        "reporting.services.chat_graph._build_dynamodb_checkpointer",
-        return_value=type("_Saver", (), {"client": client})(),
-    )
-    mocker.patch("reporting.settings.CHAT_CHECKPOINT_TABLE_NAME", "chat-table")
-
-    chat_graph._initialize_chat_checkpoints_sync()
-
-    client.describe_table.assert_called_once_with(TableName="chat-table")
-    client.create_table.assert_not_called()
-    client.update_time_to_live.assert_not_called()
 
 
 def test_collapse_ephemeral_continuations_discards_orphaned_continuation():

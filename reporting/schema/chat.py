@@ -108,9 +108,9 @@ class UpdateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-# A batch has to fit one DynamoDB item (400KB hard limit), with room left for the
-# keys and the rest of the item. The producer splits rather than the store, so
-# this is a validation bound, not a chunking hint.
+# Bound each stored event batch so readers and writers never materialize an
+# unbounded stream fragment. The producer splits rather than the store, so this
+# is a validation bound, not a chunking hint.
 CHAT_TURN_MAX_BATCH_BYTES = 320_000
 # Ceiling on batches per turn, so a runaway producer cannot write without bound.
 CHAT_TURN_MAX_SEQ = 5_000

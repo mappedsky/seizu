@@ -10,8 +10,6 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Annotated, Any, Literal, NotRequired, Protocol
 
-import botocore.config
-from botocore.exceptions import ClientError
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -25,7 +23,6 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph_checkpoint_aws import DynamoDBSaver
 from mcp.types import Prompt, Tool
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
@@ -3709,11 +3706,7 @@ def get_chat_graph() -> ChatGraph:
     global _chat_graph
     if _chat_graph is not None:
         return _chat_graph
-    backend = _chat_checkpoint_backend()
-    if backend == "postgres":
-        raise RuntimeError("PostgreSQL chat checkpoints were not initialized during application startup")
-    _chat_graph = build_chat_graph(_build_dynamodb_checkpointer())
-    return _chat_graph
+    raise RuntimeError("PostgreSQL chat checkpoints were not initialized during application startup")
 
 
 @lru_cache(maxsize=16)
@@ -3836,53 +3829,8 @@ def validate_chat_llm_config() -> None:
             _litellm_model_id(provider, configured_model)
 
 
-def _chat_checkpoint_backend() -> Literal["dynamodb", "postgres"]:
-    backend = settings.CHAT_CHECKPOINT_BACKEND.strip().lower()
-    if backend == "dynamodb":
-        return "dynamodb"
-    if backend in {"postgres", "postgresql", "sql"}:
-        return "postgres"
-    raise ValueError(
-        f"Unknown chat checkpoint backend: {settings.CHAT_CHECKPOINT_BACKEND!r}. "
-        "Supported values are 'dynamodb' and 'postgres'."
-    )
-
-
-def _build_dynamodb_checkpointer() -> DynamoDBSaver:
-    # DynamoDBSaver is boto3-based (no async DynamoDB saver ships in
-    # langgraph-checkpoint-aws), but its async methods wrap the sync calls in
-    # run_in_executor, so checkpoint I/O is offloaded to a threadpool and does
-    # not block the event loop — keep using it under the async graph.
-    s3_offload_config = None
-    if settings.CHAT_CHECKPOINT_S3_BUCKET:
-        s3_offload_config = {
-            "bucket_name": settings.CHAT_CHECKPOINT_S3_BUCKET,
-            "endpoint_url": settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL or None,
-            "key_prefix": settings.CHAT_CHECKPOINT_S3_KEY_PREFIX or None,
-        }
-    return DynamoDBSaver(
-        table_name=settings.CHAT_CHECKPOINT_TABLE_NAME,
-        region_name=settings.DYNAMODB_REGION,
-        endpoint_url=settings.DYNAMODB_ENDPOINT_URL or None,
-        boto_config=_aws_config(),
-        # No ttl_seconds, deliberately. A checkpoint TTL is stamped on every
-        # item at write time, including a thread's *latest* checkpoint, and
-        # nothing marks a checkpoint as superseded -- so an idle conversation
-        # ages out while its session record, which has no expiry, stays in the
-        # sidebar pointing at nothing. Retiring a conversation is the session
-        # reaper's job, which removes the record, the checkpoint and the
-        # sandbox together. See SBX-011.
-        enable_checkpoint_compression=settings.CHAT_CHECKPOINT_ENABLE_COMPRESSION,
-        s3_offload_config=s3_offload_config,
-    )
-
-
 async def initialize_chat_checkpoints() -> None:
-    backend = _chat_checkpoint_backend()
-    if backend == "dynamodb" and settings.CHAT_CHECKPOINT_CREATE_TABLE:
-        await asyncio.to_thread(_initialize_chat_checkpoints_sync)
-    elif backend == "postgres":
-        await _initialize_postgres_chat_checkpoints()
+    await _initialize_postgres_chat_checkpoints()
 
 
 async def close_chat_checkpoints() -> None:
@@ -3955,55 +3903,14 @@ async def _setup_postgres_checkpointer(pool: AsyncConnectionPool) -> None:
 
 
 def _postgres_checkpoint_url() -> str:
+    if not settings.CHAT_CHECKPOINT_DATABASE_URL.strip():
+        raise ValueError("CHAT_CHECKPOINT_DATABASE_URL is required and must be a PostgreSQL URL")
     url = build_database_url(
         settings.CHAT_CHECKPOINT_DATABASE_URL.strip(),
         user=settings.CHAT_CHECKPOINT_DATABASE_USER,
         password=settings.CHAT_CHECKPOINT_DATABASE_PASSWORD,
     )
     if url.get_backend_name() != "postgresql":
-        raise ValueError("CHAT_CHECKPOINT_DATABASE_URL must be a PostgreSQL URL when CHAT_CHECKPOINT_BACKEND=postgres")
+        raise ValueError("CHAT_CHECKPOINT_DATABASE_URL must be a PostgreSQL URL")
     url = url.set(drivername="postgresql")
     return url.render_as_string(hide_password=False)
-
-
-def _initialize_chat_checkpoints_sync() -> None:
-    checkpointer = _build_dynamodb_checkpointer()
-    client = checkpointer.client
-    table_name = settings.CHAT_CHECKPOINT_TABLE_NAME
-
-    try:
-        client.describe_table(TableName=table_name)
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] != "ResourceNotFoundException":
-            raise
-        try:
-            client.create_table(
-                TableName=table_name,
-                AttributeDefinitions=[
-                    {"AttributeName": "PK", "AttributeType": "S"},
-                    {"AttributeName": "SK", "AttributeType": "S"},
-                ],
-                KeySchema=[
-                    {"AttributeName": "PK", "KeyType": "HASH"},
-                    {"AttributeName": "SK", "KeyType": "RANGE"},
-                ],
-                BillingMode="PAY_PER_REQUEST",
-            )
-        except ClientError as create_exc:
-            if create_exc.response["Error"]["Code"] != "ResourceInUseException":
-                raise
-        waiter = client.get_waiter("table_exists")
-        waiter.wait(TableName=table_name)
-
-
-def _aws_config() -> botocore.config.Config:
-    config_kwargs: dict[str, Any] = {
-        "connect_timeout": settings.AWS_CONNECT_TIMEOUT,
-        "read_timeout": settings.AWS_READ_TIMEOUT,
-    }
-    # Path-style addressing is required for S3-compatible endpoints like MinIO
-    # in development; against real AWS S3 leave the default (virtual-hosted),
-    # which is the recommended/forward-compatible style.
-    if settings.CHAT_CHECKPOINT_S3_ENDPOINT_URL:
-        config_kwargs["s3"] = {"addressing_style": "path"}
-    return botocore.config.Config(**config_kwargs)

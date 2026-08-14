@@ -28,7 +28,7 @@ def test_get_boto_resource_returns_resource(mocker):
     fake_session.resource.return_value = fake_resource
     mocker.patch("reporting.services.get_boto_session", return_value=fake_session)
 
-    result = get_boto_resource("dynamodb", region="us-east-1", endpoint_url="http://localhost:8000")
+    result = get_boto_resource("s3", region="us-east-1", endpoint_url="http://localhost:9000")
 
-    fake_session.resource.assert_called_once_with("dynamodb", endpoint_url="http://localhost:8000")
+    fake_session.resource.assert_called_once_with("s3", endpoint_url="http://localhost:9000")
     assert result is fake_resource

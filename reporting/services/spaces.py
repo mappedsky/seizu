@@ -176,10 +176,8 @@ async def find_duplicate_space_name(name: str, *, exclude_space_id: str | None =
     definition both sides can hold without sharing code -- see
     ``_seed_spaces`` in ``seizu_cli/commands/seed.py``.
 
-    Best-effort, and deliberately not backed by a unique constraint: a unique
-    index on ``name`` is awkward cross-dialect and DynamoDB cannot enforce one
-    at all, so adding it to only the SQL backend would make the two behave
-    differently under a race.
+    Best-effort and deliberately not backed by a unique constraint: exact name
+    matching is a seeding convenience, not a durable identity or a product rule.
     """
     return any(space.space_id != exclude_space_id and space.name == name for space in await report_store.list_spaces())
 

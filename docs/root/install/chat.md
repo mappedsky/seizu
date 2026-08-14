@@ -23,7 +23,9 @@ API keys resolve in order: `CHAT_LLM_API_KEY`, then the standard provider env va
 
 `CHAT_LLM_BASE_URL` points chat at a self-hosted LiteLLM proxy or another OpenAI-compatible gateway. Legacy `CHAT_LLM_PROVIDER` values (`openai`, `anthropic`, `gemini`, `deepseek`) still work and namespace a bare `CHAT_LLM_MODEL`.
 
-Chat history requires checkpoint storage (DynamoDB by default, PostgreSQL optional); the `CHAT_CHECKPOINT_*` variables are documented in the [backend configuration](backend.html) under *Chat checkpoint storage*.
+Chat history requires PostgreSQL checkpoint storage; the
+`CHAT_CHECKPOINT_DATABASE_*` variables are documented in the
+[backend configuration](backend.html) under *Chat checkpoint storage*.
 
 ## Permissions
 

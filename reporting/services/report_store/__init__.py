@@ -42,25 +42,12 @@ _store: ReportStore | None = None
 
 
 def get_store() -> ReportStore:
-    """Return the configured report store singleton.
-
-    The backend is selected by the REPORT_STORE_BACKEND setting (default: ``dynamodb``).
-    """
+    """Return the PostgreSQL report store singleton."""
     global _store
     if _store is None:
-        from reporting import settings
+        from reporting.services.report_store.sql import SQLModelReportStore
 
-        backend = settings.REPORT_STORE_BACKEND
-        if backend == "dynamodb":
-            from reporting.services.report_store.dynamodb import DynamoDBReportStore
-
-            _store = DynamoDBReportStore()
-        elif backend == "sqlmodel":
-            from reporting.services.report_store.sql import SQLModelReportStore
-
-            _store = SQLModelReportStore()
-        else:
-            raise ValueError(f"Unknown report store backend: {backend!r}")
+        _store = SQLModelReportStore()
     return _store
 
 
