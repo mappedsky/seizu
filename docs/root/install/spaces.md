@@ -276,30 +276,9 @@ overwritten are reused, so hand-chosen names survive an export.
 
 ## Storage
 
-Spaces and sub-spaces are stored in the report store alongside reports, in whichever backend
-`REPORT_STORE_BACKEND` selects.
-
-- **DynamoDB** — `SPACE#{id}` / `#METADATA` with a `SPACE_LIST` index entry, and
-  `SUBSPACE#{id}` / `#METADATA` with a per-space `SUBSPACE_LIST#{space_id}` index entry. Reports carry
-  `space_id` and `subspace_id` attributes; the overview pointer lives on the space.
-
-  Listing a space's reports uses a global secondary index, **`space_reports_index`**, keyed
-  `space_id` (hash) + `SK` (range) with an `ALL` projection. It is sparse — only items that carry a
-  `space_id` appear — and queries add a `begins_with(SK, "REPORT#")` condition so they read only each
-  report's `REPORT_LIST` copy, not its `#METADATA` copy or the sub-space items that also carry the
-  attribute.
-
-  When `DYNAMODB_CREATE_TABLE` is enabled the app creates the index, and adds it to an existing table
-  on startup if it is missing. **Tables managed outside the app (the default, since
-  `DYNAMODB_CREATE_TABLE` is `false`) need the index added to your Terraform or CloudFormation.**
-  Until it exists, Seizu falls back to reading the whole report list and filtering in memory, logging
-  `Space reports GSI unavailable`: correct results, but read capacity proportional to your *total*
-  report count rather than the space's. Measured on a 51-report table, the index cut a space page from
-  2.0 to 0.5 RCU, and the gap grows linearly.
-
-  No backfill is needed when adding the index to a populated table: it keys on the `space_id`
-  attribute that member reports already carry, so DynamoDB indexes them during the normal build.
-- **PostgreSQL** — `spaces` and `subspaces` tables, plus `space_id` and `subspace_id` on `reports`.
-  Added by the `0005_spaces` Alembic revision, which runs automatically at startup.
+Spaces and sub-spaces are stored in PostgreSQL alongside reports. The
+`spaces` and `subspaces` tables, plus `space_id` and `subspace_id` on
+`reports`, were added by the `0005_spaces` Alembic revision. Alembic upgrades
+the schema automatically at startup.
 
 No configuration or feature flag is required; Spaces is always available.

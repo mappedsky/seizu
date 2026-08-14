@@ -71,11 +71,10 @@ def initial_report_config(name: str) -> dict[str, Any]:
 
 
 def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
-    """Reject a batch no backend could store, before any I/O.
+    """Reject an oversized event-log batch before any I/O.
 
-    The byte length is measured rather than the character count: pydantic's
-    ``max_length`` counts characters, so a batch of multi-byte content would
-    pass that and still exceed the DynamoDB item limit.
+    Measure bytes rather than characters so multi-byte stream content observes
+    the same storage and replay bound.
     """
     if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
         raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
@@ -150,7 +149,7 @@ def chat_turn_lease_expiry(now: datetime) -> str:
 
 
 class ReportStore(ABC):
-    """Abstract base class for report configuration storage backends."""
+    """Application persistence contract and test seam."""
 
     @abstractmethod
     def generate_id(self) -> str:
@@ -158,7 +157,7 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def initialize(self) -> None:
-        """Perform any one-time setup required by the backend (e.g. create table)."""
+        """Upgrade the PostgreSQL application schema."""
 
     @abstractmethod
     async def list_reports(self, user_id: str | None = None) -> list[ReportListItem]:

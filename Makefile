@@ -5,9 +5,7 @@ args = `arg="$(filter-out $@,$(MAKECMDGOALS))" && echo $${arg:-${1}}`
 
 # Automatically include --profile auth if auth is enabled in .env
 AUTH_PROFILE := $(shell grep -q 'DEVELOPMENT_ONLY_REQUIRE_AUTH=true' .env 2>/dev/null && echo '--profile auth' || echo '')
-# Automatically include --profile sqlmodel if either PostgreSQL-backed store is selected in .env
-SQL_PROFILE := $(shell grep -Eq '^(REPORT_STORE_BACKEND=sqlmodel|CHAT_CHECKPOINT_BACKEND=postgres)$$' .env 2>/dev/null && echo '--profile sqlmodel' || echo '')
-COMPOSE_PROFILES := $(AUTH_PROFILE) $(SQL_PROFILE)
+COMPOSE_PROFILES := $(AUTH_PROFILE)
 
 .PHONY: uv_sync
 uv_sync:
@@ -118,13 +116,8 @@ build_cartography_worker:
 
 .PHONY: drop_db
 drop_db: down
-	@if grep -q 'REPORT_STORE_BACKEND=sqlmodel' .env 2>/dev/null; then \
-		echo "Removing postgres_data volume..."; \
-		docker volume rm -f seizu_postgres_data; \
-	else \
-		echo "Removing dynamodb_data volume..."; \
-		docker volume rm -f seizu_dynamodb_data; \
-	fi
+	@echo "Removing postgres_data volume..."
+	@docker volume rm -f seizu_postgres_data
 	@echo "Done. Run 'make up' to recreate and 'make seed_dashboard' to reseed."
 
 .PHONY: drop_auth_db
@@ -146,7 +139,7 @@ schema: generate_openapi
 # Export the OpenAPI spec from the FastAPI app (no backend connections required).
 .PHONY: generate_openapi
 generate_openapi:
-	docker compose run --rm -e DYNAMODB_CREATE_TABLE=false seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
+	docker compose run --rm --no-deps seizu uv run --frozen --no-sync python -c "from reporting.app import create_app; import json; app = create_app(); print(json.dumps(app.openapi()))" > schema/openapi.json
 
 # Generate a client library from schema/openapi.json using openapi-generator-cli.
 # Usage: make generate_client LANG=go
@@ -190,8 +183,16 @@ bun:
 config_setup:
 	@./.config/setup.sh
 
+.PHONY: check_legacy_persistence_config
+check_legacy_persistence_config:
+	@if grep -Eq '^(REPORT_STORE_BACKEND|DYNAMODB_TABLE_NAME|DYNAMODB_REGION|DYNAMODB_ENDPOINT_URL|DYNAMODB_CREATE_TABLE|CHAT_CHECKPOINT_BACKEND|CHAT_CHECKPOINT_TABLE_NAME|CHAT_CHECKPOINT_ENABLE_COMPRESSION|CHAT_CHECKPOINT_S3_BUCKET|CHAT_CHECKPOINT_S3_ENDPOINT_URL|CHAT_CHECKPOINT_S3_KEY_PREFIX|CHAT_CHECKPOINT_TTL_SECONDS)=' .env 2>/dev/null; then \
+		echo "Removed DynamoDB persistence settings remain in .env." >&2; \
+		echo "Migrate first, then remove them; see docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql." >&2; \
+		exit 1; \
+	fi
+
 .PHONY: up
-up: config_setup
+up: config_setup check_legacy_persistence_config
 	docker compose $(COMPOSE_PROFILES) up $(call args)
 
 .PHONY: down
@@ -249,26 +250,6 @@ apoc_disable:
 		|| true
 	@rm -f .compose/neo4j/plugins/apoc-*.jar
 	@echo "APOC disabled. Run 'make down && make up' to apply."
-
-.PHONY: sqlmodel_enable
-sqlmodel_enable:
-	@grep -q 'REPORT_STORE_BACKEND=' .env 2>/dev/null \
-		&& perl -pi -e 's/REPORT_STORE_BACKEND=.*/REPORT_STORE_BACKEND=sqlmodel/' .env \
-		|| echo 'REPORT_STORE_BACKEND=sqlmodel' >> .env
-	@grep -q 'CHAT_CHECKPOINT_BACKEND=' .env 2>/dev/null \
-		&& perl -pi -e 's/CHAT_CHECKPOINT_BACKEND=.*/CHAT_CHECKPOINT_BACKEND=postgres/' .env \
-		|| echo 'CHAT_CHECKPOINT_BACKEND=postgres' >> .env
-	@echo "SQLModel report store and PostgreSQL chat checkpoints enabled in .env. Run 'make down && make up' to apply."
-
-.PHONY: sqlmodel_disable
-sqlmodel_disable:
-	@grep -q 'REPORT_STORE_BACKEND=' .env 2>/dev/null \
-		&& perl -pi -e 's/REPORT_STORE_BACKEND=.*/REPORT_STORE_BACKEND=dynamodb/' .env \
-		|| echo 'REPORT_STORE_BACKEND=dynamodb' >> .env
-	@grep -q 'CHAT_CHECKPOINT_BACKEND=' .env 2>/dev/null \
-		&& perl -pi -e 's/CHAT_CHECKPOINT_BACKEND=.*/CHAT_CHECKPOINT_BACKEND=dynamodb/' .env \
-		|| echo 'CHAT_CHECKPOINT_BACKEND=dynamodb' >> .env
-	@echo "DynamoDB report store and chat checkpoints restored in .env. Run 'make down && make up' to apply."
 
 .PHONY: restart
 restart:

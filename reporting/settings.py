@@ -1,3 +1,4 @@
+import os
 from importlib import resources
 
 from cartography_sync.registry import parse_enabled_modules
@@ -18,8 +19,6 @@ def _core_tools_from_env() -> list[str]:
     carries a non-empty default, and letting a stray empty assignment empty
     *that* is a security change, not a convenience.
     """
-    import os
-
     raw = os.environ.get("SANDBOX_CORE_TOOLS")
     if raw is None:
         return list(_DEFAULT_SANDBOX_CORE_TOOLS)
@@ -521,7 +520,7 @@ API_REQUEST_TIMEOUT = int_env("API_REQUEST_TIMEOUT", 60)
 # Timeout in seconds for JWKS endpoint HTTP requests used to fetch signing keys.
 JWKS_FETCH_TIMEOUT = int_env("JWKS_FETCH_TIMEOUT", 10)
 
-# Connection and read timeouts (in seconds) for AWS boto3 clients (DynamoDB, SQS).
+# Connection and read timeouts (in seconds) for AWS boto3 clients such as SQS.
 AWS_CONNECT_TIMEOUT = int_env("AWS_CONNECT_TIMEOUT", 5)
 AWS_READ_TIMEOUT = int_env("AWS_READ_TIMEOUT", 30)
 
@@ -536,33 +535,50 @@ SLACK_TIMEOUT = int_env("SLACK_TIMEOUT", 30)
 # running behind an SSL-terminating load balancer.
 TALISMAN_FORCE_HTTPS = bool_env("TALISMAN_FORCE_HTTPS", True)
 
-# DynamoDB settings for report config storage
-# Name of the DynamoDB table used to store report configs and version history
-DYNAMODB_TABLE_NAME = str_env("DYNAMODB_TABLE_NAME", "seizu-reports")
-# AWS region for DynamoDB. Falls back to boto3 default chain if unset.
-DYNAMODB_REGION = str_env("DYNAMODB_REGION", "us-east-1")
-# Override the DynamoDB endpoint URL, e.g. http://dynamodb:8000 for local dev.
-# Leave empty to use the default AWS endpoint.
-DYNAMODB_ENDPOINT_URL = str_env("DYNAMODB_ENDPOINT_URL", "")
-# When true, the table is created automatically on startup if it does not exist.
-# Enable this in local development against DynamoDB Local.
-DYNAMODB_CREATE_TABLE = bool_env("DYNAMODB_CREATE_TABLE", False)
 # Snowflake ID generator machine ID (0–1023). Set a unique value per instance
 # when running multiple replicas to avoid ID collisions.
 SNOWFLAKE_MACHINE_ID = int_env("SNOWFLAKE_MACHINE_ID", 1)
-# Report storage backend. Supported values: "dynamodb" (default), "sqlmodel".
-REPORT_STORE_BACKEND = str_env("REPORT_STORE_BACKEND", "dynamodb")
-# SQLAlchemy database URL used when REPORT_STORE_BACKEND=sqlmodel. Keep
+# PostgreSQL database URL for Seizu-managed application records. Keep
 # credentials out of this value and provide them through SQL_DATABASE_USER and
 # SQL_DATABASE_PASSWORD so secret managers can manage only the password.
 # Credential-bearing URLs remain supported for backward compatibility.
-# Any SQLAlchemy-compatible URL works (PostgreSQL, SQLite, MySQL, etc.).
 # Example: postgresql://postgres:5432/seizu
-# Example: sqlite:///./seizu.db
 SQL_DATABASE_URL = str_env("SQL_DATABASE_URL", "")
 # Optional credentials overlaid on SQL_DATABASE_URL.
 SQL_DATABASE_USER = str_env("SQL_DATABASE_USER", "")
 SQL_DATABASE_PASSWORD = str_env("SQL_DATABASE_PASSWORD", "")
+
+_LEGACY_PERSISTENCE_SETTINGS = frozenset(
+    {
+        "REPORT_STORE_BACKEND",
+        "DYNAMODB_TABLE_NAME",
+        "DYNAMODB_REGION",
+        "DYNAMODB_ENDPOINT_URL",
+        "DYNAMODB_CREATE_TABLE",
+        "CHAT_CHECKPOINT_BACKEND",
+        "CHAT_CHECKPOINT_TABLE_NAME",
+        "CHAT_CHECKPOINT_ENABLE_COMPRESSION",
+        "CHAT_CHECKPOINT_S3_BUCKET",
+        "CHAT_CHECKPOINT_S3_ENDPOINT_URL",
+        "CHAT_CHECKPOINT_S3_KEY_PREFIX",
+        "CHAT_CHECKPOINT_TTL_SECONDS",
+    }
+)
+
+
+def validate_persistence_settings() -> None:
+    """Reject removed persistence selectors before any database is touched."""
+    configured = sorted(name for name in _LEGACY_PERSISTENCE_SETTINGS if name in os.environ)
+    if not configured:
+        return
+    names = ", ".join(configured)
+    raise RuntimeError(
+        "Legacy DynamoDB persistence configuration is no longer supported: "
+        f"{names}. Migrate durable data before upgrading, remove these settings, "
+        "and configure SQL_DATABASE_* plus CHAT_CHECKPOINT_DATABASE_* instead. "
+        "See docs/root/install/upgrading.md#migrating-from-dynamodb-to-postgresql."
+    )
+
 
 # Master switch for the chat assistant. When false the chat routes are not
 # registered, checkpoint storage is not initialized, and the frontend hides the
@@ -837,11 +853,7 @@ GEMINI_API_KEY = str_env("GEMINI_API_KEY", "")
 GOOGLE_API_KEY = str_env("GOOGLE_API_KEY", "")
 DEEPSEEK_API_KEY = str_env("DEEPSEEK_API_KEY", "")
 
-# LangGraph checkpoint backend. Supported values: "dynamodb" (default),
-# "postgres". The PostgreSQL checkpointer is independent of the report store,
-# though the development Makefile switchers change both together.
-CHAT_CHECKPOINT_BACKEND = str_env("CHAT_CHECKPOINT_BACKEND", "dynamodb")
-# PostgreSQL connection URL used when CHAT_CHECKPOINT_BACKEND=postgres. Defaults
+# PostgreSQL connection URL used for LangGraph chat checkpoints. Defaults
 # to SQL_DATABASE_URL so SQL-backed deployments can share one database. Keep
 # credentials separate using the settings below; credential-bearing URLs remain
 # supported for backward compatibility.
@@ -855,19 +867,8 @@ CHAT_CHECKPOINT_DATABASE_PASSWORD = str_env("CHAT_CHECKPOINT_DATABASE_PASSWORD",
 # Per-process async PostgreSQL connection pool bounds for chat checkpoints.
 CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MIN_SIZE", 1)
 CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE = int_env("CHAT_CHECKPOINT_DATABASE_POOL_MAX_SIZE", 10)
-# Dedicated DynamoDB table used by LangGraph to persist chat checkpoints when
-# CHAT_CHECKPOINT_BACKEND=dynamodb.
-CHAT_CHECKPOINT_TABLE_NAME = str_env("CHAT_CHECKPOINT_TABLE_NAME", "seizu-chat-checkpoints")
-# When true, create/migrate the configured LangGraph checkpoint storage at startup.
+# When true, create/migrate the LangGraph checkpoint schema at startup.
 CHAT_CHECKPOINT_CREATE_TABLE = bool_env("CHAT_CHECKPOINT_CREATE_TABLE", False)
-# DynamoDB-only compression for serialized checkpoint payloads.
-CHAT_CHECKPOINT_ENABLE_COMPRESSION = bool_env("CHAT_CHECKPOINT_ENABLE_COMPRESSION", True)
-# S3 bucket used by langgraph-checkpoint-aws for payloads larger than 350KB.
-CHAT_CHECKPOINT_S3_BUCKET = str_env("CHAT_CHECKPOINT_S3_BUCKET", "")
-# Optional S3 endpoint override, e.g. http://minio:9000 for local development.
-CHAT_CHECKPOINT_S3_ENDPOINT_URL = str_env("CHAT_CHECKPOINT_S3_ENDPOINT_URL", "")
-# Optional S3 object prefix for checkpoint offload isolation.
-CHAT_CHECKPOINT_S3_KEY_PREFIX = str_env("CHAT_CHECKPOINT_S3_KEY_PREFIX", "seizu/langgraph")
 # Maximum persisted LangGraph messages per chat thread. Older turns are removed
 # from checkpoint state after each non-ephemeral turn.
 CHAT_MAX_PERSISTED_MESSAGES = int_env("CHAT_MAX_PERSISTED_MESSAGES", 200)

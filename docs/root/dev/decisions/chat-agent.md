@@ -244,8 +244,7 @@ retrying the same request.
 **Admission returns an outcome, not an exception.** `ChatTurnAdmission.outcome`
 is one of `created` / `existing` / `busy` / `retired`. It used to raise one of
 four errors inferred from *whichever constraint rejected the write*, so a single
-collision could mean any of them and the store had to guess — including, in one
-version, reporting DynamoDB throttling as "this thread is busy". The store now
+collision could mean any of them and the store had to guess. The store now
 re-reads and says which it was.
 
 **A store failure during admission is a 503, never an assumption.** A failed
@@ -261,9 +260,9 @@ longer existed.
 
 **Don't:** enforce one-running-turn with a read above the insert. The *store*
 says a thread has at most one running turn: a partial unique index
-(`status = 'running'`) in SQL, a conditional write in DynamoDB. Under
-read-committed two requests can both observe no running turn and both commit,
-leaving two producers interleaving two answers into one conversation.
+(`status = 'running'`) in PostgreSQL. Under read-committed two requests can both
+observe no running turn and both commit, leaving two producers interleaving two
+answers into one conversation.
 
 **The handoff is repairable, because the store commits first.** Admission writes
 the turn and *then* starts the workflow, so a failure in between leaves a turn
@@ -321,8 +320,8 @@ has lapsed and a successor has been admitted. `execution_timeout` bounds the
 whole thing and is kept strictly under the lease, with a test asserting that
 relationship so a settings change cannot quietly reopen it. Belt and braces on
 the worker side: the activity re-checks that its turn is still `running` **and**
-still holds the thread pointer before producing, because a lapsed claim is
-exactly the case the bound is protecting against.
+is still the active unexpired turn for the thread before producing, because a
+lapsed claim is exactly the case the bound is protecting against.
 
 **The admitted command is immutable.** The turn record stores the message,
 continuation/confirmation fields, bypass flag, permission cap, and timeout.
@@ -358,8 +357,7 @@ item on every flush).
 
 **Don't:** advance a reader's cursor past a gap in `seq`. Store propagation is
 per item, so a poll can return 5 and 7 without 6; taking the gap loses 6
-permanently rather than late. Both backends truncate a page at the first gap,
-and the DynamoDB reads are `ConsistentRead=True` on top of that.
+permanently rather than late. The store truncates a page at the first gap.
 
 **Only the stream route is exempt from the request timeout.** The exemption is
 matched on the path's shape (`/api/v1/chat/turns/{id}/stream`) because the id is
@@ -422,28 +420,15 @@ well as the read above it, and a sweep that could not assume creation order was
 expiry order). With the workflow bounding the turn, a fixed lease derived from
 that bound is sound and all three disappear.
 
-**A turn's header and its thread pointer terminalize together.** Two writes
-wedge the thread: terminalizing the header first and releasing the pointer
-second means a transient failure on the second leaves every retry seeing a
-terminal header, returning early, and never reaching the pointer — so nothing
-new can be admitted until the lease lapses. **Don't** collapse the fallback
-though: the two conditions mean different things, and when only the *pointer's*
-fails a successor already owns the thread while this turn still has to reach a
-terminal state, or a reader waits on it forever. The header is retried alone.
-
-**Deletion order is load-bearing.** Event batches go first, in a batch write —
-there can be hundreds, far past a transaction's limit, and a half-deleted log is
-unreachable without its header anyway. The header then goes *with* every index
-naming it in one small transaction. Orphaning the idempotency-key item is the
-case that motivates this: it names a missing turn, and its
-`attribute_not_exists` condition then refuses that key forever while resolving
-to nothing — a request that can be neither admitted nor repaired.
+**Deletion is transactional.** Event batches and their turn row are removed in
+one PostgreSQL transaction. The idempotency key is constrained on that same turn
+row, so deleting the row cannot leave a separate key that resolves to nothing
+or permanently blocks a retry.
 
 **Note:** expired logs are swept at the end of turns, not by a scheduler. A log
-belongs to a *turn*, so `delete_chat_session`'s cascade is not enough. DynamoDB's
-sparse sweep partition is ordered by the turn's actual `expires_at`; finishing a
-turn rekeys that entry in the same transaction. A bounded range query can
-therefore read only expired entries, with no scan cursor or renewal path.
+belongs to a *turn*, so `delete_chat_session`'s cascade is not enough. The
+PostgreSQL `expires_at` index lets a bounded ordered query read only expired
+turns, with no scan cursor or renewal path.
 
 **Heartbeat on a timer, never on output.** A turn is quietest exactly when it is
 slowest — a model call or a tool can run for minutes producing no chunk — so
@@ -454,21 +439,18 @@ checkpoint, which is two producers on one conversation. The activity ticks
 independently (`_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS`); `start_to_close_timeout`
 is what bounds a turn that genuinely runs too long.
 
-**Terminal writes are conditional on the turn still being `running`, in both
-stores.** Two writers reach `finish_chat_turn` for one turn: the turn closing
-itself, and the workflow's fallback closing it after the activity timed out. A
-turn that timed out *spuriously* is still alive, so an unconditional write lets
-the late one replace a recorded outcome — including its `last_seq`, which is
-exactly what a reader uses to know it has seen the whole answer. First writer
-wins, enforced by the write itself: `WHERE status = 'running'` in SQL, and
-`#s = :running` in the DynamoDB condition expression.
+**A terminal write is conditional on the turn still being `running`.** Two
+writers reach `finish_chat_turn` for one turn: the turn closing itself, and the
+workflow's fallback closing it after the activity timed out. A turn that timed
+out *spuriously* is still alive, so an unconditional write lets the late one
+replace a recorded outcome — including its `last_seq`, which is exactly what a
+reader uses to know it has seen the whole answer. First writer wins, enforced by
+`WHERE status = 'running'` in the update itself.
 
 The loser is handed **what is recorded**, not what it asked for, so it can tell
 it lost; `None` keeps meaning "no such turn". `produce_turn` reports the store's
 status rather than its own, so the workflow result and the log a reader sees
-cannot disagree. And a loser must **not** go on to release the thread pointer:
-by then it may belong to a successor, and clearing it would let a third turn
-start alongside.
+cannot disagree.
 
 ### The client holds a pending send
 

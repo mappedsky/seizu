@@ -277,10 +277,9 @@ class _MCPMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings.validate_persistence_settings()
     await oauth_client.verify_issuer_consistency()
-    should_init = settings.DYNAMODB_CREATE_TABLE or (settings.REPORT_STORE_BACKEND == "sqlmodel")
-    if should_init:
-        await report_store.initialize()
+    await report_store.initialize()
     if settings.CHAT_ENABLED:
         validate_chat_llm_config()
         await initialize_chat_checkpoints()

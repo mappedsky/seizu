@@ -255,8 +255,7 @@ Reports, scheduled queries, roles, toolsets, tools, skillsets, and skills are st
 
 Recommendations:
 
-- Use IAM roles or workload identity instead of static AWS keys when possible.
-- Limit DynamoDB or SQL credentials to the minimum required tables/database.
+- Limit PostgreSQL credentials to the minimum required databases and schemas.
 - Encrypt storage volumes and managed database storage.
 - Back up report-store data and test restore paths.
 - Keep Slack tokens, OIDC client secrets, database passwords, and cloud credentials in a secret manager.

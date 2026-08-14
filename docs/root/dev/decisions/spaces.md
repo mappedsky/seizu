@@ -17,26 +17,23 @@ No `/versions` endpoints, and `list_spaces` is unfiltered.
 filters what `list_space_reports` returns, so the thing worth protecting is
 protected without a second access model to keep consistent.
 
-## SPC-002 — A report filed in a space is public, enforced in the stores
+## SPC-002 — A report filed in a space is public, enforced in the store
 
 **Applies to:** `SPACE_MEMBER_ACCESS`, `require_public_space_member`
 
 Filing a draft is a 409, unpublishing a member is a 409, and creating a report
-into a space publishes it. All three writes are enforced **in the stores**:
-`require_public_space_member` on `create_report`, a `ConditionExpression` on the
-DynamoDB `#METADATA` put, and `SELECT ... FOR UPDATE` on SQL.
+into a space publishes it. All three writes are enforced **in the store**:
+`require_public_space_member` on `create_report` and `SELECT ... FOR UPDATE` in
+PostgreSQL.
 
-**Why in the stores:** the route-level check alone loses a concurrent
-unpublish/file race. Both stores raise `SpaceConflictError` (defined in
-`schema/space_config.py` so stores and services can share it), which routes map
-to 409.
+**Why in the store:** the route-level check alone loses a concurrent
+unpublish/file race. The store raises `SpaceConflictError` (defined in
+`schema/space_config.py` so the store and services can share it), which routes
+map to 409.
 
 **Why the invariant at all:** a space holding a report nobody else can see would
 both block the space's deletion invisibly and leak the report's ID through the
 overview pointer.
-
-**Don't:** treat a first-item `ConditionalCheckFailed` as the only failure mode
-— other cancellation reasons must propagate rather than becoming a 409.
 
 ## SPC-003 — Membership is unversioned parent metadata
 

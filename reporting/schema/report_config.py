@@ -14,9 +14,8 @@ from reporting.schema.reporting_config import (
 def _coerce_decimal(value: Any) -> Any:
     """Recursively convert Decimal to int/float.
 
-    DynamoDB's boto3 resource returns all numbers as Decimal; this normalises
-    them back to native Python int/float so Pydantic models can validate them
-    without needing to know about Decimal.
+    Decimal values can still arrive through third-party integrations; normalize
+    them before Pydantic serializes report configuration JSON.
     """
     if isinstance(value, Decimal):
         return int(value) if value % 1 == 0 else float(value)

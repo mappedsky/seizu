@@ -1,6 +1,7 @@
 # Quickstart
 
-A full docker-compose setup is included that can start neo4j, dynamodb, telegraf, seizu (and its workers), and can provide a quick way of running cartography to load your neo4j database with data.
+A full docker-compose setup is included that starts Neo4j, PostgreSQL, Telegraf,
+Seizu and its workers, and can run Cartography to load the graph database.
 
 First clone the seizu repo:
 
@@ -47,13 +48,15 @@ Add `-N` to open the tunnels without starting a shell, or `-f -N` to background 
 
 ## Seeding reports
 
-The default quickstart stack uses DynamoDB Local as Seizu's report store. After starting the stack for the first time, seed the example reports from the YAML config:
+After starting the stack for the first time, seed the example reports into PostgreSQL from the YAML config:
 
 ```bash
 make seed_dashboard
 ```
 
-This reads `.config/dev/seizu/reporting-dashboard.yaml`, creates each report in the configured report store, and sets the dashboard pointer. In the default quickstart stack, that store is DynamoDB Local; after resetting the DynamoDB volume, re-run `make seed_dashboard` to repopulate.
+This reads `.config/dev/seizu/reporting-dashboard.yaml`, creates each report in
+the application database, and sets the dashboard pointer. After resetting the
+PostgreSQL volume, re-run `make seed_dashboard` to repopulate it.
 
 To reset the database and reseed:
 

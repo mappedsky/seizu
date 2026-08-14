@@ -26,6 +26,7 @@ Documentation
 -------------
 
 * `Installation documentation <https://mappedsky.github.io/seizu/install/backend.html>`_
+* `Upgrade guide <https://mappedsky.github.io/seizu/install/upgrading.html>`_
 * `Dashboard configuration <https://mappedsky.github.io/seizu/install/dashboard.html>`_
 * `Spaces documentation <https://mappedsky.github.io/seizu/install/spaces.html>`_
 * `CLI documentation <https://mappedsky.github.io/seizu/install/cli.html>`_
@@ -48,6 +49,7 @@ Documentation
 
     install/quickstart
     install/backend
+    install/upgrading
     install/dashboard
     install/spaces
     install/cli

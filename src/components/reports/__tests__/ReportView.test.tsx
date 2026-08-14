@@ -1,8 +1,7 @@
 /**
  * Tests for the params-building logic in ReportView.
  *
- * The key regression: when a panel param has `input_id` but no `value` key
- * (because _strip_none removed the null value when storing in DynamoDB), the
+ * The key regression: when a panel param has `input_id` but no `value` key,
  * old code used `!== null` which treated `undefined` as "value is set", causing
  * params to be sent as `{}` and triggering Neo4j ParameterMissing errors.
  * The fix uses `!= null` (loose) which handles both null and undefined.
@@ -174,10 +173,9 @@ describe('ReportView param building', () => {
     );
   });
 
-  it('adds to needInputs when value key is absent (as after DynamoDB _strip_none)', () => {
+  it('adds to needInputs when value key is absent', () => {
     // Regression: value key absent (undefined) should not be treated as "value is set".
-    // This simulates a param stored in DynamoDB where input_id was set and value was null,
-    // so _strip_none removed the value key entirely — the object only has {name, input_id}.
+    // This simulates an API object that only has {name, input_id}.
     const report = makeReport([
       {
         type: 'count',
@@ -199,8 +197,8 @@ describe('ReportView param building', () => {
     expect(screen.getByText('(Set Base Severity)')).toBeInTheDocument();
   });
 
-  it('adds to needInputs when value is explicitly null (original YAML-loaded behavior)', () => {
-    // Before DynamoDB: Pydantic model_dump() included value: null in JSON.
+  it('adds to needInputs when value is explicitly null (YAML-loaded behavior)', () => {
+    // Pydantic model_dump() includes value: null in JSON.
     // The null value should also fall through to the input_id branch.
     const report = makeReport([
       {

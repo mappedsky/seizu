@@ -32,22 +32,13 @@ def test_install_shutdown_handlers_sets_event_on_sigint():
     assert event.is_set()
 
 
-async def test_initialize_report_store_skips_when_not_needed(mocker):
-    mocker.patch("reporting.worker_bootstrap.settings.DYNAMODB_CREATE_TABLE", False)
-    mocker.patch("reporting.worker_bootstrap.settings.REPORT_STORE_BACKEND", "dynamodb")
+async def test_initialize_report_store_validates_and_initializes(mocker):
+    validate = mocker.patch("reporting.worker_bootstrap.settings.validate_persistence_settings")
     init = mocker.patch("reporting.worker_bootstrap.report_store.initialize", AsyncMock())
 
     await initialize_report_store()
 
-    init.assert_not_awaited()
-
-
-async def test_initialize_report_store_runs_when_dynamodb_create_table(mocker):
-    mocker.patch("reporting.worker_bootstrap.settings.DYNAMODB_CREATE_TABLE", True)
-    init = mocker.patch("reporting.worker_bootstrap.report_store.initialize", AsyncMock())
-
-    await initialize_report_store()
-
+    validate.assert_called_once_with()
     init.assert_awaited_once()
 
 

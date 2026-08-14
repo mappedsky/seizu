@@ -6,9 +6,9 @@ from reporting.app import _CSRF_FAILURE_BODY, _TIMEOUT_RESPONSE_BODY, _CSRFMiddl
 
 
 async def test_lifespan_verifies_oidc_issuer_consistency(mocker):
-    mocker.patch("reporting.settings.DYNAMODB_CREATE_TABLE", False)
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
     mocker.patch("reporting.settings.CHAT_ENABLED", False)
+    validate = mocker.patch("reporting.app.settings.validate_persistence_settings")
+    initialize_store = mocker.patch("reporting.app.report_store.initialize", new=mocker.AsyncMock())
     verify = mocker.patch(
         "reporting.app.oauth_client.verify_issuer_consistency",
         new=mocker.AsyncMock(),
@@ -18,13 +18,15 @@ async def test_lifespan_verifies_oidc_issuer_consistency(mocker):
     async with lifespan(app):
         pass
 
+    validate.assert_called_once_with()
+    initialize_store.assert_awaited_once_with()
     verify.assert_awaited_once_with()
 
 
 async def test_lifespan_initializes_and_closes_chat_checkpoints(mocker):
-    mocker.patch("reporting.settings.DYNAMODB_CREATE_TABLE", False)
-    mocker.patch("reporting.settings.REPORT_STORE_BACKEND", "dynamodb")
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
+    mocker.patch("reporting.app.settings.validate_persistence_settings")
+    mocker.patch("reporting.app.report_store.initialize", new=mocker.AsyncMock())
     validate = mocker.patch("reporting.app.validate_chat_llm_config")
     initialize = mocker.patch("reporting.app.initialize_chat_checkpoints", new=mocker.AsyncMock())
     close = mocker.patch("reporting.app.close_chat_checkpoints", new=mocker.AsyncMock())

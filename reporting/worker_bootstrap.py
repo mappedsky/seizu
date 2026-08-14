@@ -23,9 +23,9 @@ def install_shutdown_handlers(event: asyncio.Event, logger: logging.Logger) -> N
 
 
 async def initialize_report_store() -> None:
-    """Initialize the configured store when the backend requires setup."""
-    if settings.DYNAMODB_CREATE_TABLE or settings.REPORT_STORE_BACKEND == "sqlmodel":
-        await report_store.initialize()
+    """Validate persistence configuration and upgrade the report-store schema."""
+    settings.validate_persistence_settings()
+    await report_store.initialize()
 
 
 @asynccontextmanager

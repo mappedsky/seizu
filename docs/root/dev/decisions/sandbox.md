@@ -413,33 +413,13 @@ be re-taken. The interactive delete route keeps the opposite order for the
 opposite reason: it should vanish from the UI at once, and a user watching it
 can retry.
 
-**Finding idle sessions is a resumable walk, not an index.** Sessions are
-partitioned per user in DynamoDB with no global order on `updated_at`, and
-asking every user in one pass is what makes an hourly sweep unaffordable — 100k
-users is 100k queries, nearly all returning nothing, and a pass that cannot
-finish inside the activity timeout retries from the first page forever, never
-reaching the users at the end.
-
-So a pass is bounded in both directions — at most
-`CHAT_SESSION_REAP_USERS_PER_PASS` users, and at most
-`CHAT_SESSION_REAP_PAGES_PER_USER` pages of any one user's session list — and
-records where it stopped in both: **which user, and how far into that user's own
-sessions**. The next pass resumes there, finishing that user before walking on,
-and clears the cursor on reaching the last user. Bounded work, complete
-coverage. Sweeps never overlap (`SKIP`), so the cursor has a single writer, and
-losing it costs a repeated pass rather than skipped users.
-
-A clock-derived bucket rotation was tried first and is not enough: it bounds the
-per-user session queries but not the walk over the user partition itself, which
-stays O(all users) per pass.
-
-A global index keyed on `updated_at` was the obvious alternative and is worse
-here: it costs a write on every chat turn into one hot partition, and it could
-never see the sessions that *already exist* — which, since an abandoned session
-is by definition never touched again, is precisely the population this feature
-is for. SQL has no such problem and gets the real thing: a composite
+**Finding idle sessions is a bounded indexed query.** PostgreSQL has a composite
 `(origin, updated_at)` index, added by migration `0006` and declared on the
-model so fresh databases get it from `create_all`.
+model so fresh databases get it from `create_all`. Each pass selects at most
+`_MAX_SESSIONS_PER_PASS` interactive sessions older than the cutoff, oldest
+first. Bounded work prevents one sweep monopolizing the worker; anything beyond
+the limit remains the oldest population and is picked up by the next
+non-overlapping pass.
 
 **The sweep is gated on its own settings only.** Not on `CHAT_ENABLED`, not on
 `SANDBOX_ENABLED`: a deployment that turns either off still holds everything it
@@ -447,38 +427,15 @@ created while they were on. That also removes a failure mode that shipped once �
 `CHAT_ENABLED` was not in the Temporal worker's compose environment, so the
 worker read chat as disabled and deleted its own schedule.
 
-**`CHAT_CHECKPOINT_TTL_SECONDS` was removed rather than tuned.** A checkpoint
-TTL is stamped on every item at write time, including a thread's *latest*
-checkpoint, and nothing marks a checkpoint as superseded — an idle conversation
-simply stops being written to and ages out. Its session record has no expiry, so
-what survives is a conversation still listed in the sidebar that opens empty,
-with nothing anywhere to explain it. Raising the value does not fix that; it
-moves the cliff.
-
-Which leaves a setting that is only safe when it never fires — when reaping is
-enabled and retires the session first. A TTL that must never fire earns nothing,
-and when it does fire it is retirement without any of the things retirement
-does: no sandbox reclaimed, no session record removed, no way to tell afterwards
-that anything was deleted. So conversations are retired in exactly one place.
-
-Two consequences worth stating rather than discovering:
-
-- **Superseded per-turn checkpoints now accumulate until a thread is retired,
-  and that is accepted.** `put()` never deletes a prior checkpoint and the saver
-  exposes no retention knob, so this was the TTL's one genuine job. Reviewed and
-  waived twice, deliberately. There is no ceiling in the strict sense --
-  retirement is opt-in, and a periodically active thread never becomes idle
-  enough to retire -- so the judgement is about proportion rather than bounds:
-  such threads are a minority and hold little data between them. Worth
-  revisiting, not worth solving now. It is bounded per item by
-  `CHAT_MAX_PERSISTED_MESSAGES` and compression, and reclaimed in full when the
-  session goes. If it ever does need paying down, the answer is a pruning pass
-  over *superseded* checkpoints that keeps the latest — not an expiry on the
-  current one, which is the thing that emptied live conversations.
-- **Existing items keep the expiry already stamped on them.** Removing the
-  setting stops new writes carrying one; a deployment that had a TTL configured
-  must disable it on the table itself to stop DynamoDB collecting what is
-  already marked.
+**Checkpoint retention follows session retirement.** Superseded per-turn
+checkpoints accumulate until a thread is retired, and that is accepted. The
+saver exposes no retention knob, retirement is opt-in, and a periodically
+active thread may never become idle enough to retire. Each checkpoint is still
+bounded by `CHAT_MAX_PERSISTED_MESSAGES`, and the whole thread is reclaimed with
+its session. If this needs paying down, use a pruning pass over *superseded*
+checkpoints that preserves the latest; never expire the current checkpoint
+independently of the session, which would leave a listed conversation opening
+without its history.
 
 **Don't:** reap a sandbox whose session is still alive, however old the sandbox
 is. **Don't:** reap untagged or foreign-tagged sandboxes by default. **Don't:**

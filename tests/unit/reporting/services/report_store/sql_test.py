@@ -175,6 +175,15 @@ def test_get_engine_uses_command_timeout_for_postgres(mocker):
     assert create_engine.call_args.kwargs["connect_args"] == {"command_timeout": 31}
 
 
+def test_get_engine_rejects_non_postgres_url(mocker):
+    mocker.patch("reporting.settings.SQL_DATABASE_URL", "sqlite:///seizu.db")
+    mocker.patch("reporting.settings.SQL_DATABASE_USER", "")
+    mocker.patch("reporting.settings.SQL_DATABASE_PASSWORD", "")
+
+    with pytest.raises(ValueError, match="SQL_DATABASE_URL must be a PostgreSQL URL"):
+        sql_module._get_engine()
+
+
 # ---------------------------------------------------------------------------
 # list_reports
 # ---------------------------------------------------------------------------
