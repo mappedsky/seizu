@@ -71,7 +71,7 @@ make generate_openapi   # export schema/openapi.json (no running server)
 make generate_client LANG=go
 make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
-make external_mcp_enable / external_mcp_disable
+make external_mcp_enable / external_mcp_disable / external_mcp_login
 make build_cartography_worker     # build the cartography sync-worker image
 make cartography_contract_test    # verify registry flags against the pinned CLI
 make lock_proxy_requirements [REQUIREMENTS=... PYTHON_VERSION=... OUTPUT=...]  # re-lock the proxy's deps

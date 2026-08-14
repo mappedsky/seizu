@@ -120,6 +120,10 @@ a public PKCE/device client. Both applications use the same Authentik tenant,
 users, and browser SSO session. The proxy's supervised in-container loopback
 forwarder reaches Authentik as `localhost:9000`, matching AUTH-002; the GitHub
 PAT remains a separate credential used only on the proxy-to-GitHub MCP hop.
+For the single-user local profile, `make external_mcp_login` registers a
+per-login public PKCE client with Obot, completes authorization through that
+same Authentik application, and stores the resulting proxy bearer in the local
+`.env`; it never handles or replaces the GitHub PAT.
 
 **Why not a Google development client:** it splits local authentication across
 two identity providers, makes the external-MCP path test a different login and

@@ -144,22 +144,27 @@ GitHub server's comma-separated toolset names. Generate the encryption key with
 ```bash
 make external_mcp_enable
 make up
+make external_mcp_login
 ```
 
 The make target enables local Authentik and persists
 `MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose
-profiles automatically. The proxy container uses a supervised loopback
+profiles automatically. After the services are healthy,
+`make external_mcp_login` dynamically registers a public PKCE client with the
+local proxy, opens its Authentik authorization flow, writes the issued proxy
+bearer to `MCP_EXTERNAL_PROXY_TOKEN` without displaying it, and recreates Seizu
+and its Temporal worker. The proxy container uses a supervised loopback
 forwarder so its Authentik discovery and token exchange retain the browser's
 `localhost:9000` issuer (AUTH-002). To turn off the agent capability and its
 local proxy services, run `make external_mcp_disable`, then restart the stack
 with `make down && make up`. This does not disable Authentik independently.
 
-With `MCP_EXTERNAL_PROXY_TOKEN` empty, ask chat to use the external server to
-exercise the 401/RFC 9728 path. Complete the proxy's OAuth flow with an MCP OAuth
-client, put the issued development access token in the variable, recreate the
-Seizu and worker containers, and retry to exercise GitHub tool discovery and
-invocation. This copied proxy bearer and shared development PAT are suitable
-only for a single-user local test. Multi-user deployments should use a
+With `MCP_EXTERNAL_PROXY_TOKEN` empty, the catalog and chat exercise the
+401/RFC 9728 path and expose an `ext__github__seizu_authenticate` placeholder.
+Run `make external_mcp_login` to complete that OAuth flow and replace the
+placeholder with the GitHub server's repository and code tools. The resulting
+proxy bearer and shared development PAT are suitable only for a single-user
+local test. Multi-user deployments should use a
 gateway/M2M exchange or a proxy integration that maps a Seizu identity to its
 own per-user token vault.
 

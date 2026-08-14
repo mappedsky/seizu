@@ -253,6 +253,12 @@ external_mcp_disable:
 		|| echo 'MCP_EXTERNAL_ENABLED=false' >> .env
 	@echo "External MCP disabled in .env. Run 'make down && make up' to apply."
 
+.PHONY: external_mcp_login
+external_mcp_login:
+	@python3 scripts/external_mcp_login.py
+	@docker compose up -d --force-recreate --no-deps seizu seizu-temporal-worker
+	@echo "External MCP token applied. Reload /app/toolsets to discover GitHub tools."
+
 .PHONY: apoc_enable
 apoc_enable:
 	@grep -q 'NEO4J_PLUGINS=' .env 2>/dev/null \
