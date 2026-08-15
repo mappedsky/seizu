@@ -30,6 +30,13 @@ DEFAULT_PROXY_URL = "http://localhost:8081"
 DEFAULT_CALLBACK_HOST = "127.0.0.1"
 DEFAULT_CALLBACK_PORT = 8765
 TOKEN_ENV_NAME = "MCP_EXTERNAL_PROXY_TOKEN"
+# Authentik issues the proxy an access token valid for an hour and a refresh
+# token valid for thirty days. Keeping only the access token is why a login
+# "expired unexpectedly" an hour later, mid-investigation, with discovery
+# silently degrading to ext__github__seizu_authenticate. Persist both, plus
+# the dynamically registered client the refresh grant has to present.
+REFRESH_ENV_NAME = "MCP_EXTERNAL_PROXY_REFRESH_TOKEN"
+CLIENT_ENV_NAME = "MCP_EXTERNAL_PROXY_CLIENT_ID"
 
 
 class LoginError(RuntimeError):
@@ -80,6 +87,18 @@ def _pkce_pair() -> tuple[str, str]:
     digest = hashlib.sha256(verifier.encode()).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
     return verifier, challenge
+
+
+def _read_env_value(path: Path, key: str) -> str | None:
+    """Read one dotenv value, or None. Never logged: these are credentials."""
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"{key}="):
+            value = stripped.split("=", 1)[1].strip()
+            return value or None
+    return None
 
 
 def _write_env_value(path: Path, key: str, value: str) -> None:
@@ -182,7 +201,33 @@ def _wait_for_callback(
     return code
 
 
-def login(proxy_url: str, callback_host: str, callback_port: int, timeout: int) -> str:
+def refresh(proxy_url: str, client_id: str, refresh_token: str) -> dict[str, str]:
+    """Exchange a stored refresh token, or raise LoginError to fall back."""
+    proxy_url = proxy_url.rstrip("/")
+    metadata = _json_request(f"{proxy_url}/.well-known/oauth-authorization-server")
+    token_endpoint = metadata.get("token_endpoint")
+    if not isinstance(token_endpoint, str) or not token_endpoint:
+        raise LoginError("proxy OAuth metadata is missing its token endpoint")
+    token_response = _form_request(
+        token_endpoint,
+        {"grant_type": "refresh_token", "client_id": client_id, "refresh_token": refresh_token},
+    )
+    return _grant_from(token_response, client_id, fallback_refresh=refresh_token)
+
+
+def _grant_from(token_response: dict[str, Any], client_id: str, fallback_refresh: str = "") -> dict[str, str]:
+    access_token = token_response.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise LoginError("token endpoint did not return an access token")
+    # A server that rotates refresh tokens returns a new one; one that does not
+    # expects the old one to keep working, so carry it forward rather than
+    # dropping the only thing that avoids the next browser round trip.
+    rotated = token_response.get("refresh_token")
+    refresh_token = rotated if isinstance(rotated, str) and rotated else fallback_refresh
+    return {"access_token": access_token, "refresh_token": refresh_token, "client_id": client_id}
+
+
+def login(proxy_url: str, callback_host: str, callback_port: int, timeout: int) -> dict[str, str]:
     proxy_url = proxy_url.rstrip("/")
     metadata = _json_request(f"{proxy_url}/.well-known/oauth-authorization-server")
     authorization_endpoint = metadata.get("authorization_endpoint")
@@ -246,10 +291,7 @@ def login(proxy_url: str, callback_host: str, callback_port: int, timeout: int) 
             "code_verifier": verifier,
         },
     )
-    access_token = token_response.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
-        raise LoginError("token endpoint did not return an access token")
-    return access_token
+    return _grant_from(token_response, client_id)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -259,13 +301,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--callback-port", type=int, default=DEFAULT_CALLBACK_PORT)
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the stored refresh token and authorize from scratch in the browser.",
+    )
     args = parser.parse_args(argv)
-    try:
-        token = login(args.proxy_url, args.callback_host, args.callback_port, args.timeout)
-        _write_env_value(args.env_file, TOKEN_ENV_NAME, token)
-    except LoginError as exc:
-        print(f"External MCP login failed: {exc}", file=sys.stderr)
-        return 1
+    grant: dict[str, str] | None = None
+    stored_refresh = _read_env_value(args.env_file, REFRESH_ENV_NAME)
+    stored_client = _read_env_value(args.env_file, CLIENT_ENV_NAME)
+    if stored_refresh and stored_client and not args.force:
+        try:
+            grant = refresh(args.proxy_url, stored_client, stored_refresh)
+            print("Renewed the stored proxy credential; no browser round trip was needed.")
+        except LoginError as exc:
+            # An expired or rejected refresh token is the ordinary end of a
+            # thirty-day window, not an error worth failing on.
+            print(f"Stored credential could not be renewed ({exc}); starting a new authorization.")
+    if grant is None:
+        try:
+            grant = login(args.proxy_url, args.callback_host, args.callback_port, args.timeout)
+        except LoginError as exc:
+            print(f"External MCP login failed: {exc}", file=sys.stderr)
+            return 1
+    _write_env_value(args.env_file, TOKEN_ENV_NAME, grant["access_token"])
+    if grant["refresh_token"]:
+        _write_env_value(args.env_file, REFRESH_ENV_NAME, grant["refresh_token"])
+    _write_env_value(args.env_file, CLIENT_ENV_NAME, grant["client_id"])
     print(f"Authentication complete; {TOKEN_ENV_NAME} was updated in {args.env_file}.")
     return 0
 

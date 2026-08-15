@@ -58,6 +58,12 @@ pooled or reused for another user. Do not place a user-controlled JWT claim name
 or a literal secret in `header_mappings`; its keys are a closed set and
 `token_env` is the secret indirection.
 
+A skill's `tools_required` may name external tools with their namespaced
+`ext__<proxy>__<tool>` form. Those references are checked against the configured
+proxy list only — the remote tool inventory is discovered per user at call time,
+so the server cannot validate the tool name at save time, and a reference to an
+unconfigured proxy is dropped from the saved skill with a warning.
+
 Confirmation is decided per tool with this precedence:
 
 1. An exact, fully namespaced match in
@@ -95,7 +101,7 @@ before the chat boundary normalizes it. Rotate the credential in `token_env` and
 restart the worker. Seizu never falls back from a rejected M2M token to another
 user or a broader process identity.
 
-## Lightweight local development with Obot
+## Lightweight local development
 
 The optional Compose profile runs
 [`obot-platform/mcp-oauth-proxy`](https://github.com/obot-platform/mcp-oauth-proxy)
@@ -105,18 +111,46 @@ Streamable HTTP mode, and a network-internal Caddy adapter between them. The
 GitHub server gives the profile a real, annotation-bearing MCP implementation
 without requiring developers to launch a separate upstream.
 
-Obot authenticates access to the local proxy through the same local Authentik
-instance, users, and browser SSO session as Seizu; the GitHub MCP server
-separately uses a development GitHub PAT. Obot deliberately strips its inbound bearer
-before forwarding and exposes the OAuth provider token in an identity header,
-while GitHub's HTTP server requires a GitHub token in `Authorization`. The Caddy
-adapter supplies the PAT and removes Obot's forwarded identity headers. It and
-the GitHub server have no host ports.
+**By default Seizu talks to the Caddy adapter directly**, and every GitHub call
+is the development PAT's identity, read-only via `GITHUB_READ_ONLY=1`. There is
+no per-user token to obtain and nothing that expires. Be clear-eyed about what
+that is: a service account shared by every Seizu user, scoped by whatever the
+PAT can reach. Grant it only the repositories and permissions needed for
+testing.
 
-The Authentik development blueprint creates a dedicated confidential client and
-registers `http://localhost:8081/callback`. It stays separate from Seizu's
-public PKCE/device client because Obot requires a client secret, but both
-applications use the same identity store and SSO login. Add this to `.env`:
+```text
+DEV_GITHUB_MCP_TOKEN=<fine-grained-development-pat>
+DEV_GITHUB_MCP_READ_ONLY=1
+DEV_GITHUB_MCP_TOOLSETS=default
+
+MCP_EXTERNAL_ENABLED=true
+MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-github-auth:8080/mcp","transport":"streamable_http","auth_mode":"header_delegation"}]
+MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=
+```
+
+```bash
+make external_mcp_enable
+make up
+```
+
+`DEV_GITHUB_MCP_TOOLSETS` accepts the GitHub server's comma-separated toolset
+names; set `DEV_GITHUB_MCP_READ_ONLY=0` to expose mutating tools and exercise
+Seizu's annotation-based confirmation flow.
+
+### Exercising the OAuth challenge path
+
+The obot proxy sits in the separate `external-mcp-oauth` profile, for when the
+thing under test is Seizu's OAuth handling — RFC 9728 discovery, the 401
+challenge, and recovery — rather than the tools behind it. It authenticates the
+*caller to the proxy* through the same local Authentik instance and users as
+Seizu; it confers no GitHub authority, because the Caddy adapter strips obot's
+forwarded identity headers and substitutes the PAT. Requiring it for ordinary
+local work therefore bought a short-lived credential and no per-user
+authorization, which is why it is not the default.
+
+The Authentik blueprint creates a dedicated confidential client and registers
+`http://localhost:8081/callback`, separate from Seizu's public PKCE/device
+client because obot requires a client secret. Add to `.env`:
 
 ```text
 DEV_MCP_PROXY_OAUTH_CLIENT_ID=seizu-external-mcp-proxy
@@ -124,28 +158,33 @@ DEV_MCP_PROXY_OAUTH_CLIENT_SECRET=seizu-external-mcp-proxy-dev-secret
 DEV_MCP_PROXY_OAUTH_AUTHORIZE_URL=http://localhost:9000/application/o/seizu-external-mcp-proxy
 DEV_MCP_PROXY_SCOPES=openid,email,profile
 DEV_MCP_PROXY_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
-DEV_GITHUB_MCP_TOKEN=<fine-grained-development-pat>
-DEV_GITHUB_MCP_READ_ONLY=1
-DEV_GITHUB_MCP_TOOLSETS=default
 
-MCP_EXTERNAL_ENABLED=true
 MCP_EXTERNAL_PROXIES=[{"name":"github","url":"http://external-mcp-proxy:8080/mcp/github","transport":"streamable_http","auth_mode":"bearer","token_env":"MCP_EXTERNAL_PROXY_TOKEN"}]
-MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=
-MCP_EXTERNAL_PROXY_TOKEN=<access-token-issued-by-the-local-proxy>
 ```
 
-Grant the PAT only the repositories and permissions needed for testing. The
-profile defaults GitHub MCP to read-only mode; set
-`DEV_GITHUB_MCP_READ_ONLY=0` to expose mutating tools and exercise Seizu's
-annotation-based confirmation flow. `DEV_GITHUB_MCP_TOOLSETS` accepts the
-GitHub server's comma-separated toolset names. Generate the encryption key with
-`openssl rand -base64 32`, then enable the integration and start the stack:
+Generate the encryption key with `openssl rand -base64 32`, then:
 
 ```bash
-make external_mcp_enable
-make up
+docker compose --profile auth --profile external-mcp --profile external-mcp-oauth up -d
 make external_mcp_login
 ```
+
+`make external_mcp_login` dynamically registers a public PKCE client with the
+proxy, opens its Authentik authorization flow, and writes the issued credential
+to `.env` without displaying it. Authentik issues an access token valid for one
+hour and a refresh token valid for thirty days, so the script stores **both**
+(plus the registered client id) and renews silently on later runs — a browser
+round trip is needed roughly monthly, not hourly. Pass `--force` to authorize
+from scratch. Storing only the access token is what made an earlier setup
+"expire unexpectedly" an hour in, with tool discovery degrading to
+`ext__github__seizu_authenticate` mid-investigation.
+
+A Temporal turn holds no browser token and cannot renew one itself
+(AGT-010), so a deployment that needs per-user GitHub authority should give
+the proxy GitHub as its OAuth provider, forward the user's token instead of
+injecting a PAT, and address users with `m2m_jwt` plus `X-Target-User-ID` — the
+shape of the enterprise gateway example below.
+
 
 The make target enables local Authentik and persists
 `MCP_EXTERNAL_ENABLED=true` in `.env`; `make up` then selects both Compose

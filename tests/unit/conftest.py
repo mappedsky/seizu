@@ -11,6 +11,15 @@ import pytest
 # changed. Set before any test module imports litellm.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
+# A developer's `.env` configures real external MCP proxies, and Compose passes
+# it into the test container. Settings read it at import, so tool/skill listing
+# then tries to *discover* against a live proxy from tests that never asked for
+# one -- caught by the socket guard below, in whichever test happened to reach
+# the listing. Overridden rather than defaulted: the point is to ignore the
+# value the environment really has. Tests that want a proxy patch
+# ``external_mcp.settings.MCP_EXTERNAL_PROXIES`` directly.
+os.environ["MCP_EXTERNAL_PROXIES"] = "[]"
+
 from reporting.services import reporting_neo4j  # noqa: E402
 
 

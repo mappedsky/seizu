@@ -234,12 +234,18 @@ services:
   # for local integration testing. `make external_mcp_enable` also enables the
   # local Authentik profile: proxy users authenticate through the same IDP and
   # SSO session as Seizu.
+  # Optional: exercises Seizu's OAuth-challenge handling (RFC 9728 discovery and
+  # 401 recovery) against a proxy that really requires it. Not part of the
+  # default profile — it authenticates the *caller to the proxy* and contributes
+  # no GitHub authority, so requiring it for ordinary local use bought a
+  # short-lived token that expires mid-run for no gain. Start it explicitly:
+  #   docker compose --profile external-mcp --profile external-mcp-oauth up
   external-mcp-proxy:
     build:
       context: .
       dockerfile: .config/dev/external-mcp-proxy/Dockerfile
     profiles:
-      - external-mcp
+      - external-mcp-oauth
     depends_on:
       - external-mcp-github-auth
     environment:

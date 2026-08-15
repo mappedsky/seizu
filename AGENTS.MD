@@ -188,7 +188,11 @@ PostgreSQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
 ### External MCP Proxies (`reporting/services/external_mcp.py`)
 
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
-Compose profile (`make external_mcp_enable` / `make external_mcp_disable`).
+Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The
+local `external-mcp` profile wires Seizu straight to the PAT adapter — one
+service identity, read-only, no credential to expire; the obot OAuth proxy is
+the separate `external-mcp-oauth` profile, for exercising the RFC 9728 challenge
+path, and is the only thing `make external_mcp_login` is for.
 `MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
 definitions used by the chat agent. External tools are dynamically discovered,
 namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from

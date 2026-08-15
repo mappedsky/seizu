@@ -240,11 +240,10 @@ auth_disable:
 
 .PHONY: external_mcp_enable
 external_mcp_enable:
-	@$(MAKE) auth_enable
 	@grep -q '^MCP_EXTERNAL_ENABLED=' .env 2>/dev/null \
 		&& perl -pi -e 's/^MCP_EXTERNAL_ENABLED=.*/MCP_EXTERNAL_ENABLED=true/' .env \
 		|| echo 'MCP_EXTERNAL_ENABLED=true' >> .env
-	@echo "External MCP and local Authentik enabled in .env. Run 'make down && make up' to apply."
+	@echo "External MCP enabled in .env. Run 'make down && make up' to apply."
 
 .PHONY: external_mcp_disable
 external_mcp_disable:
@@ -253,9 +252,12 @@ external_mcp_disable:
 		|| echo 'MCP_EXTERNAL_ENABLED=false' >> .env
 	@echo "External MCP disabled in .env. Run 'make down && make up' to apply."
 
+# Only the external-mcp-oauth profile needs this; the default local wiring uses
+# the PAT adapter and has no per-user credential. Renews from the stored refresh
+# token when one is still valid, so a browser round trip is monthly, not hourly.
 .PHONY: external_mcp_login
 external_mcp_login:
-	@python3 scripts/external_mcp_login.py
+	@python3 scripts/external_mcp_login.py $(ARGS)
 	@docker compose up -d --force-recreate --no-deps seizu seizu-temporal-worker
 	@echo "External MCP token applied. Reload /app/toolsets to discover GitHub tools."
 

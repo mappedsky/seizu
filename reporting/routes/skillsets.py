@@ -26,7 +26,7 @@ from reporting.schema.mcp_config import (
     render_skill_prompt,
     validate_skill_template,
 )
-from reporting.services import report_store
+from reporting.services import external_mcp, report_store
 from reporting.services.mcp_builtins import find_builtin
 
 router = APIRouter()
@@ -54,12 +54,22 @@ async def _check_tools_required(tools_required: list[str]) -> tuple[list[str], l
 
     Missing tools are dropped rather than blocking the save so that deleting a
     tool does not permanently prevent editing skills that referenced it.
+
+    ``ext__<proxy>__<tool>`` references are checked against the configured
+    proxies only: the remote tool list is discovered per user at call time, so
+    the server has no user-independent inventory to validate against here.
     """
     valid: list[str] = []
     dropped: list[str] = []
     for tool_ref in tools_required:
         if find_builtin(tool_ref) is not None:
             valid.append(tool_ref)
+            continue
+        if tool_ref.startswith(f"{external_mcp.NAMESPACE_PREFIX}__"):
+            if external_mcp.parse_namespaced_tool_name(tool_ref) is not None:
+                valid.append(tool_ref)
+            else:
+                dropped.append(tool_ref)
             continue
         if "__" not in tool_ref:
             dropped.append(tool_ref)
