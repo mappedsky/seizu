@@ -731,6 +731,11 @@ CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
 # Planner generation budget. Thinking models need more room than the compact
 # router/verifier schemas so their final JSON is not crowded out by reasoning.
 CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS = int_env("CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS", 4096)
+# Characters of prior-step output a worker may be given, split across the step's
+# dependencies. A dependency is the reason a step can do its job: at 2,000 each,
+# a 19-finding CVE list reached the reachability step truncated, and the result
+# was failed for the incomplete coverage that caused.
+CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS", 16_000)
 # Maximum verify-driven retry cycles before the orchestrator synthesizes an
 # answer from whatever steps passed. Bounds self-correction so a persistently
 # failing step cannot loop forever.
@@ -770,7 +775,20 @@ CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN = float_env("CHAT_ORCHESTRATOR_STEP_BUDGET
 # Chosen for the strongest sibling protection at no measured cost, not because
 # it scored best. The ceiling is not the binding constraint -- the run budget
 # is, and the work does not fit inside it.
-CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 1.0)
+# How far past its fair share of the run budget a step may go before it is
+# stopped outright. The share exists so no step starves its siblings, which is a
+# scheduling concern; at 1.0 it was also the execution cut, and so became the
+# thing that ended every long investigation measured here -- four consecutive
+# runs stopped on it while the run budget sat at ~80% unspent and the cost
+# budget at ~16%. Above 1.0 the share still fires as a *signal* (the step
+# degrades and is told to converge); what changes is that a step with no sibling
+# contending can use what the run can actually spend. Useless work is now caught
+# by loop detection rather than by rationing (AGT-017).
+CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE = float_env("CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 3.0)
+# Consecutive tool calls with nothing new in them before a step is stopped as
+# stuck. A full window is required, so occasional legitimate repetition (polling,
+# re-reading a file just written) does not trip it.
+CHAT_ORCHESTRATOR_STUCK_CALL_WINDOW = int_env("CHAT_ORCHESTRATOR_STUCK_CALL_WINDOW", 8)
 # Episodic recall between sub-agents within one step. Each sandbox__delegate
 # call runs a fresh subagent that knows nothing of the previous one, so without
 # this they re-derive the same ground -- one observed step made 136 delegations
@@ -1050,6 +1068,18 @@ CHAT_SESSION_REAP_INTERVAL_SECONDS = int_env("CHAT_SESSION_REAP_INTERVAL_SECONDS
 # when these credentials are this deployment's alone -- it is also how sandboxes
 # created before tagging existed get cleaned up.
 SANDBOX_REAP_UNTAGGED = bool_env("SANDBOX_REAP_UNTAGGED", False)
+# How much a single delegation may return to the sub-agent *inline* before the
+# rest is written to files instead. Cumulative, and in tokens, because the
+# per-call bounds above cannot catch the shape that actually exhausts a step: a
+# reachability review made 90 GitHub calls of a few KB each -- every one under
+# the per-call trigger, 1.1M tokens in total, one receipt written. Set 0 to
+# disable and keep only the per-call triggers.
+SANDBOX_INLINE_RESULT_BUDGET_TOKENS = int_env("SANDBOX_INLINE_RESULT_BUDGET_TOKENS", 60_000)
+# Consecutive already-answered calls before a delegation is told, in terms it
+# can act on, that there is nothing further to get and it should report what it
+# has. The per-call note says one call was pointless; a run of them says the
+# task is (AGT-017).
+SANDBOX_STUCK_REPEAT_LIMIT = int_env("SANDBOX_STUCK_REPEAT_LIMIT", 3)
 SANDBOX_FILE_RESULT_MAX_ROWS = int_env("SANDBOX_FILE_RESULT_MAX_ROWS", 50_000)
 SANDBOX_FILE_RESULT_MAX_BYTES = int_env("SANDBOX_FILE_RESULT_MAX_BYTES", 10_000_000)
 

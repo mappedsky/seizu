@@ -1194,12 +1194,77 @@ def test_headless_turn_uses_same_router_decision_as_interactive(mocker):
     assert chat_orchestrator._forced_route(state, {"configurable": {"headless": True}}) is None
 
 
-async def test_router_resumes_in_flight_plan(mocker):
+async def test_router_resumes_in_flight_plan_on_confirmation_resume(mocker):
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", True)
     mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
-    state = {"messages": [HumanMessage(content="continue")], "plan": [_step("s2", "pending")]}
+    state = {
+        "messages": [HumanMessage(content="approved", additional_kwargs={"resume_confirmation_id": "c1"})],
+        "plan": [_step("s2", "pending")],
+    }
+    result = await chat_orchestrator.router_node(state, {"configurable": {}})
+    # Orchestrated, and the parked plan is left intact for the dispatcher.
+    assert result == {"route": "orchestrate"}
+
+
+async def test_router_resumes_in_flight_plan_on_continuation(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_ENABLED", True)
+    mocker.patch("reporting.settings.CHAT_LLM_PROVIDER", "openai")
+    state = {
+        "messages": [HumanMessage(content="continue", additional_kwargs={"continue_response": True})],
+        "plan": [_step("s2", "pending")],
+    }
     result = await chat_orchestrator.router_node(state, {"configurable": {}})
     assert result == {"route": "orchestrate"}
+
+
+async def test_router_discards_plan_left_behind_by_an_unfinished_turn(mocker):
+    # A stopped/crashed/timed-out turn leaves its steps in the checkpoint. The
+    # next message is a new request, not a resume: the stale plan must be
+    # cleared and the turn routed on its own merits, or the agent resumes the
+    # abandoned work and ignores what was just asked.
+    model = _OrchestratorFakeModel(route="simple")
+    _patch_common(mocker, model)
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    state = {
+        "messages": [
+            HumanMessage(content="investigate the cartography repository"),
+            HumanMessage(content="sorry, I meant the confidant repository"),
+        ],
+        "plan": [_step("s1", "ran"), _step("s2", "pending")],
+        "step_results": [{"step_id": "s1", "output": "cartography findings"}],
+        "iteration": 1,
+        "run_errors": ["earlier failure"],
+    }
+
+    result = await chat_orchestrator.router_node(state, {"configurable": {}})
+
+    assert result["route"] == "simple"
+    assert result["plan"] == []
+    assert result["step_results"] == []
+    assert result["iteration"] == 0
+    assert result["run_errors"] == []
+
+
+async def test_planner_replans_after_router_discards_an_abandoned_plan(mocker):
+    # End-to-end on the state contract: the router's reset is what the planner
+    # sees, so the new request gets a new plan instead of the abandoned one.
+    model = _OrchestratorFakeModel(
+        route="orchestrate",
+        plan_steps=[_PlannedStep(id="new1", goal="assess confidant", success_criteria="done")],
+    )
+    _patch_common(mocker, model)
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    state: dict[str, Any] = {
+        "messages": [HumanMessage(content="sorry, I meant the confidant repository")],
+        "plan": [_step("stale", "pending", goal="assess cartography")],
+        "step_results": [{"step_id": "stale", "output": "cartography findings"}],
+    }
+
+    routed = await chat_orchestrator.router_node(state, {"configurable": {"current_user": _user()}})
+    state.update(routed)
+    planned = await chat_orchestrator.planner_node(state, {"configurable": {"current_user": _user()}})
+
+    assert [step["id"] for step in planned["plan"]] == ["new1"]
 
 
 async def test_router_uses_json_fallback_when_structured_output_fails(mocker):
@@ -1341,12 +1406,15 @@ async def test_persistently_failing_step_terminates_within_iteration_budget(mock
 
     chunks = await _run_graph(model, "thread-orch-fail")
 
-    # Worker ran the initial attempt plus MAX_ITERATIONS retries, then stopped —
-    # plus one synthesizer astream. No infinite loop.
+    # No infinite loop — and it now stops sooner than the iteration budget
+    # allows: this verifier restates the same verdict, and a rejection a step has
+    # already been given once is terminal rather than worth a third attempt
+    # (AGT-017). MAX_ITERATIONS remains the outer bound for a step that keeps
+    # being rejected for *different* reasons.
     streamed = "".join(chunk["content"] for chunk in chunks if chunk["kind"] == "token")
     assert "best effort summary" in streamed
     verify_details = [c for c in chunks if c["kind"] == "detail" and c["data"]["kind"] == "verify"]
-    assert len(verify_details) == 3  # initial + 2 retries, all failing
+    assert len(verify_details) == 2  # initial + one retry, then the repeat is terminal
 
 
 # --- Confirmation pause / resume (Phase 4) ------------------------------------
@@ -1676,6 +1744,9 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
     """The ceiling is a share of what the run has left, split between the steps
     still to finish -- not a multiple of the planner's complexity guess."""
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 1.0)
+    # Pinned, because this test is about the share mechanism rather than about
+    # how far past the share the default lets a step go (AGT-017).
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 1.0)
     ledger = initial_budget_ledger()
     # 16k spendable across two outstanding steps -> an 8k share, and a 16k hard
     # bound. The model bills 2k a turn, so it passes its share after four calls
@@ -1891,10 +1962,14 @@ def test_the_fair_share_is_soft_and_the_reserve_is_the_hard_stop():
     soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
     assert soft == 160_000  # its share of the two outstanding steps
-    # At the default multiple of 1.0 the share is itself the hard cut. Chosen
-    # because a three-arm sweep found no difference between settings, so the
-    # strongest sibling protection wins by default.
-    assert hard == 160_000
+    # The share is a convergence signal, not the execution cut: at the default
+    # multiple a step with no sibling contending may go past its share, bounded
+    # by what the run can still spend. A three-arm sweep found no quality
+    # difference between multiples, and the tie was originally broken toward
+    # sibling protection; it is broken the other way now because 1.0 was
+    # measured stopping four consecutive long investigations while the run
+    # budget sat ~80% unspent (AGT-017).
+    assert hard == 320_000
 
 
 async def test_crossing_the_share_signals_without_stopping_the_step():
@@ -2592,3 +2667,571 @@ async def test_the_dispatcher_leaves_the_id_alone_when_it_opened_nothing(mocker)
     )
 
     assert "sandbox_id" not in update
+
+
+# --- Budget finalization keeps what a step already gathered --------------------
+
+
+async def test_finalization_keeps_the_evidence_a_stopped_step_already_gathered(mocker):
+    """The sweep meets a step that already ran and holds every tool result it
+    collected. Replacing that with a blank stub is what made an expensive run
+    answer "the step produced no output or supporting evidence" -- observed on a
+    run of 33 tool calls and 302k input tokens."""
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    controller = BudgetController(initial_budget_ledger())
+    controller.begin_finalization("Run budget spent.")
+    gathered = {
+        "step_id": "s1",
+        "goal": "goal s1",
+        "output": "",  # the worker was killed before it could summarize
+        "tools_used": ["github_security__top_vulnerabilities"],
+        "tool_details": [{"title": "Tool: github_security__top_vulnerabilities", "body": "CVE-2024-1 in confidant"}],
+        "budget_exhausted": True,
+    }
+    state = {
+        "messages": [HumanMessage(content="go")],
+        "plan": [_step("s1", "failed")],
+        "step_results": [gathered],
+    }
+
+    update = await chat_orchestrator.dispatcher_node(
+        state,
+        {"configurable": {"current_user": _user(), "budget_controller": controller}},
+    )
+
+    # Still stopped -- the run is over -- but the findings survive it.
+    assert update["plan"][0]["status"] == "skipped"
+    result = update["step_results"][0]
+    assert result["tool_details"] == gathered["tool_details"]
+    assert result["tools_used"] == gathered["tools_used"]
+    assert result["budget_exhausted"] is True
+    assert result["verify_reason"] == "Run budget spent."
+
+
+async def test_finalization_still_stubs_a_step_that_never_ran(mocker):
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _data: None)
+    controller = BudgetController(initial_budget_ledger())
+    controller.begin_finalization("Run budget spent.")
+    state = {
+        "messages": [HumanMessage(content="go")],
+        "plan": [_step("s2", "pending")],
+        "step_results": [],
+    }
+
+    update = await chat_orchestrator.dispatcher_node(
+        state,
+        {"configurable": {"current_user": _user(), "budget_controller": controller}},
+    )
+
+    assert update["step_results"][0] == {
+        "step_id": "s2",
+        "goal": "goal s2",
+        "output": "",
+        "tools_used": [],
+        "budget_exhausted": True,
+        "verify_reason": "Run budget spent.",
+    }
+
+
+def test_synthesis_context_forwards_a_stopped_steps_evidence():
+    plan = [_step("s1", "skipped")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "",
+            "tool_details": [{"title": "Tool: top_vulnerabilities", "body": "CVE-2024-1 affects confidant"}],
+            "budget_exhausted": True,
+        }
+    ]
+
+    context = chat_orchestrator._synthesis_context(plan, results)
+
+    assert "CVE-2024-1 affects confidant" in context
+    # Never labelled "skipped" above real findings: a reader shown that
+    # discounts them, which is the whole failure being prevented.
+    assert "[skipped]" not in context
+    assert "stopped early on run budget" in context
+
+
+def test_a_step_with_nothing_to_show_is_still_labelled_skipped():
+    plan = [_step("s1", "skipped")]
+    results = [{"step_id": "s1", "output": "", "budget_exhausted": True}]
+
+    assert "[skipped]" in chat_orchestrator._synthesis_context(plan, results)
+
+
+def test_repeated_identical_tool_results_are_charged_once():
+    """A worker that re-runs a tool records the result again. Paying the
+    per-call share for each copy pushes genuinely new evidence off the end."""
+    result = {
+        "step_id": "s1",
+        "tool_details": [
+            {"title": "Tool: top_vulnerabilities", "body": "CVE-2024-1"},
+            {"title": "Tool: top_vulnerabilities", "body": "CVE-2024-1"},
+            {"title": "Tool: get_file_contents", "body": "requirements.txt"},
+        ],
+    }
+
+    evidence = chat_orchestrator._step_evidence(result, max_chars=4_000)
+
+    assert evidence.count("CVE-2024-1") == 1
+    assert "requirements.txt" in evidence
+
+
+def test_the_synthesis_fallback_shows_evidence_when_the_step_never_summarized():
+    """This path runs *because* the budget died, so by construction the step
+    was cut off before writing a summary. Printing "(no output)" there denies
+    findings the run actually has."""
+    plan = [_step("s1", "skipped")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "",
+            "tool_details": [{"title": "Tool: top_vulnerabilities", "body": "CVE-2026-44432 in confidant"}],
+            "budget_exhausted": True,
+        }
+    ]
+
+    answer = chat_orchestrator._synthesis_fallback(plan, results)
+
+    assert "CVE-2026-44432 in confidant" in answer
+    assert "(no output)" not in answer
+    assert "ran out of its token budget" in answer
+
+
+def test_the_synthesis_fallback_keeps_a_written_summary_when_there_is_one():
+    plan = [_step("s1", "passed")]
+    results = [{"step_id": "s1", "output": "Found two exploitable CVEs."}]
+
+    answer = chat_orchestrator._synthesis_fallback(plan, results)
+
+    assert "Found two exploitable CVEs." in answer
+
+
+def test_a_retry_carries_forward_what_the_attempt_fetched():
+    """A worker cut at its ceiling never writes a partial summary — which is
+    exactly the case that fails verification for "no output" and triggers the
+    retry. Carrying only prose carried nothing when there was most to carry, and
+    the retry re-fetched from scratch."""
+    plan = [_step("s1", "failed")]
+    results = [
+        {
+            "step_id": "s1",
+            "output": "",
+            "partial_output": "",
+            "budget_capped": True,
+            "verify_reason": "Step produced no output.",
+            "tool_details": [
+                {"title": "Tool: ext__github__get_file_contents", "body": "Pipfile.lock: urllib3==2.6.3"},
+                {"title": "Tool: ext__github__search_code", "body": "confidant/authnz/__init__.py:12 import jwt"},
+            ],
+        }
+    ]
+
+    prepared, iteration = chat_orchestrator._prepare_retries(plan, results, 0)
+
+    assert iteration == 1
+    assert prepared[0]["status"] == "pending"
+    resume = prepared[0]["resume_from"]
+    assert "urllib3==2.6.3" in resume
+    assert "import jwt" in resume
+    assert "already made" in resume
+
+
+def test_a_retry_prefers_the_workers_own_summary_when_it_wrote_one():
+    plan = [_step("s1", "failed")]
+    results = [
+        {
+            "step_id": "s1",
+            "partial_output": "Established that urllib3 is 2.6.3 and reachable from the proxy client.",
+            "tool_details": [{"title": "Tool: x", "body": "raw"}],
+        }
+    ]
+
+    prepared, _ = chat_orchestrator._prepare_retries(plan, results, 0)
+
+    assert prepared[0]["resume_from"].startswith("Established that urllib3")
+
+
+def test_a_retry_with_nothing_to_carry_sets_no_resume_block():
+    plan = [_step("s1", "failed")]
+    results = [{"step_id": "s1", "output": "", "partial_output": ""}]
+
+    prepared, _ = chat_orchestrator._prepare_retries(plan, results, 0)
+
+    assert "resume_from" not in prepared[0]
+
+
+async def test_a_step_whose_summary_comes_back_empty_reports_what_it_gathered(mocker):
+    """The summary pass is a step's last chance to say what it found, and it can
+    return nothing — refused by the budget, or a reasoning model spending its
+    whole allowance without emitting text. A step that made real calls must not
+    then report nothing: that fails verification for "no output", is retried
+    from scratch, and loses the work."""
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 1)
+    spec = chat_graph.ChatToolSpec(name="t__one", kind="tool", description="x", input_schema={"type": "object"})
+    step = _step("s1")
+
+    class _SilentModel:
+        def bind_tools(self, _tools: Any) -> "_SilentModel":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            # One tool call, then nothing at all — including from the summary
+            # pass, which is called with no tools.
+            if not getattr(self, "called", False):
+                self.called = True
+                yield AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": "c1"}])
+            else:
+                yield AIMessage(content="")
+
+    async def _fake_batch(batch, current_user, *, session_key=None, batch_id=None, **_kw):
+        return [
+            chat_graph.ToolCallResult(request=req, content='{"results": [{"repo": "mappedsky/confidant"}]}')
+            for req in batch
+        ]
+
+    mocker.patch("reporting.services.chat_orchestrator._run_tool_call_batch", _fake_batch)
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_SilentModel(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[spec],
+        disclosed_names={"t__one"},
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert result["output"].strip(), "a step that made calls must not report an empty result"
+    assert "mappedsky/confidant" in result["output"]
+    # It reports its state, not just its working: the summary pass and the
+    # narrower retry both came back empty here.
+    assert "did not finish" in result["output"]
+    assert "Still unknown" in result["output"]
+
+
+async def test_an_interrupted_step_leaves_its_trace_in_the_sandbox(mocker):
+    """The prompt-bounded digest is the wrong shape for what a step that made
+    ninety calls has to hand on. The sandbox already holds data too big for
+    context and hands back a path; a step record is that idea applied to the
+    retry."""
+    backend = mocker.MagicMock()
+    backend.write_file = AsyncMock(return_value="ok")
+    session = mocker.MagicMock()
+    session.opened = True
+    session.sandbox_id = "sbx-1"
+    session.backend = AsyncMock(return_value=backend)
+    mocker.patch.object(chat_orchestrator.sandbox_session, "current_sandbox_session", return_value=session)
+    ledger = mocker.MagicMock()
+    mocker.patch.object(chat_orchestrator.episodic_memory, "current_session_ledger", return_value=ledger)
+
+    path = await chat_orchestrator._persist_step_record(
+        "s2",
+        {"goal": "assess reachability", "budget_capped": True, "partial_output": ""},
+        [{"title": "Tool: ext__github__get_file_contents", "arguments": '{"path": "Pipfile.lock"}', "body": "urllib3"}],
+    )
+
+    assert path.startswith("/home/user/seizu_results/step_s2_attempt_")
+    written = backend.write_file.await_args.args[1]
+    assert "urllib3" in written
+    assert "Pipfile.lock" in written
+    # Recorded as a receipt, so the next delegation is told by the machinery
+    # that already tells it about result files.
+    assert ledger.record_receipt.call_args.kwargs["sandbox_id"] == "sbx-1"
+
+
+async def test_no_open_sandbox_means_no_step_record(mocker):
+    """It is a convenience for the next attempt, never a reason to open a
+    sandbox or to fail a step that has otherwise finished."""
+    session = mocker.MagicMock()
+    session.opened = False
+    mocker.patch.object(chat_orchestrator.sandbox_session, "current_sandbox_session", return_value=session)
+
+    assert await chat_orchestrator._persist_step_record("s1", {}, [{"title": "t", "body": "x"}]) == ""
+
+
+async def test_a_failed_write_does_not_fail_the_step(mocker):
+    backend = mocker.MagicMock()
+    backend.write_file = AsyncMock(side_effect=RuntimeError("disk gone"))
+    session = mocker.MagicMock()
+    session.opened = True
+    session.sandbox_id = "sbx-1"
+    session.backend = AsyncMock(return_value=backend)
+    mocker.patch.object(chat_orchestrator.sandbox_session, "current_sandbox_session", return_value=session)
+
+    assert await chat_orchestrator._persist_step_record("s1", {}, [{"title": "t", "body": "x"}]) == ""
+
+
+def test_a_dependencys_output_gets_a_budgeted_share_not_a_fixed_2k(mocker):
+    """A dependency is the reason a step can do its job. At 2,000 characters a
+    19-finding CVE list reached the reachability step truncated, the worker said
+    so, and the verifier held the incomplete coverage against the result."""
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS", 16_000)
+    plan = [_step("s1"), _step("s2", depends_on=["s1"])]
+    results = [{"step_id": "s1", "output": "F" * 12_000}]
+
+    context = chat_orchestrator._dependency_context(plan[1], plan, results)
+
+    assert context.count("F") == 12_000, "the whole dependency should fit in its share"
+    assert "truncated" not in context
+
+
+def test_a_truncated_dependency_says_so(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS", 4_000)
+    plan = [_step("s1"), _step("s2", depends_on=["s1"])]
+    results = [{"step_id": "s1", "output": "F" * 12_000}]
+
+    context = chat_orchestrator._dependency_context(plan[1], plan, results)
+
+    assert "truncated to the first 4000 of 12000 characters" in context
+
+
+def test_the_dependency_budget_is_split_between_dependencies(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS", 16_000)
+    plan = [_step("s1"), _step("s2"), _step("s3", depends_on=["s1", "s2"])]
+    results = [{"step_id": "s1", "output": "A" * 20_000}, {"step_id": "s2", "output": "B" * 20_000}]
+
+    context = chat_orchestrator._dependency_context(plan[2], plan, results)
+
+    # Not exactly 8,000 each: the fence reserves part of the bound for its own
+    # markers. What matters is that neither dependency crowds out the other.
+    assert 7_500 < context.count("A") <= 8_000
+    assert context.count("A") == context.count("B")
+
+
+def test_the_resume_block_tells_a_rejected_attempt_to_redo_the_work():
+    """Telling a rejected attempt it "ran out of budget" says its findings were
+    fine and merely unfinished — so it skips the work the rejection asked for,
+    including the required action it is then failed for not calling."""
+    rejected = _step("s1", resume_from="what it found", retry_guidance="Missing a verdict for CVE-1")
+    capped = _step("s2", resume_from="what it found")
+
+    rejected_message = chat_orchestrator._worker_user_message(rejected, "")
+    capped_message = chat_orchestrator._worker_user_message(capped, "")
+
+    assert "was rejected" in rejected_message
+    assert "required skill or tool again" in rejected_message
+    assert "ran out of budget" in capped_message
+    assert "do not re-gather" in capped_message
+
+
+async def test_a_retry_is_not_failed_for_not_repeating_an_action_it_already_made(mocker):
+    """The retry carry tells the worker not to re-gather what the previous
+    attempt established; the contract guard then failed it for not re-calling
+    the skill it had already called. Three further attempts and the rest of the
+    run's budget went to a contract satisfied on the first."""
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 2)
+    skill = chat_graph.ChatToolSpec(
+        name="skills__reachability", kind="skill", description="x", input_schema={"type": "object"}
+    )
+    step = _step("s1", action_kind="skill", required_action="skills__reachability")
+    # Standing in for the earlier attempt that did call it.
+    step["required_action_satisfied"] = True
+
+    class _Model:
+        def bind_tools(self, _tools: Any) -> "_Model":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            yield AIMessage(content="Reused the previous attempt's findings and addressed the rejection.")
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_Model(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[skill],
+        disclosed_names={"skills__reachability"},
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert result.get("execution_error") in (None, ""), result.get("execution_error")
+    assert "Reused the previous attempt" in result["output"]
+
+
+async def test_a_first_attempt_that_skips_its_required_action_still_fails(mocker):
+    from langchain_core.messages import AIMessage
+
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS", 2)
+    skill = chat_graph.ChatToolSpec(
+        name="skills__reachability", kind="skill", description="x", input_schema={"type": "object"}
+    )
+    step = _step("s1", action_kind="skill", required_action="skills__reachability")
+
+    class _Model:
+        def bind_tools(self, _tools: Any) -> "_Model":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            yield AIMessage(content="Answered without using the required skill.")
+
+    result = await chat_orchestrator._run_worker_step(
+        step,
+        plan=[step],
+        results=[],
+        model=_Model(),
+        current_user=_user(),
+        session_key="thread",
+        config={"configurable": {}},
+        tool_specs=[skill],
+        disclosed_names={"skills__reachability"},
+        progressive=True,
+        writer=lambda event: None,
+    )
+
+    assert "did not call it" in (result.get("execution_error") or "")
+
+
+def test_an_unfinished_step_reports_its_state_not_just_a_dump():
+    """A dump of tool output leaves the verifier and synthesizer to work out
+    what the step was for and how far it got — and an absent finding reads like
+    a negative one unless something says otherwise."""
+    step = _step("s2")
+    step["goal"] = "Judge whether each CVE is reachable in confidant's code"
+    step["success_criteria"] = "Every CVE has a reachability verdict with cited evidence"
+    details = [
+        {"title": "Tool: ext__github__get_file_contents", "body": "Pipfile.lock: urllib3==2.6.3"},
+        {"title": "Tool: ext__github__search_code", "body": "no hits for import urllib3"},
+        {"title": "Tool: ext__github__get_file_contents", "body": "authnz/__init__.py: import jwt"},
+    ]
+
+    report = chat_orchestrator._unfinished_step_report(step, details)
+
+    assert "did not finish" in report
+    assert "Judge whether each CVE is reachable" in report
+    assert "Every CVE has a reachability verdict" in report
+    assert "3 call(s) across 2 distinct" in report
+    assert "Still unknown" in report
+    assert "not as a negative finding" in report
+    # The evidence is still there, it is just no longer the whole report.
+    assert "urllib3==2.6.3" in report
+
+
+# --- Loop detection: stop useless work early, rather than rationing all work ---
+
+
+def test_a_full_window_of_repeated_calls_looks_stuck():
+    from collections import deque
+
+    assert chat_orchestrator._looks_stuck(deque([False] * 4, maxlen=4))
+    # A partial window is not enough: the step may simply be young.
+    assert not chat_orchestrator._looks_stuck(deque([False, False], maxlen=4))
+    # One new call in the window means there is still a way forward.
+    assert not chat_orchestrator._looks_stuck(deque([False, True, False, False], maxlen=4))
+
+
+def test_call_signatures_distinguish_arguments():
+    from types import SimpleNamespace
+
+    seen: set[str] = set()
+
+    def request(name, **args):
+        return SimpleNamespace(name=name, arguments=args)
+
+    assert chat_orchestrator._note_call_signature(seen, request("t", a=1)) is True
+    assert chat_orchestrator._note_call_signature(seen, request("t", a=1)) is False
+    assert chat_orchestrator._note_call_signature(seen, request("t", a=2)) is True
+    # Argument order must not make the same call look new.
+    assert chat_orchestrator._note_call_signature(seen, request("t", b=1, a=2)) is True
+    assert chat_orchestrator._note_call_signature(seen, request("t", a=2, b=1)) is False
+
+
+def test_a_step_is_not_retried_for_a_rejection_it_was_already_given():
+    """Three of four attempts in one measured run were the same verdict
+    restated, and they cost the rest of the run's budget."""
+    step = _step("s1", "failed")
+    step["retry_guidance"] = "Missing a verdict for CVE-1"
+    results = [{"step_id": "s1", "verify_reason": "Missing a verdict for CVE-1"}]
+
+    prepared, iteration = chat_orchestrator._prepare_retries([step], results, 0)
+
+    assert prepared[0]["no_retry"] is True
+    assert prepared[0]["status"] == "failed"  # terminal, not queued again
+    assert iteration == 0
+
+
+def test_a_step_is_retried_when_the_rejection_is_a_new_one():
+    step = _step("s1", "failed")
+    step["retry_guidance"] = "Missing a verdict for CVE-1"
+    results = [{"step_id": "s1", "verify_reason": "Now missing evidence for CVE-2"}]
+
+    prepared, iteration = chat_orchestrator._prepare_retries([step], results, 0)
+
+    assert not prepared[0].get("no_retry")
+    assert prepared[0]["status"] == "pending"
+    assert iteration == 1
+
+
+async def test_an_empty_synthesis_is_retried_before_the_user_gets_a_dump(mocker):
+    """A run whose steps both passed still opened with "could not produce a
+    final summary" and handed over raw step output: the synthesizer call ran,
+    spent its allowance, and returned no text. From the user's seat that is a
+    failed answer, whatever the internals say."""
+    from langchain_core.messages import AIMessage
+
+    class _SilentThenAnswering:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def bind_tools(self, _tools: Any) -> "_SilentThenAnswering":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            self.calls += 1
+            if self.calls == 1:
+                yield AIMessage(content="")
+            else:
+                yield AIMessage(content="urllib3 is reachable transitively via boto3.")
+
+    model = _SilentThenAnswering()
+    mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=model)
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
+
+    state = {
+        "messages": [HumanMessage(content="which CVEs affect confidant?")],
+        "plan": [_step("s1", "passed")],
+        "step_results": [{"step_id": "s1", "output": "urllib3 2.6.3 installed"}],
+    }
+    update = await chat_orchestrator.synthesizer_node(state, {"configurable": {}})
+
+    answer = update["messages"][-1].content
+    assert "urllib3 is reachable transitively" in answer
+    assert "could not produce a final summary" not in answer
+    assert model.calls == 2, "the empty reply should have been retried"
+
+
+async def test_a_synthesis_that_stays_empty_still_falls_back(mocker):
+    from langchain_core.messages import AIMessage
+
+    class _Silent:
+        def bind_tools(self, _tools: Any) -> "_Silent":
+            return self
+
+        async def astream(self, _input: Any, config: Any = None, **_kwargs: Any):
+            yield AIMessage(content="")
+
+    mocker.patch("reporting.services.chat_orchestrator.get_chat_model", return_value=_Silent())
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _e: None)
+
+    state = {
+        "messages": [HumanMessage(content="which CVEs affect confidant?")],
+        "plan": [_step("s1", "passed")],
+        "step_results": [{"step_id": "s1", "output": "urllib3 2.6.3 installed"}],
+    }
+    update = await chat_orchestrator.synthesizer_node(state, {"configurable": {}})
+
+    answer = update["messages"][-1].content
+    assert "urllib3 2.6.3 installed" in answer  # the findings still reach the user

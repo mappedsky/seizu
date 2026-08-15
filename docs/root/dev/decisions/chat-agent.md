@@ -651,3 +651,264 @@ proxy returns an OAuth challenge, its catalog contains the synthetic
 metadata preserves the external JSON Schema property names verbatim (including
 names such as `perPage`); the lower-snake-case rule remains limited to
 Seizu-authored Cypher tool definitions.
+
+## AGT-011 — An unfinished plan is discarded unless the next turn resumes it
+
+**Applies to:** `chat_orchestrator.router_node`, `_forced_route`,
+`_abandoned_plan_reset`, `reporting/temporal_workflows/activities.finalize_chat_turn`
+
+`plan`/`step_results` round-trip through the checkpoint so an orchestrated run
+can survive a turn boundary, but only `synthesizer_node` clears them. A plan is
+therefore meant to outlive its turn in exactly one case: the run stopped at
+`confirmation_pause` and the next turn carries the approval (or a
+continue-the-answer request). Both arrive as a marked `HumanMessage`.
+
+`router_node` — the graph's single entry point — clears an unfinished plan when
+the incoming turn is **not** one of those, and `_forced_route` pins a turn to
+the orchestrated path only for a genuine resume. A new user message therefore
+always gets a new plan.
+
+**Why:** a user stopped an investigation of one repository mid-run and asked for
+a different one. Cancelling a turn cancels the graph task wherever it is, so the
+dispatcher's last checkpointed write — steps at `pending`/`ran` — stayed in the
+thread state. On the next message `_has_pending_plan` forced the orchestrated
+route and the planner kept the stale plan, so the agent resumed the *abandoned*
+repository and never read what had just been asked. The same hole is open to any
+turn that does not reach synthesis: a crashed worker, a timeout. Clearing at the
+entry point covers all of them with one rule, rather than asking each producer
+to unwind state it was cancelled out of.
+
+**A cancellation is recorded as a cancellation, whichever writer wins.** Stopping
+a turn reaches both finalizers at once — Temporal cancels the activity and the
+workflow immediately schedules `finalize_chat_turn` — and the fallback usually
+wins by a second or two because the activity is still publishing its closing
+frames. It wrote a blanket `failed`, so a user-initiated stop surfaced as an
+error and the activity's own `canceled` lost the first-writer-wins race. The
+fallback now reads `cancel_requested` from the turn, which is set before either
+writer runs, so the two agree instead of racing over the outcome.
+
+## AGT-014 — A step that made calls never reports nothing, and neither does a run
+
+**The synthesizer gets the same treatment as the step summary.** A run whose two
+steps had both *passed* still opened with "could not produce a final summary"
+and handed the user raw step output: the synthesizer call ran, spent its
+allowance and returned no text. From the user's seat that is a failed answer
+whatever the internals say. An empty synthesis is now retried once, asking for
+the answer and nothing else, before the fallback renders step output.
+
+Its output allowance is no longer capped at a concision ceiling either. 2,048
+tokens is enough for the answer but not for a reasoning model to think *and*
+answer, and the observed result was a blank one — concision achieved by saying
+nothing. Length is the prompt's job; the allowance only has to leave room to
+answer at all.
+
+### The step-level half
+
+**Applies to:** the summary pass in `chat_orchestrator._run_worker_step`
+
+When the summary pass returns nothing, a narrower retry asks for three things
+only — what was established, what was unfinished, what is still unknown — since
+that is far smaller to produce than a full summary and a model that spent its
+allowance thinking has a better chance at it. If that is also empty, the step
+reports its *state* deterministically: goal, completion condition, how many
+calls across how many tools, an explicit "still unknown", and only then the
+evidence. A raw dump was the first version of this and is not a report — it
+leaves the verifier and synthesizer to work out what the step was for, and an
+absent finding reads like a negative one unless something says otherwise.
+
+When a step's summary pass returns no text, its result is rendered from the
+calls it made and what they returned, rather than left empty.
+
+**Why:** the summary pass is a step's last chance to say what it found, and it
+can come back empty — refused by the budget, or a reasoning model spending its
+whole output allowance without emitting text. Observed on a step that had made
+90 successful calls: `output=0, partial_output=0`, which fails verification for
+"Step produced no output", is retried from scratch, and loses the work. The
+allowance is also no longer a constant: `chat_context.max_output_tokens` returns
+the smaller of `CHAT_LLM_MAX_TOKENS` and what the model reports it accepts, and
+every call site that used to pick a number now goes through it. A hardcoded
+1,024 bore no relation to what that model could have given, and asking *above* a
+provider's ceiling is refused outright rather than quietly reduced — so the
+clamp matters in both directions. The synthesizer keeps its deliberate concision
+ceiling as `min(model_limit, 2048)`; structured calls (router, planner,
+verifier) are clamped once inside `_structured_invoke`, where the model is
+chosen.
+
+The fallback is still the load-bearing half: it does not depend on knowing why
+the model went quiet.
+
+## AGT-017 — Stop useless work; do not ration all work
+
+**Applies to:** `_step_thresholds`, `_looks_stuck` / `_note_call_signature` in
+`_run_worker_step`, `_prepare_retries`, `_stuck_notice` in `sandbox.py`;
+`CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE`,
+`CHAT_ORCHESTRATOR_STUCK_CALL_WINDOW`, `SANDBOX_STUCK_REPEAT_LIMIT`
+
+A token ceiling cannot tell a run that is looping from one that is working: both
+spend. So the ceiling is no longer where a long investigation ends, and the
+looping is detected as itself.
+
+**The per-step share is a signal, not the execution cut.** Its purpose is that
+no step starves its siblings — a scheduling concern — and at a hard multiple of
+1.0 it was also what ended the step. Measured across four consecutive
+CVE-reachability runs, **every one stopped on the step share** while the run
+budget sat ~80% unspent and the cost budget at ~16%. The default multiple is now
+3.0: crossing the share still degrades the step and tells it to converge; what
+changes is that a step with no sibling contending may use what the run can
+actually spend.
+
+This re-breaks a tie that a three-arm sweep had left open. The sweep found no
+*quality* difference between multiples, so the tie went to sibling protection;
+it did not measure the case that matters here, which is a plan with one
+genuinely large step.
+
+**Three loop detectors, at the level each loop happens.**
+
+- *Within a step:* a full window of tool calls
+  (`CHAT_ORCHESTRATOR_STUCK_CALL_WINDOW`, default 8) with no call the step had
+  not already made. The step stops, keeps what it gathered, still runs its
+  summary pass, and is marked terminal — a step that has run out of new calls to
+  make will run out again. A full window is required so ordinary repetition
+  (polling, re-reading a file just written) does not trip it.
+- *Across attempts:* a rejection the step has already been given once and not
+  addressed is terminal. Three of four attempts in one measured run were the same
+  verdict restated, and they cost the rest of the run's budget.
+- *Inside a delegation:* consecutive already-answered calls
+  (`SANDBOX_STUCK_REPEAT_LIMIT`, default 3) escalate from the per-call note to
+  an instruction to stop and report. The per-call note says one call was
+  pointless; it does not say the task is.
+
+**Why this direction, and not a tighter cap:** a cap hit while answering a hard
+question does not save the tokens it appears to. The work is re-done in the next
+turn or the next session, from a cold context, and the failed run is a total
+loss on top. Cheap detection of *useless* work is what makes an expensive
+*useful* run affordable; a cost ceiling (`CHAT_RUN_COST_BUDGET_USD`) remains the
+outer guard against genuine runaway, and is the one an operator should set.
+
+## AGT-016 — The planner does not supply identifiers the request did not
+
+**Applies to:** `_PLANNER_PROMPT`, the `repo_cve_reachability` skill
+
+A plan step must not name a repository, organization, account or host the
+request did not give it. Identifiers in this graph are whatever was scanned, and
+a familiar-looking name is the trap: the resource is very unlikely to be the
+upstream project it shares a name with. A bare name stays bare in the goal and
+is resolved against the graph at execution time.
+
+**Why:** asked about "the confidant repository", the planner wrote
+`lyft/confidant` into both step goals from its own knowledge. The findings step
+correctly resolved `mappedsky/confidant` and was then *failed by the verifier*
+for not reporting on `lyft/confidant` — the invented identifier had become the
+thing the step was judged against. Worse, the reachability step believed it:
+**all 100 of its GitHub reads went to `lyft/confidant`**, an unrelated public
+repository, so it was judging one codebase's recorded vulnerabilities against
+another codebase's source. That failure mode produces confident, cited,
+wrong-target verdicts, which is worse than producing nothing.
+
+The skill carries the same guard where the calls are actually made: if the repo
+it was handed disagrees with the one the findings step resolved, it uses the
+resolved one and says so, and it refuses to read a repository the graph has no
+record of.
+
+## AGT-015 — What a retry is told, and what it is then judged on
+
+**Applies to:** `_worker_user_message` (the resume block), the required-action
+guard in `_run_worker_step`, `_dependency_context`, the verifier prompt in
+`_verify_step`
+
+Four rules, each from the same observed run: a reachability step produced a
+correct, cited review on its first attempt and was retried three times until the
+budget was gone.
+
+**A "cannot be determined" that names its missing evidence is a finding.** The
+verifier failed a review of 19 CVEs because one was `Undetermined` — a verdict
+the skill defines, and requires evidence for. [AGT-009](#agt-009) already allows
+a plan to "explicitly say the determination cannot be made"; the verifier now
+applies that to part of a result as well as the whole, and still fails anything
+left silently unaddressed or asserted beyond its evidence.
+
+**A rejected attempt is told it was rejected.** The resume block said "ran out of
+budget before finishing … do not re-gather what is already here" for *every*
+carry. Told that, a worker whose result had been rejected reasonably skipped the
+work the rejection asked for — including its required skill.
+
+**A step's contract is satisfied once, not once per attempt.** Having skipped the
+skill, the retry was failed for not calling it: the guard runs per attempt while
+`required_action` is a property of the step. It is now remembered on the step,
+so a later attempt is not failed for a contract an earlier one met. A first
+attempt that skips its required action still fails.
+
+**A dependency gets a budgeted share, not a fixed 2,000 characters.** The
+19-finding list reached the dependent step truncated; the worker said so, and
+the verifier held the incomplete coverage against it. Split across the step's
+dependencies (`CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS`, default 16,000),
+and a slice now says it is one — silent truncation is how a step comes to report
+missing coverage without knowing what it is missing.
+
+## AGT-013 — A retry carries what the attempt fetched, not only what it wrote
+
+**Applies to:** `chat_orchestrator._prepare_retries`, `_worker_user_message`
+
+A failed step's retry resumes from `partial_output` when the worker wrote one,
+and otherwise from a bounded digest of the calls it made and what they returned.
+
+**Why:** the two conditions were mutually exclusive in practice. A worker cut at
+its step ceiling never gets to write a partial summary — that is precisely what
+produces `Step produced no output.`, which is what fails verification and sends
+the step back for a retry. So the carry-forward path existed for a case that
+could not reach it, and the retry re-gathered from scratch. Observed on a
+reachability step: `output=0, partial_output=0, budget_capped=True`, and the
+second attempt re-fetched files the first had already read.
+
+**An interrupted attempt also leaves its full trace in the sandbox.** The
+digest above is bounded by what fits in a prompt, which is the wrong shape for
+what a step that made ninety calls has to hand on, so `_persist_step_record`
+writes the whole trace to a file and records it as a receipt — the machinery
+that already tells a delegation about result files then tells it about this
+([SBX-008](sandbox.md)). Best-effort, and only into a sandbox that is already
+open: it is a convenience for the next attempt, never a reason to open one or to
+fail a step that has otherwise finished.
+
+`tool_details` is thin for a *delegating* step — it records the delegations, not
+the sub-agent's calls — so this helps a directly-working step most. The
+sandbox layer has its own carry: the session digest and receipts already tell a
+later delegation what is on disk ([SBX-008](sandbox.md)), which is why the
+observed retry repeated 13 of 99 calls rather than all of them.
+
+## AGT-012 — Running out of budget must not delete what the run already found
+
+**Applies to:** `chat_orchestrator._dispatch_batch` (the degraded/finalizing
+sweeps), `_budget_stop_result`, `_step_evidence`, `_rendered_step_status`
+
+When the run budget enters finalization the dispatcher marks every unfinished
+step `skipped`, which is what stops the retry loop. It must **annotate** the
+step's existing result rather than replace it: the stub it used to write
+(`output: ""`, `tools_used: []`, no `tool_details`) deleted the findings the
+step had already gathered.
+
+A step with retained findings is never *labelled* "skipped" either. `skipped`
+is the routing status; as a label above real evidence it tells the reader to
+discount it, which is the same failure one layer up.
+
+**Why:** a CVE-exploitability run made 33 tool calls, read the repository's
+manifests, lockfile and source, spent 302,679 input tokens — and answered "the
+step was skipped and produced no output or supporting evidence". Nothing
+hallucinated: the worker is killed at its share of the run budget *before* it
+writes its summary, so the result carried evidence and an empty `output`; the
+verifier failed it for having no summary; the retry pass met it at `failed` and
+the sweep overwrote it. `_synthesis_context` forwards `tool_details` precisely
+so a missing summary cannot take a step's findings down with it
+([AGT-009](#agt-009) is the same concern from the planner's side), and the stub
+deleted that safeguard's input. The checkpoint shows it exactly: `step_results`
+went 110,930 bytes → 390 bytes → the answer. Replaying the real state through
+the fixed path hands the synthesizer 12.5k characters of evidence instead of
+"(no output)".
+
+**Identical tool results are charged once.** A worker that re-runs a tool with
+the same arguments records the result again, and an equal split of the evidence
+budget then pays repeatedly for one fact while genuinely new evidence falls off
+the end — 33 recorded calls, 25 distinct, on the run above.
+
+**Don't:** treat "the budget ended the run" as "the run found nothing". The
+terminal status is `budget_exhausted` and the answer must be the partial one the
+evidence supports, with the limit stated.

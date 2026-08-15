@@ -504,14 +504,20 @@ async def test_build_seizu_tools_binds_what_the_conversation_disclosed() -> None
     assert {t.name for t in tools} == {"graph__query", "reports__get", "find_seizu_tools", "call_seizu_tool"}
 
 
-async def test_naming_tools_on_the_delegation_narrows_as_well_as_widens() -> None:
-    """The delegating model knows the task, so naming the tools directs the
-    sub-agent instead of leaving it to work out which one to use -- and keeps
-    the disclosed set it does not need out of its context."""
+async def test_naming_tools_on_the_delegation_widens_and_keeps_what_was_disclosed() -> None:
+    """Naming tools directs the sub-agent; it must not cost it the tools the
+    step already unlocked.
+
+    Replacing the disclosed set made the more specific instruction the less
+    capable one: a delegation under a skill that declared the GitHub tools, but
+    that named one tool of its own, lost the skill's tools and went hunting for
+    them. The catalogue is still out of scope -- this is core plus disclosed
+    plus asked, nothing wider."""
     fake_tools = [
         Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
         Tool(name="reports__get", description="Get report", input_schema={"type": "object", "properties": {}}),
         Tool(name="cve_analysis__get_cve", description="CVE", input_schema={"type": "object", "properties": {}}),
+        Tool(name="roles__list", description="Roles", input_schema={"type": "object", "properties": {}}),
     ]
     with patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)):
         tools = await _build_seizu_tools(
@@ -521,9 +527,10 @@ async def test_naming_tools_on_the_delegation_narrows_as_well_as_widens() -> Non
         )
 
     names = {t.name for t in tools}
-    assert "cve_analysis__get_cve" in names
+    assert "cve_analysis__get_cve" in names  # asked for
+    assert "reports__get" in names  # already disclosed to the step
     assert "graph__query" in names  # the core is always there
-    assert "reports__get" not in names  # disclosed, but not what this task needs
+    assert "roles__list" not in names  # never disclosed: still not the catalogue
 
 
 async def test_a_requested_tool_that_does_not_exist_is_ignored_not_fatal() -> None:
@@ -942,7 +949,7 @@ async def test_handler_injects_seizu_tools_into_inner_agent() -> None:
     fake_result = _make_fake_agent_result("result")
     captured_tools: list[Any] = []
 
-    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None, **_kw: Any) -> Any:
         captured_tools.extend(tools)
         return MagicMock(ainvoke=AsyncMock(return_value=fake_result))
 
@@ -982,7 +989,7 @@ async def test_an_empty_core_still_leaves_the_sandbox_able_to_run_code() -> None
     fake_result = _make_fake_agent_result("result")
     captured_tools: list[Any] = []
 
-    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+    def fake_create_react_agent(*, model: Any, tools: list[Any], prompt: Any = None, **_kw: Any) -> Any:
         captured_tools.extend(tools)
         return MagicMock(ainvoke=AsyncMock(return_value=fake_result))
 
@@ -1819,7 +1826,7 @@ async def test_the_subagent_is_told_how_the_data_is_shaped() -> None:
     backend = _make_fake_backend()
     captured: dict[str, Any] = {}
 
-    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None, **_kw: Any) -> Any:
         captured["prompt"] = prompt
         return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
 
@@ -1843,7 +1850,7 @@ async def test_the_subagent_is_told_what_it_may_spend() -> None:
     chat_budget.set_current_budget_controller(controller)
     captured: dict[str, Any] = {}
 
-    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None, **_kw: Any) -> Any:
         captured["prompt"] = prompt
         return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
 
@@ -1877,7 +1884,7 @@ async def test_a_nearly_spent_scope_tells_the_subagent_to_finish() -> None:
     chat_budget.set_current_budget_controller(controller)
     captured: dict[str, Any] = {}
 
-    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None) -> Any:
+    def fake_agent(*, model: Any, tools: list[Any], prompt: Any = None, **_kw: Any) -> Any:
         captured["prompt"] = prompt
         return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
 
@@ -2171,3 +2178,302 @@ async def test_the_sub_agent_call_carries_a_cache_breakpoint(mocker) -> None:
 
     assert seen[0][0].content == "system"  # untouched
     assert seen[0][-1].content[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_a_receipt_previews_a_document_not_only_row_shaped_json() -> None:
+    """A fetched source file is prose plus a resource object, so the row finder
+    sees no list. Without a head the agent gets a bare path and cannot tell what
+    it holds without spending a run_python to look."""
+    from reporting.services.mcp_builtins.sandbox import _file_result_receipt
+
+    text = "successfully downloaded text file (SHA: abc)\n\n" + ("def handler(request):\n" * 400)
+    receipt = json.loads(_file_result_receipt("/home/user/seizu_results/x.json", text))
+
+    assert receipt["status"] == "too_large_to_return"
+    assert receipt["saved_to"] == "/home/user/seizu_results/x.json"
+    assert "def handler(request):" in receipt["head"]
+    assert receipt["lines"] > 1
+    # Bounded by the preview budget, so a receipt can never be a way of pulling
+    # the file back into context.
+    from reporting import settings
+
+    assert len(receipt["head"].encode()) <= settings.SANDBOX_PREVIEW_MAX_BYTES + len("\n[truncated]")
+
+
+def test_a_row_shaped_receipt_profiles_columns_rather_than_sampling_rows() -> None:
+    """A receipt is read to write code against the file, so it carries names,
+    types and a bounded example each -- not whole rows. Two sample rows of a
+    15-column vulnerability row spent most of their budget on advisory prose and
+    described only the columns those two rows happened to contain."""
+    from reporting.services.mcp_builtins.sandbox import _file_result_receipt
+
+    rows = [{"repo": f"r{i}", "cve": f"CVE-{i}", "epss": 0.5} for i in range(500)]
+    rows[3]["epss"] = None
+    text = json.dumps([*rows])
+    receipt = json.loads(_file_result_receipt("/home/user/seizu_results/y.json", text))
+
+    assert receipt["rows"] == 500
+    assert receipt["columns"]["repo"] == 'str = "r0"'
+    # Nullability is unioned across the sample, not left to whichever row was
+    # looked at first.
+    assert receipt["columns"]["epss"] == "float|null = 0.5"
+    assert "sample" not in receipt
+    assert "head" not in receipt
+
+
+def test_a_receipt_names_the_key_the_rows_live_under() -> None:
+    """Without it the sub-agent writes `d.get("results") or d.get("rows") or []`
+    and is one wrong guess from processing nothing."""
+    from reporting.services.mcp_builtins.sandbox import _file_result_receipt
+
+    text = json.dumps({"results": [{"a": 1} for _ in range(300)], "warnings": []})
+    receipt = json.loads(_file_result_receipt("/home/user/seizu_results/z.json", text))
+
+    assert receipt["rows_at"] == "results"
+    assert 'json.load(open(path))["results"]' in receipt["next_step"]
+
+
+def test_a_long_value_is_bounded_in_the_column_profile() -> None:
+    from reporting.services.mcp_builtins.sandbox import _file_result_receipt
+
+    text = json.dumps([{"blob": "x" * 5000} for _ in range(50)])
+    receipt = json.loads(_file_result_receipt("/home/user/seizu_results/w.json", text))
+
+    assert len(receipt["columns"]["blob"]) < 120
+    assert receipt["columns"]["blob"].endswith('..."')
+
+
+def test_rows_that_are_not_objects_still_get_a_sample() -> None:
+    """Nothing to profile, so describing the values is the only useful shape."""
+    from reporting.services.mcp_builtins.sandbox import _file_result_receipt
+
+    text = json.dumps([f"CVE-2026-{i}" for i in range(400)])
+    receipt = json.loads(_file_result_receipt("/home/user/seizu_results/v.json", text))
+
+    assert receipt["rows"] == 400
+    assert receipt["sample"] == ["CVE-2026-0", "CVE-2026-1"]
+
+
+def test_unsupplied_optional_arguments_are_not_sent_as_nulls() -> None:
+    """The generated args model fills every optional field with None, and an MCP
+    server may reject a null where its schema says string — GitHub answers
+    "parameter sort is not of type string, is <nil>" and the call fails every
+    time it is made, which is what the sub-agent was retrying."""
+    from reporting.services.mcp_builtins.sandbox import _drop_unset_arguments
+
+    assert _drop_unset_arguments({"query": "repo:x", "sort": None, "perPage": None}) == {"query": "repo:x"}
+    # A supplied falsy value is not "unset" and must survive.
+    assert _drop_unset_arguments({"limit": 0, "flag": False, "text": ""}) == {"limit": 0, "flag": False, "text": ""}
+
+
+def test_an_outcome_that_cannot_change_is_recognised() -> None:
+    from reporting.services.mcp_builtins.sandbox import _unchanging_outcome
+
+    assert _unchanging_outcome("[]") == "returned no results"
+    assert _unchanging_outcome('{"results": []}') == "returned no results"
+    assert _unchanging_outcome("(no output)") == "returned no results"
+    assert _unchanging_outcome('{"error": "parameter sort is not of type string"}') == "failed"
+    assert _unchanging_outcome('{"errors": ["Required parameter missing"]}') == "failed"
+    # Anything that might come out differently is left alone and runs again.
+    assert _unchanging_outcome('{"results": [{"repo": "x"}]}') is None
+    assert _unchanging_outcome("some prose output") is None
+
+
+def test_the_repeat_note_keeps_the_original_result() -> None:
+    from reporting.services.mcp_builtins.sandbox import _repeat_note
+
+    note = _repeat_note("[]", "returned no results")
+
+    assert note.startswith("[]")
+    assert "already made" in note
+    assert "returned no results" in note
+
+
+async def test_an_identical_failing_call_is_answered_without_running_again() -> None:
+    """A sub-agent that re-issues a call which cannot succeed pays a round trip
+    and a context copy each time and reaches the same answer. Observed running
+    until the step's budget was gone."""
+    fake_tools = [
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+    ]
+    outcome = SimpleNamespace(blocked=None, text='{"error": "parameter sort is not of type string"}')
+    call = AsyncMock(return_value=outcome)
+    with (
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", call),
+    ):
+        tools = await _build_seizu_tools(_current_user())
+        query = next(t for t in tools if t.name == "graph__query")
+        first = await query.coroutine()
+        second = await query.coroutine()
+
+    assert call.await_count == 1, "the identical repeat should not have reached the tool"
+    assert "parameter sort" in first
+    assert "parameter sort" in second  # the original result is still reported
+    assert "already made" in second
+
+
+async def test_a_call_that_could_come_out_differently_runs_again() -> None:
+    fake_tools = [
+        Tool(name="graph__query", description="Query", input_schema={"type": "object", "properties": {}}),
+    ]
+    outcome = SimpleNamespace(blocked=None, text='{"results": [{"repo": "mappedsky/confidant"}]}')
+    call = AsyncMock(return_value=outcome)
+    with (
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", call),
+    ):
+        tools = await _build_seizu_tools(_current_user())
+        query = next(t for t in tools if t.name == "graph__query")
+        await query.coroutine()
+        await query.coroutine()
+
+    assert call.await_count == 2
+
+
+def test_a_transient_error_is_not_treated_as_settled() -> None:
+    """ "Later" is not "never". A first cut suppressed GitHub's 429 and lost two
+    searches the sub-agent was right to repeat."""
+    from reporting.services.mcp_builtins.sandbox import _unchanging_outcome
+
+    rate_limited = (
+        '{"error": "failed to search code with query \'import urllib3 repo:x\': '
+        'GET https://api.github.com/search/code: 429 try again in 6.892429977s []"}'
+    )
+    assert _unchanging_outcome(rate_limited) is None
+    assert _unchanging_outcome('{"error": "upstream timeout"}') is None
+    assert _unchanging_outcome('{"errors": ["service temporarily unavailable"]}') is None
+    # A rejection that will not change on a retry still settles.
+    assert _unchanging_outcome('{"error": "parameter sort is not of type string"}') == "failed"
+    assert _unchanging_outcome('{"errors": ["Required parameter \'findings\' is missing"]}') == "failed"
+
+
+async def test_a_delegations_inline_results_are_cumulatively_budgeted() -> None:
+    """A per-call bound of any sane size never fires on many medium results: 90
+    source files and code searches of a few KB each, all individually small, put
+    1.1M tokens through one sub-agent's context and exhausted the step."""
+    fake_tools = [Tool(name="graph__query", description="Q", input_schema={"type": "object", "properties": {}})]
+    body = json.dumps({"text": "x" * 4_000})
+    outcome = SimpleNamespace(blocked=None, text=body)
+    backend = _make_fake_backend()
+    with (
+        patch("reporting.settings.SANDBOX_INLINE_RESULT_BUDGET_TOKENS", 2_000),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", AsyncMock(return_value=outcome)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), backend)
+        query = next(t for t in tools if t.name == "graph__query")
+        first = await query.coroutine()
+        # Same call, so vary it: the repeat guard is a different mechanism.
+        second = await query.coroutine(unused="2")
+        third = await query.coroutine(unused="3")
+
+    assert "too_large_to_return" not in first, "the first result is well under any per-call bound"
+    assert "too_large_to_return" in third, "the delegation's inline budget should have been spent by now"
+    assert isinstance(second, str)
+
+
+async def test_the_cumulative_budget_can_be_disabled() -> None:
+    fake_tools = [Tool(name="graph__query", description="Q", input_schema={"type": "object", "properties": {}})]
+    outcome = SimpleNamespace(blocked=None, text=json.dumps({"text": "x" * 4_000}))
+    backend = _make_fake_backend()
+    with (
+        patch("reporting.settings.SANDBOX_INLINE_RESULT_BUDGET_TOKENS", 0),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", AsyncMock(return_value=outcome)),
+    ):
+        tools = await _build_seizu_tools(_current_user(), backend)
+        query = next(t for t in tools if t.name == "graph__query")
+        for index in range(6):
+            result = await query.coroutine(unused=str(index))
+
+    assert "too_large_to_return" not in result
+
+
+def test_a_run_of_already_answered_calls_escalates() -> None:
+    """The per-call note says one call was pointless; it does not say the task
+    is. A sub-agent that ignores the first will usually ignore the fifth."""
+    from reporting.services.mcp_builtins.sandbox import _stuck_notice
+
+    with patch("reporting.settings.SANDBOX_STUCK_REPEAT_LIMIT", 3):
+        assert _stuck_notice(1) == ""
+        assert _stuck_notice(2) == ""
+        notice = _stuck_notice(3)
+
+    assert "nothing further to get this way" in notice
+    assert "Stop calling tools and report now" in notice
+
+
+async def test_the_subagent_trims_what_each_inner_call_re_sends(mocker) -> None:
+    """The sub-agent was the only loop without trimming: the single-agent path
+    and the worker both trim, while every inner delegation call re-sent the whole
+    accumulated exchange — 75,000 tokens per call over 20 calls on one measured
+    step, none of it waste in the loop-detection sense, just the same evidence
+    paid for again each turn."""
+    captured: dict[str, Any] = {}
+
+    def _fake_react_agent(*, model, tools, prompt, pre_model_hook=None, **_kw):
+        captured["hook"] = pre_model_hook
+        return MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("done")))
+
+    trim = mocker.patch(
+        "reporting.services.chat_graph._trim_inner_loop_messages",
+        side_effect=lambda messages, **_kw: messages[:1],
+    )
+    with (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        # Delegation refuses a mock provider outright, which is what CI runs
+        # with: without this the handler returns before it ever builds an agent,
+        # and the test passes only on a machine whose .env names a real one.
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(_make_fake_backend())),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", _fake_react_agent),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ):
+        await _handle_delegate({"task": "do the thing"}, _current_user())
+
+    hook = captured.get("hook")
+    assert hook is not None, "the sub-agent must bound what it re-sends"
+    history = [HumanMessage(content="task"), AIMessage(content="a"), AIMessage(content="b")]
+    update = hook({"messages": history})
+    # Bounds the model's input without touching graph state, so the final answer
+    # is still extracted from the full history.
+    assert list(update) == ["llm_input_messages"]
+    assert update["llm_input_messages"] == history[:1]
+    assert trim.called
+
+
+def test_the_wrap_up_signal_is_re_checked_before_every_call(mocker) -> None:
+    """The note in the system prompt is composed once, when the delegation
+    starts. A delegation that starts with room and then runs for thirty calls
+    was never told it had crossed its share — it worked until it was cut, which
+    is how an unreported result gets lost."""
+    from reporting.services.mcp_builtins.sandbox import _live_budget_note
+
+    controller = MagicMock()
+    controller.scope_soft_limit_reached.return_value = False
+    controller.scope_remaining.return_value = 40_000
+    mocker.patch("reporting.services.chat_budget.current_budget_controller", return_value=controller)
+    mocker.patch("reporting.services.chat_budget.current_budget_scope", return_value="worker:s2")
+
+    # Under its share: nothing extra rides along.
+    assert _live_budget_note() == ""
+
+    # It crosses mid-delegation, and the very next call carries the signal.
+    controller.scope_soft_limit_reached.return_value = True
+    note = _live_budget_note()
+
+    assert "Stop gathering and start concluding" in note
+    assert "40000" in note
+    assert "say what you could not determine" in note
+
+
+def test_no_budget_controller_means_no_note(mocker) -> None:
+    from reporting.services.mcp_builtins.sandbox import _live_budget_note
+
+    mocker.patch("reporting.services.chat_budget.current_budget_controller", return_value=None)
+    mocker.patch("reporting.services.chat_budget.current_budget_scope", return_value="")
+
+    assert _live_budget_note() == ""

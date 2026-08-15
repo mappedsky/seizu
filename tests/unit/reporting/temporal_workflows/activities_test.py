@@ -1082,3 +1082,32 @@ async def test_a_turn_that_no_longer_owns_its_thread_does_not_run(mocker):
         )
 
     produce.assert_not_called()
+
+
+async def test_the_fallback_finalizer_records_a_stop_as_cancelled(mocker):
+    """A user-initiated stop reaches both writers at once: Temporal cancels the
+    activity and the workflow immediately schedules the fallback, which usually
+    wins because the activity is still publishing its closing frames. Recording
+    a blanket "failed" here showed every stop as an error in the UI."""
+    turn = _chat_turn_item()
+    turn.cancel_requested = True
+    turn.status = "running"
+    mocker.patch.object(activities.report_store, "get_chat_turn", AsyncMock(return_value=turn))
+    finish = AsyncMock(return_value=None)
+    mocker.patch.object(activities.report_store, "finish_chat_turn", finish)
+
+    await activities.finalize_chat_turn(ChatTurnInvocation(turn_id="turn-1", timeout_seconds=60))
+
+    assert finish.await_args.args[1] == "canceled"
+
+
+async def test_the_fallback_finalizer_still_records_a_crash_as_failed(mocker):
+    turn = _chat_turn_item()
+    turn.status = "running"
+    mocker.patch.object(activities.report_store, "get_chat_turn", AsyncMock(return_value=turn))
+    finish = AsyncMock(return_value=None)
+    mocker.patch.object(activities.report_store, "finish_chat_turn", finish)
+
+    await activities.finalize_chat_turn(ChatTurnInvocation(turn_id="turn-1", timeout_seconds=60))
+
+    assert finish.await_args.args[1] == "failed"

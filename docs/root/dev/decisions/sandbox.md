@@ -63,8 +63,18 @@ from the oversize test.
 
 Bound = the read-only graph core (`SANDBOX_CORE_TOOLS`) + what the conversation
 disclosed (`chat_graph.current_disclosed_tools()`) + what the delegating call
-named in `tools`. Naming `tools` **narrows** as well as widens: a caller that
-knows the task gets that plus the core, not the disclosed set on top.
+named in `tools`. All three are unions: **naming `tools` widens only**.
+
+**Naming `tools` used to replace the disclosed set, and that was wrong.** A
+sub-agent runs on the same context as the step that spawned it, so a tool that
+step already unlocked — a skill's `tools_required`, most often — is not
+something the sub-agent should have to rediscover. Replacing made the more
+specific instruction the *less* capable one: a delegation under a skill that
+declared the GitHub tools, which then named a tool of its own, lost the skill's
+tools and spent the step's budget hunting for them through
+`find_seizu_skills`/`load_seizu_skill`. The context-economy argument below is
+unaffected — the catalogue is still not in scope, because "disclosed" is what
+this conversation actually unlocked, not what exists.
 
 **The core is configurable, and bypasses disclosure but not RBAC.**
 `_core_tool_names()` reads `SANDBOX_CORE_TOOLS` per call and the result is
@@ -92,6 +102,139 @@ characters.
 **Don't:** treat this as an authorization boundary — see [AGT-002](chat-agent.md).
 RBAC (`chat_safe_only` + `exclude_confirmation_gated`) bounds what `_invoke` can
 reach, and that is unchanged by any of the above.
+
+**Don't:** conclude from a thrashing sub-agent that binding is broken without
+checking that the tools *exist* for that user first. External MCP tools vanish
+from discovery and are replaced by `ext__<proxy>__seizu_authenticate` when the
+proxy 401s — an expired login looks exactly like a binding bug from the trace,
+and a Temporal turn holds no browser token to renew it with ([AGT-010](chat-agent.md)).
+
+## SBX-014 — The sub-agent trims what it re-sends
+
+**Applies to:** the `pre_model_hook` on `create_react_agent` in `_delegate`
+
+The delegation's inner loop bounds its input with the same
+`_trim_inner_loop_messages` the single-agent path and the orchestrator's worker
+use, sized by `chat_context.history_token_budget`.
+
+**Why:** it was the only loop in the system without this. Every inner call
+re-sent the whole accumulated exchange — system prompt, every tool call, every
+result — so cost grew with the square of the work. Measured on a reachability
+step: **20 calls, 1,500,173 tokens, ~75,000 per call**, with the loop detectors
+silent because none of it was repetition. It was the same evidence paid for
+again on every turn.
+
+Returned as `llm_input_messages`, which bounds the model's input without
+touching graph state, so the final answer is still extracted from the full
+history.
+
+**The same hook delivers the wrap-up signal.** `_budget_note` is composed once,
+when the delegation starts, so a delegation that begins with room and then runs
+for thirty calls was never told it had crossed its share -- it worked until it
+was cut, which is exactly how an unreported result is lost. `_live_budget_note`
+re-reads the scope before every inner call and rides last in the input, silent
+until the soft limit is reached. Last, because it changes every call and
+anything that changes invalidates the cached prefix after it -- the same rule
+`chat_graph.session_memory_message` states for the session digest. The trimmer sheds the oldest exchanges into a deterministic digest
+rather than deleting them, so a shed tool result is still represented rather
+than inviting the sub-agent to fetch it again.
+
+**Note the interaction with [SBX-013](#sbx-013):** the cumulative inline budget
+reduces what *arrives* in the context; this reduces what is *re-sent*. Neither
+substitutes for the other, and the second is the larger effect on a long
+delegation.
+
+## SBX-013 — A delegation's inline results are budgeted cumulatively
+
+**Applies to:** `_invoke` in `reporting/services/mcp_builtins/sandbox.py`,
+`SANDBOX_INLINE_RESULT_BUDGET_TOKENS`
+
+Three triggers decide whether a tool result is returned inline or written to a
+file, checked cheapest first: more rows than `CHAT_TOOL_RESULT_MAX_ROWS`, more
+bytes than `SANDBOX_MAX_OUTPUT_BYTES`, or a **cumulative** budget —
+`SANDBOX_INLINE_RESULT_BUDGET_TOKENS` (default 60,000) — spent by everything the
+delegation has already returned inline. Past it, the rest goes to disk whatever
+its individual size. Set 0 to keep only the per-call triggers.
+
+**Why:** the per-call triggers are sized for one big row set, which is what a
+Cypher query produces, and they fire perfectly there. They cannot catch the
+shape that actually exhausts a step: a reachability review made **90 GitHub
+calls of a few KB each — every one under the per-call trigger — put 1.1M tokens
+through one sub-agent's context, and wrote exactly one receipt.** No per-call
+threshold at a sane value catches 90 × 3KB; only a cumulative one does.
+
+**In tokens, not bytes**, because what is being protected is a context window,
+and the bytes-per-token ratio swings about twofold between prose and
+punctuation-dense JSON — a lockfile being the second kind. `count_tokens` is a
+local tokenizer with a content-hash cache; no model is threaded down to the call
+site, so it uses the chars-per-token fallback, which is accurate enough for a
+threshold. Bytes remain the outer safety cap: the guard has to hold before
+anything would want to tokenize a 10MB payload.
+
+**This was only safe once receipts described their contents** ([SBX-012](#)).
+Lowering the trigger with a receipt that could return a bare path would have
+traded a context problem for a blindness problem.
+
+## SBX-012 — A call that cannot come out differently is not made twice
+
+**Applies to:** `_invoke`, `_drop_unset_arguments`, `_unchanging_outcome`,
+`_repeat_note`, `_file_result_receipt` in
+`reporting/services/mcp_builtins/sandbox.py`
+
+Two fixes to the same observed failure — a sub-agent re-issuing one call until
+its step's budget was gone.
+
+**The call was invalid, and ours.** The generated args model gives every
+optional parameter a `None` default, so a parameter the sub-agent never supplied
+reached the wire as an explicit null. An MCP server is entitled to reject that:
+GitHub answers `parameter sort is not of type string, is <nil>`, and the call
+then fails identically however often it is retried. `_drop_unset_arguments`
+removes `None` values before dispatch — absent is what "not supplied" means on
+the wire. Only `None`; `0`, `False` and `""` are supplied values.
+
+**An identical repeat of a settled call is answered from what it returned.**
+Narrowly: a call the server refused *on grounds that will not change*, or one
+that authoritatively returned nothing. "Later" is not "never" — a first cut
+treated every error as settled and suppressed GitHub's `429 try again in 6.9s`,
+permanently losing two searches the sub-agent was right to repeat, so a
+transient marker (429, 5xx, rate limit, timeout, unavailable, connection) sends
+it back to the tool. A false match there only means the call runs again, which
+is the behaviour that existed before the guard. Everything ambiguous runs again, because a sub-agent that repeats a
+call is usually right to — polling, or retrying something transient. The reply
+carries the original result *and* says the call was already made and why
+repeating cannot help, so the sub-agent has something to act on rather than a
+new error to retry.
+
+**A receipt describes shape, not data.** For row-shaped results it carries the
+key the rows live under, then one line per column — type(s) and a bounded
+example (`"epss": "float|null = 0.0068"`) — rather than two whole sample rows.
+The sub-agent reads a receipt to write code against the file, and for that it
+needs names, types, and the *format* of a value: that a severity is `"high"` and
+not `"HIGH"`, that a timestamp is `"2026-05-13T16:16:57.303000000"` and not an
+epoch. Types are unioned across the sampled rows, so a sometimes-null column
+says so instead of depending on which row was looked at first.
+
+Two sample rows carried format too, but at a cost scaling with row width, and
+described only the columns those two rows happened to contain: on a 15-column
+vulnerability row most of the budget went to advisory prose and URLs. Measured
+on that row, the profile is **31% smaller** and covers every column.
+`rows_at` and the access path in `next_step` exist because the sub-agent was
+observed writing `d.get("results") or d.get("rows") or []` — one wrong guess
+away from processing nothing at all. Rows that are not objects keep a sample:
+there are no columns to profile.
+
+**Receipts preview documents, not only row-shaped JSON.** `_result_rows` finds a
+list in a query result but not in a fetched file — that arrives as prose plus a
+resource object — so an oversized document used to come back as nothing but a
+path, and the only way to see what it held was to spend a `run_python`. The
+receipt now falls back to a bounded head, using the same
+`SANDBOX_PREVIEW_MAX_BYTES` budget `preview_file` uses, so it can never become a
+way of pulling the file back into context.
+
+**Why it matters beyond the tokens:** the retry loop is invisible in an answer.
+The run that surfaced it reported a reachability step that "stopped early",
+having spent 718k tokens, and nothing in that output said the same rejected call
+had been made over and over.
 
 ## SBX-004 — Discovery follows `CHAT_LLM_PROGRESSIVE_DISCLOSURE`
 

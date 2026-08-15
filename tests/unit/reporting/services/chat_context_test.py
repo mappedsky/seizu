@@ -464,3 +464,33 @@ def test_fingerprints_are_hashes_and_bounded(_diagnostics_on, mocker):
     assert len(chat_context._FINGERPRINTS) <= 4
     stored = next(iter(chat_context._FINGERPRINTS.values()))
     assert "secret" not in stored.system
+
+
+def test_the_output_allowance_is_the_smaller_of_configured_and_the_models_limit(mocker):
+    """Call sites were picking constants. A summary pass asking for 1,024
+    produced no text at all on a reasoning model, and the number had no
+    relationship to what that model could have given."""
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 4096)
+    mocker.patch("reporting.services.chat_context.model_name_of", return_value="some/model")
+    chat_context._OUTPUT_CACHE.clear()
+    mocker.patch("litellm.get_model_info", return_value={"max_output_tokens": 2048})
+
+    assert chat_context.max_output_tokens(object()) == 2048
+
+
+def test_a_model_that_reports_no_limit_keeps_the_configured_allowance(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 4096)
+    mocker.patch("reporting.services.chat_context.model_name_of", return_value="self/hosted")
+    chat_context._OUTPUT_CACHE.clear()
+    mocker.patch("litellm.get_model_info", return_value={})
+
+    assert chat_context.max_output_tokens(object()) == 4096
+
+
+def test_an_unknown_model_does_not_raise(mocker):
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 1024)
+    mocker.patch("reporting.services.chat_context.model_name_of", return_value="mystery")
+    chat_context._OUTPUT_CACHE.clear()
+    mocker.patch("litellm.get_model_info", side_effect=RuntimeError("unknown"))
+
+    assert chat_context.max_output_tokens(object()) == 1024

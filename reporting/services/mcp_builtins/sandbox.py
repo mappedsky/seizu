@@ -181,23 +181,37 @@ _RESULT_DIR = "/home/user/seizu_results"
 _RECEIPT_SAMPLE_ROWS = 2
 
 
+_ROW_CONTAINER_KEYS = ("results", "rows", "records", "items", "data")
+
+
 def _result_rows(text: str) -> list[Any] | None:
     """Best-effort row list from a tool result, for describing it in a receipt.
 
     Tool results are strings by contract, so this parses rather than assumes.
     Returning ``None`` simply means the receipt describes bytes instead of rows.
     """
+    located = _locate_rows(text)
+    return None if located is None else located[1]
+
+
+def _locate_rows(text: str) -> tuple[str | None, list[Any]] | None:
+    """The rows and the key they live under, or None.
+
+    The key matters to whoever reads the file: a sub-agent that is not told it
+    writes ``json.load(open(path))["results"] or ["rows"] or []`` and guesses,
+    which is a wrong guess away from processing nothing at all.
+    """
     try:
         parsed = json.loads(text)
     except (ValueError, TypeError):
         return None
     if isinstance(parsed, list):
-        return parsed
+        return (None, parsed)
     if isinstance(parsed, dict):
-        for key in ("results", "rows", "records", "items", "data"):
+        for key in _ROW_CONTAINER_KEYS:
             value = parsed.get(key)
             if isinstance(value, list):
-                return value
+                return (key, value)
     return None
 
 
@@ -235,6 +249,130 @@ def _file_preview(path: str, content: str) -> str:
     return json.dumps(summary, default=str) + "\n\n" + _truncate_bytes(content, budget)
 
 
+def _estimate_tokens(text: str) -> int:
+    """Tokens ``text`` will cost the sub-agent, for budgeting only.
+
+    Tokens rather than bytes because what is being protected is a context
+    window: the bytes-per-token ratio swings about twofold between prose and
+    punctuation-dense JSON, and a lockfile is the second kind. ``count_tokens``
+    is a local tokenizer with a content-hash cache, and falls back to a
+    chars-per-token estimate when it cannot identify the model -- which is
+    accurate enough for a threshold, and is why no model is threaded down here
+    to get an exact count.
+    """
+    return chat_context.count_tokens(None, text)
+
+
+def _drop_unset_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Drop optional parameters the caller never supplied.
+
+    The generated args model gives every optional field a ``None`` default, so
+    an unsupplied parameter reaches the wire as an explicit null -- and an MCP
+    server is entitled to reject a null where its schema says string. GitHub's
+    answers "parameter sort is not of type string, is <nil>", so the call fails
+    identically every time it is made, which is exactly what a sub-agent was
+    observed retrying. Absent is what "not supplied" means on the wire.
+
+    Only ``None`` is dropped: ``0``, ``False`` and ``""`` are supplied values.
+    """
+    return {key: value for key, value in arguments.items() if value is not None}
+
+
+# Error text that says "later, not never": retrying is the correct response, so
+# these must never be treated as settled. Observed the hard way -- a first cut
+# suppressed GitHub's "429 try again in 6.9s" and permanently lost two searches
+# the sub-agent was right to repeat. A false match here only means the call runs
+# again, which is the behaviour that existed before the guard.
+_TRANSIENT_ERROR_MARKERS = (
+    "429",
+    "rate limit",
+    "ratelimit",
+    "try again",
+    "timeout",
+    "timed out",
+    "temporarily",
+    "unavailable",
+    "connection",
+    "eof",
+    " 500",
+    " 502",
+    " 503",
+    " 504",
+)
+
+
+def _is_transient_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _unchanging_outcome(text: str) -> str | None:
+    """Why re-running this exact call cannot help, or None if it might.
+
+    Deliberately narrow. A sub-agent that repeats a call is usually right to --
+    polling, or retrying something transient -- so this covers only the two
+    shapes observed burning a step's budget with no possible progress: a call
+    the server refused on grounds that will not change, and one that
+    authoritatively returned nothing. Anything ambiguous is left alone and runs
+    again.
+    """
+    stripped = text.strip()
+    if not stripped or stripped in ("(no output)", "[]", "{}"):
+        return "returned no results"
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list) and not parsed:
+        return "returned no results"
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("error"), str):
+            return None if _is_transient_error(parsed["error"]) else "failed"
+        if isinstance(parsed.get("errors"), list) and parsed["errors"]:
+            joined = " ".join(str(item) for item in parsed["errors"])
+            return None if _is_transient_error(joined) else "failed"
+        rows = _result_rows(stripped)
+        if rows is not None and not rows:
+            return "returned no results"
+    return None
+
+
+def _stuck_notice(streak: int) -> str:
+    """Escalate when a delegation keeps asking for what it has already been told.
+
+    The per-call note says one call was pointless; it does not say the *task* is.
+    A run of them does, and the sub-agent that ignores the first will usually
+    ignore the fifth, so this states the situation in terms it can act on
+    rather than repeating the same sentence.
+    """
+    from reporting import settings as _settings
+
+    limit = max(2, _settings.SANDBOX_STUCK_REPEAT_LIMIT)
+    if streak < limit:
+        return ""
+    return (
+        f"\n\n[{streak} calls in a row have returned results you already had. There is nothing further to"
+        " get this way. Stop calling tools and report now: what you established, what you could not, and"
+        " what data would be needed to finish. An incomplete answer that says so is what is wanted here.]"
+    )
+
+
+def _repeat_note(text: str, reason: str) -> str:
+    """The answer to an identical repeat of a call that cannot come out differently.
+
+    Returned without calling the tool again: the sub-agent was observed
+    re-issuing the same failing call until the step's budget ran out, which
+    costs a round trip and a context copy each time and cannot reach a different
+    answer. Says what happened rather than only refusing, so the reply is
+    something to act on instead of a new error to retry.
+    """
+    return (
+        f"{text}\n\n[This exact call was already made in this task and {reason}. It was not run again, "
+        "because the same arguments produce the same outcome. Change the arguments, use a different tool, "
+        "or report what you have — including that this could not be determined.]"
+    )
+
+
 def _file_result_receipt(path: str, text: str) -> str:
     """Describe a result too large to return, which was written to the sandbox.
 
@@ -243,22 +381,44 @@ def _file_result_receipt(path: str, text: str) -> str:
     situation rather than recommending a habit: this result *cannot* be
     returned, so reading the file is the only way to see it, and re-running the
     query will produce the same outcome.
+
+    **Everything gets a preview, not only row-shaped JSON.** ``_result_rows``
+    finds a list in a query result but not in a document -- a fetched source
+    file arrives as prose plus a resource object -- so a large file used to come
+    back as nothing but a path, and the agent could not tell what it had without
+    spending a ``run_python`` to look. The head is bounded by the same
+    ``SANDBOX_PREVIEW_MAX_BYTES`` budget ``preview_file`` uses, so the receipt
+    cannot become a way of pulling the data back into context.
     """
     receipt: dict[str, Any] = {
         "status": "too_large_to_return",
         "saved_to": path,
         "bytes": len(text.encode()),
     }
-    rows = _result_rows(text)
-    if rows is not None:
+    located = _locate_rows(text)
+    rows = None if located is None else located[1]
+    if located is not None and rows is not None:
+        container, _ = located
         receipt["rows"] = len(rows)
-        columns = _result_columns(rows)
+        receipt["rows_at"] = container
+        columns = _column_profile(rows)
         if columns:
             receipt["columns"] = columns
-        receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+        else:
+            # Rows that are not objects (scalars, lists): describe them the old
+            # way, since there are no columns to profile.
+            receipt["sample"] = rows[:_RECEIPT_SAMPLE_ROWS]
+    else:
+        head_budget = max(0, settings.SANDBOX_PREVIEW_MAX_BYTES)
+        if head_budget:
+            receipt["lines"] = text.count("\n") + 1
+            receipt["head"] = _truncate_bytes(text, head_budget)
+    access = "json.load(open(path))"
+    if receipt.get("rows_at"):
+        access += f'["{receipt["rows_at"]}"]'
     receipt["next_step"] = (
-        f"The full result is in {path}; only the sample above was returned. Read or process the file with "
-        "run_python (e.g. json.load(open(path))). Re-running this call will return this same receipt."
+        f"The full result is in {path}; only its shape above was returned. Read or process the file with "
+        f"run_python ({access} gives the rows). Re-running this call will return this same receipt."
     )
     return json.dumps(receipt, default=str)
 
@@ -292,16 +452,75 @@ def _bound_tool_names(
 ) -> set[str]:
     """Which of the reachable tools get bound as typed tools for this delegation.
 
-    ``requested`` narrows as well as widens; an unknown name is ignored, since
-    the RBAC-filtered ``reachable`` list is the authority on what exists. See
-    SBX-003 in docs/root/dev/decisions/sandbox.md.
+    Core + what the conversation disclosed + what the call named, and an unknown
+    name is ignored, since the RBAC-filtered ``reachable`` list is the authority
+    on what exists. ``requested`` **widens only**: a sub-agent runs on the same
+    context as the step that spawned it, so a tool that step already unlocked --
+    a skill's ``tools_required``, most often -- is not something the sub-agent
+    should have to rediscover. Naming ``tools`` used to replace the disclosed
+    set, which made the more specific instruction the more capable one, and left
+    a delegation hunting for what its own skill had declared. See SBX-003 in
+    docs/root/dev/decisions/sandbox.md.
+
+    The catalogue is still not in scope: nothing here widens beyond core plus
+    what this conversation has actually disclosed.
     """
     names = {tool.name for tool in reachable}
     bound = {name for name in _core_tool_names() if name in names}
     asked = {name for name in (requested or []) if name in names}
-    if asked:
-        return bound | asked
-    return bound | {name for name in (disclosed or frozenset()) if name in names}
+    return bound | asked | {name for name in (disclosed or frozenset()) if name in names}
+
+
+_PROFILE_SAMPLE_ROWS = 20
+_PROFILE_EXAMPLE_CHARS = 60
+
+
+def _example_of(value: Any) -> Any:
+    """A bounded exemplar: enough to show the format, never the payload."""
+    if isinstance(value, str):
+        return value if len(value) <= _PROFILE_EXAMPLE_CHARS else value[:_PROFILE_EXAMPLE_CHARS] + "..."
+    if isinstance(value, dict):
+        return f"{{{len(value)} keys}}"
+    if isinstance(value, list):
+        return f"[{len(value)} items]"
+    return value
+
+
+def _column_profile(rows: list[Any]) -> dict[str, str]:
+    """Per column, its type(s) and one short example, across the first rows.
+
+    Replaces handing back whole sample rows. A sub-agent reads a receipt to
+    write code against the file, and for that it needs names, types and the
+    *shape* of a value -- that a severity is ``"high"`` and not ``"HIGH"``, that
+    a timestamp is ``"2026-05-13T16:16:57.303000000"`` and not an epoch. Two
+    whole rows carry that too, but at a cost that scales with row width and
+    covers only whatever those two rows happened to contain: on a 15-column
+    vulnerability row, most of the budget went to advisory prose and URLs.
+    A bounded example per column is smaller, and describes every column.
+
+    Types are unioned across the sample, so a column that is sometimes null
+    says so rather than depending on which row was looked at.
+    """
+    profile: dict[str, dict[str, Any]] = {}  # name -> {"types": [...], "example": Any}
+    for row in rows[:_PROFILE_SAMPLE_ROWS]:
+        if not isinstance(row, dict):
+            continue
+        for key, value in row.items():
+            entry = profile.setdefault(key, {"types": [], "example": None})
+            type_name = "null" if value is None else type(value).__name__
+            if type_name not in entry["types"]:
+                entry["types"].append(type_name)
+            if entry["example"] is None and value is not None:
+                entry["example"] = _example_of(value)
+    # "type = example" as one string rather than a nested object: the consumer
+    # is a model reading JSON, and the object form spent about fifteen
+    # characters of scaffolding per column -- on a fifteen-column row that ate
+    # the whole saving over sending sample rows.
+    described: dict[str, str] = {}
+    for key, entry in profile.items():
+        types = "|".join(entry["types"])
+        described[key] = types if entry["example"] is None else f"{types} = {json.dumps(entry['example'], default=str)}"
+    return described
 
 
 def _result_columns(rows: list[Any] | None) -> list[str]:
@@ -389,6 +608,14 @@ async def _build_seizu_tools(
     _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
     # Shared by every tool in this delegation so paths stay distinct.
     _result_seq = itertools.count(1)
+    # What each exact call already returned, for calls whose outcome cannot
+    # change on a retry. See _repeat_note.
+    _settled: dict[str, str] = {}
+    # Tokens this delegation has already returned inline. See _inline_budget_spent.
+    _inline_spent = [0]
+    # Consecutive calls that told this delegation nothing it did not already
+    # have. See _stuck_notice.
+    _repeat_streak = [0]
 
     async def _invoke(tool_name: str, arguments: dict[str, Any]) -> str:
         """Run one Seizu tool for the sub-agent, however it was reached.
@@ -400,6 +627,15 @@ async def _build_seizu_tools(
         """
         from reporting import settings as _settings
         from reporting.services import mcp_runtime as _rt
+
+        arguments = _drop_unset_arguments(arguments)
+
+        signature = f"{tool_name}:{json.dumps(arguments, sort_keys=True, default=str)}"
+        if (settled := _settled.get(signature)) is not None:
+            _repeat_streak[0] += 1
+            notice = _stuck_notice(_repeat_streak[0])
+            return settled + notice if notice else settled
+        _repeat_streak[0] = 0
 
         # Fetch to the file bounds when a sandbox exists, because whether a
         # result is oversized cannot be known before fetching it, and the
@@ -427,17 +663,32 @@ async def _build_seizu_tools(
             **call_kwargs,
         )
         if outcome.blocked:
-            return f"[blocked: {outcome.blocked}]"
+            blocked = f"[blocked: {outcome.blocked}]"
+            _settled[signature] = _repeat_note(blocked, "was blocked")
+            return blocked
         text = outcome.text or "(no output)"
+        if (repeat_reason := _unchanging_outcome(text)) is not None:
+            _settled[signature] = _repeat_note(text, repeat_reason)
 
         # Size decides, not the model, and both bounds are load-bearing --
         # see SBX-002 in docs/root/dev/decisions/sandbox.md. Neither the
         # trigger nor the row cap survives being "simplified".
         rows = _result_rows(text)
-        oversized = len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES or (
-            rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS
+        # Three triggers, cheapest first. The third is cumulative: a per-call
+        # bound of any sane size never fires on a workload of many medium
+        # results -- 90 source files and code searches of a few KB each, all
+        # individually small, put 1.1M tokens through one sub-agent's context
+        # and exhausted the step. Once a delegation has returned this much
+        # inline, the rest goes to disk regardless of individual size.
+        estimated = _estimate_tokens(text)
+        budget = max(0, _settings.SANDBOX_INLINE_RESULT_BUDGET_TOKENS)
+        oversized = (
+            (rows is not None and len(rows) > _settings.CHAT_TOOL_RESULT_MAX_ROWS)
+            or len(text.encode()) > _settings.SANDBOX_MAX_OUTPUT_BYTES
+            or (budget > 0 and _inline_spent[0] + estimated > budget)
         )
         if backend is None or not oversized:
+            _inline_spent[0] += estimated
             return _truncate_bytes(text, _settings.SANDBOX_MAX_OUTPUT_BYTES)
 
         # Unique per call, not just per delegation: delegations in one step
@@ -1126,6 +1377,33 @@ def _subagent_prompt(tool_names: set[str]) -> str:
     return _SUBAGENT_PROMPT.replace(_DISCOVERY_PLACEHOLDER, f"{discovery}\n{_fallback_clause(tool_names)}")
 
 
+def _live_budget_note() -> str:
+    """The wrap-up instruction, re-checked before every inner call.
+
+    The note in the system prompt is composed once, when the delegation starts,
+    and a delegation that starts with room and then runs for thirty calls is
+    never told it crossed its share -- it works until it is cut, which is what
+    losing an unreported result looks like from the inside. This re-reads the
+    scope each turn, so the signal arrives when the condition does.
+
+    Silent until the soft limit is reached, so an ordinary delegation carries
+    nothing extra.
+    """
+    controller = chat_budget.current_budget_controller()
+    scope = chat_budget.current_budget_scope()
+    if controller is None or not scope or not controller.scope_soft_limit_reached(scope):
+        return ""
+    remaining = controller.scope_remaining(scope)
+    if remaining is None:
+        return ""
+    return (
+        f"[Budget: about {remaining} tokens remain for this step and most of its allowance is spent."
+        " Stop gathering and start concluding. Produce your result from what you already have --"
+        " including the files you saved -- and say what you could not determine. Being cut off"
+        " mid-task loses everything you have not reported.]"
+    )
+
+
 def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
     """Tell the sub-agent what it may spend, in terms it can act on."""
     if remaining is None:
@@ -1245,7 +1523,35 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         system_prompt = _subagent_prompt({tool.name for tool in tools}) + budget_note
         tools = _wrap_with_detail_events(tools, writer, parent_id=parent_id, children=children)
         model = _get_sandbox_model()
-        agent = create_react_agent(model=model, tools=tools, prompt=system_prompt)
+
+        def _trim_before_model(state: dict[str, Any]) -> dict[str, Any]:
+            """Bound what each inner call re-sends. See SBX-014.
+
+            The sub-agent was the only loop in the system without this: the
+            single-agent path and the worker both trim, while every inner
+            delegation call re-sent the whole accumulated exchange. Measured at
+            75,000 tokens per call over 20 calls -- 1.5M for one step, none of it
+            waste in the loop-detection sense, just the same evidence paid for
+            again on every turn.
+
+            ``llm_input_messages`` bounds the model's input without touching
+            graph state, so the final answer is still extracted from the full
+            history.
+            """
+            # Imported here: chat_graph imports the builtin registry this
+            # module is part of, so a module-level import is a cycle.
+            from reporting.services.chat_graph import _trim_inner_loop_messages
+
+            messages = state.get("messages") or []
+            budget = chat_context.history_token_budget(model)
+            trimmed = _trim_inner_loop_messages(messages, model=model, max_tokens=budget)
+            note = _live_budget_note()
+            # Last, and only in the model's input: it changes every call, and
+            # anything that changes invalidates the cached prefix after it
+            # (chat_graph.session_memory_message states the same rule).
+            return {"llm_input_messages": [*trimmed, HumanMessage(content=note)] if note else trimmed}
+
+        agent = create_react_agent(model=model, tools=tools, prompt=system_prompt, pre_model_hook=_trim_before_model)
         result = await agent.ainvoke({"messages": [HumanMessage(content=_prompt_for(backend))]})
         messages = result.get("messages", [])
         for msg in reversed(messages):
