@@ -2422,6 +2422,10 @@ async def test_the_subagent_trims_what_each_inner_call_re_sends(mocker) -> None:
     )
     with (
         patch("reporting.settings.SANDBOX_ENABLED", True),
+        # Delegation refuses a mock provider outright, which is what CI runs
+        # with: without this the handler returns before it ever builds an agent,
+        # and the test passes only on a machine whose .env names a real one.
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
         patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
         patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
         patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(_make_fake_backend())),
