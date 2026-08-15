@@ -109,6 +109,42 @@ def context_window_tokens(model: Any) -> int:
 _WINDOW_CACHE: dict[str, int] = {}
 
 
+def max_output_tokens(model: Any) -> int:
+    """The most one response may be asked for, in tokens.
+
+    The smaller of what is configured (``CHAT_LLM_MAX_TOKENS``) and what the
+    model will actually accept, from the same litellm model database
+    :func:`context_window_tokens` reads. A model that reports nothing keeps the
+    configured value, and an unknown model falls back to it too -- guessing low
+    here truncates an answer, where guessing high is refused outright by some
+    providers.
+
+    Exists because call sites were picking constants. A summary pass asking for
+    1,024 tokens produced no text at all on a reasoning model -- the allowance
+    went on reasoning and nothing was left to say -- and the number had no
+    relationship to what that model could have given.
+    """
+    configured = max(1, settings.CHAT_LLM_MAX_TOKENS)
+    model_name = model_name_of(model)
+    if not model_name:
+        return configured
+    cached = _OUTPUT_CACHE.get(model_name)
+    if cached is None:
+        cached = 0
+        try:
+            from litellm import get_model_info
+
+            info = get_model_info(model_name) or {}
+            cached = int(info.get("max_output_tokens") or 0)
+        except Exception:
+            logger.info("no output limit reported for %s; using the configured %d", model_name, configured)
+        _OUTPUT_CACHE[model_name] = cached
+    return min(configured, cached) if cached > 0 else configured
+
+
+_OUTPUT_CACHE: dict[str, int] = {}
+
+
 def history_token_budget(model: Any) -> int:
     """Tokens of prior conversation one call may carry.
 

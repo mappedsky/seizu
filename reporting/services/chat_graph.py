@@ -1187,7 +1187,9 @@ async def _auto_continue_answer(
                 # default: it is what the budget already reserves for this turn, and
                 # a known cap is what lets _effective_finish_reason tell a
                 # continuation that was itself cut off from one that finished.
-                max_output_tokens=settings.CHAT_LLM_MAX_TOKENS,
+                # Clamped to what the model accepts -- above a provider's ceiling
+                # the request is refused, not quietly reduced.
+                max_output_tokens=chat_context.max_output_tokens(model),
             )
         except BudgetExceeded:
             # A continuation extends an answer the user already has; it is never

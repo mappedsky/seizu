@@ -12,7 +12,7 @@ import inspect
 import logging
 import re
 from html import escape
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import TypeAdapter, ValidationError
 from temporalio import activity
@@ -1096,21 +1096,30 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
 async def finalize_chat_turn(invocation: ChatTurnInvocation) -> None:
     """Close a turn whose producer did not get to close it itself.
 
-    Only reached when the activity died with its worker or timed out, so no
-    code of ours ran at the end. Idempotent: a turn that is already terminal is
-    left alone.
+    Reached when the activity died with its worker or timed out, so no code of
+    ours ran at the end. Idempotent: a turn that is already terminal is left
+    alone.
 
     The read below is only an early out. The *store* is what settles this: the
     write moves a turn out of `running` and no further, so a turn that is
     finishing itself right now -- the spurious-timeout case, where the activity
     is alive and simply went quiet -- keeps its own outcome rather than having
     this one overwrite it.
+
+    **Records the outcome the turn was already heading for, not a blanket
+    failure.** Cancellation reaches both writers at once -- Temporal cancels the
+    activity and the workflow immediately schedules this -- and the activity
+    still has its closing frames to publish, so this one usually wins by a
+    second or two. Writing "failed" then turned every user-initiated stop into
+    an error in the UI while the activity's own "canceled" lost the race. The
+    stop is recorded on the turn before either writer runs, so both agree.
     """
     turn = await report_store.get_chat_turn(invocation.turn_id)
     if turn is None or turn.status != "running":
         return
-    recorded = await report_store.finish_chat_turn(invocation.turn_id, "failed", turn.last_seq or 0)
-    if recorded is not None and recorded.status != "failed":
+    status: Literal["failed", "canceled"] = "canceled" if turn.cancel_requested else "failed"
+    recorded = await report_store.finish_chat_turn(invocation.turn_id, status, turn.last_seq or 0)
+    if recorded is not None and recorded.status != status:
         logger.info(
             "A chat turn closed itself before the fallback could",
             extra={"turn_id": invocation.turn_id, "recorded": recorded.status},
@@ -1118,5 +1127,5 @@ async def finalize_chat_turn(invocation: ChatTurnInvocation) -> None:
         return
     logger.warning(
         "Closed a chat turn whose producer did not finish it",
-        extra={"turn_id": invocation.turn_id},
+        extra={"turn_id": invocation.turn_id, "status": status},
     )
