@@ -9,15 +9,15 @@ from typing import Any
 
 import jsonschema
 import neo4j.exceptions
-from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool
+from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool, ToolAnnotations
 from pydantic import ValidationError
 
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
-from reporting.schema.confirmations import ConfirmationSource
+from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
 from reporting.schema.mcp_config import render_skill_prompt
-from reporting.services import action_confirmations, report_store, reporting_neo4j
+from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
@@ -45,6 +45,7 @@ class ChatBlockReason(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     NOT_AVAILABLE = "not_available"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    AUTHENTICATION_REQUIRED = "authentication_required"
 
 
 @dataclass(frozen=True)
@@ -343,6 +344,17 @@ async def list_tools_for_user(
         except Exception:
             logger.exception("Failed to load tools from store for MCP listing")
 
+    # External proxies are an agent capability, not a transparent federation of
+    # Seizu's own MCP endpoint. Keep them on the chat-safe path so an MCP client
+    # connecting to Seizu does not unexpectedly inherit a second trust domain.
+    if chat_safe_only:
+        tools.extend(
+            await external_mcp.list_tools_for_user(
+                current_user,
+                exclude_confirmation_gated=exclude_confirmation_gated,
+            )
+        )
+
     return tools
 
 
@@ -394,6 +406,7 @@ async def call_tool_for_chat(
     confirmation_batch_id: str | None = None,
     bypass_confirmations: bool = False,
     confirmation_pre_approved: bool = False,
+    external_tool_annotations: ToolAnnotations | None = None,
 ) -> ChatActionOutcome:
     """Chat-oriented tool call returning the body together with a block reason.
 
@@ -436,6 +449,7 @@ async def call_tool_for_chat(
             confirmation_batch_id=confirmation_batch_id,
             confirmation_pre_approved=confirmation_pre_approved,
             bypass_confirmations=bypass_confirmations,
+            external_tool_annotations=external_tool_annotations,
         ),
     )
     return ChatActionOutcome(text=_text_content_to_string(content), blocked=blocked)
@@ -488,6 +502,7 @@ async def _call_tool_core(
     confirmation_batch_id: str | None = None,
     bypass_confirmations: bool = False,
     confirmation_pre_approved: bool = False,
+    external_tool_annotations: ToolAnnotations | None = None,
 ) -> tuple[list[TextContent], ChatBlockReason | None]:
     args = arguments or {}
     perms = _permissions(current_user, permissions)
@@ -496,6 +511,95 @@ async def _call_tool_core(
             text_response({"error": f"Permission denied: {gate_permission.value}"}),
             ChatBlockReason.PERMISSION_DENIED,
         )
+
+    external = external_mcp.parse_namespaced_tool_name(name)
+    if external is not None:
+        proxy, remote_name = external
+        if not chat_safe_only:
+            return (
+                text_response({"error": f"Tool '{name}' is only available to the Seizu agent"}),
+                ChatBlockReason.NOT_AVAILABLE,
+            )
+        if current_user is None:
+            return (
+                text_response({"error": "External MCP tools require an authenticated user"}),
+                ChatBlockReason.PERMISSION_DENIED,
+            )
+
+        needs_confirmation = external_mcp.tool_requires_confirmation(
+            proxy,
+            remote_name,
+            external_tool_annotations,
+        )
+        if needs_confirmation and bypass_confirmations:
+            if Permission.CHAT_BYPASS_PERMISSIONS.value not in perms:
+                return text_response(
+                    {"error": f"Permission denied: {Permission.CHAT_BYPASS_PERMISSIONS.value}"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            logger.info(
+                "External MCP action confirmation bypassed",
+                extra={
+                    "type": "AUDIT",
+                    "tool": name,
+                    "proxy": proxy.name,
+                    "user": current_user.user.user_id,
+                    "source": "bypass",
+                },
+            )
+        elif needs_confirmation and confirmation_pre_approved:
+            pass
+        elif needs_confirmation and confirmation_source is None:
+            logger.warning(
+                "Refused external MCP tool reached without a confirmation source",
+                extra={"type": "AUDIT", "tool": name, "proxy": proxy.name},
+            )
+            return text_response(
+                {"error": f"Tool '{name}' requires action confirmation, which is unavailable in this context"}
+            ), ChatBlockReason.PERMISSION_DENIED
+        elif needs_confirmation:
+            if confirmation_session_key is None:
+                return text_response(
+                    {"error": f"Tool '{name}' requires a session key for confirmation"}
+                ), ChatBlockReason.PERMISSION_DENIED
+            assert confirmation_source is not None
+            confirmation = await action_confirmations.ensure_confirmation(
+                user_id=current_user.user.user_id,
+                source=confirmation_source,
+                session_key=confirmation_session_key,
+                tool_name=name,
+                target=ActionConfirmationTarget(
+                    action="call",
+                    resource_type="external_mcp_tool",
+                    resource_id=name,
+                ),
+                arguments=args,
+                batch_id=confirmation_batch_id,
+            )
+            if confirmation is not None:
+                if confirmation.status == "executed":
+                    return text_response(
+                        {"notice": f"Tool '{name}' was already executed by a concurrent request."}
+                    ), None
+                payload = action_confirmations.confirmation_required_payload(confirmation)
+                if confirmation.status == "denied":
+                    payload["error"] = "Action was denied for this confirmation window"
+                return text_response(payload), ChatBlockReason.CONFIRMATION_REQUIRED
+
+        try:
+            result = await external_mcp.call_tool(
+                proxy,
+                remote_name,
+                args,
+                current_user,
+                max_bytes=_effective_limits(result_max_rows, result_max_bytes).max_bytes,
+            )
+        except external_mcp.ExternalMCPAuthenticationRequired as exc:
+            return text_response(external_mcp.authentication_payload(exc)), ChatBlockReason.AUTHENTICATION_REQUIRED
+        except external_mcp.ExternalMCPError as exc:
+            raise _ToolFailure({"error": str(exc)}) from exc
+        if result.is_error:
+            raise _ToolFailure({"error": result.text})
+        return [TextContent(type="text", text=result.text)], None
 
     builtin = find_builtin(name, include_chat_only=include_chat_only)
     if builtin is not None:

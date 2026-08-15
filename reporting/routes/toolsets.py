@@ -26,7 +26,7 @@ from reporting.schema.mcp_config import (
     UpdateToolsetRequest,
     validate_tool_arguments,
 )
-from reporting.services import report_store, reporting_neo4j
+from reporting.services import external_mcp, report_store, reporting_neo4j
 from reporting.services.mcp_builtins.synthetic import (
     builtin_tool,
     builtin_tools_for_group,
@@ -42,7 +42,7 @@ router = APIRouter()
 
 
 def _reject_builtin_mutation(toolset_id: str) -> None:
-    """Raise an error if the value refers to or reserves a synthetic built-in.
+    """Raise an error if the value refers to a read-only synthetic toolset.
 
     Accepts either a toolset ID (update/delete) or a proposed name (create).
     - Existing builtin ID  → 403 (read-only)
@@ -50,6 +50,8 @@ def _reject_builtin_mutation(toolset_id: str) -> None:
     """
     if is_builtin_toolset_id(toolset_id):
         raise HTTPException(status_code=403, detail="Built-in toolsets are read-only")
+    if external_mcp.parse_external_toolset_id(toolset_id) is not None:
+        raise HTTPException(status_code=403, detail="External MCP toolsets are read-only")
     if toolset_id.startswith("__builtin_"):
         raise HTTPException(
             status_code=400,
@@ -82,10 +84,11 @@ def _with_effective_tool_state(tool: ToolItem, toolset: ToolsetListItem) -> Tool
 async def list_toolsets(
     current: CurrentUser = Depends(require_permission(Permission.TOOLSETS_READ)),
 ) -> ToolsetListResponse:
-    """List all toolsets (built-ins first, then user-defined)."""
+    """List built-in, configured external, and user-defined toolsets."""
     builtins = builtin_toolsets()
+    external = external_mcp.external_toolsets()
     user_toolsets = await report_store.list_toolsets()
-    return ToolsetListResponse(toolsets=builtins + user_toolsets)
+    return ToolsetListResponse(toolsets=builtins + external + user_toolsets)
 
 
 @router.post("/api/v1/toolsets", response_model=ToolsetListItem, status_code=201)
@@ -112,6 +115,9 @@ async def get_toolset(
     current: CurrentUser = Depends(require_permission(Permission.TOOLSETS_READ)),
 ) -> ToolsetListItem:
     """Return a toolset by ID."""
+    external = external_mcp.parse_external_toolset_id(toolset_id)
+    if external is not None:
+        return next(item for item in external_mcp.external_toolsets() if item.toolset_id == toolset_id)
     group = group_name_from_toolset_id(toolset_id)
     if group is not None:
         synthetic = builtin_toolset(group)
@@ -167,6 +173,8 @@ async def list_toolset_versions(
     current: CurrentUser = Depends(require_permission(Permission.TOOLSETS_READ)),
 ) -> ToolsetVersionListResponse:
     """List all versions of a toolset."""
+    if external_mcp.parse_external_toolset_id(toolset_id) is not None:
+        return ToolsetVersionListResponse(versions=[])
     if is_builtin_toolset_id(toolset_id):
         # Built-ins ship with the application — no stored version history.
         return ToolsetVersionListResponse(versions=[])
@@ -187,6 +195,8 @@ async def get_toolset_version(
     current: CurrentUser = Depends(require_permission(Permission.TOOLSETS_READ)),
 ) -> ToolsetVersion:
     """Return a specific version of a toolset."""
+    if external_mcp.parse_external_toolset_id(toolset_id) is not None:
+        raise HTTPException(status_code=404, detail="Toolset version not found")
     if is_builtin_toolset_id(toolset_id):
         raise HTTPException(status_code=404, detail="Toolset version not found")
     v = await report_store.get_toolset_version(toolset_id, version)
@@ -209,6 +219,9 @@ async def list_tools(
     current: CurrentUser = Depends(require_permission(Permission.TOOLS_READ)),
 ) -> ToolListResponse:
     """List all tools in a toolset."""
+    external = external_mcp.parse_external_toolset_id(toolset_id)
+    if external is not None:
+        return ToolListResponse(tools=await external_mcp.list_tool_items_for_proxy(external, current))
     group = group_name_from_toolset_id(toolset_id)
     if group is not None:
         if builtin_toolset(group) is None:
@@ -272,6 +285,13 @@ async def get_tool(
     current: CurrentUser = Depends(require_permission(Permission.TOOLS_READ)),
 ) -> ToolItem:
     """Return a tool by ID."""
+    external = external_mcp.parse_external_toolset_id(toolset_id)
+    if external is not None:
+        tools = await external_mcp.list_tool_items_for_proxy(external, current)
+        item = next((tool for tool in tools if tool.tool_id == tool_id), None)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return item
     if is_builtin_toolset_id(toolset_id):
         synthetic = builtin_tool(tool_id)
         if synthetic is None or synthetic.toolset_id != toolset_id:
@@ -359,6 +379,11 @@ async def call_tool(
     current: CurrentUser = Depends(require_permission(Permission.TOOLS_CALL)),
 ) -> Any:
     """Execute a tool's Cypher query with the provided arguments."""
+    if external_mcp.parse_external_toolset_id(toolset_id) is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="External MCP tools are invoked by the chat agent",
+        )
     if is_builtin_toolset_id(toolset_id):
         # Built-in handlers are backed by Python, not Cypher — they're invoked
         # by the MCP server, not this REST route.  Surface a clear error so
@@ -400,6 +425,12 @@ async def list_tool_versions(
     current: CurrentUser = Depends(require_permission(Permission.TOOLS_READ)),
 ) -> ToolVersionListResponse:
     """List all versions of a tool."""
+    external = external_mcp.parse_external_toolset_id(toolset_id)
+    if external is not None:
+        tools = await external_mcp.list_tool_items_for_proxy(external, current)
+        if not any(tool.tool_id == tool_id for tool in tools):
+            raise HTTPException(status_code=404, detail="Tool not found")
+        return ToolVersionListResponse(versions=[])
     if is_builtin_toolset_id(toolset_id):
         # Confirm the tool actually exists so we still 404 typos.
         synthetic = builtin_tool(tool_id)
@@ -424,6 +455,8 @@ async def get_tool_version(
     current: CurrentUser = Depends(require_permission(Permission.TOOLS_READ)),
 ) -> ToolVersion:
     """Return a specific version of a tool."""
+    if external_mcp.parse_external_toolset_id(toolset_id) is not None:
+        raise HTTPException(status_code=404, detail="Tool version not found")
     if is_builtin_toolset_id(toolset_id):
         raise HTTPException(status_code=404, detail="Tool version not found")
     v = await report_store.get_tool_version(tool_id, version)

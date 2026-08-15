@@ -13,7 +13,7 @@ ID shape (preserved for frontend backwards compat):
 
 from typing import Any
 
-from reporting.schema.mcp_config import ToolItem, ToolParamDef, ToolsetListItem
+from reporting.schema.mcp_config import ToolDisplayParamDef, ToolItem, ToolsetListItem
 from reporting.services.mcp_builtins import find_builtin, list_builtin_groups
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 
@@ -71,16 +71,16 @@ _JSON_TYPE_MAP = {
 }
 
 
-def _params_from_input_schema(schema: dict[str, Any]) -> list[ToolParamDef]:
-    """Best-effort mapping from a JSON Schema object to ``ToolParamDef``s.
+def params_from_input_schema(schema: dict[str, Any]) -> list[ToolDisplayParamDef]:
+    """Best-effort mapping from JSON Schema to catalog parameter metadata.
 
-    ``ToolParamDef`` only models scalar types, so nested objects/arrays are
+    ``ToolDisplayParamDef`` only models scalar types, so nested objects/arrays are
     rendered as a string with an annotation in the description — enough for
     the UI to communicate "this tool exists, here are its fields".
     """
     properties = schema.get("properties", {}) or {}
     required = set(schema.get("required", []) or [])
-    params: list[ToolParamDef] = []
+    params: list[ToolDisplayParamDef] = []
     for name, prop in properties.items():
         json_type = prop.get("type")
         if isinstance(json_type, list):
@@ -91,7 +91,7 @@ def _params_from_input_schema(schema: dict[str, Any]) -> list[ToolParamDef]:
             prefix = f"(JSON {json_type})"
             description = f"{prefix} {description}".strip()
         params.append(
-            ToolParamDef(
+            ToolDisplayParamDef(
                 name=name,
                 type=param_type,
                 description=description,
@@ -123,7 +123,7 @@ def builtin_tool_to_tool_item(tool: BuiltinTool) -> ToolItem:
         name=tool.name,
         description=tool.description,
         cypher=f"-- Built-in handler: {tool.name}",
-        parameters=_params_from_input_schema(tool.input_schema),
+        parameters=params_from_input_schema(tool.input_schema),
         enabled=True,
         current_version=1,
         created_at=_EPOCH,

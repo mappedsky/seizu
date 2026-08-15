@@ -1,0 +1,18 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	# Obot forwards its provider token as X-Forwarded-Access-Token, while the
+	# GitHub MCP server requires a GitHub API token in Authorization. Keep those
+	# credentials separate: the adapter is reachable only on the Compose network.
+	rewrite * /
+	reverse_proxy external-mcp-github:8082 {
+		header_up Authorization "Bearer {env.GITHUB_PERSONAL_ACCESS_TOKEN}"
+		header_up -X-Forwarded-Access-Token
+		header_up -X-Forwarded-User
+		header_up -X-Forwarded-Email
+		header_up -X-Forwarded-Name
+	}
+}

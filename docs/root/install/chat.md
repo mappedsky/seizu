@@ -367,3 +367,4 @@ Checkpoint storage (`CHAT_CHECKPOINT_*`) is documented in the [backend configura
 - [Sandbox delegation](sandbox.html) — let the agent run code in an isolated ephemeral sandbox.
 - [Temporal workflows](temporal-workflows.html) — durable workflows whose AI sessions run through the same headless chat machinery.
 - [MCP toolsets](mcp-toolsets.html) and [MCP skillsets](mcp-skillsets.html) — the user-defined tools and skills the agent can use.
+- [External MCP proxies](external-mcp.html) — connect the agent to proxied third-party MCP servers with per-user or M2M identity delegation.

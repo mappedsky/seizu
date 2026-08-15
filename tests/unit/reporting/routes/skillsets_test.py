@@ -5,6 +5,7 @@ from httpx import ASGITransport, AsyncClient
 from reporting.app import create_app
 from reporting.authnz import CurrentUser, get_current_user
 from reporting.authnz.permissions import ALL_PERMISSIONS
+from reporting.schema.external_mcp import ExternalMCPProxy
 from reporting.schema.mcp_config import (
     SkillItem,
     SkillsetListItem,
@@ -14,6 +15,7 @@ from reporting.schema.mcp_config import (
     ToolParamDef,
 )
 from reporting.schema.report_config import User
+from reporting.services import external_mcp
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _SKILLSET_ID = "incident_response"
@@ -379,6 +381,94 @@ async def test_create_skill_keeps_builtin_tool_refs_even_when_catalog_lookup_mis
     assert ret.json()["tools_required"] == ["graph__query"]
     create_skill.assert_awaited_once()
     assert create_skill.await_args.kwargs["tools_required"] == ["graph__query"]
+
+
+async def test_create_skill_keeps_external_tool_refs_for_configured_proxies(mocker):
+    mocker.patch.object(
+        external_mcp.settings,
+        "MCP_EXTERNAL_PROXIES",
+        [
+            ExternalMCPProxy(
+                name="github",
+                url="https://proxy.example/mcp/github",
+                transport="streamable_http",
+                auth_mode="bearer",
+                token_env="MCP_EXTERNAL_PROXY_TOKEN",
+            )
+        ],
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_skill",
+        new=AsyncMock(return_value=None),
+    )
+    # An external tool has no stored catalog row; it is discovered per user.
+    get_tool = mocker.patch(
+        "reporting.routes.skillsets.report_store.get_tool",
+        new=AsyncMock(return_value=None),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_skillset",
+        new=AsyncMock(return_value=_skillset_item()),
+    )
+    tools = ["ext__github__get_file_contents", "ext__github__search_code"]
+    create_skill = mocker.patch(
+        "reporting.routes.skillsets.report_store.create_skill",
+        new=AsyncMock(return_value=_skill_item().model_copy(update={"tools_required": tools})),
+    )
+    app = _make_app()
+    body = {
+        "skill_id": _SKILL_ID,
+        "name": "Summarize Findings",
+        "description": "",
+        "template": "Summarize {% $topic %}",
+        "parameters": [{"name": "topic", "type": "string", "required": True}],
+        "tools_required": tools,
+        "enabled": True,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(f"/api/v1/skillsets/{_SKILLSET_ID}/skills", json=body)
+
+    assert ret.status_code == 201
+    assert ret.json()["tools_required"] == tools
+    create_skill.assert_awaited_once()
+    assert create_skill.await_args.kwargs["tools_required"] == tools
+    get_tool.assert_not_awaited()
+
+
+async def test_create_skill_drops_external_tool_refs_for_unknown_proxies(mocker):
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [])
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_skill",
+        new=AsyncMock(return_value=None),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_tool",
+        new=AsyncMock(return_value=None),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_skillset",
+        new=AsyncMock(return_value=_skillset_item()),
+    )
+    create_skill = mocker.patch(
+        "reporting.routes.skillsets.report_store.create_skill",
+        new=AsyncMock(return_value=_skill_item().model_copy(update={"tools_required": []})),
+    )
+    app = _make_app()
+    body = {
+        "skill_id": _SKILL_ID,
+        "name": "Summarize Findings",
+        "description": "",
+        "template": "Summarize {% $topic %}",
+        "parameters": [{"name": "topic", "type": "string", "required": True}],
+        "tools_required": ["ext__nowhere__get_file_contents"],
+        "enabled": True,
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ret = await client.post(f"/api/v1/skillsets/{_SKILLSET_ID}/skills", json=body)
+
+    assert ret.status_code == 201
+    create_skill.assert_awaited_once()
+    assert create_skill.await_args.kwargs["tools_required"] == []
 
 
 async def test_list_skills_marks_parent_disabled_skills_effectively_disabled(mocker):

@@ -18,6 +18,7 @@ import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import AddIcon from '@mui/icons-material/Add';
 import BuildIcon from '@mui/icons-material/Build';
 import BadgeIcon from '@mui/icons-material/Badge';
+import HubIcon from '@mui/icons-material/Hub';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import HistoryIcon from '@mui/icons-material/History';
@@ -57,9 +58,16 @@ import { pageContentSx } from 'src/theme/layout';
 // to hide edit/delete actions on those rows.
 
 const BUILTIN_PREFIX = '__builtin_';
+const EXTERNAL_PREFIX = '__external_';
 
 const isBuiltinToolset = (id: string): boolean =>
   id.startsWith(BUILTIN_PREFIX) && id.endsWith('__');
+
+const isExternalToolset = (id: string): boolean =>
+  id.startsWith(EXTERNAL_PREFIX) && id.endsWith('__');
+
+const isReadOnlyToolset = (id: string): boolean =>
+  isBuiltinToolset(id) || isExternalToolset(id);
 
 const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 // Cap each slug component so the full "toolset__tool" MCP name stays <= 64 chars
@@ -261,16 +269,18 @@ function Toolsets() {
   };
 
   const rowActions = (item: ToolsetListItem): RowMenuAction[] => {
-    const isBuiltin = isBuiltinToolset(item.toolset_id);
+    const isExternal = isExternalToolset(item.toolset_id);
+    const isReadOnly = isReadOnlyToolset(item.toolset_id);
+    const readOnlyLabel = isExternal ? 'External MCP' : 'Built-in';
     return [
       {
         key: 'edit',
         label: 'Edit',
         icon: <EditIcon fontSize="small" />,
         onClick: () => openEdit(item),
-        disabled: isBuiltin || !canWrite,
-        tooltip: isBuiltin
-          ? 'Built-in toolsets cannot be edited'
+        disabled: isReadOnly || !canWrite,
+        tooltip: isReadOnly
+          ? `${readOnlyLabel} toolsets cannot be edited`
           : !canWrite
             ? 'You do not have permission to edit toolsets'
             : undefined,
@@ -289,9 +299,9 @@ function Toolsets() {
           navigate(`/app/toolsets/${item.toolset_id}/history`, {
             state: { fromLabel: 'Toolsets' } satisfies BackState,
           }),
-        disabled: isBuiltin,
-        tooltip: isBuiltin
-          ? 'Built-in toolsets have no version history'
+        disabled: isReadOnly,
+        tooltip: isReadOnly
+          ? `${readOnlyLabel} toolsets have no version history`
           : undefined,
       },
       {
@@ -299,9 +309,9 @@ function Toolsets() {
         label: 'Delete',
         icon: <DeleteIcon fontSize="small" />,
         onClick: () => setDeleteTarget(item),
-        disabled: isBuiltin || !canDelete,
-        tooltip: isBuiltin
-          ? 'Built-in toolsets cannot be deleted'
+        disabled: isReadOnly || !canDelete,
+        tooltip: isReadOnly
+          ? `${readOnlyLabel} toolsets cannot be deleted`
           : !canDelete
             ? 'You do not have permission to delete toolsets'
             : undefined,
@@ -340,12 +350,19 @@ function Toolsets() {
       cellSx: typeColumnSx,
       render: (item) => {
         const isBuiltin = isBuiltinToolset(item.toolset_id);
+        const isExternal = isExternalToolset(item.toolset_id);
         return (
           <Chip
-            label={isBuiltin ? 'Built-in' : 'User-defined'}
+            label={
+              isBuiltin
+                ? 'Built-in'
+                : isExternal
+                  ? 'External MCP'
+                  : 'User-defined'
+            }
             size="small"
-            variant={isBuiltin ? 'outlined' : 'filled'}
-            color={isBuiltin ? 'primary' : 'default'}
+            variant={isBuiltin || isExternal ? 'outlined' : 'filled'}
+            color={isBuiltin ? 'primary' : isExternal ? 'secondary' : 'default'}
           />
         );
       },
@@ -390,7 +407,7 @@ function Toolsets() {
       hideBelow: 'sm',
       cellSx: versionColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) ? '—' : `v${item.current_version}`,
+        isReadOnlyToolset(item.toolset_id) ? '—' : `v${item.current_version}`,
     },
     {
       key: 'updated_at',
@@ -398,7 +415,7 @@ function Toolsets() {
       hideBelow: 'xl',
       cellSx: updatedAtColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) || !item.updated_at
+        isReadOnlyToolset(item.toolset_id) || !item.updated_at
           ? '—'
           : new Date(item.updated_at).toLocaleString(),
     },
@@ -408,7 +425,7 @@ function Toolsets() {
       hideBelow: 'lg',
       cellSx: updatedByColumnSx,
       render: (item) =>
-        isBuiltinToolset(item.toolset_id) ? (
+        isReadOnlyToolset(item.toolset_id) ? (
           '—'
         ) : item.updated_by ? (
           <UserDisplay userId={item.updated_by} />
@@ -436,10 +453,16 @@ function Toolsets() {
           matches: (item) => isBuiltinToolset(item.toolset_id),
         },
         {
+          key: 'external',
+          label: 'External MCP',
+          icon: <HubIcon fontSize="small" />,
+          matches: (item) => isExternalToolset(item.toolset_id),
+        },
+        {
           key: 'user_defined',
           label: 'User-defined',
           icon: <PersonOutlineIcon fontSize="small" />,
-          matches: (item) => !isBuiltinToolset(item.toolset_id),
+          matches: (item) => !isReadOnlyToolset(item.toolset_id),
         },
       ],
     },

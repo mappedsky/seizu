@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+EXTERNAL_MCP_TOOL_NAME_RE = re.compile(r"^ext__[a-z][a-z0-9_-]{0,62}__[A-Za-z0-9_.-]{1,128}$")
 
 # The MCP name is "{parent}__{child}" (toolset__tool / skillset__skill) and the
 # provider tool-call APIs cap names at 64 chars. Capping each component at 31
@@ -47,12 +48,14 @@ def validate_string_list(values: list[str], field_name: str) -> list[str]:
 def validate_mcp_tool_refs(values: list[str]) -> list[str]:
     result = validate_string_list(values, "tools_required")
     for value in result:
-        if not MCP_TOOL_NAME_RE.fullmatch(value):
-            raise ValueError("tools_required entries must use MCP tool names like toolset_id__tool_id")
+        if not (MCP_TOOL_NAME_RE.fullmatch(value) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(value)):
+            raise ValueError(
+                "tools_required entries must use MCP tool names like toolset_id__tool_id or ext__proxy__tool"
+            )
     return result
 
 
-def _coerce_argument(param: "ToolParamDef", value: Any) -> tuple[Any | None, str | None]:
+def _coerce_argument(param: "ToolDisplayParamDef", value: Any) -> tuple[Any | None, str | None]:
     if param.type == "string":
         if isinstance(value, str):
             return value, None
@@ -99,8 +102,13 @@ def _coerce_decimal(value: Any) -> Any:
     return value
 
 
-class ToolParamDef(BaseModel):
-    """Definition of a single parameter accepted by an MCP tool."""
+class ToolDisplayParamDef(BaseModel):
+    """Parameter metadata returned by the tool catalog.
+
+    External MCP input schemas may use any JSON property name (for example,
+    GitHub's ``perPage``). Catalog responses preserve those names verbatim.
+    Seizu-authored tools use the stricter :class:`ToolParamDef` subclass.
+    """
 
     name: str
     type: Literal["string", "integer", "float", "boolean"]
@@ -108,15 +116,19 @@ class ToolParamDef(BaseModel):
     required: bool = True
     default: Any | None = None
 
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        return validate_lower_snake_id(v)
-
     @field_validator("default", mode="before")
     @classmethod
     def coerce_default(cls, v: Any) -> Any:
         return _coerce_decimal(v)
+
+
+class ToolParamDef(ToolDisplayParamDef):
+    """Strict parameter definition for a Seizu-authored MCP tool."""
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return validate_lower_snake_id(v)
 
 
 def _skip_cypher_quoted(cypher: str, start: int, quote: str) -> int:
@@ -269,7 +281,7 @@ class ToolItem(BaseModel):
     name: str
     description: str = ""
     cypher: str
-    parameters: list[ToolParamDef] = Field(default_factory=list)
+    parameters: list[ToolDisplayParamDef] = Field(default_factory=list)
     enabled: bool = True
     current_version: int = 0
     created_at: str
@@ -348,7 +360,7 @@ class ToolIdResponse(BaseModel):
     tool_id: str
 
 
-def validate_tool_arguments(parameters: list["ToolParamDef"], arguments: dict[str, Any]) -> list[str]:
+def validate_tool_arguments(parameters: list[ToolDisplayParamDef], arguments: dict[str, Any]) -> list[str]:
     """Validate *arguments* against the tool's parameter definitions.
 
     Returns a list of error strings; empty means the arguments are valid.

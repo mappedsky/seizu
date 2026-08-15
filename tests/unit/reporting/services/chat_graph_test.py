@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
-from mcp.types import Prompt, PromptArgument, Tool
+from mcp.types import Prompt, PromptArgument, Tool, ToolAnnotations
 from pydantic import BaseModel
 
 from reporting import settings
@@ -166,6 +166,16 @@ def test_ai_message_for_tool_results_preserves_reasoning_while_filtering_tool_ca
 
     assert filtered.additional_kwargs["reasoning_content"] == "hidden"
     assert [call["id"] for call in filtered.tool_calls] == ["call_1"]
+
+
+def test_mcp_tool_specs_preserve_external_confirmation_annotations():
+    annotations = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+
+    specs = chat_graph._mcp_tool_specs(
+        [Tool(name="ext__drive__search", input_schema={"type": "object"}, annotations=annotations)]
+    )
+
+    assert specs[0].annotations == annotations
 
 
 async def test_invoke_structured_output_falls_back_to_json_text():
@@ -1776,6 +1786,30 @@ async def test_chat_tool_create_already_exists_is_idempotent_success(mocker):
     assert data["ok"] is True
     assert data["idempotent"] is True
     assert "already completed" in data["message"]
+
+
+async def test_chat_tool_call_forwards_external_annotations(mocker):
+    annotations = ToolAnnotations(read_only_hint=True)
+    request = chat_graph.ToolCallRequest(
+        id="call_1",
+        name="ext__drive__search",
+        arguments={"query": "budget"},
+        spec=chat_graph.ChatToolSpec(
+            name="ext__drive__search",
+            kind="tool",
+            description="Search files",
+            input_schema={"type": "object"},
+            annotations=annotations,
+        ),
+    )
+    call = mocker.patch(
+        "reporting.services.chat_graph.mcp_runtime.call_tool_for_chat",
+        return_value=ChatActionOutcome(text='{"files": []}'),
+    )
+
+    await chat_graph._run_tool_call(request, _user(), session_key="1001")
+
+    assert call.await_args.kwargs["external_tool_annotations"] == annotations
 
 
 def test_confirmation_batch_id_only_for_multiple_requests(mocker):

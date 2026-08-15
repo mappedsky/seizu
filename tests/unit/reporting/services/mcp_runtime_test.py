@@ -1,15 +1,25 @@
 import dataclasses
 import json
 
+import pytest
+from mcp.types import ToolAnnotations
+
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
+from reporting.schema.external_mcp import ExternalMCPProxy
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
-from reporting.services import action_confirmations, mcp_runtime, report_store
+from reporting.services import action_confirmations, external_mcp, mcp_runtime, report_store
 
 _NOW = "2024-01-01T00:00:00+00:00"
 _LATER = "2099-01-01T00:30:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _no_deployment_external_proxies(mocker):
+    """Keep unit listing tests independent of the developer's .env."""
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [])
 
 
 def _user(permissions: frozenset[str]) -> CurrentUser:
@@ -48,6 +58,16 @@ def _tool() -> ToolItem:
         created_at=_NOW,
         updated_at=_NOW,
         created_by="user-1",
+    )
+
+
+def _external_proxy(*, require_confirmation: bool = True) -> ExternalMCPProxy:
+    return ExternalMCPProxy(
+        name="drive",
+        url="https://proxy.example/sse",
+        auth_mode="header_delegation",
+        header_mappings={"user_id": "X-Forwarded-User"},
+        require_confirmation=require_confirmation,
     )
 
 
@@ -127,6 +147,134 @@ async def test_chat_tool_gate_blocks_listing_before_store_lookup(mocker):
 
     assert tools == []
     list_enabled_tools.assert_not_called()
+
+
+async def test_chat_listing_includes_namespaced_external_tools(mocker):
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value}))
+    external_tool = mcp_runtime.Tool(
+        name="ext__drive__search",
+        description="Search files",
+        input_schema={"type": "object"},
+    )
+    list_external = mocker.patch.object(
+        external_mcp,
+        "list_tools_for_user",
+        mocker.AsyncMock(return_value=[external_tool]),
+    )
+
+    tools = await mcp_runtime.list_tools_for_user(
+        current,
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+    )
+
+    assert external_tool in tools
+    list_external.assert_awaited_once_with(current, exclude_confirmation_gated=False)
+
+
+async def test_external_tool_requires_confirmation_by_default(mocker):
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value}))
+    proxy = _external_proxy()
+    mocker.patch.object(external_mcp, "parse_namespaced_tool_name", return_value=(proxy, "search"))
+    confirmation = _confirmation()
+    confirmation = confirmation.model_copy(
+        update={"source": "chat", "tool_name": "ext__drive__search", "session_key": "thread-1"}
+    )
+    ensure = mocker.patch.object(
+        action_confirmations,
+        "ensure_confirmation",
+        mocker.AsyncMock(return_value=confirmation),
+    )
+    call = mocker.patch.object(external_mcp, "call_tool", mocker.AsyncMock())
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "ext__drive__search",
+        {"query": "budget"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        confirmation_source="chat",
+        confirmation_session_key="thread-1",
+    )
+
+    assert result.blocked == mcp_runtime.ChatBlockReason.CONFIRMATION_REQUIRED
+    ensure.assert_awaited_once()
+    call.assert_not_awaited()
+
+
+async def test_external_read_only_tool_executes_with_current_user(mocker):
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value}))
+    proxy = _external_proxy(require_confirmation=False)
+    mocker.patch.object(external_mcp, "parse_namespaced_tool_name", return_value=(proxy, "search"))
+    call = mocker.patch.object(
+        external_mcp,
+        "call_tool",
+        mocker.AsyncMock(return_value=external_mcp.ExternalToolResult("files found")),
+    )
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "ext__drive__search",
+        {"query": "budget"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        result_max_bytes=500,
+    )
+
+    assert result == mcp_runtime.ChatActionOutcome(text="files found")
+    call.assert_awaited_once_with(proxy, "search", {"query": "budget"}, current, max_bytes=500)
+
+
+async def test_external_read_only_annotation_overrides_confirmation_fallback(mocker):
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value}))
+    proxy = _external_proxy(require_confirmation=True)
+    mocker.patch.object(external_mcp, "parse_namespaced_tool_name", return_value=(proxy, "search"))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS", [])
+    call = mocker.patch.object(
+        external_mcp,
+        "call_tool",
+        mocker.AsyncMock(return_value=external_mcp.ExternalToolResult("files found")),
+    )
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "ext__drive__search",
+        {"query": "budget"},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+        external_tool_annotations=ToolAnnotations(read_only_hint=True),
+    )
+
+    assert result == mcp_runtime.ChatActionOutcome(text="files found")
+    call.assert_awaited_once()
+
+
+async def test_external_oauth_challenge_is_a_structured_chat_block(mocker):
+    current = _user(frozenset({Permission.CHAT_TOOLS_CALL.value}))
+    proxy = _external_proxy(require_confirmation=False)
+    mocker.patch.object(external_mcp, "parse_namespaced_tool_name", return_value=(proxy, "search"))
+    mocker.patch.object(
+        external_mcp,
+        "call_tool",
+        mocker.AsyncMock(
+            side_effect=external_mcp.ExternalMCPAuthenticationRequired(
+                external_mcp.OAuthChallenge("drive", "https://proxy.example/.well-known/mcp")
+            )
+        ),
+    )
+
+    result = await mcp_runtime.call_tool_for_chat(
+        current,
+        "ext__drive__search",
+        {},
+        gate_permission=Permission.CHAT_TOOLS_CALL,
+        chat_safe_only=True,
+    )
+
+    assert result.blocked == mcp_runtime.ChatBlockReason.AUTHENTICATION_REQUIRED
+    payload = json.loads(result.text)
+    assert payload["authentication_required"] is True
+    assert payload["resource_metadata"] == "https://proxy.example/.well-known/mcp"
 
 
 async def test_chat_tool_gate_blocks_call_before_store_lookup(mocker):

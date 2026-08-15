@@ -23,7 +23,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from mcp.types import Prompt, Tool
+from mcp.types import Prompt, Tool, ToolAnnotations
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
@@ -201,6 +201,7 @@ class ChatToolSpec:
     description: str
     input_schema: dict[str, Any]
     llm_name: str | None = None
+    annotations: ToolAnnotations | None = None
 
 
 @dataclass(frozen=True)
@@ -2223,6 +2224,7 @@ def _mcp_tool_specs(tools: list[Tool]) -> list[ChatToolSpec]:
             kind="tool",
             description=tool.description or f"{tool.name} tool",
             input_schema=tool.input_schema if isinstance(tool.input_schema, dict) else {"type": "object"},
+            annotations=tool.annotations,
         )
         for tool in tools
     ]
@@ -2421,6 +2423,8 @@ async def _run_tool_call(
         "result_max_rows": settings.CHAT_TOOL_RESULT_MAX_ROWS,
         "result_max_bytes": settings.CHAT_TOOL_RESULT_MAX_BYTES,
     }
+    if request.spec.annotations is not None:
+        call_kwargs["external_tool_annotations"] = request.spec.annotations
     if bypass_confirmations:
         # Bypass mode: no confirmation records are created; mcp_runtime
         # enforces chat:bypass_permissions and audit-logs each execution.
@@ -2757,6 +2761,15 @@ def _blocked_tool_call_response(results: list[ToolCallResult]) -> str:
         for result in pending:
             lines.append(f"- {_blocked_tool_call_body(result.content)}")
         return "\n".join(lines)
+    authentication = [result for result in results if result.blocked == ChatBlockReason.AUTHENTICATION_REQUIRED]
+    if authentication:
+        lines = [
+            "An external MCP proxy requires authentication before Seizu can use the requested tool. "
+            "Authenticate with the proxy, then retry this request."
+        ]
+        for result in authentication:
+            lines.append(f"- {_blocked_tool_call_body(result.content)}")
+        return "\n".join(lines)
     lines = [
         "Seizu blocked the requested action because the tool or skill is not available to this chat session, "
         "or the current user/agent permissions do not allow it."
@@ -2777,6 +2790,8 @@ def _blocked_tool_call_reason_label(reason: ChatBlockReason | None) -> str:
         return "not available in this chat session"
     if reason == ChatBlockReason.CONFIRMATION_REQUIRED:
         return "confirmation required"
+    if reason == ChatBlockReason.AUTHENTICATION_REQUIRED:
+        return "external authentication required"
     return "blocked"
 
 

@@ -108,3 +108,32 @@ OIDC exchange is plaintext HTTP.
 "just for the backend" one. Binding both `127.0.0.1` and `::1` is load-bearing:
 `localhost` resolves to `::1` first inside the container, and an IPv4-only
 listener gets connection-refused for half the lookups.
+
+## AUTH-003 — Optional local services reuse Authentik without reusing Seizu's client
+
+**Applies to:** `.config/dev/authentik/blueprints/seizu.yaml`,
+`.config/dev/external-mcp-proxy/`, the `external-mcp` Compose profile
+
+The local external MCP OAuth proxy has its own confidential Authentik client,
+because Obot requires a client secret while Seizu and its CLI intentionally use
+a public PKCE/device client. Both applications use the same Authentik tenant,
+users, and browser SSO session. The proxy's supervised in-container loopback
+forwarder reaches Authentik as `localhost:9000`, matching AUTH-002; the GitHub
+PAT remains a separate credential used only on the proxy-to-GitHub MCP hop.
+For the single-user local profile, `make external_mcp_login` registers a
+per-login public PKCE client with Obot, completes authorization through that
+same Authentik application, and stores the resulting proxy bearer in the local
+`.env`; it never handles or replaces the GitHub PAT.
+
+**Why not a Google development client:** it splits local authentication across
+two identity providers, makes the external-MCP path test a different login and
+session model from Seizu, and requires every developer to provision unrelated
+cloud OAuth credentials.
+
+**Why not reuse the `seizu` OAuth client:** changing that public client to
+confidential would break the CLI's device flow and the no-secret PKCE contract.
+A separate client is the standard OAuth boundary and still provides unified
+SSO because Authentik owns both applications.
+
+**Don't:** point the proxy at `authentik-server:9000`; Authentik derives its
+issuer from that host and creates the split-host identity described by AUTH-001.

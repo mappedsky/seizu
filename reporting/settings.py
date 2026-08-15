@@ -2,6 +2,7 @@ import os
 from importlib import resources
 
 from cartography_sync.registry import parse_enabled_modules
+from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 _DEFAULT_SANDBOX_CORE_TOOLS = ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"]
@@ -930,6 +931,17 @@ MCP_ENABLED = bool_env("MCP_ENABLED", True)
 # Note: the sandbox group is chat-only (never exposed via the MCP server endpoint
 # regardless of this setting) and also requires SANDBOX_ENABLED=true.
 MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
+
+# External MCP servers reached through an identity-aware proxy. JSON array; see
+# docs/root/install/external-mcp.md. Parsing at startup makes malformed security
+# mappings a configuration error rather than silently dropping a proxy.
+MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
+_MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
+MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
+
+# Fully namespaced external tools that always require confirmation, regardless
+# of remote MCP annotations or a proxy's fallback policy.
+MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS = list_env("MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS", [])
 
 # ---------------------------------------------------------------------------
 # Sandbox delegation (sandbox__delegate chat tool)

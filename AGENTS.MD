@@ -71,6 +71,7 @@ make generate_openapi   # export schema/openapi.json (no running server)
 make generate_client LANG=go
 make seed_dashboard [ARGS="--force|--dry-run|export"]
 make auth_enable / auth_disable
+make external_mcp_enable / external_mcp_disable / external_mcp_login
 make build_cartography_worker     # build the cartography sync-worker image
 make cartography_contract_test    # verify registry flags against the pinned CLI
 make lock_proxy_requirements [REQUIREMENTS=... PYTHON_VERSION=... OUTPUT=...]  # re-lock the proxy's deps
@@ -183,6 +184,37 @@ Exposed at `/api/v1/mcp` when `MCP_ENABLED=true` (default). LLM agents connect a
 **Toolsets/Tools** are user-managed Cypher-backed tool groupings in the report store with version history; CRUD via REST; Cypher validated (writes blocked) at create/update.
 
 PostgreSQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
+
+### External MCP Proxies (`reporting/services/external_mcp.py`)
+
+`MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
+Compose profile (`make external_mcp_enable` / `make external_mcp_disable`). The
+local `external-mcp` profile wires Seizu straight to the PAT adapter — one
+service identity, read-only, no credential to expire; the obot OAuth proxy is
+the separate `external-mcp-oauth` profile, for exercising the RFC 9728 challenge
+path, and is the only thing `make external_mcp_login` is for.
+`MCP_EXTERNAL_PROXIES` is a JSON array of SSE or Streamable HTTP proxy
+definitions used by the chat agent. External tools are dynamically discovered,
+namespaced as `ext__<proxy>__<tool>`, and deliberately not re-exported from
+Seizu's own MCP endpoint. The `/app/toolsets` catalog exposes configured proxies
+and their per-user discovery results as read-only synthetic toolsets. Each
+discovery/call creates a new transport with
+headers derived for exactly one `CurrentUser`; never pool these transports or
+their delegated identity headers across users. Bearer/M2M secrets are named by
+`token_env`, not embedded in JSON. The web and Temporal worker must receive the
+same proxy config and token env vars.
+
+Confirmation is decided per tool: the local
+`MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS` exact-name list wins, then MCP
+`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint` annotations,
+then the proxy's `require_confirmation` fallback (default true). Bypass still
+requires `chat:bypass_permissions` and is audit-logged. RFC 9728 401 challenges
+surface as a structured authentication block, and M2M 401s have a distinct
+`ExternalMCPTokenExpired` exception before chat normalization. Interactive
+Temporal turns do not persist the browser bearer token, so use M2M plus a target
+user header (or trusted header delegation) for detached/headless execution.
+Decisions: [`AGT-010`](docs/root/dev/decisions/chat-agent.md). Docs:
+`docs/root/install/external-mcp.md`.
 
 ### Chat (`reporting/services/chat_graph.py`, `reporting/routes/chat.py`)
 

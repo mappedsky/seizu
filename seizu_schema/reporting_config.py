@@ -12,6 +12,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 LOWER_SNAKE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+# Mirrors MCP_TOOL_NAME_RE / EXTERNAL_MCP_TOOL_NAME_RE in
+# reporting/schema/mcp_config.py; the seed must accept every tool reference the
+# API accepts, including external MCP proxy tools (ext__<proxy>__<tool>).
+MCP_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+EXTERNAL_MCP_TOOL_NAME_RE = re.compile(r"^ext__[a-z][a-z0-9_-]{0,62}__[A-Za-z0-9_.-]{1,128}$")
 
 
 def validate_lower_snake_id(value: str) -> str:
@@ -968,8 +973,10 @@ class SkillDef(BaseModel):
     def validate_tools_required(cls, v: list[str]) -> list[str]:
         seen: set[str] = set()
         for value in v:
-            if not re.fullmatch(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*__[a-z][a-z0-9]*(?:_[a-z0-9]+)*$", value):
-                raise ValueError("tools_required entries must use MCP tool names like toolset_id__tool_id")
+            if not (MCP_TOOL_NAME_RE.fullmatch(value) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(value)):
+                raise ValueError(
+                    "tools_required entries must use MCP tool names like toolset_id__tool_id or ext__proxy__tool"
+                )
             if value in seen:
                 raise ValueError("tools_required entries must be unique")
             seen.add(value)
