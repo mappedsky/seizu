@@ -174,6 +174,39 @@ docker compose exec -T seizu uv run --frozen --no-sync \
 The worker, verifier and synthesizer need real step results to judge, so measure
 those with `make chat_harness` arms rather than these probes.
 
+### Independent steps run across the worker fleet
+
+Within an orchestrated turn, a batch of plan steps with no dependency on one
+another is scheduled as one Temporal activity per step. Steps run on any
+`seizu-temporal-worker` replica, and each is bounded by
+`CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS`.
+
+A step that fails, or whose worker dies, is recorded as a failed step; the plan
+continues and the answer is synthesized from the steps that completed.
+
+Each batch appears in the Temporal UI as a `seizu-chat-fanout:` workflow named
+after the turn, with one activity per step. Progress streams live: a distributed
+step writes its step and tool details into the same turn event log, so the UI
+shows the fan-out as it happens. The final answer has a single producer.
+
+**Budget.** Each step is allocated a fixed slice of the run budget before the
+batch starts, and cannot exceed it. Plan fewer, larger steps for work that needs
+a bigger allowance.
+
+**Concurrency is bounded twice.** `CHAT_ORCHESTRATOR_MAX_PARALLEL` bounds one
+turn; `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` bounds each worker process, and so the
+cluster. Size the second for what your model provider, Neo4j, MCP proxies and
+sandbox account can take at once — Temporal queues the overflow rather than
+dropping it.
+
+**Sandbox.** The turn opens the conversation's sandbox and distributed steps
+attach to it, so parallel steps share one disk and files from earlier turns
+remain available.
+
+Scheduled chats and other headless runs are not distributed. Set
+`CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED=false` to run every batch inside the
+turn's own process.
+
 ### Fitting the model's context window
 
 Context caps are **tokens**, counted with the provider's own tokenizer, and the
@@ -357,6 +390,11 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
 | `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |
+| `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED` | `true` | Schedule each independent step of a batch as its own Temporal activity. Interactive turns only. |
+| `CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS` | `2` | Batches smaller than this run inside the turn's own process. |
+| `CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS` | `600` | How long one distributed step may run. Keep well under `CHAT_TURN_TIMEOUT_SECONDS`. |
+| `CHAT_ORCHESTRATOR_DISTRIBUTED_INLINE_MAX_BYTES` | `262144` | Step results larger than this are stored and passed by reference instead of through Temporal history. |
+| `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` | `100` | Activity slots per worker process — the cluster-wide bound on concurrent distributed steps. |
 
 ### Run budgets
 

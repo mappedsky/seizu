@@ -375,6 +375,8 @@ async def open_backend(
     on_teardown: Callable[[bool], None] | None = None,
     purpose: str = "sandbox",
     thread: str = "",
+    create_if_missing: bool = True,
+    detach_on_exit: bool = False,
 ) -> AsyncIterator[SandboxBackend]:
     """Open a sandbox and yield a :class:`SandboxBackend` for it.
 
@@ -435,6 +437,14 @@ async def open_backend(
     evaluated at exit for a caller that only learns on the way out whether the
     sandbox is worth keeping.
 
+    ``create_if_missing=False`` with ``detach_on_exit=True`` is the **attaching**
+    caller: a distributed plan step running on another worker, which uses the
+    conversation's sandbox but does not own it (SBX-015). It must not create one
+    -- a second sandbox for a conversation that is meant to have exactly one is
+    worse than a failed step, and nobody would hold its id -- and it must leave
+    the sandbox exactly as it found it, because the coordinating turn is still
+    using it and will suspend it when the turn ends.
+
     Read SBX-006 and SBX-007 in ``docs/root/dev/decisions/sandbox.md`` before
     changing any of that — each rule exists because the obvious alternative
     strands a paid-for sandbox or discards a conversation's work.
@@ -478,7 +488,11 @@ async def open_backend(
             # to create is the whole recovery, and the caller compares
             # sandbox_id and treats anything it remembered writing as gone.
             logger.info("sandbox %s is gone (%s); creating a new one", resume_sandbox_id, type(exc).__name__)
+            if not create_if_missing:
+                raise
     if sandbox is None:
+        if not create_if_missing:
+            raise RuntimeError("no sandbox to attach to")
         sandbox = await AsyncSandbox.create(**create_kwargs)
 
     suspended = False
@@ -487,7 +501,11 @@ async def open_backend(
     finally:
         # Never `async with sandbox` — its __aexit__ kills unconditionally, and
         # the point of suspend_on_exit is to survive.
-        if suspend_on_exit() if callable(suspend_on_exit) else suspend_on_exit:
+        if detach_on_exit:
+            # Someone else's sandbox. Neither pausing nor killing it is this
+            # caller's to do: the owner is still working in it.
+            pass
+        elif suspend_on_exit() if callable(suspend_on_exit) else suspend_on_exit:
             try:
                 # Memory snapshot included, deliberately. keep_memory=False
                 # was tried first, for the isolation of not carrying untrusted

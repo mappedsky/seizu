@@ -346,6 +346,47 @@ sandbox of a thread that is abandoned rather than deleted is reclaimed only when
 the *thread* is retired by the sweep in [SBX-011](#sbx-011) — a scheduled pass
 on a multi-day threshold, not a guarantee the lifecycle itself provides.
 
+## SBX-015 — A distributed plan step attaches to the conversation's sandbox; it never owns one
+
+**Applies to:** `sandbox_session.attach_sandbox_session`,
+`SandboxSession(attach=True)`, `open_backend(create_if_missing=, detach_on_exit=)`,
+`chat_orchestrator._shared_sandbox_id`
+
+[SBX-005](#sbx-005) gives a conversation exactly one sandbox and relies on
+`asyncio.gather` copying the context but not the session object, so every step of
+a batch shares one disk. Once a step runs as its own Temporal activity
+([AGT-018](chat-agent.md#agt-018)) that no longer follows from anything: the step
+is a different process, possibly on a different machine.
+
+**One sandbox per conversation is kept, by splitting ownership from use.** The
+coordinating turn still opens the sandbox, still suspends it, and is still the
+only thing that writes `ChatState.sandbox_id`. A distributed step *attaches*: it
+connects to the running sandbox by id, and on exit neither pauses nor kills it —
+`detach_on_exit`. Parallel steps therefore go on sharing one disk exactly as they
+do in-process, and a step's receipts keep naming a sandbox that is still there
+(SBX-008).
+
+**An attaching session must not create one** (`create_if_missing=False`). The
+failure it prevents is not a crash: a step that quietly created its own sandbox
+would give the conversation a second one that nobody holds the id for, so nothing
+suspends it, nothing reaps it (SBX-011 finds sandboxes through the session that
+owns them), and every file the step wrote is invisible to its siblings and to the
+next turn. A step that cannot attach runs without a sandbox instead — the same
+position every step is in when `SANDBOX_ENABLED` is false.
+
+**So the coordinator opens it eagerly before a distributed batch**, where SBX-005
+opens on first delegation. A worker cannot open the shared sandbox itself, and
+deciding in advance which steps will delegate is not possible: `sandbox__delegate`
+is always disclosed, so any step may. The cost is a sandbox opened for a batch
+whose steps turn out never to delegate, bounded to multi-step orchestrated turns
+— which are the shape that delegates. A failure to open is not a failure of the
+batch.
+
+**Don't:** give distributed steps a sandbox each and copy artifacts between them.
+It was the obvious alternative and it is worse in three ways at once: N sandboxes
+per turn instead of one, a step that cannot see what a sibling wrote, and the
+conversation's accumulated files unreachable from the step that most needs them.
+
 ## SBX-010 — Result files live under `/home/user`, never `/tmp`
 
 **Applies to:** `_RESULT_DIR` in `reporting/services/mcp_builtins/sandbox.py`

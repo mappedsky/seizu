@@ -246,6 +246,43 @@ class SessionLedger:
             return ""
         return heading + "\n" + "\n\n".join(entries)
 
+    def merge_state(self, data: Any) -> None:
+        """Fold in a ledger that ran elsewhere, keeping only what is new here.
+
+        A distributed plan step is seeded from this ledger and hands its own copy
+        back (AGT-018), so most of what returns is already present. Matching on
+        content rather than on position is what makes that idempotent: the two
+        ledgers shed entries independently once they are at their bounds, so
+        counting would misalign them and re-append work the conversation already
+        knows about.
+        """
+        if not isinstance(data, dict):
+            return
+        known = {(episode.task, episode.outcome) for episode in self._episodes}
+        for item in data.get("episodes") or []:
+            if not isinstance(item, dict):
+                continue
+            task, outcome = str(item.get("task") or ""), str(item.get("outcome") or "")
+            if not task or not outcome or (task, outcome) in known:
+                continue
+            known.add((task, outcome))
+            self.append_episode(task, outcome)
+        for item in data.get("receipts") or []:
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            rows = item.get("rows")
+            columns = item.get("columns")
+            # record_receipt is keyed on path and replaces, so a receipt the step
+            # rewrote lands once rather than twice.
+            self.record_receipt(
+                path=str(item["path"]),
+                source=str(item.get("source") or "a tool"),
+                purpose=str(item.get("purpose") or ""),
+                sandbox_id=str(item.get("sandbox_id") or ""),
+                rows=int(rows) if isinstance(rows, int) else None,
+                columns=[str(column) for column in columns] if isinstance(columns, list) else None,
+            )
+
     def to_state(self) -> dict[str, Any]:
         """A plain-dict form for the LangGraph checkpoint."""
         return {

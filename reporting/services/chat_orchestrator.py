@@ -29,11 +29,13 @@ Design notes:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Any, Literal, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -47,6 +49,7 @@ from reporting.services import (
     chat_budget,
     chat_context,
     chat_graph,
+    chat_models,
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
@@ -1015,28 +1018,52 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
         state["messages"], max_chars=settings.CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS
     )
 
-    new_results = await asyncio.gather(
-        *(
-            _run_worker_step_with_session(
-                step,
+    new_results: list[dict[str, Any]] | None = None
+    if _distribution_eligible(batch, config):
+        try:
+            new_results = await _dispatch_batch_distributed(
+                batch,
                 plan=plan,
                 results=results,
                 conversation_context=conversation_context,
-                model=model,
                 current_user=current_user,
-                session_key=session_key,
                 config=config,
-                tool_specs=tool_specs,
+                iteration=iteration,
                 disclosed_names=disclosed_names,
                 progressive=progressive,
-                writer=writer,
-                skill_tools=skill_tools,
-                skill_prompts=skill_prompts,
-                summary_model=summary_model,
+                controller=controller,
             )
-            for step in batch
+        except _FanoutUnavailable:
+            # Nothing was scheduled, so running the batch here bills it once.
+            # Only raised *before* the fan-out starts, for exactly that reason:
+            # once steps are running elsewhere, a local rerun would be a second
+            # paid execution of work that is already under way.
+            logger.warning("chat dispatcher: falling back to in-process steps", exc_info=True)
+    if new_results is None:
+        new_results = list(
+            await asyncio.gather(
+                *(
+                    _run_worker_step_with_session(
+                        step,
+                        plan=plan,
+                        results=results,
+                        conversation_context=conversation_context,
+                        model=model,
+                        current_user=current_user,
+                        session_key=session_key,
+                        config=config,
+                        tool_specs=tool_specs,
+                        disclosed_names=disclosed_names,
+                        progressive=progressive,
+                        writer=writer,
+                        skill_tools=skill_tools,
+                        skill_prompts=skill_prompts,
+                        summary_model=summary_model,
+                    )
+                    for step in batch
+                )
+            )
         )
-    )
     merged = _merge_results(results, list(new_results))
     for result in new_results:
         disclosed_names.update(result.get("disclosed_tools") or [])
@@ -1053,6 +1080,342 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
     _refresh_remaining_estimate(controller, plan)
     update.update(_budget_state(config))
     return update
+
+
+# --- Distributed dispatch ------------------------------------------------------
+
+
+#: Detached cleanup tasks, held so the loop's weak reference is not the only one.
+_detached: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_detached(coro: Any) -> None:
+    """Run cleanup that must survive the cancellation that asked for it."""
+    task = asyncio.ensure_future(coro)
+    _detached.add(task)
+    task.add_done_callback(_detached.discard)
+
+
+class _FanoutUnavailable(RuntimeError):
+    """The batch could not be handed to Temporal, and nothing was scheduled.
+
+    Raised only before any step starts. Past that point a failure has to
+    propagate: the steps are running somewhere and re-running them locally would
+    pay for the same work twice and apply their tool side effects twice.
+    """
+
+
+def _distribution_eligible(batch: list[dict[str, Any]], config: RunnableConfig) -> bool:
+    """Whether this batch is worth scheduling across the fleet (AGT-018).
+
+    Three conditions, and each rules out a case where distribution is either
+    impossible or pure overhead:
+
+    * **An admitted turn.** A distributed step reports progress into the turn's
+      event log and is scheduled by a workflow derived from the turn id. A
+      headless run has neither, so it stays in-process -- and it is already
+      inside an activity of its own, so it is distributed at the run level.
+    * **More than one step.** A batch of one gains nothing from being scheduled
+      elsewhere and pays a serialization boundary for it.
+    * **No confirmation resume pending.** Resuming an approved action re-enters
+      the step through ``_resume_awaiting_steps``, which never reaches here.
+    """
+    if not settings.CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED:
+        return False
+    if not chat_graph.turn_id_from_config(config):
+        return False
+    return len(batch) >= max(2, settings.CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS)
+
+
+@dataclass(frozen=True)
+class _StepGrant:
+    """One step's disjoint slice of every budget dimension the run tracks."""
+
+    soft_tokens: int
+    tokens: int
+    cost_usd: float
+    llm_calls: int
+
+
+def _grant_for(
+    step: dict[str, Any],
+    plan: list[dict[str, Any]],
+    controller: BudgetController | None,
+    batch_size: int,
+) -> _StepGrant:
+    """One step's slice of what the run has left, on every dimension.
+
+    A distributed step cannot ask the run's controller for more part-way through
+    -- the controller is in another process -- so its slice is allocated up
+    front and is a hard cut, where an in-process step may overrun into a
+    sibling's idle budget (:func:`_step_thresholds`). The slices of a batch are
+    non-overlapping and sum to no more than what the run has left, which is what
+    makes concurrent workers unable to collectively overspend without a
+    distributed transaction.
+
+    **Every dimension, not just tokens.** Cost and call count are budgeted too,
+    and a batch granted only tokens could exhaust either of the other two before
+    any of it was absorbed back -- the run would find out after the money was
+    spent rather than instead of spending it.
+
+    The soft threshold holds back the run's own reserve fraction, so a step that
+    spends its slice still has enough left to say what it found rather than
+    being cut mid-work with nothing to report (AGT-012).
+    """
+    floor = int(
+        int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
+        * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN)
+    )
+    remaining = controller.remaining_normal_tokens if controller is not None else None
+    if remaining is None:
+        hard = floor
+    else:
+        outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
+        share = remaining // max(1, outstanding, batch_size)
+        # Never more than an equal split of what is left, however generous the
+        # planner's estimate was: the floor is a fair share's replacement when
+        # there is no budget at all, not a licence to exceed one.
+        hard = min(max(floor, share), remaining // max(1, batch_size))
+    reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
+    soft = max(1, hard - int(hard * reserve_ratio))
+    ledger = controller.snapshot() if controller is not None else {}
+    return _StepGrant(
+        soft_tokens=soft,
+        tokens=max(soft, hard),
+        # Zero on either of these means "no limit configured", and it has to
+        # travel as zero rather than as a share of zero.
+        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", batch_size),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", batch_size)),
+    )
+
+
+def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, batch_size: int) -> float:
+    """An equal split of one budget dimension's remainder, or 0 when unlimited."""
+    limit = float(ledger.get(limit_key) or 0.0)
+    if limit <= 0:
+        return 0.0
+    remaining = max(0.0, limit - float(ledger.get(spent_key) or 0.0))
+    return remaining / max(1, batch_size)
+
+
+def _trimmed_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What a worker needs from the plan: enough to name its dependencies.
+
+    Not the plan itself. Every step of every batch would otherwise carry a copy
+    of the whole plan, including each step's own results, through Temporal
+    history.
+    """
+    return [{"id": item["id"], "goal": item.get("goal", "")} for item in plan]
+
+
+def _dependency_payload(step: dict[str, Any], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only the outputs this step's dependencies produced, bounded as they will be rendered."""
+    wanted = set(step.get("depends_on") or [])
+    bound = max(2_000, settings.CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS)
+    return [
+        {"step_id": result["step_id"], "output": _truncate_text(str(result.get("output") or ""), bound)}
+        for result in results
+        if result["step_id"] in wanted and result.get("output")
+    ]
+
+
+async def _shared_sandbox_id(config: RunnableConfig) -> str:
+    """Open the conversation's sandbox now, so distributed steps can attach to it.
+
+    SBX-005 gives a conversation exactly one sandbox and opens it lazily, on the
+    first delegation. A distributed step cannot do that: it runs in another
+    process, so a sandbox it opened would be a second one for a conversation
+    meant to have one, and nobody would hold its id to suspend or reap it.
+
+    The coordinator therefore opens it before the fan-out and passes the id;
+    workers attach without owning it (SBX-015), and the coordinator suspends it
+    at the end of the batch exactly as before. The cost is a sandbox opened for a
+    distributed batch whose steps turn out never to delegate -- bounded to
+    multi-step orchestrated turns, which are the shape that does delegate.
+
+    Returns ``""`` when sandboxing is off or the sandbox cannot be opened; the
+    steps then run without one, which is the same position an in-process step is
+    in when ``SANDBOX_ENABLED`` is false.
+    """
+    if not settings.SANDBOX_ENABLED:
+        return ""
+    session = sandbox_session.current_sandbox_session()
+    if session is None:
+        return ""
+    try:
+        await session.backend()
+    except Exception:
+        # Never a reason to fail the batch: a step without a sandbox still runs,
+        # it just cannot delegate.
+        logger.warning(
+            "chat dispatcher: could not open the conversation sandbox for a distributed batch", exc_info=True
+        )
+        return ""
+    return session.sandbox_id
+
+
+def _batch_key(iteration: int, batch: list[dict[str, Any]]) -> str:
+    """A name for this batch that the same batch would produce again.
+
+    Derived from what the batch *is* -- the retry cycle it belongs to and the
+    steps in it -- so a coordinator that has to name the fan-out a second time
+    resolves to the one already running instead of scheduling a second copy of
+    work that is already being paid for.
+
+    Both halves are needed. Two batches in one cycle hold different steps (the
+    dispatcher takes at most ``CHAT_ORCHESTRATOR_MAX_PARALLEL`` at a time), and
+    the same steps re-run only after a verify failure, which consumes a cycle.
+    """
+    digest = hashlib.sha256("|".join(sorted(str(step["id"]) for step in batch)).encode("utf-8")).hexdigest()
+    return f"{iteration}-{digest[:16]}"
+
+
+async def _dispatch_batch_distributed(
+    batch: list[dict[str, Any]],
+    *,
+    plan: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    conversation_context: str,
+    current_user: CurrentUser | None,
+    config: RunnableConfig,
+    iteration: int,
+    disclosed_names: set[str],
+    progressive: bool,
+    controller: BudgetController | None,
+) -> list[dict[str, Any]]:
+    """Run a batch as one Temporal activity per step, and fold the results back."""
+    from temporalio.common import WorkflowIDReusePolicy
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    from reporting.services import chat_step_worker, schedule_reconciler
+    from reporting.temporal_workflows.chat_step_fanout import workflow_id_for
+    from reporting.temporal_workflows.shared import (
+        ChatStepFanoutInvocation,
+        ChatStepFanoutResult,
+        ChatWorkerStepInvocation,
+    )
+
+    if current_user is None:
+        raise _FanoutUnavailable("a distributed batch needs a resolved user")
+    turn_id = chat_graph.turn_id_from_config(config)
+    thread_id = _client_thread_id_from_config(config) or ""
+    ledger = episodic_memory.current_session_ledger()
+    session_memory_json = json.dumps(ledger.to_state()) if ledger is not None else ""
+    sandbox_id = await _shared_sandbox_id(config)
+    trimmed_plan = json.dumps(_trimmed_plan(plan))
+    # Resolved here, once, and carried: every step of the batch runs on the
+    # model this turn resolved rather than on whatever each worker's settings
+    # say (AGT-019).
+    degraded = bool(controller and controller.degraded)
+    model_spec = chat_models.resolve("worker", economy=degraded).to_payload()
+    # Carried, not re-resolved worker-side: a step's summary pass must run on
+    # the model its turn was admitted with, exactly like the step itself.
+    summary_model_spec = chat_models.resolve("worker_summary", economy=degraded).to_payload()
+
+    invocations: list[ChatWorkerStepInvocation] = []
+    for step in batch:
+        grant = _grant_for(step, plan, controller, len(batch))
+        invocations.append(
+            ChatWorkerStepInvocation(
+                turn_id=turn_id,
+                step_id=str(step["id"]),
+                user_id=current_user.user.user_id,
+                thread_id=thread_id,
+                # The cap the turn was admitted under, not a resolved permission
+                # set: the worker resolves identity itself and intersects
+                # (AGT-006). Nothing here grants anything.
+                permission_cap=sorted(current_user.permissions),
+                bypass_confirmations=chat_graph._bypass_confirmations_from_config(config),
+                step_json=json.dumps(step),
+                plan_json=trimmed_plan,
+                dependency_results_json=json.dumps(_dependency_payload(step, results)),
+                conversation_context=conversation_context,
+                session_memory_json=session_memory_json,
+                disclosed_tools=sorted(disclosed_names),
+                progressive=progressive,
+                sandbox_id=sandbox_id,
+                sandbox_thread=chat_graph.sandbox_thread_tag(config),
+                token_grant=grant.tokens,
+                soft_token_grant=grant.soft_tokens,
+                cost_grant_usd=grant.cost_usd,
+                llm_call_grant=grant.llm_calls,
+                model_spec=model_spec,
+                summary_model_spec=summary_model_spec,
+            )
+        )
+
+    try:
+        client = await schedule_reconciler.get_client()
+    except Exception as exc:
+        raise _FanoutUnavailable("no Temporal client for the chat step fan-out") from exc
+
+    workflow_id = workflow_id_for(turn_id, _batch_key(iteration, batch))
+    timeout = max(60, settings.CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS)
+    try:
+        handle = await client.start_workflow(
+            "seizu_chat_step_fanout",
+            ChatStepFanoutInvocation(turn_id=turn_id, steps=invocations, step_timeout_seconds=timeout),
+            id=workflow_id,
+            task_queue=settings.TEMPORAL_TASK_QUEUE,
+            # The id is the guard against a second paid execution of the same
+            # batch, exactly as it is for the turn itself (AGT-008).
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            # Bounds the whole batch, not just each step once a worker picks it
+            # up, so a fan-out queued through a worker outage cannot still be
+            # running after the turn that is waiting for it has gone.
+            execution_timeout=timedelta(seconds=timeout + 60),
+            # Required, and easy to miss: started by *name*, Temporal has no way
+            # to know what the result is, so it hands back the decoded JSON --
+            # a plain dict, on which reading `.outcomes` raises. Naming the type
+            # is what makes the handle return the dataclass.
+            result_type=ChatStepFanoutResult,
+        )
+    except WorkflowAlreadyStartedError:
+        handle = client.get_workflow_handle(workflow_id, result_type=ChatStepFanoutResult)
+    except Exception as exc:
+        raise _FanoutUnavailable("could not start the chat step fan-out") from exc
+
+    try:
+        fanout = await handle.result()
+    except BaseException:
+        # Includes cancellation: the turn was stopped, so the batch must stop
+        # too rather than keep spending on an answer nobody will read. Detached
+        # rather than awaited, because this path is usually reached *because*
+        # this task is being cancelled, and awaiting there is interrupted before
+        # the request lands. Best effort either way -- each step also watches the
+        # turn for a stop, which is what actually guarantees it stops.
+        _spawn_detached(handle.cancel())
+        raise
+
+    by_id = {outcome.step_id: outcome for outcome in fanout.outcomes if outcome.step_id}
+    step_results: list[dict[str, Any]] = []
+    for index, step in enumerate(batch):
+        # Matched by id, not by position: a fan-out that came back short or
+        # reordered would otherwise attribute one step's findings to another,
+        # which is worse than losing them.
+        outcome = by_id.get(str(step["id"]))
+        if outcome is None:
+            outcome = fanout.outcomes[index] if index < len(fanout.outcomes) else None
+        if outcome is None:
+            step_results.append(_step_contract_error_result(step, "The step did not return a result."))
+            continue
+        resolved = await chat_step_worker.read_step_result(turn_id, outcome)
+        if resolved is None:
+            # The step never produced a result -- the worker died, the payload is
+            # gone, or it was rejected. Recorded as an execution error so the
+            # verifier judges it and the retry cycle can pick it up, rather than
+            # disappearing from a plan the synthesizer then answers from.
+            step_results.append(_step_contract_error_result(step, outcome.error or "The step did not return a result."))
+            continue
+        step_results.append(resolved)
+        if controller is not None:
+            # The grant was the reservation; this commits what was actually
+            # spent under it, so the run's ledger stays complete even though the
+            # spending happened elsewhere.
+            await controller.absorb(outcome.usage, scope=f"worker:{step['id']}")
+        if ledger is not None:
+            ledger.merge_state({"episodes": outcome.episodes, "receipts": outcome.receipts})
+    return step_results
 
 
 def route_from_dispatcher(state: ChatState) -> str:
@@ -1395,6 +1758,7 @@ async def _run_worker_step(
     writer: Any = None,
     skill_tools: list[chat_graph.Tool] | None = None,
     skill_prompts: list[chat_graph.Prompt] | None = None,
+    thresholds: tuple[int, int] | None = None,
     summary_model: Any = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
@@ -1409,6 +1773,11 @@ async def _run_worker_step(
     model its turn was admitted with, and resolving inside would read the
     worker's own settings instead. Defaults to ``model``.
 
+    ``thresholds`` overrides the (soft, ceiling) pair this step is bounded by.
+    A distributed step passes it because it holds a *grant* rather than a share
+    of a live run ledger (AGT-018): dividing the grant again by the outstanding
+    steps of a plan it is only carrying for dependency context would give it a
+    fraction of what was already allocated to it.
     """
     step_id = str(step["id"])
     summary_model = summary_model if summary_model is not None else model
@@ -1582,7 +1951,7 @@ async def _run_worker_step(
     # from a coarse complexity label: degrading at the estimate is cheap if it
     # was low, whereas stopping there would kill legitimate work. The ceiling is
     # what keeps one step from spending a whole run's budget.
-    step_soft, step_ceiling = _step_thresholds(step, plan, controller, step_budget)
+    step_soft, step_ceiling = thresholds or _step_thresholds(step, plan, controller, step_budget)
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far

@@ -414,3 +414,107 @@ class ChatTurnRunResult:
     # completed | failed | canceled
     status: str = "completed"
     last_seq: int = 0
+
+
+@dataclass
+class ChatWorkerStepInvocation:
+    """Everything one plan step needs to run on a worker that has none of it.
+
+    A step used to run inside the turn's own activity, where it read its sandbox,
+    its budget ledger, its disclosed tool set and its session memory out of
+    context variables the dispatcher had set. Distributed, none of those exist:
+    the worker is a different process and possibly a different machine, so every
+    one of them is an explicit field here (AGT-018).
+
+    ``version`` is checked by the activity. Adding a field with a default is
+    compatible; changing what an existing field *means* is not, and a worker
+    running older code must refuse the payload rather than interpret it wrongly.
+
+    The turn record stays the source of truth for identity: only the ``user_id``
+    to resolve and the cap to intersect against travel here, never a token and
+    never a resolved permission set.
+    """
+
+    version: int = 1
+    turn_id: str = ""
+    # Duplicated out of ``step_json`` so workflow code can name a step it could
+    # not run without having to parse the plan.
+    step_id: str = ""
+    user_id: str = ""
+    # Client-side thread id; the worker namespaces it exactly as the turn does.
+    thread_id: str = ""
+    permission_cap: list[str] = field(default_factory=list)
+    bypass_confirmations: bool = False
+    # JSON, not nested dataclasses: a plan step is an open dict the planner
+    # shapes, and pinning its keys into a payload schema would make every
+    # planner change a Temporal compatibility question.
+    step_json: str = ""
+    plan_json: str = ""
+    dependency_results_json: str = ""
+    conversation_context: str = ""
+    session_memory_json: str = ""
+    disclosed_tools: list[str] = field(default_factory=list)
+    progressive: bool = True
+    # The conversation's sandbox, when the coordinator has one open. The worker
+    # attaches to it and never creates or tears one down (SBX-015).
+    sandbox_id: str = ""
+    sandbox_thread: str = ""
+    # A slice of the run budget, allocated before the fan-out.
+    token_grant: int = 0
+    soft_token_grant: int = 0
+    cost_grant_usd: float = 0.0
+    llm_call_grant: int = 0
+    # The model the *turn* resolved, not a hint for the worker to re-resolve.
+    # This was a bare ``economy: bool`` because settings could only express a
+    # binary; once a model is a per-turn choice, re-resolving worker-side would
+    # run a different model than the turn was admitted with -- the same reason
+    # ``permission_cap`` travels rather than being re-derived (AGT-006/019).
+    model_spec: dict[str, Any] = field(default_factory=dict)
+    #: The model the step's *summary* passes run on. Separate because a summary
+    #: is transcription rather than decision-making and may carry a different
+    #: reasoning budget; carried for the same reason as ``model_spec``.
+    summary_model_spec: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ChatWorkerStepOutcome:
+    """One distributed step's result, its spend, and what it learned.
+
+    ``result_json`` is inline when it is small enough to be worth carrying;
+    otherwise it is empty and ``result_ref`` names a payload in the report store,
+    because a step's full call trace can exceed what Temporal will carry and
+    would be copied into workflow history twice.
+
+    ``error`` is set when the step could not run at all. That is not the same as
+    a step that ran and failed -- which comes back as an ordinary result for the
+    verifier to judge -- and the two are kept apart so a worker crash never looks
+    like a finding.
+
+    What the step disclosed is deliberately *not* a field here: it is already in
+    the result the dispatcher reads, and the same fact carried in two places is
+    the shape that drifts.
+    """
+
+    version: int = 1
+    step_id: str = ""
+    result_json: str = ""
+    result_ref: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+    episodes: list[dict[str, Any]] = field(default_factory=list)
+    receipts: list[dict[str, Any]] = field(default_factory=list)
+    error: str = ""
+
+
+@dataclass
+class ChatStepFanoutInvocation:
+    """One dispatch batch, scheduled step by step rather than gathered locally."""
+
+    version: int = 1
+    turn_id: str = ""
+    steps: list[ChatWorkerStepInvocation] = field(default_factory=list)
+    step_timeout_seconds: int = 600
+
+
+@dataclass
+class ChatStepFanoutResult:
+    outcomes: list[ChatWorkerStepOutcome] = field(default_factory=list)

@@ -20,6 +20,11 @@ through `headless_chat.run_headless_chat`.
 **Why:** Temporal replays workflow code. Non-determinism there is not a bug you
 find in testing.
 
+`ChatStepFanoutWorkflow` follows the same split at a finer grain: it decides
+*which* plan steps run concurrently and does nothing else, while every model
+call, tool call, store write and sandbox operation stays in the activity it
+schedules ([AGT-018](chat-agent.md#agt-018)).
+
 ## WF-002 — Code-defined workflows are top-level activity types
 
 **Applies to:** `WORKFLOW_REGISTRY`, `workflows.normalized_stages`

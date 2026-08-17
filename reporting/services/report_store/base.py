@@ -70,17 +70,23 @@ def initial_report_config(name: str) -> dict[str, Any]:
     return {"name": name, "rows": [], "schema_version": 1}
 
 
-def validate_chat_turn_batch(seq: int, parts_json: str) -> None:
+def validate_chat_turn_batch(parts_json: str) -> None:
     """Reject an oversized event-log batch before any I/O.
 
     Measure bytes rather than characters so multi-byte stream content observes
-    the same storage and replay bound.
+    the same storage and replay bound. The sequence number is not checked here
+    any more: the store allocates it, so it cannot be out of range by the time
+    anything is written.
     """
-    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
-        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
     size = len(parts_json.encode("utf-8"))
     if size > CHAT_TURN_MAX_BATCH_BYTES:
         raise ValueError(f"chat turn batch is {size} bytes, over the {CHAT_TURN_MAX_BATCH_BYTES} limit")
+
+
+def validate_chat_turn_seq(seq: int) -> None:
+    """Reject a sequence number the log cannot hold, after allocation."""
+    if seq < 1 or seq > CHAT_TURN_MAX_SEQ:
+        raise ValueError(f"chat turn sequence {seq} is outside 1..{CHAT_TURN_MAX_SEQ}")
 
 
 def resolve_chat_turn_for_key(turn: "ChatTurnItem") -> ChatTurnAdmission:
@@ -1032,18 +1038,43 @@ class ReportStore(ABC):
         """Return a turn by id, optionally scoped to its owner."""
 
     @abstractmethod
-    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
-        """Append one already-rendered batch of UI-stream parts.
+    async def append_chat_turn_events(self, turn_id: str, parts_json: str) -> int | None:
+        """Append one already-rendered batch of UI-stream parts; return its ``seq``.
 
         ``parts_json`` is stored verbatim -- it is the exact JSON array text the
         live stream sent -- so a replay is byte-identical rather than
         re-serialized from a decoded copy.
 
-        Idempotent, returning False when ``seq`` is already present: a producer
-        that is retried or fails over must not rewrite a batch a tailing reader
-        has already replayed. Raises ValueError when the batch exceeds
-        ``CHAT_TURN_MAX_BATCH_BYTES``; splitting is the producer's job.
+        **The store allocates ``seq``, not the caller.** A turn has more than one
+        producer once its plan steps run as separate activities (AGT-018), and a
+        counter held by any of them cannot stay dense: two writers picking their
+        own next number either collide or leave a gap, and
+        :meth:`read_chat_turn_events` truncates at the first gap, so a gap is a
+        reader that stops mid-answer. Allocating under the turn row's lock makes
+        the numbering total across every writer, and makes "row N exists" mean
+        rows 1..N-1 were committed before it.
+
+        Returns ``None`` when the turn is gone -- there is nothing left to append
+        to, and a caller that kept writing would leave headerless rows behind.
+        Raises ValueError when the batch exceeds ``CHAT_TURN_MAX_BATCH_BYTES``;
+        splitting is the producer's job.
         """
+
+    @abstractmethod
+    async def put_chat_turn_payload(self, turn_id: str, payload_id: str, body: str) -> None:
+        """Store one oversized turn payload out of band, keyed within the turn.
+
+        A distributed plan step's result carries every tool call it made and what
+        each returned, which is bounded by ``CHAT_TOOL_RESULT_MAX_BYTES`` *per
+        call* and so can run to megabytes for a step that made dozens. Returning
+        that through Temporal would copy it into workflow history on the way out
+        and again on the way in; the reference goes through history instead and
+        the body stays here, collected with the turn (AGT-018).
+        """
+
+    @abstractmethod
+    async def get_chat_turn_payload(self, turn_id: str, payload_id: str) -> str | None:
+        """Read back a payload stored by :meth:`put_chat_turn_payload`."""
 
     @abstractmethod
     async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
@@ -1095,7 +1126,10 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def delete_chat_turn(self, turn_id: str) -> bool:
-        """Delete a turn and every one of its batches. Returns False if not found."""
+        """Delete a turn, every one of its batches, and its spilled payloads.
+
+        Returns False if not found.
+        """
 
     @abstractmethod
     async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
