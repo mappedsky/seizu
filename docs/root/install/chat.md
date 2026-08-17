@@ -124,71 +124,49 @@ Every run — interactive or scheduled — is governed by a shared budget ledger
 
 Output ceilings are not configured per model. Seizu reads the model's own
 `max_output_tokens` from litellm and caps it with
-`CHAT_LLM_MAX_OUTPUT_TOKENS_CAP`, because a constant is wrong in both directions
-at once: the models people run here report ceilings from 16,384 (`gpt-4o`) to
-393,216 (`deepseek-v4-pro`), and a request above a model's ceiling is **refused
-outright** rather than reduced.
+`CHAT_LLM_MAX_OUTPUT_TOKENS_CAP`, so a deployment does not maintain a limit per
+model and never asks for more than a provider accepts.
 
-This matters more than it sounds on reasoning models, where thinking and the
-answer come out of **one** allowance. A ceiling that is too low does not shorten
-the answer — it removes it. At the previous 4,096 default, every planner call on
-`deepseek-v4-pro` returned zero characters and fell back to a one-step plan,
-which silently disables the orchestrator's parallelism (parallelism operates on
-independent plan *steps*). `CHAT_LLM_MAX_TOKENS=0` and
-`CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS=0` now mean "derive"; set either to pin a
-value, which is still clamped to what the provider accepts.
+`CHAT_LLM_MAX_TOKENS=0` and `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS=0` mean
+"derive". Set either to pin a value; a pinned value is still clamped to the
+model's ceiling.
 
-`CHAT_LLM_REASONING_EFFORT` bounds the thinking rather than the total.
-LiteLLM translates it into each provider's native parameter — Anthropic and
-DeepSeek `thinking`, Gemini `thinkingConfig`, OpenAI `reasoning_effort` — so it
-is the one portable knob, and it is never sent to a model that does not reason.
-Per-stage overrides exist because the stages want opposite things:
+```{note}
+On reasoning models the thinking and the answer share one output allowance, so a
+ceiling set too low yields an empty response rather than a shorter one. Prefer
+the derived value unless you have a reason to pin.
+```
 
-| Stage | Default | Rationale |
-|-------|---------|-----------|
-| `CHAT_LLM_ROUTER_REASONING_EFFORT` | **`none`** | measured: 21/21 routes correct with output halved |
-| `CHAT_LLM_PLANNER_REASONING_EFFORT` | decomposition is what reasoning is *for* — spend here |
-| `CHAT_LLM_WORKER_REASONING_EFFORT` | highest call volume, so it dominates cost |
-| `CHAT_LLM_VERIFIER_REASONING_EFFORT` | judgment, tiny output |
-| `CHAT_LLM_SYNTHESIZER_REASONING_EFFORT` | competes with the answer for the same allowance |
+`CHAT_LLM_REASONING_EFFORT` bounds how much of that allowance a model may spend
+thinking: `none`, `minimal`, `low`, `medium`, `high`, or empty for the provider's
+own default. Seizu renders it into each provider's native parameter —
+`reasoning_effort` for OpenAI and Gemini, `thinking.budget_tokens` for Anthropic
+(a share of the call's ceiling), `extra_body` for DeepSeek — and never sends it
+to a model that does not support reasoning.
 
-| `CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT` | the worker's summary passes; transcription, not decision-making |
+Per-stage overrides take precedence over the global value, and an empty stage
+inherits it:
 
-**The router defaults to `none`; every other stage defaults to empty.** The
-router is the only stage with a measured default, and the reason it can have one
-is structural: its entire output is a single label, so its reasoning cannot
-change anything downstream except that label. The planner is the opposite — its
-output *is* the structure of everything after it, so a cheap planner-only
-measurement is the wrong instrument. Measured with reasoning off, the planner
-used 7.7x fewer tokens and produced equally *wide* plans, but a different shape:
-it dropped the shared up-front fetch that the other four steps depended on, so
-each of them re-derived it. A saving at one call that adds work to dozens is not
-a saving until measured end to end — and measured end to end it **reversed**:
-planner reasoning off cost ~31% more tokens and ~21% more money across a whole
-run, while finishing ~33% faster because those steps stopped serializing behind
-the prefetch. Worth taking if you want latency over spend; not a saving.
+| Setting | Default | Stage |
+|---------|---------|-------|
+| `CHAT_LLM_ROUTER_REASONING_EFFORT` | `none` | routing classification, once per turn |
+| `CHAT_LLM_PLANNER_REASONING_EFFORT` | inherit | plan decomposition |
+| `CHAT_LLM_WORKER_REASONING_EFFORT` | inherit | plan step execution |
+| `CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT` | inherit worker | a step's summary passes |
+| `CHAT_LLM_VERIFIER_REASONING_EFFORT` | inherit | step verification |
+| `CHAT_LLM_SYNTHESIZER_REASONING_EFFORT` | inherit | the final answer |
 
-Seizu renders the level into whatever each
-provider actually grades on — `reasoning_effort` for OpenAI and Gemini,
-`thinking.budget_tokens` for Anthropic (a share of the call's ceiling), and
-`extra_body` for DeepSeek — because LiteLLM's own mapping collapses every level
-to a single value on the latter two. It is never sent to a model whose
-`supports_reasoning` is false.
+Effort levels are graded natively on OpenAI and Gemini. On DeepSeek and Anthropic
+the practical distinction is `none` against any other value.
 
-Measured on `deepseek-v4-pro` *before* that rendering existed (so with the level
-being discarded), the router routed 21/21 correctly at every setting and the
-planner produced an equally wide plan at every setting. Those nulls say nothing
-about a graded provider; re-measure on yours.
-
-So treat the table as a place to look on a graded provider, not as a
-configuration to copy. Measure it on yours before changing anything:
+To measure the effect on your own provider before changing anything:
 
 ```bash
 # plan shape, one LLM call
 docker compose exec -T seizu uv run --frozen --no-sync \
     python -m scripts.plan_probe --repeat 3 "your request here"
 
-# accuracy, tokens and latency per effort level
+# routing accuracy, output tokens and latency per effort level
 docker compose exec -T seizu uv run --frozen --no-sync \
     python -m scripts.reasoning_sweep --stage router --efforts "" none low
 ```
