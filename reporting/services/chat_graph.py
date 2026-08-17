@@ -37,6 +37,7 @@ from reporting.services import (
     action_confirmations,
     chat_budget,
     chat_context,
+    chat_models,
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
@@ -1755,11 +1756,20 @@ def _strip_reasoning_context(message: AIMessage) -> AIMessage:
     conversion calls ``.get("text")`` on every element and crashes on a bare str.
 
     Reasoning is normally a UI-only diagnostic (streamed separately as a thinking
-    detail), but DeepSeek thinking mode requires an assistant message that
-    performed a tool call to be replayed with its original ``reasoning_content``.
+    detail), but a tool-calling assistant message has to be replayed with its
+    reasoning intact, in whichever shape the provider uses: DeepSeek thinking
+    mode needs the original ``reasoning_content``, and Anthropic extended
+    thinking needs the signed ``thinking_blocks`` -- a tool-use turn replayed
+    without them is rejected outright.
+
     Therefore: flatten list content back to the plain answer text for every
-    provider, strip reasoning from normal assistant messages, and preserve or
-    reconstruct ``reasoning_content`` only on assistant tool-call messages.
+    provider, strip reasoning from normal assistant messages, and preserve both
+    reasoning shapes only on assistant tool-call messages.
+
+    **Anthropic + reasoning + tool loops is unverified here.** This deployment
+    runs DeepSeek, so the ``thinking_blocks`` path is written to what litellm
+    reads rather than to an observed failure; verify it against a real Anthropic
+    key before recommending reasoning on Anthropic (AGT-019).
     """
     has_tool_calls = bool(message.tool_calls or message.additional_kwargs.get("tool_calls"))
     reasoning_content = _chunk_reasoning_delta(message)
@@ -1767,8 +1777,22 @@ def _strip_reasoning_context(message: AIMessage) -> AIMessage:
     if has_tool_calls:
         if reasoning_content:
             additional_kwargs["reasoning_content"] = reasoning_content
+        # Anthropic's half of the same requirement, and it is *not* the same
+        # field. Extended thinking makes the signed ``thinking`` blocks part of
+        # the assistant turn, and a tool-use turn replayed without them is
+        # rejected -- litellm reads them from this key on the message
+        # (``prompt_templates/factory.py``) and prepends them to the content it
+        # rebuilds. The content list below is flattened to plain text, which
+        # would destroy them and their signatures, so they are kept here where
+        # the flattening cannot reach.
+        blocks = message.additional_kwargs.get("thinking_blocks")
+        if blocks:
+            additional_kwargs["thinking_blocks"] = blocks
     else:
         additional_kwargs.pop("reasoning_content", None)
+        # Dropped off a plain answer for the same reason reasoning_content is:
+        # it is a UI diagnostic there, and re-sending it only costs context.
+        additional_kwargs.pop("thinking_blocks", None)
     message.additional_kwargs = additional_kwargs
     if isinstance(message.content, list):
         message.content = message_text(message.content)
@@ -3726,25 +3750,45 @@ def get_chat_graph() -> ChatGraph:
     raise RuntimeError("PostgreSQL chat checkpoints were not initialized during application startup")
 
 
-@lru_cache(maxsize=16)
-def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
+@lru_cache(maxsize=32)
+def build_chat_model(spec: chat_models.ModelSpec) -> ChatModel:
+    """Build the model one resolved :class:`ModelSpec` describes.
+
+    Cached **on the spec**, not on a role name that reads globals underneath.
+    That is what lets two calls in one process run different models: once a
+    model becomes a per-turn choice, a role-keyed cache would hand one user's
+    model to another.
+    """
     provider = _chat_provider()
     if provider == _MOCK_PROVIDER:
         raise RuntimeError("CHAT_LLM_PROVIDER=mock does not use a real chat model")
     from langchain_litellm import ChatLiteLLM
 
-    model_id = _model_for_role(role, economy=economy)
     kwargs: dict[str, Any] = {
-        "model": _litellm_model_id(provider, model_id),
-        "temperature": settings.CHAT_LLM_TEMPERATURE,
+        "model": _litellm_model_id(provider, spec.model_id),
         "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
         "max_retries": settings.CHAT_LLM_MAX_RETRIES,
         # Seizu always consumes the model through .astream(); make the streaming
         # intent explicit so LiteLLM emits stream=true on the wire.
         "streaming": True,
     }
-    if settings.CHAT_LLM_MAX_TOKENS > 0:
-        kwargs["max_tokens"] = settings.CHAT_LLM_MAX_TOKENS
+    temperature = chat_models.temperature_for(spec)
+    if temperature is not None:
+        # Omitted, not defaulted, for a model that refuses one: OpenAI's
+        # reasoning models reject a temperature outright and drop_params is
+        # False, so sending the configured value fails every call (AGT-019).
+        kwargs["temperature"] = temperature
+    if spec.max_output_tokens > 0:
+        kwargs["max_tokens"] = spec.max_output_tokens
+    reasoning = chat_models.reasoning_kwargs(spec)
+    if reasoning:
+        # Through model_kwargs, not as constructor arguments. ChatLiteLLM does
+        # not declare `reasoning_effort`, so passing it directly is **silently
+        # swallowed** -- no attribute, not in model_kwargs, absent from
+        # _default_params -- and the setting looks configured while never
+        # reaching the wire. model_kwargs is flattened into the completion call,
+        # which is what actually delivers it (AGT-019).
+        kwargs["model_kwargs"] = reasoning
     api_key = settings.CHAT_LLM_API_KEY or _legacy_provider_api_key(provider)
     if api_key:
         kwargs["api_key"] = api_key
@@ -3756,17 +3800,15 @@ def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
     return ChatLiteLLM(**kwargs)
 
 
-def _model_for_role(role: str, *, economy: bool = False) -> str:
-    if economy and settings.CHAT_LLM_ECONOMY_MODEL.strip():
-        return settings.CHAT_LLM_ECONOMY_MODEL.strip()
-    role_models = {
-        "planner": settings.CHAT_LLM_PLANNER_MODEL,
-        "router": settings.CHAT_LLM_PLANNER_MODEL,
-        "worker": settings.CHAT_LLM_WORKER_MODEL,
-        "verifier": settings.CHAT_LLM_VERIFIER_MODEL,
-        "synthesizer": settings.CHAT_LLM_SYNTHESIZER_MODEL,
-    }
-    return role_models.get(role, "").strip() or settings.CHAT_LLM_MODEL.strip()
+def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
+    """Resolve this deployment's spec for a stage and build its model.
+
+    The convenience path for callers with no per-call choice to express. A
+    caller that *has* one -- notably a distributed plan step running on the spec
+    its turn was admitted with -- resolves the spec itself and calls
+    :func:`build_chat_model`.
+    """
+    return build_chat_model(chat_models.resolve(role, economy=economy))
 
 
 def _chat_provider() -> str:

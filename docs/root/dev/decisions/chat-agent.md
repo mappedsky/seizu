@@ -583,6 +583,212 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-019 — What a call may spend is derived from the model, never a constant
+
+**Applies to:** `reporting/services/chat_models.py`, `chat_graph.build_chat_model`
+/ `get_chat_model`, `chat_context.max_output_tokens`,
+`chat_orchestrator._structured_invoke`; `CHAT_LLM_MAX_TOKENS`,
+`CHAT_LLM_MAX_OUTPUT_TOKENS_CAP`, `CHAT_LLM_*_REASONING_EFFORT`,
+`CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS`
+
+A `ModelSpec` — model id, output ceiling, reasoning effort — is resolved once per
+call and passed down. The ceiling is `min(cap, the model's own
+max_output_tokens)` read from litellm, not a configured constant.
+
+**Why: a constant here fails silently and catastrophically.** On a reasoning
+model the thinking and the answer come out of **one** allowance, so a ceiling
+that is too low does not produce a shorter answer — it produces *no* answer, and
+nothing distinguishes that from a model that could not satisfy the request.
+Measured on `deepseek-v4-pro` at the old `CHAT_LLM_MAX_TOKENS=4096`: **every**
+planner call returned `chars=0, finish_reason=length` twice, and `planner_node`
+fell back to a single step carrying the user's whole request.
+
+That fallback is invisible everywhere downstream — identical in the stream, the
+checkpoint and the harness (`steps_total: 1`), with `run_errors` the only record
+— and it **disables the orchestrator's parallelism entirely**, because
+parallelism operates on
+independent plan *steps* and there was only ever one. So a feature can be
+correct, tested, and completely unreachable. Measured, 3 samples per arm:
+
+| `max_tokens` | real plans | widest batch |
+|---|---|---|
+| 4,096 | **0/3** | 1 |
+| 16,384 | 3/3 | 4 |
+| 32,768 | 3/3 | 4 |
+
+The planner emits **5,798–13,058 output tokens** per call on this model, so
+4,096 could never have worked: the plan and the reasoning that produces it do
+not fit.
+
+**A constant is wrong in both directions at once.** The models we run report
+ceilings from 16,384 (`gpt-4o`) to 393,216 (`deepseek-v4-pro`). A constant large
+enough for the second is *refused outright* by the first — providers reject an
+over-ceiling request rather than reducing it. Only derivation is right for both,
+and it needs no per-model configuration.
+
+**`0` means derive.** `CHAT_LLM_MAX_TOKENS` and
+`CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` both default to `0` and are still honoured
+when set — and still clamped to the provider's ceiling.
+
+**Don't:** reintroduce a default output size at a call site.
+`_structured_invoke` defaulted to `1,024`, which is why the router and verifier
+sat one hard question away from the same silent failure the planner hit.
+
+### `reasoning_effort` is the intent; the provider's own parameter is what ships
+
+`max_tokens` is genuinely portable — litellm renames it to
+`max_completion_tokens` for OpenAI on its own. **Effort is not.** Its mapping is
+lossy on half the providers we run: every level collapses to
+`thinking: {"type": "enabled"}` on DeepSeek and `{"type": "adaptive"}` on
+Anthropic, so a "high" and a "minimal" arrive identical. That is why sweeping
+effort measured nothing on DeepSeek — there was no dial attached.
+
+Graded control does exist on all four, so `chat_models.reasoning_kwargs` renders
+the level into whatever that provider grades on:
+
+| Provider | Rendered from `low` |
+|---|---|
+| OpenAI | `reasoning_effort="low"` (native) |
+| Gemini | `reasoning_effort="low"` → `thinkingBudget` (native) |
+| Anthropic | `thinking={"type":"enabled","budget_tokens":N}` |
+| DeepSeek | `extra_body={"reasoning_effort":"low"}` |
+
+`budget_tokens` is a **share of the call's own ceiling**, not a constant, so one
+profile means the same thing on a 16k model and a 393k one — floored at
+Anthropic's 1024 minimum and capped at half the ceiling, because thinking and the
+answer come out of the same allowance.
+
+This is provider-specific code, which the previous revision of this entry argued
+against. The argument was wrong: keeping only the portable parameter did not
+avoid provider knowledge, it silently discarded control. The knowledge lives in
+the **one resolver that already knows the model**, so no call site learns a
+provider name.
+
+### Two generation parameters are refused, and neither says so
+
+**OpenAI reasoning models reject `temperature` outright.** With
+`litellm.drop_params` False that raises, so `CHAT_LLM_TEMPERATURE=0.2` fails
+*every call* on `gpt-5` and `o3`. There is no capability flag for it —
+`get_supported_openai_params` reports `temperature` as supported for `gpt-5`,
+which then refuses it — so `chat_models` asks litellm's parameter transform
+directly and caches the answer.
+
+**Anthropic fixes temperature at 1 once extended thinking is on**, and litellm
+does not strip a different value. `temperature_for` therefore returns `1.0` for
+that combination and `None` where a temperature may not be sent at all.
+
+Both are the same shape as the ceiling bug: a flat generation constant applied to
+models that do not all accept it.
+
+### Only the router has a measured default, and only because of its shape
+
+`CHAT_LLM_ROUTER_REASONING_EFFORT` defaults to `none`. Measured across 21 cases
+on `deepseek-v4-pro`: routing stayed **21/21 correct** while median output
+**halved**, 78 → 37 tokens, on every turn.
+
+**The planner looks like a far bigger win and is not takeable on that evidence.**
+With reasoning off it used **7.7x fewer tokens** (8,439 → 1,093) and was 12x
+faster, at the same plan *width*. But reading the plans showed they are not
+equivalent: with reasoning the planner produced a shared up-front fetch step that
+the four per-CVE steps depended on; without it, four independent steps each
+re-derived that data. Width is a structural metric and hid this entirely.
+
+The asymmetry is the point, and it generalizes. **A stage whose output is a
+single value can be measured by a cheap probe; a stage whose output is the
+structure of everything downstream cannot.** The router's reasoning can change
+nothing but one label. The planner's changes what every worker then does, so
+only an end-to-end run can price it — a saving at one call that adds work to
+dozens is not a saving.
+
+**Measured end to end, the planner saving reverses.** Three samples per arm on
+the same conversation: turning planner reasoning off cost **more** overall --
+median 1,107k tokens against 846k, and $0.329 against $0.271 -- despite saving
+7,300 tokens at the planner call. Exactly the mechanism the plans predicted: four
+steps re-deriving the data the shared prefetch would have fetched once, and the
+workers are where the tokens are. (Ranges overlap at n=3, so read this as
+directionally confirmed rather than settled; the mechanism is what makes it
+credible, not the sample size.)
+
+It *is* faster -- 684s against 1,019s -- because those four steps start
+immediately instead of serializing behind the prefetch. So it is a real
+cost-versus-latency trade, and a deployment that wants responsiveness over spend
+can take it deliberately. It is not a free win, which is how the probe made it
+look.
+
+**Don't:** convert the per-stage rationale table into defaults. It is where to
+look, not what to set.
+
+### Effort keys on stage, not only role
+
+A worker's ReAct loop is deciding what to do next; its summary pass is writing
+down what the step already established, and **every "reasoning ate the
+allowance" failure in this codebase is in the latter**. Both used to resolve
+through `get_chat_model("worker", …)`, so the distinction could not be
+expressed. `worker_summary` and `worker_summary_retry` are now stages that run
+on the worker's model with their own effort, inheriting the worker's when unset.
+
+**It must go through `model_kwargs`.** `ChatLiteLLM` does not declare
+`reasoning_effort`, so passing it as a constructor argument is silently
+swallowed — no attribute, absent from `model_kwargs`, absent from
+`_default_params`. It shipped that way first, and every measurement taken
+against it was measuring nothing.
+
+`litellm.drop_params` is `False`, so an unsupported parameter **raises** rather
+than being dropped. That makes the `supports_reasoning` gate in
+`chat_models.resolve` load-bearing rather than tidy.
+
+Effort is **per role** because the stages want opposite things in principle:
+reasoning is what decomposition and judgment (planner, verifier) are for, while
+classification (router) and transcription (worker summaries, synthesis) only
+lose answer allowance to it.
+
+**Every per-role default is empty, because on this deployment the knob does
+nothing measurable.** LiteLLM collapses `minimal`/`low`/`medium`/`high` to a
+single value on DeepSeek (`thinking: {"type": "enabled"}`) and Anthropic
+(`{"type": "adaptive"}`) — only OpenAI and Gemini are genuinely graded. Measured
+on DeepSeek with the parameter actually reaching the wire: the router routes
+21/21 correctly at every level with ~70 output tokens either way, and the
+planner produces a width-4 plan 3/3 at every level. Turning reasoning *off*
+(`none`) did not help either — it produced **more** output (11k vs 6.5k median),
+because the model writes its thinking into the visible answer instead.
+
+So the recommended-values table in the install docs is guidance for graded
+providers, not a measured win. Do not ship it as a default without measuring on
+the provider in question.
+
+### Reasoning has to survive back into the next request
+
+A tool-calling assistant message must be replayed with its reasoning intact, and
+the shape differs: DeepSeek needs `reasoning_content`, Anthropic extended
+thinking needs the **signed `thinking_blocks`**, and a tool-use turn replayed
+without them is rejected. `_strip_reasoning_context` flattens list content to
+plain text, which would destroy Anthropic's blocks, so both shapes are preserved
+in `additional_kwargs` — where litellm reads them
+(`prompt_templates/factory.py`) and where the flattening cannot reach.
+
+**Anthropic + reasoning + tool loops is unverified.** This deployment runs
+DeepSeek, so that path is written to what litellm reads rather than to an
+observed failure. Verify it against a real Anthropic key before recommending
+reasoning on Anthropic.
+
+### The spec is the cache key, and it travels
+
+`build_chat_model` is memoized on the **spec**, not on `(role, economy)`. That
+matters ahead of user-selected models: a role-keyed cache would hand one user's
+chosen model to another in the same process.
+
+For the same reason a spec **travels** to wherever the call actually happens
+rather than being re-resolved there. A caller that re-resolves at the far end
+reads that process's settings and can produce a different model than the one the
+turn was admitted with — the failure `permission_cap` travelling already
+prevents ([AGT-006](#agt-006)). The worker's summary passes take their model as
+an argument for exactly this reason.
+
+**Measuring this needs `scripts/plan_probe.py`**, which runs the planner alone —
+one LLM call, nothing executed — and reports the widest independent batch plus
+whether the plan was the fallback. A full harness turn costs ~553s and ~$0.20 to
+learn the same integer.
+
 ## AGT-009 — Answer-only plan steps require complete evidence
 
 **Applies to:** `chat_orchestrator._PLANNER_PROMPT`

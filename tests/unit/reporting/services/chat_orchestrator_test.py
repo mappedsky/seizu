@@ -1747,6 +1747,10 @@ async def test_worker_stops_at_its_share_of_the_run_budget(mocker):
     # Pinned, because this test is about the share mechanism rather than about
     # how far past the share the default lets a step go (AGT-017).
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE", 1.0)
+    # Pinned for the same reason: authorization reserves a full output allowance
+    # per call, so the derived ceiling (AGT-019) would set the size of every
+    # estimate here and the token arithmetic below is written around 4,096.
+    mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 4_096)
     ledger = initial_budget_ledger()
     # 16k spendable across two outstanding steps -> an 8k share, and a 16k hard
     # bound. The model bills 2k a turn, so it passes its share after four calls

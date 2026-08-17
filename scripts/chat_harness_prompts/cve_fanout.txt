@@ -1,0 +1,17 @@
+# A conversation whose plan has independent per-item steps.
+#
+# The built-in conversation plans a *single* step on this graph, so it cannot
+# measure anything that only happens with two or more independent steps -- an
+# arm that changes such behaviour comes back looking identical for a reason that
+# has nothing to do with the arm.
+#
+# The CVE ids are named in the request on purpose. Plans are static: the planner
+# writes the whole plan before any step runs, so it can only fan out over items
+# the *request* enumerates. Asking for "the four highest-severity CVEs" gives it
+# nothing to fan out over -- the ids do not exist yet -- and it correctly plans
+# one step that handles all four. Measured: exactly that, twice.
+#
+# One prompt per non-blank line; lines starting with # are ignored.
+
+Investigate these four vulnerabilities in the mappedsky organization, treating each one as a separate and independent piece of work: CVE-2011-4969, CVE-2015-9251, CVE-2016-9639, CVE-2017-12791. For each, tell me its severity and CVSS, which repositories and packages carry it, and whether the vulnerable version is actually installed.
+Now, for each of those same four vulnerabilities separately, tell me what would have to be true for it to be exploitable in the repositories that carry it, and then rank the four by which I should fix first.

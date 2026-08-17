@@ -13,7 +13,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.report_config import User
-from reporting.services import chat_context, chat_graph, sandbox_session
+from reporting.services import chat_context, chat_graph, chat_models, sandbox_session
 from reporting.services.chat_messages import MessageTag, created_at, has_tag, stamp_created_at
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
 
@@ -3147,12 +3147,14 @@ def test_get_chat_model_builds_litellm_streaming_client(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 2048)
     mocker.patch("reporting.settings.CHAT_LLM_API_KEY", "chat-key")
     mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://llm.example.com")
-    chat_graph.get_chat_model.cache_clear()
+    chat_graph.build_chat_model.cache_clear()
+    chat_models.capability.cache_clear()
 
     try:
         assert chat_graph.get_chat_model() is model
     finally:
-        chat_graph.get_chat_model.cache_clear()
+        chat_graph.build_chat_model.cache_clear()
+        chat_models.capability.cache_clear()
 
     model_factory.assert_called_once_with(
         model="openai/gpt-4o",
@@ -4178,3 +4180,38 @@ def test_add_timestamped_messages_ignores_non_conversation_messages():
     merged = chat_graph.add_timestamped_messages([], [tool_message])
 
     assert created_at(merged[0]) is None
+
+
+async def test_a_tool_call_message_keeps_both_reasoning_shapes():
+    """A tool-calling turn is replayed to the provider, and the shape it needs
+    differs: DeepSeek wants `reasoning_content`, Anthropic wants the signed
+    `thinking_blocks`. Flattening the content list would destroy the blocks, so
+    they are kept in additional_kwargs where litellm reads them."""
+    blocks = [{"type": "thinking", "thinking": "considering", "signature": "sig-abc"}]
+    message = AIMessage(
+        content=[{"type": "thinking", "thinking": "considering"}, "the answer"],
+        tool_calls=[{"name": "t__one", "args": {}, "id": "call_1"}],
+        additional_kwargs={"reasoning_content": "considering", "thinking_blocks": blocks},
+    )
+
+    result = chat_graph._strip_reasoning_context(message)
+
+    assert result.additional_kwargs["thinking_blocks"] == blocks
+    assert result.additional_kwargs["reasoning_content"] == "considering"
+    assert isinstance(result.content, str)
+
+
+async def test_a_plain_answer_drops_both_reasoning_shapes():
+    """A UI diagnostic there, and re-sending it only costs context."""
+    message = AIMessage(
+        content="just the answer",
+        additional_kwargs={
+            "reasoning_content": "considering",
+            "thinking_blocks": [{"type": "thinking", "thinking": "considering"}],
+        },
+    )
+
+    result = chat_graph._strip_reasoning_context(message)
+
+    assert "thinking_blocks" not in result.additional_kwargs
+    assert "reasoning_content" not in result.additional_kwargs

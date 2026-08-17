@@ -612,7 +612,49 @@ CHAT_LLM_BASE_URL = str_env("CHAT_LLM_BASE_URL", "")
 CHAT_LLM_TEMPERATURE = float_env("CHAT_LLM_TEMPERATURE", 0.2)
 # Per-call output token cap. Kept generous so most answers finish in one shot;
 # replies still truncated by it are auto-continued server-side (see below).
-CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 4096)
+# Explicit per-call output cap. 0 (the default) derives it from the model
+# instead -- see CHAT_LLM_MAX_OUTPUT_TOKENS_CAP. A non-zero value still gets
+# clamped to what the provider accepts, since asking above a model's ceiling is
+# refused outright rather than quietly reduced.
+#
+# This defaulted to 4096, which silently broke the planner on every reasoning
+# model: reasoning and answer share one allowance, so a structured call spent
+# the whole 4096 thinking and returned zero content, and planner_node fell back
+# to a one-step plan -- disabling the orchestrator's parallelism entirely,
+# because parallelism operates on independent plan steps (AGT-019).
+CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 0)
+# Ceiling applied to the model's own max_output_tokens when CHAT_LLM_MAX_TOKENS
+# is 0. Not a flat output size: models we run report ceilings from 16,384
+# (gpt-4o) to 393,216 (deepseek-v4-pro), so the effective value is
+# min(this, the model's ceiling) and no per-model configuration is needed.
+CHAT_LLM_MAX_OUTPUT_TOKENS_CAP = int_env("CHAT_LLM_MAX_OUTPUT_TOKENS_CAP", 32_768)
+# How much of the output allowance a reasoning model may spend thinking:
+# "none", "minimal", "low", "medium", "high", or "" for the provider's default.
+# LiteLLM translates this into each provider's native shape (Anthropic/DeepSeek
+# `thinking`, Gemini `thinkingConfig`, OpenAI `reasoning_effort`), so this stays
+# the one portable knob; sending a provider-native parameter instead would
+# re-introduce the special-casing LiteLLM was adopted to remove.
+CHAT_LLM_REASONING_EFFORT = str_env("CHAT_LLM_REASONING_EFFORT", "")
+# Per-stage overrides, empty to inherit CHAT_LLM_REASONING_EFFORT. The stages
+# want opposite things: reasoning is what decomposition and judgment are for,
+# while a classifier and a report-writer only lose answer allowance to it.
+# Measured on deepseek-v4-pro: at a 32,768 cap, "low" produced the same plan
+# shape as the provider default 31% faster.
+# The router is the one stage with a measured default. Its entire output is a
+# single label, so its reasoning cannot change anything downstream except that
+# label -- unlike the planner, whose output *is* the structure of everything
+# after it. Measured on deepseek-v4-pro across 21 cases: routing stayed 21/21
+# correct with reasoning off while median output halved (78 -> 37 tokens), on
+# every turn. Set to "" to restore the provider's default.
+CHAT_LLM_ROUTER_REASONING_EFFORT = str_env("CHAT_LLM_ROUTER_REASONING_EFFORT", "none")
+CHAT_LLM_PLANNER_REASONING_EFFORT = str_env("CHAT_LLM_PLANNER_REASONING_EFFORT", "")
+CHAT_LLM_WORKER_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_REASONING_EFFORT", "")
+# The worker's summary passes, which run on the worker's model but are doing a
+# different job: writing down what the step already established rather than
+# deciding what to do next. Empty inherits CHAT_LLM_WORKER_REASONING_EFFORT.
+CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT", "")
+CHAT_LLM_VERIFIER_REASONING_EFFORT = str_env("CHAT_LLM_VERIFIER_REASONING_EFFORT", "")
+CHAT_LLM_SYNTHESIZER_REASONING_EFFORT = str_env("CHAT_LLM_SYNTHESIZER_REASONING_EFFORT", "")
 CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
 CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
 # When a final answer is cut off by the output-token limit (finish_reason
@@ -730,7 +772,12 @@ CHAT_ORCHESTRATOR_ENABLED = bool_env("CHAT_ORCHESTRATOR_ENABLED", True)
 CHAT_ORCHESTRATOR_MAX_STEPS = int_env("CHAT_ORCHESTRATOR_MAX_STEPS", 8)
 # Planner generation budget. Thinking models need more room than the compact
 # router/verifier schemas so their final JSON is not crowded out by reasoning.
-CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS = int_env("CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS", 4096)
+# Planner output ceiling. 0 (the default) means "whatever the model allows",
+# derived the same way every other output ceiling now is. This was 4096, which
+# is *below* what a reasoning model needs to think and then emit a plan, so the
+# planner returned nothing and fell back to a one-step plan on every turn --
+# and a one-step plan removes the orchestrator's parallelism entirely (AGT-019).
+CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS = int_env("CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS", 0)
 # Characters of prior-step output a worker may be given, split across the step's
 # dependencies. A dependency is the reason a step can do its job: at 2,000 each,
 # a 19-finding CVE list reached the reachability step truncated, and the result

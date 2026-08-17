@@ -471,11 +471,24 @@ async def _structured_invoke(
     *,
     role: str,
     allow_reserve: bool = False,
-    max_output_tokens: int = 1024,
+    max_output_tokens: int = 0,
 ) -> BaseModel:
+    """Invoke a structured call, bounded by what the model can actually give.
+
+    ``max_output_tokens=0`` means "as much as this model allows", and is the
+    default because a constant here is the wrong shape. On a reasoning model the
+    thinking and the JSON come out of one allowance, so a small ceiling does not
+    produce a smaller answer -- it produces **no** answer, and the caller cannot
+    tell that from a model that could not satisfy the schema. Measured: the
+    planner at 4,096 returned ``chars=0, finish_reason=length`` on every attempt
+    and fell back to a one-step plan (AGT-019). A non-zero value is still
+    honoured, and still clamped, since asking above a provider's ceiling is
+    refused outright rather than quietly reduced.
+    """
     controller = budget_controller_from_config(config)
     economy = bool(controller and controller.degraded and role in ("worker", "synthesizer"))
     model = get_chat_model(role, economy=economy)
+    ceiling = chat_context.max_output_tokens(model)
     return await _invoke_structured_output(
         model,
         schema,
@@ -483,10 +496,7 @@ async def _structured_invoke(
         config,
         allow_reserve=allow_reserve,
         phase=role,
-        # Clamped here rather than at each call site, which is where the model
-        # for a structured call is chosen. Asking above a provider's ceiling is
-        # refused outright rather than quietly reduced.
-        max_output_tokens=min(max_output_tokens, chat_context.max_output_tokens(model)),
+        max_output_tokens=min(max_output_tokens, ceiling) if max_output_tokens > 0 else ceiling,
     )
 
 
@@ -989,7 +999,11 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
     for step in batch:
         step["status"] = "ran"
 
-    model = get_chat_model("worker", economy=bool(controller and controller.degraded))
+    economy = bool(controller and controller.degraded)
+    model = get_chat_model("worker", economy=economy)
+    # Its own stage: the worker's model, but a summary is transcription rather
+    # than decision-making and may carry a different reasoning budget (AGT-019).
+    summary_model = get_chat_model("worker_summary", economy=economy)
     tool_specs, skill_tools, skill_prompts = await _worker_tool_specs(current_user)
     # Progressive disclosure carries across steps: tools a skill disclosed in an
     # earlier super-step stay callable for the dependent steps that follow.
@@ -1018,6 +1032,7 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
                 writer=writer,
                 skill_tools=skill_tools,
                 skill_prompts=skill_prompts,
+                summary_model=summary_model,
             )
             for step in batch
         )
@@ -1380,14 +1395,23 @@ async def _run_worker_step(
     writer: Any = None,
     skill_tools: list[chat_graph.Tool] | None = None,
     skill_prompts: list[chat_graph.Prompt] | None = None,
+    summary_model: Any = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
 
     ``tool_specs`` is the full universe of skills + tools; under progressive
     disclosure only skills and already-``disclosed_names`` tools are callable at
     the start, with the rest unlocked when a rendered skill declares them.
+
+    ``summary_model`` runs the summary passes, which do a different job from the
+    step's own loop and may carry a different reasoning budget (AGT-019). It is
+    resolved by the *caller*, never here: a distributed step must run on the
+    model its turn was admitted with, and resolving inside would read the
+    worker's own settings instead. Defaults to ``model``.
+
     """
     step_id = str(step["id"])
+    summary_model = summary_model if summary_model is not None else model
     # One log per step. Scoped by construction: parallel steps get independent
     # logs because asyncio.gather copies the context per task, while tool calls
     # within this step share the object by reference — which is the carry that
@@ -1795,11 +1819,6 @@ async def _run_worker_step(
     # can happen at the interactive loop guard or when the shared run budget
     # enters finalization. Summarize progress rather than returning an empty step.
     if not output_text.strip() and blocked is None and tools_used:
-        summary_model = (
-            get_chat_model("worker", economy=True)
-            if controller is not None and controller.degraded and settings.CHAT_LLM_ECONOMY_MODEL.strip()
-            else model
-        )
         try:
             synthesis = await _run_llm_tool_turn(
                 summary_model,
@@ -1844,7 +1863,7 @@ async def _run_worker_step(
         # much better chance at three short lists.
         try:
             retry = await _run_llm_tool_turn(
-                model,
+                summary_model,
                 f"{system_prompt}\n\n{_worker_unfinished_summary_message()}",
                 messages,
                 [],
@@ -1852,7 +1871,7 @@ async def _run_worker_step(
                 None,
                 allow_reserve=True,
                 phase=f"worker_summary_retry:{step_id}",
-                max_output_tokens=chat_context.max_output_tokens(model),
+                max_output_tokens=chat_context.max_output_tokens(summary_model),
             )
             step_input_tokens += retry.input_tokens
             step_output_tokens += retry.output_tokens
