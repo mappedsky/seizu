@@ -44,11 +44,11 @@ from scripts.plan_probe import _dev_user, _independent_batches
 #: router getting it wrong rather than the case being ambiguous.
 ROUTER_CASES: list[tuple[str, str]] = [
     ("hello", "simple"),
-    ("what does CVE-2015-9251 affect?", "simple"),
+    ("what does CVE-2021-44228 affect?", "simple"),
     ("how many repositories are in the graph?", "simple"),
     ("what do you mean by 'reachable'?", "simple"),
     (
-        "Find the highest-severity CVEs in the mappedsky org, work out which are actually "
+        "Find the highest-severity CVEs in the organization, work out which are actually "
         "installed, then trace which repositories they expose and rank them by fix priority.",
         "orchestrate",
     ),
@@ -63,11 +63,15 @@ ROUTER_CASES: list[tuple[str, str]] = [
     ),
 ]
 
+#: The identifiers are illustrative, not this graph's: the planner writes a plan
+#: without executing anything, so it never queries them. They have to be *named*
+#: though -- plans are static, so a request for "the top four CVEs" gives the
+#: planner nothing to fan out over and it correctly plans a single step.
 PLANNER_CASE = (
-    "Investigate these four vulnerabilities in the mappedsky organization, treating each one as "
-    "a separate and independent piece of work: CVE-2011-4969, CVE-2015-9251, CVE-2016-9639, "
-    "CVE-2017-12791. For each, tell me its severity and CVSS, which repositories and packages "
-    "carry it, and whether the vulnerable version is actually installed."
+    "Investigate these four vulnerabilities, treating each one as a separate and independent "
+    "piece of work: CVE-2021-44228, CVE-2014-0160, CVE-2017-5638, CVE-2018-11776. For each, "
+    "tell me its severity and CVSS, which repositories and packages carry it, and whether the "
+    "vulnerable version is actually installed."
 )
 
 

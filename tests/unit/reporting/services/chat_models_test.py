@@ -127,8 +127,14 @@ def test_a_per_call_model_beats_every_setting(mocker):
 
 
 def test_a_spec_round_trips_through_a_payload(mocker):
-    """A distributed plan step must run on the model its turn was admitted with,
-    not on whatever that worker's settings resolve to now."""
+    """A spec resolved in one process must rebuild identically in another, so a
+    call cannot silently run on a different model than the one that was chosen.
+
+    The model is pinned rather than taken from the environment: an unconfigured
+    deployment resolves an empty id, which is not a usable spec, and the test
+    would then pass or fail on whether a `.env` happened to be present.
+    """
+    mocker.patch.object(settings, "CHAT_LLM_MODEL", "some/model")
     _capability(mocker, max_output_tokens=32_768)
     spec = chat_models.resolve("worker", reasoning_effort="low")
 

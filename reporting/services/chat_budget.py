@@ -295,6 +295,25 @@ class BudgetController:
                 self._ledger["usage_estimated"] = True
             self._refresh_mode_locked()
 
+    def usage_report(self) -> dict[str, Any]:
+        """What this ledger actually spent.
+
+        A plain accessor, but the only honest way to compare two configurations:
+        wall-clock here is dominated by network variance wide enough to swamp any
+        difference between them, while tokens are what reasoning actually moves
+        and what the provider bills.
+        """
+        return {
+            "input_tokens": int(self._ledger.get("input_tokens") or 0),
+            "output_tokens": int(self._ledger.get("output_tokens") or 0),
+            "cache_read_tokens": int(self._ledger.get("cache_read_tokens") or 0),
+            "cache_creation_tokens": int(self._ledger.get("cache_creation_tokens") or 0),
+            "cost_usd": float(self._ledger.get("cost_usd") or 0.0),
+            "llm_calls": int(self._ledger.get("llm_calls") or 0),
+            "usage_estimated": bool(self._ledger.get("usage_estimated")),
+            "phases": dict(self._ledger.get("phases") or {}),
+        }
+
     async def release(self, reservation: BudgetReservation) -> None:
         async with self._lock:
             self._reservations.pop(reservation.reservation_id, None)
