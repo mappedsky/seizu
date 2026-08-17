@@ -33,6 +33,7 @@ from reporting.temporal_workflows.activities import (
     record_scheduled_chat_run_result,
     run_agent_chat_session,
     run_chat_turn,
+    run_chat_worker_step,
     run_dependency_ci_fix,
     run_dependency_remediation,
     run_repo_cve_chat,
@@ -41,6 +42,7 @@ from reporting.temporal_workflows.activities import (
 )
 from reporting.temporal_workflows.agent_chat import AgentChatWorkflow
 from reporting.temporal_workflows.cartography_sync import CartographyModuleWorkflow, CartographySyncWorkflow
+from reporting.temporal_workflows.chat_step_fanout import ChatStepFanoutWorkflow
 from reporting.temporal_workflows.chat_turn import ChatTurnWorkflow
 from reporting.temporal_workflows.configured_workflow import (
     ConfiguredWorkflow,
@@ -71,6 +73,11 @@ async def _run_worker() -> None:
         worker = Worker(
             client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,
+            # The cluster-wide bound on concurrent work, and so on distributed
+            # chat plan steps (AGT-018): per-turn limits stop one conversation
+            # fanning out too wide, slots stop many conversations doing it at
+            # once. Temporal queues the overflow rather than dropping it.
+            max_concurrent_activities=max(1, settings.TEMPORAL_MAX_CONCURRENT_ACTIVITIES),
             workflows=[
                 CveRepoReportWorkflow,
                 CveDependencyRemediationWorkflow,
@@ -81,6 +88,7 @@ async def _run_worker() -> None:
                 ConfiguredWorkflowWaitingSlot,
                 ConfiguredWorkflowWatchPoll,
                 ChatTurnWorkflow,
+                ChatStepFanoutWorkflow,
                 ScheduledChatWorkflow,
                 ScheduledChatWatchPoll,
                 AgentChatWorkflow,
@@ -103,6 +111,7 @@ async def _run_worker() -> None:
                 check_scheduled_chat_watch,
                 finalize_chat_turn,
                 run_chat_turn,
+                run_chat_worker_step,
                 run_scheduled_chat_session,
                 record_scheduled_chat_run_result,
                 run_agent_chat_session,

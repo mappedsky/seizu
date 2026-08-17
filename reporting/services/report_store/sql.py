@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from snowflake import SnowflakeGenerator
-from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, null, nullslast, text, update
+from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, func, null, nullslast, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -57,6 +57,7 @@ from reporting.services.report_store.base import (
     require_public_space_member,
     resolve_chat_turn_for_key,
     validate_chat_turn_batch,
+    validate_chat_turn_seq,
 )
 from reporting.utils.sql import build_database_url
 
@@ -65,6 +66,13 @@ logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _snowflake_gen: SnowflakeGenerator | None = None
+
+# How many times an event-log append re-reads the highest sequence after losing
+# the race for it. The turn row is locked first, so a loss needs two producers to
+# get past that lock concurrently -- a backend without row locking, or a lock
+# released by a rollback elsewhere. A handful of retries covers that without
+# turning a genuinely stuck allocation into an unbounded loop.
+_CHAT_TURN_SEQ_ALLOCATION_ATTEMPTS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +414,20 @@ class ChatTurnEventRecord(SQLModel, table=True):  # type: ignore
     # the live stream sent, and a JSON column round-trips through Python and
     # renormalises it. Nothing ever queries into it.
     parts_json: str = Field(sa_column=Column(Text, nullable=False))
+    created_at: str
+
+
+class ChatTurnPayloadRecord(SQLModel, table=True):  # type: ignore
+    """A turn payload too large to travel through Temporal history (AGT-018).
+
+    Keyed within the turn so it is collected by the same sweep, and holds opaque
+    text for the same reason as the event log: nothing queries into it.
+    """
+
+    __tablename__ = "chat_turn_payloads"
+    turn_id: str = Field(primary_key=True)
+    payload_id: str = Field(primary_key=True)
+    body: str = Field(sa_column=Column(Text, nullable=False))
     created_at: str
 
 
@@ -2942,8 +2964,6 @@ class SQLModelReportStore(ReportStore):
 
     async def list_query_history(self, user_id: str, page: int, per_page: int) -> tuple[list[QueryHistoryItem], int]:
         """Return a paginated page of query history (newest first) and the total count."""
-        from sqlalchemy import func
-
         async with AsyncSession(_get_engine()) as session:
             count_stmt = (
                 select(func.count()).select_from(QueryHistoryRecord).where(col(QueryHistoryRecord.user_id) == user_id)
@@ -3549,27 +3569,74 @@ class SQLModelReportStore(ReportStore):
                 return None
             return _chat_turn_from_record(record)
 
-    async def append_chat_turn_events(self, turn_id: str, seq: int, parts_json: str) -> bool:
-        validate_chat_turn_batch(seq, parts_json)
-        async with AsyncSession(_get_engine()) as session:
-            session.add(
-                ChatTurnEventRecord(
-                    turn_id=turn_id,
-                    seq=seq,
-                    parts_json=parts_json,
-                    created_at=datetime.now(tz=UTC).isoformat(),
+    async def append_chat_turn_events(self, turn_id: str, parts_json: str) -> int | None:
+        validate_chat_turn_batch(parts_json)
+        for _ in range(_CHAT_TURN_SEQ_ALLOCATION_ATTEMPTS):
+            async with AsyncSession(_get_engine()) as session:
+                # The turn row is the allocation lock. Taking it means two
+                # producers -- the coordinating turn and a distributed plan step,
+                # or two steps of one batch -- serialize here rather than both
+                # reading the same MAX and picking the same number. On SQLite the
+                # dialect renders no FOR UPDATE and the write lock does the same
+                # job, which is why the retry below is kept as well.
+                turn = (
+                    await session.execute(
+                        select(ChatTurnRecord).where(col(ChatTurnRecord.turn_id) == turn_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if turn is None:
+                    # Deleted underneath the producer. Writing anyway leaves rows
+                    # no reader can reach and no sweep collects by header.
+                    return None
+                highest = (
+                    await session.execute(
+                        select(func.max(col(ChatTurnEventRecord.seq))).where(
+                            col(ChatTurnEventRecord.turn_id) == turn_id
+                        )
+                    )
+                ).scalar()
+                seq = int(highest or 0) + 1
+                validate_chat_turn_seq(seq)
+                session.add(
+                    ChatTurnEventRecord(
+                        turn_id=turn_id,
+                        seq=seq,
+                        parts_json=parts_json,
+                        created_at=datetime.now(tz=UTC).isoformat(),
+                    )
                 )
-            )
-            try:
-                await session.commit()
-            except IntegrityError:
-                # The unique (turn_id, seq) constraint fired: this batch was
-                # already written by an earlier attempt of the same producer.
-                # Rewriting it would change bytes a reader may already have
-                # replayed, so this is a no-op success.
-                await session.rollback()
-                return False
-            return True
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    # Another producer took this number between the read and the
+                    # commit. Nothing has been written, so re-reading the maximum
+                    # is the whole recovery.
+                    await session.rollback()
+                    continue
+                return seq
+        raise RuntimeError(f"could not allocate a chat turn event sequence for {turn_id}")
+
+    async def put_chat_turn_payload(self, turn_id: str, payload_id: str, body: str) -> None:
+        async with AsyncSession(_get_engine()) as session:
+            existing = await session.get(ChatTurnPayloadRecord, (turn_id, payload_id))
+            if existing is not None:
+                existing.body = body
+                session.add(existing)
+            else:
+                session.add(
+                    ChatTurnPayloadRecord(
+                        turn_id=turn_id,
+                        payload_id=payload_id,
+                        body=body,
+                        created_at=datetime.now(tz=UTC).isoformat(),
+                    )
+                )
+            await session.commit()
+
+    async def get_chat_turn_payload(self, turn_id: str, payload_id: str) -> str | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(ChatTurnPayloadRecord, (turn_id, payload_id))
+            return record.body if record is not None else None
 
     async def read_chat_turn_events(self, turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:
         async with AsyncSession(_get_engine()) as session:
@@ -3677,8 +3744,11 @@ class SQLModelReportStore(ReportStore):
             events = await session.execute(
                 delete(ChatTurnEventRecord).where(col(ChatTurnEventRecord.turn_id) == turn_id)
             )
+            payloads = await session.execute(
+                delete(ChatTurnPayloadRecord).where(col(ChatTurnPayloadRecord.turn_id) == turn_id)
+            )
             await session.commit()
-            return result.rowcount > 0 or events.rowcount > 0
+            return result.rowcount > 0 or events.rowcount > 0 or payloads.rowcount > 0
 
     async def list_expired_chat_turns(self, expired_before: str, limit: int) -> list[str]:
         async with AsyncSession(_get_engine()) as session:

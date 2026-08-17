@@ -383,3 +383,31 @@ async def test_a_killed_sandbox_reports_that_the_thread_must_clear_its_id(mocker
 
     assert teardown.opened is True  # so the caller writes the key...
     assert teardown.suspended_id == ""  # ...with an empty value, clearing it
+
+
+async def test_an_attaching_session_neither_creates_nor_tears_down(mocker):
+    """A distributed plan step uses the conversation's sandbox without owning it
+    (SBX-015). Creating one would give the conversation a second sandbox nobody
+    holds the id for; suspending one would pull it out from under the turn that
+    is still using it."""
+    calls: list[dict[str, Any]] = []
+    mocker.patch("reporting.services.sandbox_session.open_backend", _fake_persistent_open_backend(calls))
+
+    session = sandbox_session.attach_sandbox_session("sbx-shared", thread="user:u1:thread:1")
+    backend = await session.backend()
+
+    assert backend.sandbox_id == "sbx-shared"
+    assert calls[0]["kwargs"]["create_if_missing"] is False
+    assert calls[0]["kwargs"]["detach_on_exit"] is True
+
+    teardown = await sandbox_session.close_sandbox_session()
+    # ``opened`` false on purpose: reporting it would make the caller overwrite
+    # the owner's stored sandbox id.
+    assert (teardown.opened, teardown.suspended_id) == (False, "")
+
+
+async def test_attaching_needs_an_id():
+    """Without one there is nothing to attach to, and the fallback -- creating a
+    sandbox -- is the thing this must never do."""
+    with pytest.raises(ValueError):
+        sandbox_session.attach_sandbox_session("")

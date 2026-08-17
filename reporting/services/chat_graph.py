@@ -408,6 +408,7 @@ def build_turn_config(
     budget_controller: Any,
     headless: bool = False,
     bypass_confirmations: bool = False,
+    turn_id: str = "",
 ) -> dict[str, Any]:
     """Build the ``configurable`` a turn runs under.
 
@@ -416,6 +417,13 @@ def build_turn_config(
     Notably ``thread_id`` is namespaced here rather than by the caller, which is
     what stops a surface from accidentally running against a raw client id
     (AGT-004).
+
+    ``turn_id`` names the admitted turn this run belongs to, and is empty for
+    headless runs, which have no event log and no admitted turn. It is what the
+    orchestrator needs to distribute plan steps (AGT-018): the id addresses the
+    log a distributed step writes its progress into and derives the workflow that
+    schedules the fan-out. An empty one is therefore also the switch that keeps
+    every headless surface on the in-process path.
     """
     return {
         "configurable": {
@@ -427,6 +435,7 @@ def build_turn_config(
             # says the caller asked for it.
             "bypass_confirmations": bypass_confirmations,
             "budget_controller": budget_controller,
+            "turn_id": turn_id,
         }
     }
 
@@ -3333,6 +3342,15 @@ def _current_user_from_config(config: RunnableConfig) -> CurrentUser | None:
         return None
     current_user = configurable.get("current_user")
     return current_user if isinstance(current_user, CurrentUser) else None
+
+
+def turn_id_from_config(config: RunnableConfig) -> str:
+    """The admitted turn this run belongs to, or ``""`` for a headless run."""
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return ""
+    turn_id = configurable.get("turn_id")
+    return turn_id if isinstance(turn_id, str) else ""
 
 
 def _client_thread_id_from_config(config: RunnableConfig) -> str | None:

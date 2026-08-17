@@ -388,6 +388,7 @@ The per-dependency workflow result records the outcome in `ci_status`
 | `TEMPORAL_NAMESPACE` | `default` | Namespace workflows run in. |
 | `TEMPORAL_TASK_QUEUE` | `seizu-workflows` | Task queue shared by the action module and the worker. |
 | `TEMPORAL_WORKER_ENABLED` | `true` | Set `false` to disable the worker process. |
+| `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` | `100` | Activity slots per worker process. Also the cluster-wide bound on [distributed chat plan steps](chat.md). |
 | `TEMPORAL_WORKFLOW_MAX_RESULT_ROWS` | `200` | Cap on result rows forwarded into a workflow. |
 | `TEMPORAL_ENABLED_WORKFLOWS` | `""` (all) | Comma-separated allowlist of code-defined workflows exposed as top-level activity types (e.g. `cve_repo_report` to allow assessment but not remediation). The workflow editor only offers enabled workflows and dispatch refuses disabled ones. Set it on both the web service (editor) and the temporal worker (enforcement). |
 | `TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS` | `600` | Default AI chat activity timeout (per repository for `cve_repo_report`; the default for `agent_chat`'s `timeout_minutes`). |

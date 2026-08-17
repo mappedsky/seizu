@@ -169,12 +169,13 @@ def _chat_turn_log(mocker):
         events[turn.turn_id] = {}
         return ChatTurnAdmission(outcome="created", turn=turn)
 
-    async def append_chat_turn_events(turn_id: str, seq: int, parts_json: str) -> bool:
+    async def append_chat_turn_events(turn_id: str, parts_json: str) -> int | None:
+        if turn_id not in turns:
+            return None
         batches = events.setdefault(turn_id, {})
-        if seq in batches:
-            return False
+        seq = max(batches, default=0) + 1
         batches[seq] = parts_json
-        return True
+        return seq
 
     async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int):
         turn = turns.get(turn_id)
@@ -1311,10 +1312,10 @@ async def test_reconnect_streams_a_running_turn_from_its_first_frame(mocker, _ch
     _patch_chat_sessions(mocker, [("test-user-id", "1001")])
     turn = await _open_turn("test-user-id", "1001", "msg_9", "text_9")
     await chat_turns.report_store.append_chat_turn_events(
-        turn.turn_id, 1, '[{"type":"start","messageId":"msg_9"},{"type":"text-start","id":"text_9"}]'
+        turn.turn_id, '[{"type":"start","messageId":"msg_9"},{"type":"text-start","id":"text_9"}]'
     )
     await chat_turns.report_store.append_chat_turn_events(
-        turn.turn_id, 2, '[{"type":"text-delta","id":"text_9","delta":"Half a"}]'
+        turn.turn_id, '[{"type":"text-delta","id":"text_9","delta":"Half a"}]'
     )
 
     # The turn has to be running when the route resolves it, or there would be

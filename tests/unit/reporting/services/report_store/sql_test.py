@@ -819,7 +819,7 @@ async def test_cancel_creates_nothing(store):
 
 async def test_chat_turn_round_trips_a_batch(store):
     turn = await _open_turn(store)
-    assert await store.append_chat_turn_events(turn.turn_id, 1, '[{"type":"start"}]') is True
+    assert await store.append_chat_turn_events(turn.turn_id, '[{"type":"start"}]') == 1
 
     page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
 
@@ -833,7 +833,7 @@ async def test_chat_turn_events_are_returned_verbatim(store):
     JSON column would do -- makes a replay differ from the original."""
     turn = await _open_turn(store)
     parts = '[{"type":"data-seizu-detail","id":"d1","data":{"body":null,"ratio":0.5}}]'
-    await store.append_chat_turn_events(turn.turn_id, 1, parts)
+    await store.append_chat_turn_events(turn.turn_id, parts)
 
     page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
 
@@ -841,25 +841,65 @@ async def test_chat_turn_events_are_returned_verbatim(store):
     assert page.batches[0].parts_json == parts
 
 
-async def test_chat_turn_append_is_idempotent_per_seq(store):
-    """A producer that is retried must not rewrite a batch a reader may already
-    have replayed, so a duplicate seq is a no-op rather than an overwrite."""
+async def test_chat_turn_appends_allocate_a_dense_sequence(store):
+    """A turn has several producers once its plan steps run as their own
+    activities (AGT-018), so none of them may choose the number. Allocating it
+    here is what keeps the log gap-free across all of them."""
     turn = await _open_turn(store)
-    await store.append_chat_turn_events(turn.turn_id, 1, '["first"]')
 
-    assert await store.append_chat_turn_events(turn.turn_id, 1, '["second"]') is False
+    allocated = [await store.append_chat_turn_events(turn.turn_id, f'["{n}"]') for n in range(3)]
+
+    assert allocated == [1, 2, 3]
+    page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
+    assert page is not None
+    assert [b.seq for b in page.batches] == [1, 2, 3]
+
+
+async def test_a_lost_allocation_race_retries_rather_than_leaving_a_gap(store):
+    """Serialization is the database's job -- the turn row is locked, and on
+    PostgreSQL that settles it. This pins the belt-and-braces half: if another
+    producer takes the number anyway, the append re-reads the maximum instead of
+    failing or skipping ahead, because the reader truncates at the first gap.
+
+    (The race itself cannot be reproduced on the SQLite test seam, whose single
+    shared connection has no isolation between sessions to lose.)
+    """
+    turn = await _open_turn(store)
+    async with AsyncSession(sql_module._get_engine()) as session:
+        session.add(
+            sql_module.ChatTurnEventRecord(
+                turn_id=turn.turn_id, seq=1, parts_json='["taken"]', created_at="2024-01-01T00:00:00+00:00"
+            )
+        )
+        await session.commit()
+
+    assert await store.append_chat_turn_events(turn.turn_id, '["mine"]') == 2
 
     page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
     assert page is not None
-    assert page.batches[0].parts_json == '["first"]'
+    assert [(b.seq, b.parts_json) for b in page.batches] == [(1, '["taken"]'), (2, '["mine"]')]
+
+
+async def test_chat_turn_append_reports_a_deleted_turn(store):
+    """Nothing to append to, and writing anyway leaves rows no reader reaches."""
+    turn = await _open_turn(store)
+    await store.delete_chat_turn(turn.turn_id)
+
+    assert await store.append_chat_turn_events(turn.turn_id, '["one"]') is None
 
 
 async def test_chat_turn_read_truncates_at_the_first_gap(store):
     """A reader advances its cursor to the last batch it received. Handing it
     seq 3 while 2 is missing would move the cursor past 2 forever."""
     turn = await _open_turn(store)
-    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
-    await store.append_chat_turn_events(turn.turn_id, 3, '["three"]')
+    await store.append_chat_turn_events(turn.turn_id, '["one"]')
+    async with AsyncSession(sql_module._get_engine()) as session:
+        session.add(
+            sql_module.ChatTurnEventRecord(
+                turn_id=turn.turn_id, seq=3, parts_json='["three"]', created_at="2024-01-01T00:00:00+00:00"
+            )
+        )
+        await session.commit()
 
     page = await store.read_chat_turn_events(turn.turn_id, 0, limit=10)
 
@@ -870,7 +910,7 @@ async def test_chat_turn_read_truncates_at_the_first_gap(store):
 async def test_chat_turn_read_resumes_from_a_cursor(store):
     turn = await _open_turn(store)
     for seq in (1, 2, 3):
-        await store.append_chat_turn_events(turn.turn_id, seq, f'["{seq}"]')
+        await store.append_chat_turn_events(turn.turn_id, f'["{seq}"]')
 
     page = await store.read_chat_turn_events(turn.turn_id, 1, limit=10)
 
@@ -881,7 +921,19 @@ async def test_chat_turn_read_resumes_from_a_cursor(store):
 async def test_chat_turn_rejects_an_oversized_batch(store):
     turn = await _open_turn(store)
     with pytest.raises(ValueError):
-        await store.append_chat_turn_events(turn.turn_id, 1, "x" * (CHAT_TURN_MAX_BATCH_BYTES + 1))
+        await store.append_chat_turn_events(turn.turn_id, "x" * (CHAT_TURN_MAX_BATCH_BYTES + 1))
+
+
+async def test_chat_turn_payload_round_trips_and_is_deleted_with_the_turn(store):
+    """A distributed step's oversized result is stored here rather than carried
+    through Temporal history, and is collected with the turn it belongs to."""
+    turn = await _open_turn(store)
+    await store.put_chat_turn_payload(turn.turn_id, "step_1", '{"output": "big"}')
+
+    assert await store.get_chat_turn_payload(turn.turn_id, "step_1") == '{"output": "big"}'
+
+    await store.delete_chat_turn(turn.turn_id)
+    assert await store.get_chat_turn_payload(turn.turn_id, "step_1") is None
 
 
 async def test_finish_chat_turn_records_the_final_sequence(store):
@@ -917,7 +969,7 @@ async def test_get_chat_turn_is_scoped_to_its_owner(store):
 
 async def test_delete_chat_turn_removes_its_batches(store):
     turn = await _open_turn(store)
-    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    await store.append_chat_turn_events(turn.turn_id, '["one"]')
 
     assert await store.delete_chat_turn(turn.turn_id) is True
 
@@ -929,7 +981,7 @@ async def test_deleting_a_turn_collects_batches_whose_header_is_gone(store):
     headerless batches; gating the batch delete on the header meant the only
     rows worth collecting were the ones skipped."""
     turn = await _open_turn(store)
-    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    await store.append_chat_turn_events(turn.turn_id, '["one"]')
     async with AsyncSession(sql_module._get_engine()) as session:
         await session.execute(
             sql_module.delete(sql_module.ChatTurnRecord).where(
@@ -957,7 +1009,7 @@ async def test_deleting_a_session_deletes_its_turn_logs(store):
     """A turn log is only reachable through its session, so one that outlived
     its session is a row nothing will ever look for again."""
     turn = await _open_turn(store)
-    await store.append_chat_turn_events(turn.turn_id, 1, '["one"]')
+    await store.append_chat_turn_events(turn.turn_id, '["one"]')
 
     assert await store.delete_chat_session("user-1", "1001") is True
 

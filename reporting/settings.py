@@ -304,6 +304,12 @@ TEMPORAL_TASK_QUEUE = str_env("TEMPORAL_TASK_QUEUE", "seizu-workflows")
 # Whether the temporal worker process (python -m reporting.temporal_worker)
 # should run. Lets the same image/deployment disable the worker via env.
 TEMPORAL_WORKER_ENABLED = bool_env("TEMPORAL_WORKER_ENABLED", True)
+# Activity slots per worker process. This is the cluster-wide bound on
+# distributed chat plan steps (AGT-018): per-turn limits stop one conversation
+# from fanning out too wide, but only slots stop N conversations from doing it at
+# once and saturating the provider, Neo4j, or the sandbox account. Temporal
+# queues what does not fit rather than dropping it.
+TEMPORAL_MAX_CONCURRENT_ACTIVITIES = int_env("TEMPORAL_MAX_CONCURRENT_ACTIVITIES", 100)
 # Maximum number of scheduled query result rows forwarded into a workflow
 # (Temporal payloads are capped at ~2MB; excess rows are dropped with a warning).
 TEMPORAL_WORKFLOW_MAX_RESULT_ROWS = int_env("TEMPORAL_WORKFLOW_MAX_RESULT_ROWS", 200)
@@ -788,7 +794,29 @@ CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_DEPE
 # failing step cannot loop forever.
 CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
 # Maximum independent steps the dispatcher runs concurrently in one batch.
+# This bounds one turn. Cluster-wide concurrency is bounded by the Temporal
+# worker's activity slots (TEMPORAL_MAX_CONCURRENT_ACTIVITIES) once steps are
+# distributed, so raising this for a wide investigation does not by itself let
+# one turn take the whole fleet.
 CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Run each independent plan step of a batch as its own Temporal activity instead
+# of a coroutine inside the turn's activity (AGT-018). Steps are then placed
+# across the worker fleet, time out and fail independently, and are visible in
+# the Temporal UI. Interactive turns only: a headless run has no admitted turn
+# and no event log for a distributed step to report progress into.
+CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED = bool_env("CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED", True)
+# Batches smaller than this stay in-process. A single step gains nothing from
+# being scheduled elsewhere and pays a serialization boundary for it.
+CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS = int_env("CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS", 2)
+# How long one distributed step may run before Temporal stops it. Bounded well
+# under CHAT_TURN_TIMEOUT_SECONDS so the turn keeps time to verify and answer
+# with whatever the other steps produced.
+CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS = int_env("CHAT_ORCHESTRATOR_DISTRIBUTED_STEP_TIMEOUT_SECONDS", 600)
+# Serialized step results larger than this are written to the report store and
+# passed by reference, rather than through Temporal history. A step's full call
+# trace is bounded per call by CHAT_TOOL_RESULT_MAX_BYTES, so a step that made
+# dozens of calls can exceed what Temporal will carry.
+CHAT_ORCHESTRATOR_DISTRIBUTED_INLINE_MAX_BYTES = int_env("CHAT_ORCHESTRATOR_DISTRIBUTED_INLINE_MAX_BYTES", 262_144)
 # Compatibility guard for runs with all shared budget dimensions disabled.
 # Normal interactive and headless plans use the shared run-level
 # token/cost/call ledger instead of stopping at a per-step action count.

@@ -65,6 +65,43 @@ def initial_budget_ledger() -> dict[str, Any]:
     }
 
 
+def grant_ledger(
+    *,
+    token_grant: int,
+    soft_token_grant: int,
+    cost_grant_usd: float,
+    llm_call_grant: int,
+) -> dict[str, Any]:
+    """A self-contained ledger for one unit of work executing somewhere else.
+
+    A distributed plan step cannot share the run's controller -- it runs in a
+    different process -- so it is handed a **grant** instead: a slice of what the
+    run had left, allocated before the fan-out and returned as actuals when the
+    step finishes (AGT-018). Slices are non-overlapping and sum to no more than
+    the run's remaining normal tokens, which is what makes concurrent workers
+    unable to collectively overspend without a distributed transaction.
+
+    The price is that a distributed step's share is a hard cut where an
+    in-process one may overrun into a sibling's idle budget: the run's controller
+    is not there to be asked. ``soft_token_grant`` keeps the converge-then-stop
+    shape within the slice, so a step still gets to summarize what it found
+    rather than being killed at the wall (AGT-012).
+    """
+    grant = max(0, token_grant)
+    return {
+        **initial_budget_ledger(),
+        "enabled": grant > 0 or cost_grant_usd > 0 or llm_call_grant > 0,
+        "token_limit": grant,
+        "cost_limit_usd": max(0.0, cost_grant_usd),
+        # The reserve is what pays for the step's summary pass, which is the only
+        # thing standing between a capped step and reporting nothing.
+        "reserve_tokens": max(0, grant - max(0, soft_token_grant)) if soft_token_grant else 0,
+        "reserve_cost_usd": 0.0,
+        "max_llm_calls": max(0, llm_call_grant),
+        "reserve_llm_calls": min(2, max(0, llm_call_grant - 1)),
+    }
+
+
 class BudgetController:
     """Atomic run-level budget ledger shared by parallel orchestrator workers."""
 
@@ -313,6 +350,48 @@ class BudgetController:
             "usage_estimated": bool(self._ledger.get("usage_estimated")),
             "phases": dict(self._ledger.get("phases") or {}),
         }
+
+    async def absorb(self, usage: dict[str, Any], *, scope: str = "") -> None:
+        """Fold work done under a separate ledger back into this one.
+
+        The other half of a grant (:func:`grant_ledger`): a distributed step
+        spends against its own slice and reports actuals here, so the run's view
+        of what it has spent stays complete even though the spending happened in
+        another process. Committed after the fact rather than reserved, because
+        the grant was the reservation -- authorizing it again would double-count
+        it against the run.
+        """
+        input_tokens = max(0, int(usage.get("input_tokens") or 0))
+        output_tokens = max(0, int(usage.get("output_tokens") or 0))
+        async with self._lock:
+            self._ledger["input_tokens"] += input_tokens
+            self._ledger["output_tokens"] += output_tokens
+            self._ledger["total_tokens"] = self._ledger["input_tokens"] + self._ledger["output_tokens"]
+            self._ledger["cache_read_tokens"] = int(self._ledger.get("cache_read_tokens") or 0) + max(
+                0, int(usage.get("cache_read_tokens") or 0)
+            )
+            self._ledger["cache_creation_tokens"] = int(self._ledger.get("cache_creation_tokens") or 0) + max(
+                0, int(usage.get("cache_creation_tokens") or 0)
+            )
+            self._ledger["cost_usd"] += max(0.0, float(usage.get("cost_usd") or 0.0))
+            self._ledger["llm_calls"] += max(0, int(usage.get("llm_calls") or 0))
+            phases = dict(self._ledger.get("phases") or {})
+            for name, reported in (usage.get("phases") or {}).items():
+                if not isinstance(reported, dict):
+                    continue
+                merged = dict(phases.get(name) or {})
+                for key in ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens", "llm_calls"):
+                    merged[key] = int(merged.get(key) or 0) + max(0, int(reported.get(key) or 0))
+                merged["cost_usd"] = float(merged.get("cost_usd") or 0.0) + max(
+                    0.0, float(reported.get("cost_usd") or 0.0)
+                )
+                phases[name] = merged
+            self._ledger["phases"] = phases
+            if scope and scope in self._scope_spend:
+                self._scope_spend[scope] += input_tokens + output_tokens
+            if usage.get("usage_estimated"):
+                self._ledger["usage_estimated"] = True
+            self._refresh_mode_locked()
 
     async def release(self, reservation: BudgetReservation) -> None:
         async with self._lock:

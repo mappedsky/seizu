@@ -121,10 +121,24 @@ class ChatTurnPublisher:
     per token. The flush interval is therefore the latency a viewer pays, and
     the batch size is what keeps the write count proportional to time rather
     than to output length.
+
+    **A turn has more than one publisher once its plan steps run as their own
+    activities** (AGT-018): each distributed step writes its own progress into
+    the same log, on a different machine. None of them holds the counter --
+    ``append_chat_turn_events`` allocates ``seq`` under the turn row's lock, so
+    the numbering stays dense across every writer and ``last_seq`` here is
+    whatever this publisher was last given, not a number it chose. The
+    coordinating turn's closing flush is still the highest, because it happens
+    after it has awaited every step.
+
+    ``watch_cancel`` is for the coordinator only. A step publisher is stopped by
+    Temporal cancelling its activity, and a second poller per step would multiply
+    the store reads by the width of the fan-out for no extra coverage.
     """
 
-    def __init__(self, turn: ChatTurnItem) -> None:
-        self._turn = turn
+    def __init__(self, turn_id: str, *, watch_cancel: bool = True) -> None:
+        self._turn_id = turn_id
+        self._watch_cancel = watch_cancel
         self._buffer: list[dict[str, Any]] = []
         self._buffered_bytes = 0
         self._seq = 0
@@ -147,7 +161,8 @@ class ChatTurnPublisher:
         # goes quiet mid-tool-call would otherwise leave its last partial batch
         # sitting in memory, and the viewer would see the stream stall.
         self._flusher = asyncio.create_task(self._flush_loop())
-        self._cancel_watch = asyncio.create_task(self._cancel_watch_loop())
+        if self._watch_cancel:
+            self._cancel_watch = asyncio.create_task(self._cancel_watch_loop())
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -177,13 +192,13 @@ class ChatTurnPublisher:
         while True:
             await asyncio.sleep(interval)
             try:
-                turn = await report_store.get_chat_turn(self._turn.turn_id)
+                turn = await report_store.get_chat_turn(self._turn_id)
                 if turn is None or turn.cancel_requested or turn.status != "running":
                     self._stop_producer()
                     return
             except Exception:
                 # A transient store failure must not stop a healthy turn.
-                logger.warning("Chat turn cancel-watch failed", extra={"turn_id": self._turn.turn_id}, exc_info=True)
+                logger.warning("Chat turn cancel-watch failed", extra={"turn_id": self._turn_id}, exc_info=True)
 
     def _stop_producer(self) -> None:
         """Ask the turn to stop.
@@ -220,11 +235,16 @@ class ChatTurnPublisher:
         if not self._buffer:
             return
         parts_json = json.dumps(self._buffer, separators=(",", ":"))
-        seq = self._seq + 1
-        await report_store.append_chat_turn_events(self._turn.turn_id, seq, parts_json)
-        self._seq = seq
+        seq = await report_store.append_chat_turn_events(self._turn_id, parts_json)
+        # Cleared either way. ``None`` means the turn record is gone, so there is
+        # nothing to append to and nothing to come back for; holding the batch
+        # would only re-attempt the same write on the next flush.
         self._buffer = []
         self._buffered_bytes = 0
+        if seq is None:
+            self._stop_producer()
+            return
+        self._seq = seq
 
 
 def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController) -> ChatState:
@@ -402,7 +422,7 @@ async def produce_turn(
     body = turn.command
     finish_reason = "stop"
     status: Literal["completed", "failed", "canceled"] = "completed"
-    async with ChatTurnPublisher(turn) as publisher:
+    async with ChatTurnPublisher(turn.turn_id) as publisher:
         opening: list[dict[str, Any]] = [
             {
                 "type": "start",
@@ -425,6 +445,7 @@ async def produce_turn(
             turn.thread_id,
             budget_controller=budget_controller,
             bypass_confirmations=body.bypass_confirmations,
+            turn_id=turn.turn_id,
         )
 
         async def _drive() -> None:

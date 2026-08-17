@@ -61,6 +61,14 @@ Suspension keeps the **full VM state**, memory included
 (`pause(keep_memory=True)`). Set `SANDBOX_SESSION_PERSIST=false` to return to a
 sandbox per turn.
 
+This holds when an orchestrated turn's steps run across the worker fleet: the
+turn still owns the one sandbox and is still the only thing that suspends it, and
+distributed steps *attach* to it by id. Parallel steps therefore share one disk
+whether they run in one process or several. So that a step can attach, the
+sandbox is opened before a distributed batch rather than on first delegation —
+one turn's worth of sandbox time for a batch whose steps turn out not to use it.
+See [SBX-015](../dev/decisions/sandbox.md).
+
 ```{warning}
 **Processes survive between turns.** A memory snapshot restores whatever was
 running, so code the model executed in one turn can still be running in the
