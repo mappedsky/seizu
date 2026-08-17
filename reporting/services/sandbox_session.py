@@ -54,7 +54,14 @@ class SandboxSession:
     turn ends, and ``sandbox_id`` is the handle the next turn resumes it by.
     """
 
-    def __init__(self, *, resume_sandbox_id: str | None = None, persist: bool = False, thread: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        resume_sandbox_id: str | None = None,
+        persist: bool = False,
+        thread: str = "",
+        attach: bool = False,
+    ) -> None:
         self._stack: AsyncExitStack | None = None
         self._backend: SandboxBackend | None = None
         self._lock = asyncio.Lock()
@@ -62,6 +69,11 @@ class SandboxSession:
         self._resume_sandbox_id = resume_sandbox_id or ""
         self._persist = persist
         self._thread = thread
+        # An attaching session uses a sandbox it does not own: it never creates
+        # one, and leaves it running for the owner to suspend (SBX-015).
+        self._attach = attach
+        if attach and not self._resume_sandbox_id:
+            raise ValueError("an attaching sandbox session needs the id of the sandbox to attach to")
         self._sandbox_id = ""
         # Decided at close, not at open: whether the sandbox is worth keeping
         # depends on how the turn ended.
@@ -109,6 +121,8 @@ class SandboxSession:
                         # whose lifetime it now shares.
                         purpose="chat-session",
                         thread=self._thread,
+                        create_if_missing=not self._attach,
+                        detach_on_exit=self._attach,
                     )
                 )
                 # Publish all three together, so the stack can never belong to a
@@ -188,6 +202,11 @@ class SandboxSession:
             # became unknown, and a bad id costs the next turn a failed resume.
             logger.warning("sandbox session teardown failed", exc_info=True)
             return SandboxTeardown(opened=True)
+        if self._attach:
+            # An attaching session never opened anything of its own, so it has
+            # nothing to tell the thread to record -- and reporting ``opened``
+            # would make the caller overwrite the owner's stored id with "".
+            return SandboxTeardown(opened=False)
         # ``_suspended``, not the intent: a pause that failed fell back to a
         # kill, and returning that id would checkpoint a dead sandbox.
         return SandboxTeardown(opened=True, suspended_id=sandbox_id if self._suspended and sandbox_id else "")
@@ -216,6 +235,21 @@ def start_sandbox_session(
         persist=settings.SANDBOX_SESSION_PERSIST if persist is None else persist,
         thread=thread,
     )
+    _current_sandbox_session.set(session)
+    return session
+
+
+def attach_sandbox_session(sandbox_id: str, *, thread: str = "") -> SandboxSession:
+    """Make the conversation's *existing* sandbox ambient, without owning it.
+
+    For a plan step executing as its own Temporal activity, which may be on a
+    different machine from the turn that scheduled it. One sandbox per
+    conversation is unchanged (SBX-005) -- the coordinating turn still opens it,
+    suspends it and stores its id; this session only connects to it, so parallel
+    steps go on sharing one disk exactly as they do in-process. What an attaching
+    session must never do is create or tear one down (SBX-015).
+    """
+    session = SandboxSession(resume_sandbox_id=sandbox_id, persist=False, thread=thread, attach=True)
     _current_sandbox_session.set(session)
     return session
 

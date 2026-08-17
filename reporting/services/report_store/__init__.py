@@ -869,8 +869,16 @@ async def get_chat_turn(turn_id: str, user_id: str | None = None) -> ChatTurnIte
     return await get_store().get_chat_turn(turn_id, user_id=user_id)
 
 
-async def append_chat_turn_events(turn_id: str, seq: int, parts_json: str) -> bool:
-    return await get_store().append_chat_turn_events(turn_id, seq, parts_json)
+async def append_chat_turn_events(turn_id: str, parts_json: str) -> int | None:
+    return await get_store().append_chat_turn_events(turn_id, parts_json)
+
+
+async def put_chat_turn_payload(turn_id: str, payload_id: str, body: str) -> None:
+    return await get_store().put_chat_turn_payload(turn_id, payload_id, body)
+
+
+async def get_chat_turn_payload(turn_id: str, payload_id: str) -> str | None:
+    return await get_store().get_chat_turn_payload(turn_id, payload_id)
 
 
 async def read_chat_turn_events(turn_id: str, after_seq: int, limit: int) -> ChatTurnEventPage | None:

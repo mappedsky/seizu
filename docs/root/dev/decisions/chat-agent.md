@@ -606,7 +606,7 @@ fell back to a single step carrying the user's whole request.
 That fallback is invisible everywhere downstream — identical in the stream, the
 checkpoint and the harness (`steps_total: 1`), with `run_errors` the only record
 — and it **disables the orchestrator's parallelism entirely**, because
-parallelism operates on
+parallelism (in-process and distributed, [AGT-018](#agt-018)) operates on
 independent plan *steps* and there was only ever one. So a feature can be
 correct, tested, and completely unreachable. Measured, 3 samples per arm:
 
@@ -777,17 +777,147 @@ reasoning on Anthropic.
 matters ahead of user-selected models: a role-keyed cache would hand one user's
 chosen model to another in the same process.
 
-For the same reason a spec **travels** to wherever the call actually happens
-rather than being re-resolved there. A caller that re-resolves at the far end
-reads that process's settings and can produce a different model than the one the
-turn was admitted with — the failure `permission_cap` travelling already
-prevents ([AGT-006](#agt-006)). The worker's summary passes take their model as
-an argument for exactly this reason.
+For the same reason a distributed plan step carries the resolved spec
+([AGT-018](#agt-018)) instead of the `economy: bool` it started with. A step must
+run on the model its turn was *admitted* with; re-resolving worker-side reads
+that worker's settings and can produce a different model — the failure
+`permission_cap` travelling already prevents ([AGT-006](#agt-006)).
 
 **Measuring this needs `scripts/plan_probe.py`**, which runs the planner alone —
 one LLM call, nothing executed — and reports the widest independent batch plus
 whether the plan was the fallback. A full harness turn costs ~553s and ~$0.20 to
 learn the same integer.
+
+## AGT-018 — A plan's independent steps are Temporal activities, not coroutines
+
+**Applies to:** `reporting/temporal_workflows/chat_step_fanout.py`,
+`reporting/services/chat_step_worker.py`,
+`chat_orchestrator._dispatch_batch_distributed` / `_distribution_eligible` /
+`_grant_for`, `chat_budget.grant_ledger` / `BudgetController.absorb`,
+`report_store.append_chat_turn_events` (now allocating), `chat_turn_payloads`;
+`CHAT_ORCHESTRATOR_DISTRIBUTED_*`, `TEMPORAL_MAX_CONCURRENT_ACTIVITIES`
+
+The turn is still one activity. Its independent plan steps are not: each batch is
+handed to a `seizu_chat_step_fanout` workflow that schedules one
+`run_chat_worker_step` activity per step.
+
+**Why not leave them as `asyncio.gather`.** They were already parallel, so this
+buys nothing in wall-clock for a batch that fits on one worker. What it buys is
+everything that follows from a step being a *scheduled unit*: steps are placed
+across the fleet rather than sharing one process's CPU, memory and event loop; a
+step gets its own start-to-close timeout instead of being bounded only by the
+turn's; a step that fails or whose worker dies takes only itself down, where an
+unhandled exception inside the gather took the batch; and each step is separately
+visible and separately cancellable. The shape that motivated it is an
+investigation whose steps are genuinely independent and individually large — one
+per CVE, after a first step has fetched the finding set from the graph — where
+one worker holding all of them is the bottleneck and one crash is the whole
+answer.
+
+**Only the middle is distributed.** Routing, planning, verification and synthesis
+stay in the turn's own activity: they are sequential, they share a model context,
+and distributing them would add a serialization boundary per stage for no
+concurrency. Synthesis in particular stays single-producer, so the user-visible
+answer still has exactly one writer.
+
+**Not for headless runs.** A distributed step reports progress into the turn's
+event log and is scheduled by a workflow derived from the turn id; a headless run
+has neither, and is already an activity of its own. `build_turn_config` therefore
+carries `turn_id`, and an empty one is the switch.
+
+### The store allocates `seq`, because a turn now has several producers
+
+`append_chat_turn_events` no longer takes a sequence number. It takes the batch,
+locks the turn row, and returns the number it assigned. AGT-008 requires one
+append-only log whose live delivery and replay are identical, and
+`read_chat_turn_events` **truncates at the first gap** — so a counter held by any
+one producer is not an option once there are several: two writers picking their
+own next number either collide or leave a hole, and a hole is a reader that stops
+mid-answer. Allocating under the row lock makes the numbering total across every
+writer and makes "row N exists" mean rows 1..N-1 were already committed.
+
+The coordinating turn's closing flush is still the highest number, because it
+happens after it has awaited every step — which is what keeps `last_seq` an
+honest end-of-log marker.
+
+**Don't:** restore caller-chosen sequence numbers for idempotency. Nothing here
+retries: the turn is `maximum_attempts=1` (AGT-008), the fan-out and each step
+are `maximum_attempts=1`, and a batch is named by a workflow id derived from the
+turn, the retry cycle and the step ids, so asking twice resolves to the batch
+already running rather than starting a second paid copy.
+
+### Budgets are granted before the fan-out, not shared during it
+
+The run's `BudgetController` is an in-process object; a step on another machine
+cannot reserve against it. Each distributed step is therefore allocated a
+**grant** — a slice of `remaining_normal_tokens`, non-overlapping across the
+batch and summing to no more than what the run has left — runs against a
+`grant_ledger` of its own, and reports actuals that the coordinator folds back in
+with `BudgetController.absorb`. Concurrent workers cannot collectively overspend
+without any distributed transaction, because the arithmetic that prevents it
+happened before any of them started.
+
+The price is real and one-sided: a distributed step's slice is a **hard cut**,
+where an in-process step may overrun into a sibling's idle budget (AGT-017). The
+slice keeps the two-threshold shape internally — the run's own reserve fraction
+is held back so a step that spends its slice can still say what it found rather
+than being cut mid-work with nothing to report (AGT-012) — but a step that would
+have borrowed from an idle sibling now stops. Steps that need to borrow should
+be planned as fewer, larger steps, or the batch should not be distributed.
+
+**Don't:** grant a step the whole remaining budget "because it is the only one
+running". It is not: its siblings are running too, and the only reason nobody
+overspends is that the shares were disjoint when they were handed out.
+
+### Results come back by reference when they are large
+
+A step's result carries every call it made and what each returned, bounded per
+call by `CHAT_TOOL_RESULT_MAX_BYTES` — megabytes for a step that made dozens.
+Returning that through Temporal copies it into workflow history on the way out of
+the activity and again on the way in. Anything over
+`CHAT_ORCHESTRATOR_DISTRIBUTED_INLINE_MAX_BYTES` is written to `chat_turn_payloads`
+and the reference travels instead; the payload is keyed within the turn, so the
+existing expiry sweep collects it. Truncating instead is not available: the trace
+is the evidence the synthesizer answers from and the retry resumes from
+(AGT-013, AGT-014).
+
+### What a worker rebuilds, and what it must never be handed
+
+Everything a step read from ambient context in-process is an explicit field on
+`ChatWorkerStepInvocation`: the step, the trimmed plan, its dependencies'
+outputs, the conversation excerpt, the disclosed tool set, session memory, the
+sandbox id, the grant. The payload is versioned and a worker refuses one newer
+than it understands, because misreading a field is worse than not running.
+
+**Identity is rebuilt worker-side and intersected, never carried.** The payload
+names a `user_id` and the permission cap the turn was admitted under; the worker
+resolves the stored user and intersects (AGT-006, AGT-008). A resolved permission
+set travelling in a payload would be one nobody re-checked. The worker also
+re-verifies that the turn is still running and still owns its thread before doing
+any work, so a step scheduled just before a cancellation cannot keep spending or
+keep writing into a closed log.
+
+**Confirmation gating and chat-safe filtering are unchanged**, because the step
+reaches tools through the same `mcp_runtime` path — a mutating tool still fails
+closed (AGT-001) and progressive disclosure still is not an authorization
+boundary (AGT-002).
+
+### Concurrency is bounded twice
+
+`CHAT_ORCHESTRATOR_MAX_PARALLEL` bounds one turn's batch, as before. Once steps
+are distributed that is no longer enough: N conversations fanning out at once can
+saturate the provider, Neo4j, the MCP proxies or the sandbox account even though
+each is individually well behaved. `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` is the
+cluster-wide bound, and Temporal queues the overflow rather than dropping it.
+
+### Falling back is safe only before anything is scheduled
+
+`_FanoutUnavailable` — no Temporal client, or the start call failed — runs the
+batch in-process, which bills it exactly once. Anything after the fan-out has
+started propagates instead: the steps are running somewhere, and a local rerun
+would pay for the same work twice and re-apply its tool side effects. A step the
+fan-out could not produce comes back as a recorded execution error for the
+verifier to judge, never as a silently missing step.
 
 ## AGT-009 — Answer-only plan steps require complete evidence
 

@@ -87,6 +87,8 @@ def mock_store():
         "get_active_chat_turn": None,
         "get_chat_turn": None,
         "append_chat_turn_events": True,
+        "put_chat_turn_payload": None,
+        "get_chat_turn_payload": None,
         "read_chat_turn_events": None,
         "request_chat_turn_cancel": None,
         "finish_chat_turn": None,
@@ -636,8 +638,14 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     await report_store.get_chat_turn("turn-1", user_id="u1")
     mock_store.get_chat_turn.assert_awaited_once_with("turn-1", user_id="u1")
 
-    await report_store.append_chat_turn_events("turn-1", 1, '["one"]')
-    mock_store.append_chat_turn_events.assert_awaited_once_with("turn-1", 1, '["one"]')
+    await report_store.append_chat_turn_events("turn-1", '["one"]')
+    mock_store.append_chat_turn_events.assert_awaited_once_with("turn-1", '["one"]')
+
+    await report_store.put_chat_turn_payload("turn-1", "step_1", "{}")
+    mock_store.put_chat_turn_payload.assert_awaited_once_with("turn-1", "step_1", "{}")
+
+    await report_store.get_chat_turn_payload("turn-1", "step_1")
+    mock_store.get_chat_turn_payload.assert_awaited_once_with("turn-1", "step_1")
 
     await report_store.read_chat_turn_events("turn-1", 0, 200)
     mock_store.read_chat_turn_events.assert_awaited_once_with("turn-1", 0, 200)

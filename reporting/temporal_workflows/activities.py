@@ -26,6 +26,7 @@ from reporting.schema.chat import ScheduledChatItem
 from reporting.schema.reporting_config import ScheduledQueryAction, ScheduledQueryWatchScan
 from reporting.services import (
     agent_run,
+    chat_step_worker,
     chat_turns,
     github_checks,
     report_store,
@@ -36,6 +37,7 @@ from reporting.services import (
 from reporting.services import (
     workflows as workflow_service,
 )
+from reporting.services.chat_step_worker import StepInvocationRejected
 from reporting.services.payload_bounds import bounded_json_rows, json_size_bytes
 from reporting.services.reporting_neo4j import (
     check_watch_scan_triggered,
@@ -48,6 +50,8 @@ from reporting.temporal_workflows.shared import (
     AgentChatResult,
     ChatTurnInvocation,
     ChatTurnRunResult,
+    ChatWorkerStepInvocation,
+    ChatWorkerStepOutcome,
     CiFixInput,
     CiFixResult,
     CodeWorkflowInputRequest,
@@ -1090,6 +1094,41 @@ async def run_chat_turn(invocation: ChatTurnInvocation) -> ChatTurnRunResult:
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
     return ChatTurnRunResult(status=status, last_seq=last_seq)
+
+
+@activity.defn
+async def run_chat_worker_step(invocation: ChatWorkerStepInvocation) -> ChatWorkerStepOutcome:
+    """Run one plan step of an orchestrated turn, on whichever worker picks it up.
+
+    A thin wrapper: everything the step needs is rebuilt from the payload by
+    :mod:`reporting.services.chat_step_worker`, which is also where the identity,
+    turn-ownership and confirmation rules a distributed step must not lose are
+    enforced (AGT-018).
+
+    Heartbeats on a timer, for the same reason the turn does: a step is quietest
+    exactly when it is slowest, so heartbeating on output would time out the
+    healthy ones.
+    """
+
+    async def _heartbeat_until_done() -> None:
+        while True:
+            await asyncio.sleep(_CHAT_TURN_HEARTBEAT_INTERVAL_SECONDS)
+            activity.heartbeat()
+
+    heartbeat = asyncio.create_task(_heartbeat_until_done())
+    try:
+        return await chat_step_worker.run_distributed_step(invocation)
+    except StepInvocationRejected as exc:
+        # The turn was cancelled, closed, or lost its thread while this was
+        # queued. Non-retryable and not a fault: the coordinator either is not
+        # listening any more or will record the step as unrun.
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    except HeadlessIdentityError as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
 
 
 @activity.defn
