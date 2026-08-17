@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from reporting.services import chat_context
+from reporting.services import chat_context, chat_models
 
 
 @pytest.fixture(autouse=True)
@@ -472,7 +472,7 @@ def test_the_output_allowance_is_the_smaller_of_configured_and_the_models_limit(
     relationship to what that model could have given."""
     mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 4096)
     mocker.patch("reporting.services.chat_context.model_name_of", return_value="some/model")
-    chat_context._OUTPUT_CACHE.clear()
+    chat_models.capability.cache_clear()
     mocker.patch("litellm.get_model_info", return_value={"max_output_tokens": 2048})
 
     assert chat_context.max_output_tokens(object()) == 2048
@@ -481,7 +481,7 @@ def test_the_output_allowance_is_the_smaller_of_configured_and_the_models_limit(
 def test_a_model_that_reports_no_limit_keeps_the_configured_allowance(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 4096)
     mocker.patch("reporting.services.chat_context.model_name_of", return_value="self/hosted")
-    chat_context._OUTPUT_CACHE.clear()
+    chat_models.capability.cache_clear()
     mocker.patch("litellm.get_model_info", return_value={})
 
     assert chat_context.max_output_tokens(object()) == 4096
@@ -490,7 +490,7 @@ def test_a_model_that_reports_no_limit_keeps_the_configured_allowance(mocker):
 def test_an_unknown_model_does_not_raise(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_MAX_TOKENS", 1024)
     mocker.patch("reporting.services.chat_context.model_name_of", return_value="mystery")
-    chat_context._OUTPUT_CACHE.clear()
+    chat_models.capability.cache_clear()
     mocker.patch("litellm.get_model_info", side_effect=RuntimeError("unknown"))
 
     assert chat_context.max_output_tokens(object()) == 1024

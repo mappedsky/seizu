@@ -91,7 +91,8 @@ lock_proxy_requirements:
 # so the host needs no project environment.
 chat_harness:
 	python3 -m scripts.chat_harness --samples $(or $(SAMPLES),4) \
-		--turns $(or $(TURNS),2) --user-id $(USER_ID) --arms $(ARMS)
+		--turns $(or $(TURNS),2) --user-id $(USER_ID) \
+		$(if $(PROMPTS),--prompts $(PROMPTS),) --arms $(ARMS)
 
 .PHONY: test_frontend
 test_frontend:

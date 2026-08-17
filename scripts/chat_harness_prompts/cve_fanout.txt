@@ -1,0 +1,26 @@
+# A conversation whose plan has independent per-item steps.
+#
+# The built-in conversation plans a *single* step, so it cannot measure anything
+# that only happens with two or more independent steps -- an arm that changes
+# such behaviour comes back looking identical for a reason that has nothing to
+# do with the arm.
+#
+# Deliberately names no organization, repository or CVE id: those differ per
+# deployment, and a prompt file that only works against one graph is a prompt
+# file nobody else can run.
+#
+# **Why it takes two turns.** Plans are static: the planner writes the whole plan
+# before any step runs, so it can only fan out over items it can already name.
+# Asking in one turn for "the top four CVEs, investigated separately" gives it
+# nothing to fan out over -- the ids do not exist yet -- and it correctly plans
+# one step that handles all four. Measured: exactly that, twice. The first turn
+# therefore *establishes* the ids, and the second refers back to them, so by the
+# time the planner runs they are concrete subjects in the conversation.
+#
+# If a deployment's graph holds no CVEs this measures nothing useful; point
+# --prompts at a file whose first turn enumerates something that graph has.
+#
+# One prompt per non-blank line; lines starting with # are ignored.
+
+List the four highest-severity open CVEs recorded in the security graph. For each one give me its identifier, its severity, and which repositories and packages it affects.
+Now investigate each of those four CVEs separately and independently. For each, confirm whether the vulnerable version is actually installed in the repositories that carry it, and what would have to be true for it to be exploitable there. Treat the four as separate pieces of work that do not depend on each other, then rank them by which I should fix first.

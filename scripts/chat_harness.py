@@ -50,9 +50,12 @@ its samples were not all taken against the same build -- and the arm labels then
 describe a configuration rather than a build, which is exactly the kind of
 silently-invented result the read-back check above exists to prevent.
 
-Runs on the host rather than in a container -- it recreates the ``seizu``
-service between arms, which it could not do from inside that service -- and uses
-only the standard library so the host needs no project environment.
+Runs on the host rather than in a container -- it recreates the ``seizu`` and
+``seizu-temporal-worker`` services between arms, which it could not do from
+inside them -- and uses only the standard library so the host needs no project
+environment. **Both** services get the arm: the API admits a turn, but the turn
+runs on the worker, so an arm applied only to the web service measures the
+default.
 """
 
 import argparse
@@ -67,6 +70,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -91,9 +95,28 @@ CONVERSATION = [
 ]
 
 
-def conversation_turns(count: int) -> list[str]:
+def conversation_turns(count: int, prompts: list[str] | None = None) -> list[str]:
     """The first *count* prompts, cycling once the written ones run out."""
-    return [CONVERSATION[index % len(CONVERSATION)] for index in range(max(1, count))]
+    source = prompts or CONVERSATION
+    return [source[index % len(source)] for index in range(max(1, count))]
+
+
+def load_prompts(path: Path) -> list[str]:
+    """Read a conversation from a file, one prompt per non-blank line.
+
+    The built-in conversation is deliberately fixed so runs stay comparable, but
+    it is *one* shape of request -- and some behaviour only appears for others.
+    A plan's step count is the clearest case: the built-in conversation plans a
+    single step on this graph, so anything that only happens with two or more
+    independent steps cannot be measured with it at all, and an arm that changes
+    such behaviour comes back looking identical for a reason that has nothing to
+    do with the arm.
+    """
+    lines = [line.strip() for line in path.read_text().splitlines()]
+    prompts = [line for line in lines if line and not line.startswith("#")]
+    if not prompts:
+        raise HarnessError(f"{path} contains no prompts")
+    return prompts
 
 
 _ARM_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[^\s]*$")
@@ -108,6 +131,34 @@ def _post(path: str, payload: dict[str, Any], *, stream: bool = False) -> str:
     # No timeout: a turn legitimately runs for many minutes.
     with urllib.request.urlopen(request) as response:  # noqa: S310 - localhost dev stack
         return response.read().decode(errors="replace") if stream else response.read().decode()
+
+
+def _get(path: str) -> str:
+    request = urllib.request.Request(f"{API}{path}", headers={"Accept": "text/event-stream"})
+    with urllib.request.urlopen(request) as response:  # noqa: S310 - localhost dev stack
+        return response.read().decode(errors="replace")
+
+
+def run_turn(thread_id: str, message: str) -> str:
+    """Send one message and read the turn's stream to the end.
+
+    Two requests, because that is what a turn is now: admission answers with a
+    turn id before anything streams, and the stream is a *reader* over the
+    turn's event log (AGT-008). The single `POST /chat/stream` this used to call
+    was removed with that change, so every run since has failed outright at the
+    first turn.
+
+    The idempotency key is required and is minted per turn here. It must be
+    fresh for each: reusing one resolves to the turn it already admitted and the
+    harness would measure the same answer twice.
+    """
+    admission = json.loads(
+        _post(
+            f"/api/v1/chat/threads/{thread_id}/turns",
+            {"message": message, "idempotency_key": uuid.uuid4().hex},
+        )
+    )
+    return _get(f"/api/v1/chat/turns/{admission['turn_id']}/stream")
 
 
 class HarnessError(RuntimeError):
@@ -157,13 +208,26 @@ def _dotenv_value(key: str) -> str:
     return ""
 
 
+#: Services an arm has to reach. ``seizu`` serves the API and admits the turn;
+#: ``seizu-temporal-worker`` is where the turn actually runs, so a chat setting
+#: applied only to the web service measures the *default* and records it under
+#: the experimental arm's label -- the exact silently-invented result the
+#: read-back check below exists to prevent.
+ARM_SERVICES = ("seizu", "seizu-temporal-worker")
+
+
+def _overlay_for(arm: str) -> str:
+    if arm == "baseline":
+        body = "    environment: []\n"
+    else:
+        body = f"    environment:\n      - {arm}\n"
+    return "services:\n" + "".join(f"  {service}:\n{body}" for service in ARM_SERVICES)
+
+
 def apply_arm(arm: str) -> str:
     """Recreate the backend with this arm applied, and read the value back."""
-    if arm == "baseline":
-        OVERLAY.write_text("services:\n  seizu:\n    environment: []\n")
-    else:
-        OVERLAY.write_text(f"services:\n  seizu:\n    environment:\n      - {arm}\n")
-    _compose("up", "-d", "--force-recreate", "seizu", env={"COMPOSE_FILE": _compose_file_chain()})
+    OVERLAY.write_text(_overlay_for(arm))
+    _compose("up", "-d", "--force-recreate", *ARM_SERVICES, env={"COMPOSE_FILE": _compose_file_chain()})
     for _ in range(60):
         try:
             urllib.request.urlopen(f"{API}/healthcheck", timeout=5)  # noqa: S310
@@ -175,26 +239,31 @@ def apply_arm(arm: str) -> str:
     if arm == "baseline":
         return "baseline"
     key, _, expected = arm.partition("=")
-    out = _compose(
-        "exec",
-        "-T",
-        "seizu",
-        "uv",
-        "run",
-        "--frozen",
-        "--no-sync",
-        "python",
-        "-c",
-        f"from reporting import settings; print(settings.{key})",
-        capture=True,
-    )
-    applied = out.strip().splitlines()[-1] if out.strip() else ""
-    # Compare, do not merely print. An override that never reaches the service
-    # leaves it running the default, which measures perfectly well and is then
-    # recorded under the experimental arm's label -- a silently invented result.
-    # Settings are typed, so compare loosely enough that "2000" matches 2000.
-    if not _same_value(applied, expected):
-        raise HarnessError(f"arm {arm} did not apply: {key} is {applied!r}, expected {expected!r}")
+    applied = ""
+    # Read it back from every service the arm was applied to. One of them missing
+    # the override is the failure this catches, and checking only the first would
+    # miss precisely the case that matters: the turn runs in the *worker*.
+    for service in ARM_SERVICES:
+        out = _compose(
+            "exec",
+            "-T",
+            service,
+            "uv",
+            "run",
+            "--frozen",
+            "--no-sync",
+            "python",
+            "-c",
+            f"from reporting import settings; print(settings.{key})",
+            capture=True,
+        )
+        applied = out.strip().splitlines()[-1] if out.strip() else ""
+        # Compare, do not merely print. An override that never reaches the
+        # service leaves it running the default, which measures perfectly well
+        # and is then recorded under the experimental arm's label. Settings are
+        # typed, so compare loosely enough that "2000" matches 2000.
+        if not _same_value(applied, expected):
+            raise HarnessError(f"arm {arm} did not apply to {service}: {key} is {applied!r}, expected {expected!r}")
     return applied
 
 
@@ -365,15 +434,22 @@ def ledger(thread_id: str, user_id: str) -> dict[str, Any]:
     }
 
 
-def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2) -> dict[str, Any]:
+def run_sample(
+    arm: str,
+    index: int,
+    user_id: str,
+    out_dir: Path,
+    turns: int = 2,
+    prompts: list[str] | None = None,
+) -> dict[str, Any]:
     session = json.loads(_post("/api/v1/chat/sessions", {"title": f"harness {arm} #{index}"}))
     thread_id = session["thread_id"]
     started = time.time()
-    prompts = conversation_turns(turns)
+    conversation = conversation_turns(turns, prompts)
     streams: list[str] = []
-    for turn, prompt in enumerate(prompts, start=1):
-        streams.append(_post("/api/v1/chat/stream", {"thread_id": thread_id, "message": prompt}, stream=True))
-        print(f"    turn {turn}/{len(prompts)} done ({int(time.time() - started)}s)", flush=True)
+    for turn, prompt in enumerate(conversation, start=1):
+        streams.append(run_turn(thread_id, prompt))
+        print(f"    turn {turn}/{len(conversation)} done ({int(time.time() - started)}s)", flush=True)
     # Hash the arm rather than embedding it: an ordinary value such as
     # "openai/gpt-4" carries a path separator and would write outside out_dir.
     slug = "baseline" if arm == "baseline" else hashlib.sha256(arm.encode()).hexdigest()[:10]
@@ -390,7 +466,7 @@ def run_sample(arm: str, index: int, user_id: str, out_dir: Path, turns: int = 2
         "slug": slug,
         "sample": index,
         "thread": thread_id,
-        "turns": len(prompts),
+        "turns": len(conversation),
         "seconds": int(time.time() - started),
     }
     row.update(aggregate_stream_metrics(streams))
@@ -435,11 +511,19 @@ def main() -> int:
     parser.add_argument("--arms", nargs="+", required=True, help='"baseline" or KEY=VALUE')
     parser.add_argument("--user-id", required=True, help="Seizu user id whose threads to read budgets from")
     parser.add_argument("--out", default="chat-harness-results")
+    parser.add_argument(
+        "--prompts",
+        type=Path,
+        default=None,
+        help="File of prompts (one per non-blank line) to use instead of the built-in conversation",
+    )
     args = parser.parse_args()
 
     for arm in args.arms:
         if arm != "baseline" and not _ARM_RE.match(arm):
             parser.error(f"arm {arm!r} must be 'baseline' or KEY=VALUE")
+
+    prompts = load_prompts(args.prompts) if args.prompts else None
 
     out_dir = REPO / args.out
     out_dir.mkdir(exist_ok=True)
@@ -452,7 +536,7 @@ def main() -> int:
             applied = apply_arm(arm)
             print(f"ARM {arm} applied={applied}", flush=True)
             for index in range(1, args.samples + 1):
-                row = run_sample(arm, index, args.user_id, out_dir, turns=args.turns)
+                row = run_sample(arm, index, args.user_id, out_dir, turns=args.turns, prompts=prompts)
                 rows.append(row)
                 with results.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")
