@@ -77,7 +77,10 @@ async def test_token_reserve_is_only_available_for_finalization():
     assert controller.mode == "finalizing"
 
 
-async def test_parallel_reservations_cannot_oversubscribe_budget():
+async def test_parallel_reservations_cannot_oversubscribe_budget(mocker):
+    # Nothing will settle here, so the second call waits out its window and then
+    # fails. The invariant under test is that it never gets through.
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.05)
     controller = BudgetController(_ledger(reserve_tokens=0))
 
     results = await asyncio.gather(
@@ -88,6 +91,158 @@ async def test_parallel_reservations_cannot_oversubscribe_budget():
 
     assert sum(not isinstance(result, Exception) for result in results) == 1
     assert sum(isinstance(result, BudgetExceeded) for result in results) == 1
+
+
+# --- Contention is backpressure, not exhaustion (AGT-021) ----------------------
+
+
+async def test_a_call_waits_for_an_in_flight_reservation_instead_of_failing():
+    """Contention waits for capacity; it never ends the run (AGT-021).
+
+    The budget has room here -- it is held by a call that has not returned.
+    """
+    controller = BudgetController(_ledger(reserve_tokens=0))
+    held = await controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20)
+
+    waiter = asyncio.ensure_future(controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20))
+    await asyncio.sleep(0)
+    assert not waiter.done()  # blocked on capacity, not failed
+
+    # The call returns, and its 60-token estimate settles as 10 actual tokens.
+    await controller.commit(held, input_tokens=8, output_tokens=2, cost_usd=0.0, usage_estimated=False)
+
+    assert await asyncio.wait_for(waiter, timeout=1)
+    assert controller.mode == "normal"  # contention never marks the run finished
+
+
+async def test_contention_does_not_finalize_the_run(mocker):
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.05)
+    controller = BudgetController(_ledger(reserve_tokens=0))
+    await controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20)
+
+    with pytest.raises(BudgetExceeded, match="in flight"):
+        await controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20)
+
+    # The step that lost the race reports what it has; the run carries on with
+    # the budget it still demonstrably owns.
+    assert controller.mode == "normal"
+    assert controller.snapshot()["exhaustion_reason"] is None
+
+
+async def test_committed_spend_still_finalizes_immediately_without_waiting():
+    """The genuine case must stay fast: waiting cannot un-spend what is spent."""
+    controller = BudgetController(_ledger(reserve_tokens=0))
+    reservation = await controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20)
+    await controller.commit(reservation, input_tokens=90, output_tokens=5, cost_usd=0.0, usage_estimated=False)
+
+    with pytest.raises(BudgetExceeded, match="reserved for final synthesis"):
+        await asyncio.wait_for(controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20), timeout=1)
+
+    assert controller.mode in ("finalizing", "exhausted")
+
+
+async def test_cost_contention_waits_like_token_contention(mocker):
+    """The cost dimension is reachable by default, so it needs the same split."""
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.05)
+    ledger = _ledger(token_limit=0)
+    ledger.update({"cost_limit_usd": 1.0, "reserve_cost_usd": 0.0})
+    controller = BudgetController(ledger)
+    held = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.6)
+
+    with pytest.raises(BudgetExceeded, match="cost budget is reserved by calls still in flight"):
+        await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.6)
+    assert controller.mode == "normal"
+
+    # The reservation settles for a tenth of its estimate, and the waiter fits.
+    await controller.commit(held, input_tokens=1, output_tokens=1, cost_usd=0.06, usage_estimated=False)
+    assert await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.6)
+
+
+async def test_committed_cost_over_the_limit_finalizes_rather_than_waits():
+    ledger = _ledger(token_limit=0)
+    ledger.update({"cost_limit_usd": 1.0, "reserve_cost_usd": 0.0})
+    controller = BudgetController(ledger)
+    reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.5)
+    await controller.commit(reservation, input_tokens=1, output_tokens=1, cost_usd=0.99, usage_estimated=False)
+
+    with pytest.raises(BudgetExceeded, match="cost budget is reserved for final synthesis"):
+        await asyncio.wait_for(
+            controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.5), timeout=1
+        )
+    assert controller.mode in ("finalizing", "exhausted")
+
+
+async def test_zero_wait_restores_fail_fast(mocker):
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.0)
+    controller = BudgetController(_ledger(reserve_tokens=0))
+    await controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20)
+
+    with pytest.raises(BudgetExceeded):
+        await asyncio.wait_for(controller.reserve(estimated_input_tokens=40, estimated_output_tokens=20), timeout=1)
+
+
+# --- Reservations are sized from what calls emit, not from the ceiling --------
+
+
+async def test_output_reservation_starts_at_the_seed_and_then_tracks_observation(mocker):
+    mocker.patch("reporting.settings.CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS", 4_096)
+    mocker.patch("reporting.settings.CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY", 1.5)
+    controller = BudgetController(_ledger(token_limit=0))
+
+    # Cold: the seed, never the model's 32,768 ceiling.
+    assert controller.projected_output_tokens("worker:s1", 32_768) == 4_096
+
+    for _ in range(6):
+        reservation = await controller.reserve(
+            estimated_input_tokens=10, estimated_output_tokens=100, phase="worker:s2"
+        )
+        await controller.commit(reservation, input_tokens=10, output_tokens=1_000, cost_usd=0.0, usage_estimated=False)
+
+    # Converged on what workers actually emit, plus the safety multiple, and a
+    # different step of the same role inherits it rather than starting cold.
+    assert controller.projected_output_tokens("worker:s9", 32_768) == pytest.approx(1_500, rel=0.05)
+
+
+def test_output_reservation_never_exceeds_the_models_ceiling():
+    controller = BudgetController(_ledger(token_limit=0))
+    assert controller.projected_output_tokens("planner", 512) == 512
+
+
+async def test_output_reservation_keeps_a_floor_for_a_terse_phase():
+    controller = BudgetController(_ledger(token_limit=0))
+    for _ in range(8):
+        reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1, phase="router")
+        await controller.commit(reservation, input_tokens=1, output_tokens=3, cost_usd=0.0, usage_estimated=False)
+
+    # An authorization that rounds to nothing authorizes nothing.
+    assert controller.projected_output_tokens("router", 32_768) == 256
+
+
+def test_observation_key_groups_by_role_and_sub_role_not_by_step():
+    from reporting.services.chat_budget import _observation_key
+
+    assert _observation_key("planner") == "planner"
+    # Keying on the step id would give every new step a cold start, which is the
+    # case this exists to fix.
+    assert _observation_key("worker:s1") == _observation_key("worker:s2") == "worker"
+    # A sandbox sub-agent's calls look nothing like its worker's, so they stay apart.
+    assert _observation_key("worker:s1:sandbox_subagent") == "worker:sandbox_subagent"
+    assert _observation_key("") == "unspecified"
+
+
+async def test_absorbed_grant_totals_seed_the_estimate():
+    """A distributed step reports totals; the coordinator still learns from them."""
+    controller = BudgetController(_ledger(token_limit=0))
+    await controller.absorb(
+        {
+            "input_tokens": 9_000,
+            "output_tokens": 4_000,
+            "llm_calls": 4,
+            "phases": {"worker:s1": {"output_tokens": 4_000, "llm_calls": 4}},
+        }
+    )
+
+    assert controller.projected_output_tokens("worker:s7", 32_768) == 1_500  # 1,000 mean x 1.5
 
 
 async def test_parallel_reserve_calls_cannot_exceed_hard_call_limit():

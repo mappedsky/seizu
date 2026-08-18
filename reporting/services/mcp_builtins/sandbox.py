@@ -1074,7 +1074,13 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         # delegating instead of continuing to spend invisibly.
         messages = normalized if isinstance(normalized, list) else []
         estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
-        estimated_output = settings.CHAT_LLM_MAX_TOKENS
+        phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
+        # Was `CHAT_LLM_MAX_TOKENS`, which defaults to 0 (= "derive it from the
+        # model") -- so the run's *largest* spender reserved no output at all
+        # while the outer path reserved a full 32,768 it would never use. Both
+        # now ask the ledger what calls of their kind actually emit, bounded by
+        # what this model may return.
+        estimated_output = controller.projected_output_tokens(phase, chat_context.max_output_tokens(self._model))
         reservation = await controller.reserve(
             estimated_input_tokens=estimated_input,
             estimated_output_tokens=estimated_output,
@@ -1091,7 +1097,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # starve every sibling step. Phase is a child of the scope so the
             # ledger shows where it went.
             scope=scope,
-            phase=f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE,
+            phase=phase,
         )
         settled = False
         try:

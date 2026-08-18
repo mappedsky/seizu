@@ -1548,20 +1548,23 @@ async def _run_llm_tool_turn(
         runnable = bind_tools(tool_schemas)
 
     controller = budget_controller_from_config(config)
-    estimated_output = max_output_tokens if max_output_tokens is not None else settings.CHAT_LLM_MAX_TOKENS
+    output_ceiling = max(1, max_output_tokens if max_output_tokens is not None else settings.CHAT_LLM_MAX_TOKENS)
     # The one place the whole request exists in one scope, and therefore the only
     # place it can be checked as a whole. Every caller's own cap bounds part of
     # it; this bounds the request the provider will actually receive.
-    messages = _fit_messages_to_window(
-        model, system_prompt, messages, tool_schemas, max_output_tokens=max(1, estimated_output)
-    )
+    #
+    # Fitted against the *ceiling*: the window has to hold whatever the model is
+    # allowed to return. What is reserved below is a different number, and
+    # deliberately so -- see BudgetController.projected_output_tokens.
+    messages = _fit_messages_to_window(model, system_prompt, messages, tool_schemas, max_output_tokens=output_ceiling)
     estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     reservation = None
     if controller is not None:
+        estimated_output = controller.projected_output_tokens(phase, output_ceiling)
         reservation = await controller.reserve(
             estimated_input_tokens=estimated_input,
-            estimated_output_tokens=max(1, estimated_output),
-            estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max(1, estimated_output)),
+            estimated_output_tokens=estimated_output,
+            estimated_cost_usd=controller.project_cost_usd(model, estimated_input, estimated_output),
             allow_reserve=allow_reserve,
             phase=phase,
         )
@@ -2916,10 +2919,13 @@ async def _invoke_structured_output(
         reservation = None
         try:
             if controller is not None:
+                # Sized from what structured calls of this kind emit, bounded by
+                # the ceiling they may ask for (AGT-021).
+                estimated_output = controller.projected_output_tokens(phase, max_output_tokens)
                 reservation = await controller.reserve(
                     estimated_input_tokens=estimated_input,
-                    estimated_output_tokens=max_output_tokens,
-                    estimated_cost_usd=controller.project_cost_usd(model, estimated_input, max_output_tokens),
+                    estimated_output_tokens=estimated_output,
+                    estimated_cost_usd=controller.project_cost_usd(model, estimated_input, estimated_output),
                     allow_reserve=allow_reserve,
                     phase=phase,
                 )

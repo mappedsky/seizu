@@ -926,10 +926,28 @@ CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_C
 # delegation is disabled or rare; a turn that never delegates spends the same as
 # it always did.
 CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 400_000)
-CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 0.0)
+# Estimated provider spend one run may reach, in USD, and the intended runaway
+# guard (AGT-021). Priced per call from LiteLLM's model data, cache-aware on
+# commit. Set 0 to disable the dimension -- required for a gateway or custom
+# model whose pricing LiteLLM does not know, since an unpriced run would
+# otherwise never charge against it.
+CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 2.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
 CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 64)
+# Output tokens assumed for a call whose kind has not been seen yet. Every
+# later call of that kind is reserved from what it was observed to emit
+# instead (AGT-021). Raise it if cold-start calls on your model are large.
+CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS = int_env("CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS", 4_096)
+# Multiple of the observed average a reservation carries, covering a call that
+# runs longer than the last one. Reservations are bounded by the model's output
+# ceiling regardless.
+CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY = float_env("CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY", 1.5)
+# How long a call waits when the run has budget left but it is reserved by calls
+# still in flight. Concurrency throttles itself for up to this long instead of
+# failing; committed spend over a limit still stops the run immediately. 0 fails
+# fast (AGT-021).
+CHAT_BUDGET_CONTENTION_WAIT_SECONDS = float_env("CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 30.0)
 # Optional role-specific models. Empty values inherit CHAT_LLM_MODEL. The
 # economy model is selected for read-only worker/synthesis calls after the run
 # crosses its soft budget limit.

@@ -75,12 +75,19 @@ async def plan_for(message: str, history: list[str]) -> dict[str, Any]:
 
 
 def render(index: int, result: dict[str, Any]) -> int:
+    from reporting.services import chat_orchestrator
+
     plan = result["plan"]
     fallback = len(plan) == 1 and plan[0].get("success_criteria") == _FALLBACK_CRITERIA
     batches = _independent_batches(plan)
     print(f"\n--- sample {index}: {len(plan)} step(s){'  [FALLBACK, not a real plan]' if fallback else ''}")
     if result["run_errors"]:
+        # Where an invalid graph shows up: the planner validates the DAG it is
+        # given, replans once, and reports what it had to repair (AGT-020).
         print(f"    run_errors: {result['run_errors']}")
+    # The plan reaching here is always a DAG; what varies is its depth, which is
+    # what each step's budget slice is now divided by.
+    print(f"    dispatch waves: {chat_orchestrator._remaining_waves(plan)}")
     for step in plan:
         print(
             f"    {step['id']}  deps={step.get('depends_on') or []}  "

@@ -184,6 +184,281 @@ def test_init_plan_drops_dangling_and_self_dependencies():
     assert all(step["status"] == "pending" for step in plan)
 
 
+# --- The plan is a validated DAG ----------------------------------------------
+
+
+def test_plan_problems_accepts_a_valid_dag():
+    # A diamond: two independent middles over one root, joined by one leaf.
+    assert (
+        chat_orchestrator._plan_problems(
+            [
+                _PlannedStep(id="s1", goal="root"),
+                _PlannedStep(id="s2", goal="left", depends_on=["s1"]),
+                _PlannedStep(id="s3", goal="right", depends_on=["s1"]),
+                _PlannedStep(id="s4", goal="join", depends_on=["s2", "s3"]),
+            ]
+        )
+        == []
+    )
+
+
+def test_plan_problems_reports_self_edges_dangling_refs_and_duplicates():
+    problems = chat_orchestrator._plan_problems(
+        [
+            _PlannedStep(id="s1", goal="a", depends_on=["s1"]),
+            _PlannedStep(id="s2", goal="b", depends_on=["ghost"]),
+            _PlannedStep(id="s2", goal="c"),
+        ]
+    )
+    assert "Duplicate step id 's2'." in problems
+    assert "Step 's1' depends on itself." in problems
+    assert "Step 's2' depends on 'ghost', which is not a step in this plan." in problems
+    # A dangling reference is reported once, as itself -- not a second time as a
+    # cycle it is not part of.
+    assert not any("cycle" in problem for problem in problems)
+
+
+def test_plan_problems_reports_a_multi_node_cycle_and_what_waits_on_it():
+    # The failure the whole validation exists for: nothing here is ever runnable,
+    # and before validation the turn answered from an empty plan with no error.
+    problems = chat_orchestrator._plan_problems(
+        [
+            _PlannedStep(id="s1", goal="a", depends_on=["s3"]),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"]),
+            _PlannedStep(id="s3", goal="c", depends_on=["s2"]),
+            _PlannedStep(id="s4", goal="d", depends_on=["s2"]),
+        ]
+    )
+    assert len(problems) == 1
+    assert "s1, s2, s3, s4" in problems[0]
+    assert "cycle" in problems[0]
+
+
+def test_init_plan_breaks_a_cycle_by_freeing_its_earliest_step():
+    plan = chat_orchestrator._init_plan(
+        [
+            _PlannedStep(id="s1", goal="a", depends_on=["s2"]),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"]),
+            _PlannedStep(id="s3", goal="c", depends_on=["s2"]),
+        ]
+    )
+    by_id = {step["id"]: step for step in plan}
+    assert by_id["s1"]["depends_on"] == []  # earliest member of the cycle is freed
+    assert by_id["s2"]["depends_on"] == ["s1"]
+    assert by_id["s3"]["depends_on"] == ["s2"]
+    # And the repaired plan actually runs: something is runnable from the start.
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s1"]
+
+
+def test_init_plan_renames_a_duplicate_id_rather_than_dropping_the_step():
+    plan = chat_orchestrator._init_plan(
+        [
+            _PlannedStep(id="s1", goal="a"),
+            _PlannedStep(id="s1", goal="b"),
+            _PlannedStep(id="", goal="c", depends_on=["s1"]),
+        ]
+    )
+    assert [step["id"] for step in plan] == ["s1", "s1-2", "s3"]
+    assert [step["goal"] for step in plan] == ["a", "b", "c"]
+    # The edge binds to the first step that claimed the id, which is what
+    # dropping the duplicate would have done -- minus the work it described.
+    assert plan[2]["depends_on"] == ["s1"]
+
+
+def test_truncate_plan_removes_edges_into_the_steps_it_dropped(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_STEPS", 2)
+    kept, notes = chat_orchestrator._truncate_plan(
+        [
+            _PlannedStep(id="s1", goal="a"),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1", "s3"]),
+            _PlannedStep(id="s3", goal="c"),
+        ]
+    )
+    assert [step.id for step in kept] == ["s1", "s2"]
+    # Our own cut, so it is repaired here rather than replanned as if the model
+    # had emitted a dangling reference.
+    assert kept[1].depends_on == ["s1"]
+    assert chat_orchestrator._plan_problems(kept) == []
+    assert notes and "truncated" in notes[0]
+
+
+async def _plan_via_planner(mocker, plans: list[Any]) -> dict[str, Any]:
+    invoke = mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=plans,
+    )
+    mocker.patch("reporting.services.chat_orchestrator._list_chat_prompts", new_callable=AsyncMock, return_value=[])
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=lambda _event: None)
+    result = await chat_orchestrator.planner_node(
+        {"messages": [HumanMessage(content="investigate and report")]},
+        {"configurable": {"current_user": _user()}},
+    )
+    result["_invoke"] = invoke
+    return result
+
+
+async def test_planner_replans_once_when_the_dependency_graph_is_invalid(mocker):
+    invalid = _Plan(
+        steps=[
+            _PlannedStep(id="s1", goal="a", depends_on=["s2"]),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"]),
+        ]
+    )
+    valid = _Plan(steps=[_PlannedStep(id="s1", goal="a"), _PlannedStep(id="s2", goal="b", depends_on=["s1"])])
+
+    result = await _plan_via_planner(mocker, [invalid, valid])
+
+    assert [step["depends_on"] for step in result["plan"]] == [[], ["s1"]]
+    assert result["_invoke"].await_count == 2
+    # The correction names the problem and shows the graph it came from.
+    correction = result["_invoke"].await_args_list[1].args[1][-1].content
+    assert "cycle" in correction and "s1: depends_on=['s2']" in correction
+    assert result["run_errors"] and "invalid dependency graph" in result["run_errors"][0]
+
+
+async def test_planner_repairs_and_reports_when_the_replan_is_also_invalid(mocker):
+    invalid = _Plan(
+        steps=[
+            _PlannedStep(id="s1", goal="a", depends_on=["s2"]),
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"]),
+        ]
+    )
+
+    result = await _plan_via_planner(mocker, [invalid, invalid])
+
+    assert result["_invoke"].await_count == 2  # once, never a loop
+    # Repaired rather than thrown away for the single-step fallback: the steps
+    # the planner wrote are still the work the request needs.
+    assert [step["id"] for step in result["plan"]] == ["s1", "s2"]
+    assert chat_orchestrator._runnable_steps(result["plan"])
+    assert "also invalid" in result["run_errors"][0]
+
+
+async def test_planner_keeps_the_first_plan_when_replanning_cannot_run(mocker):
+    invalid = _Plan(steps=[_PlannedStep(id="s1", goal="a", depends_on=["ghost"])])
+
+    result = await _plan_via_planner(mocker, [invalid, ValueError("no structured output")])
+
+    assert [step["id"] for step in result["plan"]] == ["s1"]
+    assert result["plan"][0]["depends_on"] == []
+    assert "Replanning failed" in result["run_errors"][0]
+
+
+async def test_planner_streams_the_graph_diagnostics_beside_the_plan(mocker):
+    events: list[dict[str, Any]] = []
+    mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=[_Plan(steps=[_PlannedStep(id="s1", goal="a", depends_on=["ghost"])])] * 2,
+    )
+    mocker.patch("reporting.services.chat_orchestrator._list_chat_prompts", new_callable=AsyncMock, return_value=[])
+    mocker.patch("reporting.services.chat_orchestrator.get_stream_writer", return_value=events.append)
+
+    await chat_orchestrator.planner_node(
+        {"messages": [HumanMessage(content="investigate and report")]},
+        {"configurable": {"current_user": _user()}},
+    )
+
+    plan_event = next(event for event in events if event["data"]["kind"] == "plan")
+    assert "Plan diagnostics:" in plan_event["data"]["body"]
+    assert "not a step in this plan" in plan_event["data"]["body"]
+
+
+def test_unreachable_steps_are_failed_rather_than_left_pending():
+    # s3 waits on a step that failed terminally. Left pending it contributes
+    # nothing to run_errors and simply disappears from the synthesized answer.
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "failed", depends_on=["s1"], no_retry=True),
+        _step("s3", "pending", depends_on=["s1", "s2"]),
+    ]
+    results = chat_orchestrator._fail_unreachable_steps(plan, [{"step_id": "s2", "output": "half a result"}])
+
+    assert plan[2]["status"] == "failed" and plan[2]["no_retry"] is True
+    by_id = {result["step_id"]: result for result in results}
+    assert "s2 (failed)" in by_id["s3"]["execution_error"]
+    assert by_id["s2"]["output"] == "half a result"  # untouched
+
+
+def test_steps_in_flight_are_not_mistaken_for_unreachable_ones():
+    plan = [_step("s1", "awaiting"), _step("s2", "pending", depends_on=["s1"])]
+    assert chat_orchestrator._fail_unreachable_steps(plan, []) == []
+    assert plan[1]["status"] == "pending"
+
+
+def test_a_diamonds_join_waits_for_both_parents_across_a_retry(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "passed", depends_on=["s1"]),
+        _step("s3", "failed", depends_on=["s1"]),
+        _step("s4", "pending", depends_on=["s2", "s3"]),
+    ]
+    results = [{"step_id": "s3", "verify_reason": "thin", "output": ""}]
+
+    plan, iteration = chat_orchestrator._prepare_retries(plan, results, 0)
+
+    assert iteration == 1
+    assert plan[2]["status"] == "pending" and plan[2]["retry_guidance"] == "thin"
+    # Only the retried parent is runnable; the join stays blocked on it even
+    # though its other parent has passed.
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s3"]
+
+
+def test_remaining_waves_counts_dispatcher_passes_not_steps(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    chain = [_step("s1"), _step("s2", depends_on=["s1"]), _step("s3", depends_on=["s2"])]
+    assert chat_orchestrator._remaining_waves(chain) == 3
+    flat = [_step("s1"), _step("s2"), _step("s3"), _step("s4")]
+    assert chat_orchestrator._remaining_waves(flat) == 2  # 3 then 1
+    diamond = [
+        _step("s1"),
+        _step("s2", depends_on=["s1"]),
+        _step("s3", depends_on=["s1"]),
+        _step("s4", depends_on=["s2", "s3"]),
+    ]
+    assert chat_orchestrator._remaining_waves(diamond) == 3
+    # Finished steps are not waves the run still has to pay for.
+    assert chat_orchestrator._remaining_waves([_step("s1", "passed"), _step("s2", "skipped")]) == 1
+
+
+def test_budget_divisor_slices_by_depth_not_by_outstanding_count(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    # A bottleneck: s1 runs alone while three steps wait behind it. Counting
+    # outstanding steps would give the only running step a fifth of the run.
+    diamond = [
+        _step("s1", "ran"),
+        _step("s2", depends_on=["s1"]),
+        _step("s3", depends_on=["s1"]),
+        _step("s4", depends_on=["s2", "s3"]),
+    ]
+    assert chat_orchestrator._budget_divisor(diamond, 1) == 3
+
+    # Unchanged where the old count was right: a chain, and a single wide batch.
+    chain = [_step("s1", "ran"), _step("s2", depends_on=["s1"]), _step("s3", depends_on=["s2"])]
+    assert chat_orchestrator._budget_divisor(chain, 1) == 3
+    flat = [_step("s1", "ran"), _step("s2", "ran"), _step("s3", "ran")]
+    assert chat_orchestrator._budget_divisor(flat, 3) == 3
+
+
+def test_step_grant_gives_a_bottleneck_step_a_waves_share(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 300_000, "reserve_tokens": 0, "total_tokens": 0})
+    controller = BudgetController(ledger)
+    diamond = [
+        _step("s1", "ran"),
+        _step("s2", depends_on=["s1"]),
+        _step("s3", depends_on=["s1"]),
+        _step("s4", depends_on=["s2", "s3"]),
+    ]
+
+    grant = chat_orchestrator._grant_for(diamond[0], diamond, controller, 1)
+
+    assert grant.tokens == 100_000  # one of three waves, not one of four steps
+
+
 async def test_planner_records_structured_output_fallback_as_run_error(mocker):
     invoke = mocker.patch(
         "reporting.services.chat_orchestrator._structured_invoke",
@@ -2057,12 +2332,15 @@ def test_the_worker_is_told_to_continue_from_a_partial_result():
     assert "do not re-gather" in message
 
 
-async def test_a_scope_counts_in_flight_reservations_not_just_committed_spend():
+async def test_a_scope_counts_in_flight_reservations_not_just_committed_spend(mocker):
     """Regression: a parallel batch authorized every call against an unchanged total.
 
     Each concurrent delegate saw the same committed spend, so a scope could
-    overshoot its ceiling by however many started together.
+    overshoot its ceiling by however many started together. The bound is now
+    held by making the loser *wait* rather than fail (AGT-021); with nothing
+    settling, it still never gets through.
     """
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.05)
     controller = BudgetController(initial_budget_ledger())
     controller.open_scope("worker:s1", 100)
 
@@ -2077,7 +2355,29 @@ async def test_a_scope_counts_in_flight_reservations_not_just_committed_spend():
     assert sum(1 for o in outcomes if not isinstance(o, Exception)) == 1
 
 
-async def test_releasing_a_reservation_frees_the_scope_again():
+async def test_a_sibling_delegation_waits_for_the_scope_rather_than_killing_the_step():
+    """A step's own parallel tool calls contend with each other constantly.
+
+    Failing the second one ends the step; waiting for the first to commit its
+    (smaller) actuals lets both run, which is what the ceiling was always for.
+    """
+    controller = BudgetController(initial_budget_ledger())
+    controller.open_scope("worker:s1", 100)
+    held = await controller.reserve(estimated_input_tokens=80, estimated_output_tokens=0, scope="worker:s1")
+
+    waiter = asyncio.ensure_future(
+        controller.reserve(estimated_input_tokens=80, estimated_output_tokens=0, scope="worker:s1")
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await controller.commit(held, input_tokens=5, output_tokens=5, cost_usd=0.0, usage_estimated=False)
+
+    assert await asyncio.wait_for(waiter, timeout=1)
+
+
+async def test_releasing_a_reservation_frees_the_scope_again(mocker):
+    mocker.patch("reporting.settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 0.05)
     controller = BudgetController(initial_budget_ledger())
     controller.open_scope("worker:s1", 100)
     held = await controller.reserve(estimated_input_tokens=80, estimated_output_tokens=0, scope="worker:s1")

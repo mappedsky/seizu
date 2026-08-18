@@ -118,7 +118,32 @@ health rather than for the maximum duration of a chat turn.
 
 For multi-step requests, chat can route a turn through a plan → dispatch → verify orchestration instead of the single-agent path. A cheap router classifies each turn; simple turns take the direct path with no extra LLM call, while complex ones get a planner, scoped sub-agent workers (run in parallel when steps are independent), and a verify gate with bounded retry. This is on by default and controlled by the `CHAT_ORCHESTRATOR_*` settings below.
 
+The plan is a **directed acyclic graph**: each step lists the steps whose output
+it needs, and runs as soon as all of them have passed. The graph is validated as
+it is produced — unique ids, no self-references, no references to steps that do
+not exist, no cycles. An invalid graph is sent back to the planner once; if the
+second attempt is also invalid the graph is repaired and the repair is reported
+in the run's errors and beside the plan in the UI. A step that can never run is
+recorded as failed, naming the dependency that stopped short.
+
+Each step's share of the run budget is divided by the remaining dispatcher
+passes rather than by the number of steps left, so a step that runs alone at a
+bottleneck gets a whole pass's share.
+
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
+
+**Cost is the runaway guard.** `CHAT_RUN_COST_BUDGET_USD` defaults to $2.00 per
+run and is the limit to tune for your model. Set it to `0` when pointing Seizu
+at a gateway or custom model whose pricing LiteLLM does not know, since an
+unpriced run never charges against it.
+
+**Concurrency throttles itself rather than ending the run.** A call is
+authorized against what the run has committed plus what is reserved by calls
+that have not returned. When only the reserved part leaves no room, the call
+waits for a reservation to settle — up to `CHAT_BUDGET_CONTENTION_WAIT_SECONDS`
+— instead of failing; only committed spend ends a run. Reservations are sized
+from what each kind of call has been observed to emit, so a phase's first call
+uses `CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS` and later ones track reality.
 
 ### What a call may spend is derived from the model
 
@@ -191,6 +216,10 @@ docker compose exec -T seizu uv run --frozen --no-sync \
 # accuracy, tokens and latency per effort level
 docker compose exec -T seizu uv run --frozen --no-sync \
     python -m scripts.reasoning_sweep --stage router --efforts "" none low
+
+# what each phase reserves against what it actually emits
+docker compose exec -T seizu uv run --frozen --no-sync \
+    python -m scripts.budget_probe
 ```
 
 The worker, verifier and synthesizer need real step results to judge, so measure
@@ -407,10 +436,10 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_ORCHESTRATOR_ENABLED` | `true` | Route complex turns through plan → dispatch → verify; when off, every turn takes the single-agent path. |
-| `CHAT_ORCHESTRATOR_MAX_STEPS` | `8` | Maximum steps the planner may emit for one turn. |
+| `CHAT_ORCHESTRATOR_MAX_STEPS` | `8` | Maximum steps the planner may emit for one turn. Steps past it are dropped, along with any dependency pointing into them. |
 | `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` | `4096` | Planner generation budget, kept separate so thinking models have room to emit the structured plan. |
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
-| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. |
+| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. A step's budget slice is divided by the width in flight, so raise this together with the run token budget rather than on its own. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED` | `true` | Schedule each independent step of a batch as its own Temporal activity. Interactive turns only. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS` | `2` | Batches smaller than this run inside the turn's own process. |
@@ -423,10 +452,13 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHAT_RUN_TOKEN_BUDGET` | `400000` | Per-run token budget; `0` disables this dimension. Includes sandbox sub-agent spend, which is typically 70-85% of a delegating turn — lower it if the sandbox is disabled or rarely used. |
-| `CHAT_RUN_COST_BUDGET_USD` | `0` | Per-run estimated-cost budget in USD; `0` disables this dimension. Cache-aware: input the provider served from its prompt cache is priced at the cache rate, and a reservation is projected using the hit rate the run has actually observed. See [Prompt caching and cost](#prompt-caching-and-cost). |
+| `CHAT_RUN_COST_BUDGET_USD` | `2.0` | Per-run estimated-cost budget in USD, and the runaway guard to tune; `0` disables this dimension (do that for a gateway or custom model whose pricing LiteLLM does not know). Cache-aware: input the provider served from its prompt cache is priced at the cache rate. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
 | `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
+| `CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS` | `4096` | What a call is assumed to emit when its budget is reserved, before any call of its kind has returned. After that, the observed figure is used. |
+| `CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY` | `1.5` | Headroom over the observed average when reserving. |
+| `CHAT_BUDGET_CONTENTION_WAIT_SECONDS` | `30` | How long a call waits for in-flight reservations to settle when the budget has room but the room is spoken for; `0` fails fast instead. |
 | `CHAT_EPISODIC_RECALL_MAX_CHARS` | `4000` | Results carried from earlier sandbox delegations into the next one's prompt, so each fresh sub-agent does not re-derive what the last one found; `0` disables. |
 | `CHAT_EPISODIC_MAX_ENTRIES` | `20` | Delegation results retained before the oldest are shed. |
 | `CHAT_SESSION_MEMORY_MAX_ENTRIES` | `30` | The same carry one scope out: sub-agent results kept across the *turns* of a conversation, so a follow-up turn does not re-run the previous turn's work. Stored in the thread's checkpoint. |

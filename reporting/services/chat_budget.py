@@ -102,6 +102,30 @@ def grant_ledger(
     }
 
 
+#: Smallest output reservation, however little a phase is observed to emit.
+_MIN_OUTPUT_RESERVATION = 256
+
+#: How long a waiter sleeps before re-checking capacity of its own accord.
+_CAPACITY_POLL_SECONDS = 1.0
+
+#: Weight of the newest observation in the running output estimate: a phase
+#: whose calls grow is tracked within a few calls, and one outlier decays out.
+_OUTPUT_OBSERVATION_ALPHA = 0.4
+
+
+def _observation_key(phase: str) -> str:
+    """The family of calls a phase belongs to, for estimating what it emits.
+
+    Phases are ``role``, ``role:step_id``, or ``role:step_id:sub_role``. The step
+    id is dropped, so every step of a role shares one estimate; the sub-role is
+    kept, so a sandbox sub-agent is estimated apart from its worker.
+    """
+    parts = [part for part in phase.split(":") if part]
+    if not parts:
+        return "unspecified"
+    return parts[0] if len(parts) < 3 else f"{parts[0]}:{parts[-1]}"
+
+
 class BudgetController:
     """Atomic run-level budget ledger shared by parallel orchestrator workers."""
 
@@ -109,6 +133,13 @@ class BudgetController:
         self._ledger = dict(ledger or initial_budget_ledger())
         self._reservations: dict[str, BudgetReservation] = {}
         self._lock = asyncio.Lock()
+        # Signalled whenever a reservation settles, so a call refused for
+        # contention can wait for room. Wraps the ledger lock, so code already
+        # holding that lock may notify.
+        self._capacity = asyncio.Condition(self._lock)
+        # phase family -> exponentially weighted mean of output tokens emitted,
+        # which is what a reservation is sized from.
+        self._observed_output: dict[str, float] = {}
         # scope -> ceiling, and scope -> tokens committed. Held here rather than
         # counted by the caller because steps run concurrently: a caller reading
         # a snapshot before and after its own work would attribute a sibling's
@@ -198,6 +229,39 @@ class BudgetController:
         cached = int(self._ledger.get("cache_read_tokens") or 0)
         return min(1.0, max(0.0, cached / input_tokens))
 
+    def projected_output_tokens(self, phase: str, ceiling: int) -> int:
+        """Output tokens to reserve for a call of this kind.
+
+        An exponentially weighted mean of what the phase family has emitted,
+        times ``CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY``, floored at
+        :data:`_MIN_OUTPUT_RESERVATION` and never above *ceiling* -- the call
+        cannot return more than that. Falls back to
+        ``CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS`` until the first call of the
+        family commits.
+
+        This is an authorization, not a prediction: a call that emits more than
+        its reservation is corrected exactly on commit and overshoots into the
+        finalization reserve. Pass the model's ceiling, not this, when sizing
+        the context window. Rationale and measurements: AGT-021.
+        """
+        ceiling = max(1, ceiling)
+        seed = max(1, settings.CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS)
+        observed = self._observed_output.get(_observation_key(phase))
+        if observed is None:
+            return min(ceiling, seed)
+        safety = max(1.0, settings.CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY)
+        return max(1, min(ceiling, max(_MIN_OUTPUT_RESERVATION, int(observed * safety))))
+
+    def _record_output_locked(self, phase: str, output_tokens: int) -> None:
+        key = _observation_key(phase)
+        prior = self._observed_output.get(key)
+        observed = float(max(0, output_tokens))
+        self._observed_output[key] = (
+            observed
+            if prior is None
+            else (1 - _OUTPUT_OBSERVATION_ALPHA) * prior + _OUTPUT_OBSERVATION_ALPHA * observed
+        )
+
     def project_cost_usd(self, model: Any, input_tokens: int, output_tokens: int) -> float:
         """What to *reserve* for a call of this size: the uncached price.
 
@@ -275,10 +339,32 @@ class BudgetController:
             allow_reserve=allow_reserve,
             scope=scope or current_budget_scope(),
         )
-        async with self._lock:
-            self._authorize_locked(reservation)
-            self._reservations[reservation.reservation_id] = reservation
-        return reservation
+        wait_seconds = max(0.0, settings.CHAT_BUDGET_CONTENTION_WAIT_SECONDS)
+        deadline: float | None = None
+        async with self._capacity:
+            while True:
+                contention = self._authorize_locked(reservation)
+                if not contention:
+                    self._reservations[reservation.reservation_id] = reservation
+                    return reservation
+                # The budget has room, held by calls that have not returned:
+                # wait for one to settle and re-authorize against its actuals.
+                if wait_seconds <= 0:
+                    raise BudgetExceeded(contention)
+                loop = asyncio.get_running_loop()
+                if deadline is None:
+                    deadline = loop.time() + wait_seconds
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise BudgetExceeded(f"{contention} (waited {wait_seconds:g}s for capacity)")
+                try:
+                    async with asyncio.timeout(min(remaining, _CAPACITY_POLL_SECONDS)):
+                        await self._capacity.wait()
+                except TimeoutError:
+                    # Re-check rather than trust the notification: ``close_scope``
+                    # and ``discard`` free capacity from synchronous paths that
+                    # cannot take the lock to announce it.
+                    continue
 
     def ambient_scope(self) -> str:
         """The scope a caller belongs to when it does not name one itself.
@@ -330,7 +416,11 @@ class BudgetController:
                 self._scope_spend[reservation.scope] += max(0, input_tokens) + max(0, output_tokens)
             if usage_estimated:
                 self._ledger["usage_estimated"] = True
+            self._record_output_locked(reservation.phase, output_tokens)
             self._refresh_mode_locked()
+            # This call's estimate is now an actual, usually smaller: wake
+            # anything waiting for the difference.
+            self._capacity.notify_all()
 
     def usage_report(self) -> dict[str, Any]:
         """What this ledger actually spent.
@@ -386,16 +476,24 @@ class BudgetController:
                     0.0, float(reported.get("cost_usd") or 0.0)
                 )
                 phases[name] = merged
+                # A grant reports totals rather than individual calls, so the
+                # per-call mean is the sample this can contribute.
+                calls = max(0, int(reported.get("llm_calls") or 0))
+                if calls:
+                    self._record_output_locked(name, max(0, int(reported.get("output_tokens") or 0)) // calls)
             self._ledger["phases"] = phases
             if scope and scope in self._scope_spend:
                 self._scope_spend[scope] += input_tokens + output_tokens
             if usage.get("usage_estimated"):
                 self._ledger["usage_estimated"] = True
             self._refresh_mode_locked()
+            self._capacity.notify_all()
 
     async def release(self, reservation: BudgetReservation) -> None:
         async with self._lock:
             self._reservations.pop(reservation.reservation_id, None)
+            # A call that never happened frees exactly what it booked.
+            self._capacity.notify_all()
 
     def discard(self, reservation: BudgetReservation) -> None:
         """Drop a reservation without awaiting.
@@ -416,35 +514,48 @@ class BudgetController:
         self._ledger["mode"] = "exhausted"
         self._ledger["exhaustion_reason"] = reason
 
-    def _authorize_locked(self, reservation: BudgetReservation) -> None:
+    def _authorize_locked(self, reservation: BudgetReservation) -> str:
+        """Authorize a call, or say why it must wait.
+
+        Returns ``""`` when the call may proceed, and a reason when it may not
+        *yet* -- the budget has room, but the room is held by calls still in
+        flight, so :meth:`reserve` waits and re-authorizes against the actuals
+        they commit. Raises :class:`BudgetExceeded`, and finalizes the run, only
+        when **committed** spend leaves no room; waiting cannot change that.
+
+        Contention must never take the finalizing path: finalization is
+        permanent and the dispatcher skips every remaining step on it (AGT-021).
+        """
         # Checked before `enabled`, and before the finalization gate, because a
         # step ceiling bounds one step against its siblings rather than the run
         # against itself: it must hold even where the run-level dimensions are
         # all disabled, and a finalizing run's reserve is for the *run* to
         # summarize, not for an over-budget step to keep working.
         ceiling = self._scope_ceilings.get(reservation.scope)
+        requested_tokens = reservation.estimated_input_tokens + reservation.estimated_output_tokens
         if ceiling is not None:
-            # Count what the scope has in flight as well as what it has spent,
-            # matching the run-wide check below. On committed spend alone a
-            # parallel batch authorizes every call at once -- each sees the same
-            # unchanged total -- so a scope can overshoot its ceiling by however
-            # many delegations happen to start together, and starve the siblings
-            # the ceiling exists to protect.
+            spent = self._scope_spend.get(reservation.scope, 0)
+            if spent + requested_tokens > ceiling:
+                raise BudgetExceeded(
+                    f"Step {reservation.scope} reached its share of the run budget ({ceiling} tokens)."
+                )
+            # Sibling delegations of the same step, still running. Waiting for
+            # them holds the ceiling exactly as counting them did, without
+            # ending the step to do it.
             in_flight = sum(
                 item.estimated_input_tokens + item.estimated_output_tokens
                 for item in self._reservations.values()
                 if item.scope == reservation.scope
             )
-            requested = reservation.estimated_input_tokens + reservation.estimated_output_tokens
-            if self._scope_spend.get(reservation.scope, 0) + in_flight + requested > ceiling:
-                raise BudgetExceeded(
-                    f"Step {reservation.scope} reached its share of the run budget ({ceiling} tokens)."
-                )
+            if spent + in_flight + requested_tokens > ceiling:
+                return f"Step {reservation.scope} has its share of the run budget in flight."
         if not self.enabled:
-            return
+            return ""
         if self.finalizing and not reservation.allow_reserve:
             raise BudgetExceeded(self._ledger.get("exhaustion_reason") or "Run budget is reserved for finalization.")
 
+        # Waiting cannot help the call count: a commit raises `llm_calls` by
+        # exactly what it removes from the in-flight count. It stays hard.
         max_calls = int(self._ledger.get("max_llm_calls") or 0)
         reserve_calls = 0 if reservation.allow_reserve else int(self._ledger.get("reserve_llm_calls") or 0)
         projected_calls = int(self._ledger["llm_calls"]) + len(self._reservations) + 1
@@ -452,27 +563,30 @@ class BudgetController:
             self.begin_finalization("The run reached its LLM-call safety limit.")
             raise BudgetExceeded(str(self._ledger["exhaustion_reason"]))
 
-        reserved_tokens = sum(
-            item.estimated_input_tokens + item.estimated_output_tokens for item in self._reservations.values()
-        )
-        requested_tokens = reservation.estimated_input_tokens + reservation.estimated_output_tokens
         token_limit = int(self._ledger.get("token_limit") or 0)
         reserve_tokens = 0 if reservation.allow_reserve else int(self._ledger.get("reserve_tokens") or 0)
-        projected_tokens = int(self._ledger["total_tokens"]) + reserved_tokens + requested_tokens
-        if token_limit and projected_tokens > token_limit - reserve_tokens:
-            self.begin_finalization("The run token budget is reserved for final synthesis.")
-            raise BudgetExceeded(str(self._ledger["exhaustion_reason"]))
+        if token_limit:
+            committed_tokens = int(self._ledger["total_tokens"]) + requested_tokens
+            if committed_tokens > token_limit - reserve_tokens:
+                self.begin_finalization("The run token budget is reserved for final synthesis.")
+                raise BudgetExceeded(str(self._ledger["exhaustion_reason"]))
+            reserved_tokens = sum(
+                item.estimated_input_tokens + item.estimated_output_tokens for item in self._reservations.values()
+            )
+            if committed_tokens + reserved_tokens > token_limit - reserve_tokens:
+                return "The run's remaining tokens are reserved by calls still in flight."
 
         cost_limit = float(self._ledger.get("cost_limit_usd") or 0.0)
         if cost_limit:
-            reserved_cost = sum(item.estimated_cost_usd for item in self._reservations.values())
             reserve_cost = 0.0 if reservation.allow_reserve else float(self._ledger.get("reserve_cost_usd") or 0.0)
-            if (
-                float(self._ledger["cost_usd"]) + reserved_cost + reservation.estimated_cost_usd
-                > cost_limit - reserve_cost
-            ):
+            committed_cost = float(self._ledger["cost_usd"]) + reservation.estimated_cost_usd
+            if committed_cost > cost_limit - reserve_cost:
                 self.begin_finalization("The run cost budget is reserved for final synthesis.")
                 raise BudgetExceeded(str(self._ledger["exhaustion_reason"]))
+            reserved_cost = sum(item.estimated_cost_usd for item in self._reservations.values())
+            if committed_cost + reserved_cost > cost_limit - reserve_cost:
+                return "The run's remaining cost budget is reserved by calls still in flight."
+        return ""
 
     def _refresh_mode_locked(self) -> None:
         token_limit = int(self._ledger.get("token_limit") or 0)
