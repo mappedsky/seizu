@@ -139,6 +139,10 @@ def _budget_state(config: RunnableConfig) -> dict[str, Any]:
 def _refresh_remaining_estimate(controller: BudgetController | None, plan: list[dict[str, Any]]) -> None:
     if controller is None:
         return
+    # The call ceiling is derived from the plan, so it follows the plan growing
+    # when a step expands (AGT-024). Steps that have finished are counted: their
+    # calls were spent against the same ceiling.
+    controller.set_planned_steps(len(plan))
     unfinished = sum(
         int(step.get("estimated_tokens") or 0)
         for step in plan

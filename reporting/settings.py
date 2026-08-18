@@ -942,7 +942,19 @@ CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 2_000_000)
 CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 2.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
-CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 64)
+# Emergency loop guard on the number of LLM calls one run may make. 0 (the
+# default) derives it from the plan -- a fixed count is a bound on plan size
+# wearing a safety limit's clothes, and a plan grows when a step expands
+# (AGT-024). Set a positive value to pin it, or set both this and
+# CHAT_RUN_LLM_CALLS_PER_STEP to 0 to disable the dimension.
+CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 0)
+# Calls one plan step may make, for that derivation: its own loop, whatever it
+# delegates to, its summary pass, and the verifier's look at it, across retries.
+# Deliberately generous: what a step may *spend* is bounded by its share of the
+# run's cost and tokens, and a loop is caught by loop detection (AGT-017), so
+# this only has to stop a run that is making calls without spending or
+# progressing.
+CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 24)
 # Output tokens assumed for a call whose kind has not been seen yet. Every
 # later call of that kind is reserved from what it was observed to emit
 # instead (AGT-021). Raise it if cold-start calls on your model are large.

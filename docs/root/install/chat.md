@@ -144,6 +144,11 @@ coverage it did not have; `0` turns expansion off.
 
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
+**The call ceiling follows the plan.** `CHAT_RUN_MAX_LLM_CALLS` is an emergency
+loop guard rather than a spend limit, and it defaults to being derived from the
+plan — including when a step expands, which is when a fixed count would bind on
+work that is merely wide rather than wasteful.
+
 **A run is budgeted in cost.** `CHAT_RUN_COST_BUDGET_USD` (default $2.00 per
 run) is the limit to tune: it bounds the run, and a share of it bounds each plan
 step. `CHAT_RUN_TOKEN_BUDGET` is a backstop for a model LiteLLM cannot price,
@@ -451,7 +456,8 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_RUN_COST_BUDGET_USD` | `2.0` | Per-run estimated-cost budget in USD — the limit a run is meant to be tuned on, bounding both the run and each step's share of it; `0` disables this dimension (do that for a gateway or custom model whose pricing LiteLLM does not know). Cache-aware: input the provider served from its prompt cache is priced at the cache rate. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
-| `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
+| `CHAT_RUN_MAX_LLM_CALLS` | `0` | Emergency ceiling on LLM calls per run. `0` derives it from the plan (`8 + CHAT_RUN_LLM_CALLS_PER_STEP` per step, recomputed as the plan grows); a positive value pins it. |
+| `CHAT_RUN_LLM_CALLS_PER_STEP` | `24` | Calls one plan step may make, for that derivation. Set this and `CHAT_RUN_MAX_LLM_CALLS` both to `0` to disable the dimension. |
 | `CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS` | `4096` | What a call is assumed to emit when its budget is reserved, before any call of its kind has returned. After that, the observed figure is used. |
 | `CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY` | `1.5` | Headroom over the observed average when reserving. |
 | `CHAT_BUDGET_CONTENTION_WAIT_SECONDS` | `30` | How long a call waits for in-flight reservations to settle when the budget has room but the room is spoken for; `0` fails fast instead. |

@@ -33,12 +33,32 @@ class BudgetReservation:
     scope: str = ""
 
 
+#: Calls a run makes whatever its plan costs: routing, planning, synthesis, and
+#: the retries those three are allowed.
+_CALL_CEILING_BASE = 8
+
+
+def derived_call_ceiling(steps: int) -> int:
+    """The call ceiling a plan of *steps* steps implies, or 0 when disabled.
+
+    ``CHAT_RUN_MAX_LLM_CALLS`` overrides it when set. Rationale: AGT-024.
+    """
+    override = max(0, settings.CHAT_RUN_MAX_LLM_CALLS)
+    if override:
+        return override
+    per_step = max(0, settings.CHAT_RUN_LLM_CALLS_PER_STEP)
+    return _CALL_CEILING_BASE + per_step * max(1, steps) if per_step else 0
+
+
 def initial_budget_ledger() -> dict[str, Any]:
     token_limit = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
     cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD)
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
+    # One step's worth until a plan exists: routing and planning happen before
+    # there is anything to derive from.
+    max_calls = derived_call_ceiling(1)
     return {
-        "enabled": token_limit > 0 or cost_limit > 0 or settings.CHAT_RUN_MAX_LLM_CALLS > 0,
+        "enabled": token_limit > 0 or cost_limit > 0 or max_calls > 0,
         "token_limit": token_limit,
         "cost_limit_usd": cost_limit,
         "reserve_tokens": math.ceil(token_limit * reserve_ratio) if token_limit else 0,
@@ -55,8 +75,8 @@ def initial_budget_ledger() -> dict[str, Any]:
         "cache_creation_tokens": 0,
         "cost_usd": 0.0,
         "llm_calls": 0,
-        "max_llm_calls": max(0, settings.CHAT_RUN_MAX_LLM_CALLS),
-        "reserve_llm_calls": min(2, max(0, settings.CHAT_RUN_MAX_LLM_CALLS - 1)),
+        "max_llm_calls": max_calls,
+        "reserve_llm_calls": min(2, max(0, max_calls - 1)),
         "usage_estimated": False,
         "mode": "normal",
         "exhaustion_reason": None,
@@ -356,6 +376,21 @@ class BudgetController:
         spent = float(self._ledger.get("cost_usd") or 0.0)
         reserve = float(self._ledger.get("reserve_cost_usd") or 0.0)
         return max(0.0, cost_limit - reserve - spent)
+
+    def set_planned_steps(self, steps: int) -> None:
+        """Re-derive the call ceiling for a plan of *steps* steps.
+
+        Called wherever the plan changes, including when a step expands into
+        several (AGT-023), so the ceiling tracks the work rather than the shape
+        the plan happened to have when the turn started. Only ever raises: a
+        ceiling that fell below what a run had already spent would finalize it
+        retroactively.
+        """
+        derived = derived_call_ceiling(steps)
+        if not derived or derived <= int(self._ledger.get("max_llm_calls") or 0):
+            return
+        self._ledger["max_llm_calls"] = derived
+        self._ledger["reserve_llm_calls"] = min(2, max(0, derived - 1))
 
     def set_estimated_remaining_tokens(self, tokens: int) -> None:
         self._ledger["estimated_remaining_tokens"] = max(0, tokens)

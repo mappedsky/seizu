@@ -583,6 +583,44 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-024 — The call ceiling is derived from the plan, not configured
+
+**Applies to:** `chat_budget.derived_call_ceiling`,
+`BudgetController.set_planned_steps`, `_refresh_remaining_estimate`;
+`CHAT_RUN_MAX_LLM_CALLS`, `CHAT_RUN_LLM_CALLS_PER_STEP`
+
+`CHAT_RUN_MAX_LLM_CALLS` defaults to `0`, meaning *derive*: a ceiling of
+`8 + CHAT_RUN_LLM_CALLS_PER_STEP x steps`, recomputed wherever the plan changes.
+A positive value pins it; zeroing both it and the per-step figure disables the
+dimension.
+
+**Why a constant is wrong here specifically.** The call ceiling is an emergency
+loop guard — what a run may *spend* is bounded by cost and tokens
+([AGT-022](#agt-022)), and a loop is caught by loop detection
+([AGT-017](#agt-017)). A fixed count does not bound spend or detect loops; what
+it actually bounds is **plan size**, wearing a safety limit's clothing. 64 was
+chosen when a plan was at most eight steps, and it silently became "at most
+about five steps' worth of work" the moment a step could expand into eight
+([AGT-023](#agt-023)).
+
+**Measured:** the expansion run in AGT-023 ended `exhausted` on the call ceiling
+at 120 calls, having spent **28% of its cost budget** — the same failure shape as
+[AGT-019](#agt-019)'s output ceiling and AGT-021's reservation sizing, one level
+up: an expensive, productive run stopped by a number that had no relationship to
+what it was doing.
+
+**Only ever raises.** `set_planned_steps` never lowers the ceiling. A plan that
+shrinks — steps skipped by the budget sweep, a retry cycle that drops one — would
+otherwise pull the ceiling below what the run had already spent and finalize it
+retroactively.
+
+**The per-step figure is deliberately generous** (24). It covers a step's own
+loop, whatever it delegates to, its summary pass and the verifier's look at it,
+across retries; and since every one of those calls is already bounded by the
+step's share of cost and tokens, a high count cannot translate into high spend.
+The number only has to be above what legitimate work does and below what a
+run making calls without spending or progressing would reach.
+
 ## AGT-023 — A step maps over what an earlier step discovered
 
 **Applies to:** `chat_orchestrator._PlannedStep.map_over`, `_MapItems`,
