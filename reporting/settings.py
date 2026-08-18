@@ -927,11 +927,18 @@ CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_C
 # remains an emergency loop guard.
 #
 # **A run is budgeted in cost.** CHAT_RUN_COST_BUDGET_USD below is the limit to
-# tune; this token ceiling is the backstop that bounds a run whose model LiteLLM
-# cannot price, and it is set high enough that cost normally binds first on a
-# model it can (AGT-022). Both the run and each individual step are bounded in
-# whichever dimension is configured. Lower this to bound runs by tokens instead.
-CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 2_000_000)
+# tune; this token ceiling is the backstop for a run whose model LiteLLM cannot
+# price. 0 (the default) derives it: no token ceiling at all when a cost budget
+# is set and the model is priced -- cost is then the only bound needed -- and
+# CHAT_RUN_UNPRICED_TOKEN_BUDGET when it is not (AGT-022). Set a positive value
+# to bound runs by tokens instead.
+CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 0)
+# The backstop that applies when a cost budget is configured but the model's
+# price is unknown, so cost can never accrue and never bind. Sized as a run that
+# has plainly gone wrong rather than as a budget: a priced run of this length
+# costs $0.25 on a cheap model and $30 on a frontier one, which is why it cannot
+# also serve as the spend limit.
+CHAT_RUN_UNPRICED_TOKEN_BUDGET = int_env("CHAT_RUN_UNPRICED_TOKEN_BUDGET", 2_000_000)
 # Estimated provider spend one run may reach, in USD. This is the budget a run
 # is meant to be tuned on (AGT-021, AGT-022): it bounds the run, and a share of
 # it bounds each plan step. Priced per call from LiteLLM's model data,

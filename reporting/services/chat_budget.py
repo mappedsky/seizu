@@ -50,8 +50,30 @@ def derived_call_ceiling(steps: int) -> int:
     return _CALL_CEILING_BASE + per_step * max(1, steps) if per_step else 0
 
 
+def derived_token_ceiling() -> int:
+    """The run's token ceiling, or 0 when cost is bound to do the bounding.
+
+    ``CHAT_RUN_TOKEN_BUDGET`` pins it when set. Otherwise: a run budgeted in
+    cost on a model LiteLLM can price needs no token ceiling, because cost
+    already bounds it and a token figure that also bounded it would have to be
+    re-derived for every model's price. When the model is *not* priced, cost can
+    never accrue, and the backstop is the only guard left. Rationale: AGT-022.
+    """
+    configured = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
+    if configured:
+        return configured
+    if max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) <= 0:
+        # Not budgeting on cost either: this is an explicit "no token limit".
+        return 0
+    from reporting.services.chat_models import capability
+
+    if capability(settings.CHAT_LLM_MODEL).priced:
+        return 0
+    return max(0, settings.CHAT_RUN_UNPRICED_TOKEN_BUDGET)
+
+
 def initial_budget_ledger() -> dict[str, Any]:
-    token_limit = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
+    token_limit = derived_token_ceiling()
     cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD)
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
     # One step's worth until a plan exists: routing and planning happen before

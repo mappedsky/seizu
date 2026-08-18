@@ -11,6 +11,7 @@ from reporting.services.chat_budget import (
     usage_cost_usd,
     usage_from_message,
 )
+from reporting.services.chat_models import ModelCapability
 
 
 def _ledger(
@@ -692,3 +693,66 @@ async def test_a_wide_plan_is_not_stopped_by_a_ceiling_meant_for_a_narrow_one(mo
 
     assert controller.mode == "normal"
     assert controller.snapshot()["llm_calls"] == 60
+
+
+# --- The token backstop is derived too (AGT-022) ------------------------------
+
+
+def test_a_priced_model_with_a_cost_budget_needs_no_token_ceiling(mocker):
+    """Measured: a 2M-token backstop is ~$0.25 on a cheap model, so a $2 cost
+    budget could never be what binds."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=True))
+
+    assert derived_token_ceiling() == 0
+
+
+def test_an_unpriced_model_keeps_the_backstop(mocker):
+    """Cost cannot accrue on a model litellm cannot price, so something must."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_RUN_UNPRICED_TOKEN_BUDGET", 2_000_000)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "my-gateway/private-model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=False))
+
+    assert derived_token_ceiling() == 2_000_000
+
+
+def test_an_explicit_token_budget_still_wins(mocker):
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 400_000)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+
+    assert derived_token_ceiling() == 400_000
+
+
+def test_budgeting_on_neither_leaves_both_off(mocker):
+    """Zeroing both is an explicit choice, not a gap to fill in."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 0.0)
+
+    assert derived_token_ceiling() == 0
+
+
+def test_a_cost_budgeted_run_is_bounded_by_cost_alone(mocker):
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=True))
+    from reporting.services.chat_budget import initial_budget_ledger
+
+    controller = BudgetController(initial_budget_ledger())
+
+    assert controller.remaining_normal_tokens is None  # no token bound at all
+    assert controller.remaining_normal_cost_usd == pytest.approx(1.6)
+    assert controller.enabled

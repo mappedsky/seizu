@@ -812,9 +812,30 @@ dimensions slice a bottleneck the same way.
 
 **What this does not change.** The distributed grant is still a hard cut
 (AGT-018) — it now carries a cost ceiling as well as a token one. Contention on
-the cost dimension waits exactly as it does on tokens (AGT-021). And an unpriced
-model is still bounded, by the token backstop, which is why that default rose
-rather than going to zero.
+the cost dimension waits exactly as it does on tokens (AGT-021).
+
+### The backstop is derived, because a fixed one can never let cost bind
+
+`CHAT_RUN_TOKEN_BUDGET` defaults to `0` = derive: **no token ceiling at all**
+when a cost budget is set and litellm can price the model, and
+`CHAT_RUN_UNPRICED_TOKEN_BUDGET` when it cannot. A positive value pins it;
+zeroing both it and the cost budget is an explicit "no limit" and is respected.
+
+**Why a fixed backstop cannot work.** Measured on two real turns: a run cost
+**$0.126 per million tokens**, so the $2.00 cost budget is worth ~16M tokens and
+a 2,000,000-token backstop is *eight times tighter than the budget it backs up*.
+It ended the run at 10% of the cost limit. On a frontier model the same 2M
+figure would be ~$30 — five times too loose. There is no single number that is a
+backstop for both, which is the same argument as [AGT-019](#agt-019) for output
+ceilings and [AGT-024](#agt-024) for the call ceiling: a constant that has to
+track a model's properties belongs to the model, not to configuration.
+
+**Pricing is asked, not assumed.** `ModelCapability.priced` comes from litellm's
+`input_cost_per_token`/`output_cost_per_token`. If it says priced and the price
+turns out to be zero at runtime, the run keeps the derived call ceiling
+(AGT-024) and each step keeps its cost share, but nothing bounds total tokens —
+the case for setting `CHAT_RUN_TOKEN_BUDGET` explicitly on a gateway that
+proxies a priced model under a private name.
 
 ### Verified on a real turn
 

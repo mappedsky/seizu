@@ -151,13 +151,11 @@ work that is merely wide rather than wasteful.
 
 **A run is budgeted in cost.** `CHAT_RUN_COST_BUDGET_USD` (default $2.00 per
 run) is the limit to tune: it bounds the run, and a share of it bounds each plan
-step. `CHAT_RUN_TOKEN_BUDGET` is a backstop for a model LiteLLM cannot price,
-set high enough (2,000,000) that cost normally binds first on a model it can —
-lower it to bound runs by tokens instead. Set the cost budget to `0` when
-pointing Seizu at a gateway or custom model whose pricing LiteLLM does not know,
-since an unpriced run never charges against it; the token backstop is then the
-only guard. Each step is bounded in whichever dimension is configured, and
-whichever binds first stops it.
+step. `CHAT_RUN_TOKEN_BUDGET` defaults to being **derived** — a priced model
+needs no token ceiling, since cost already bounds the run, and a model LiteLLM
+cannot price falls back to `CHAT_RUN_UNPRICED_TOKEN_BUDGET`. Set a positive
+value to bound runs by tokens instead. Each step is bounded in whichever
+dimension applies, and whichever binds first stops it.
 
 **A step's share comes out of the budget the run is bounded by.** With a cost
 budget set, each step gets a share of the *cost* and the token ceiling only
@@ -458,7 +456,8 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAT_RUN_TOKEN_BUDGET` | `2000000` | Per-run token backstop, for models LiteLLM cannot price; `0` disables this dimension. Lower it to bound runs by tokens rather than cost. Includes sandbox sub-agent spend, typically 70-85% of a delegating turn. |
+| `CHAT_RUN_TOKEN_BUDGET` | `0` | Per-run token ceiling. `0` derives it: none at all when a cost budget is set and the model is priced, otherwise `CHAT_RUN_UNPRICED_TOKEN_BUDGET`. A positive value bounds runs by tokens instead. Includes sandbox sub-agent spend, typically 70-85% of a delegating turn. |
+| `CHAT_RUN_UNPRICED_TOKEN_BUDGET` | `2000000` | The backstop used when a cost budget is set but LiteLLM cannot price the model, so cost can never accrue. |
 | `CHAT_RUN_COST_BUDGET_USD` | `2.0` | Per-run estimated-cost budget in USD — the limit a run is meant to be tuned on, bounding both the run and each step's share of it; `0` disables this dimension (do that for a gateway or custom model whose pricing LiteLLM does not know). Cache-aware: input the provider served from its prompt cache is priced at the cache rate. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
