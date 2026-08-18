@@ -168,8 +168,10 @@ def test_cost_and_call_budgets_are_granted_too():
             "token_limit": 120_000,
             "reserve_tokens": 20_000,
             "cost_limit_usd": 8.0,
+            "reserve_cost_usd": 1.6,
             "cost_usd": 2.0,
             "max_llm_calls": 40,
+            "reserve_llm_calls": 2,
             "llm_calls": 10,
         }
     )
@@ -177,8 +179,10 @@ def test_cost_and_call_budgets_are_granted_too():
 
     grants = [chat_orchestrator._grant_for(step, plan, controller, len(plan)) for step in plan]
 
-    assert sum(grant.cost_usd for grant in grants) == pytest.approx(6.0)
-    assert sum(grant.llm_calls for grant in grants) == 30
+    # $8 limit, $1.60 held for finalization, $2 already spent: the batch shares
+    # what is left, not what is left plus the reserve (AGT-025).
+    assert sum(grant.cost_usd for grant in grants) == pytest.approx(4.4)
+    assert sum(grant.llm_calls for grant in grants) == 28
 
 
 def test_an_unlimited_dimension_is_granted_as_unlimited():

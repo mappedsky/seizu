@@ -159,6 +159,12 @@ since an unpriced run never charges against it; the token backstop is then the
 only guard. Each step is bounded in whichever dimension is configured, and
 whichever binds first stops it.
 
+**A step's share comes out of the budget the run is bounded by.** With a cost
+budget set, each step gets a share of the *cost* and the token ceiling only
+bounds concurrent steps against each other — a backstop divided between every
+step in a large plan stops being a backstop. A step that uses its own share is
+reported as a partial run, not as the run running out of budget.
+
 **Concurrency throttles itself rather than ending the run.** A call is
 authorized against what the run has committed plus what is reserved by calls
 that have not returned. When only the reserved part leaves no room, the call

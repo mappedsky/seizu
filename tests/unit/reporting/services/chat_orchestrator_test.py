@@ -442,21 +442,83 @@ def test_budget_divisor_slices_by_depth_not_by_outstanding_count(mocker):
     assert chat_orchestrator._budget_divisor(flat, 3) == 3
 
 
-def test_step_grant_gives_a_bottleneck_step_a_waves_share(mocker):
-    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
-    ledger = initial_budget_ledger()
-    ledger.update({"token_limit": 300_000, "reserve_tokens": 0, "total_tokens": 0})
-    controller = BudgetController(ledger)
-    diamond = [
+def _diamond_plan() -> list[dict[str, Any]]:
+    return [
         _step("s1", "ran"),
         _step("s2", depends_on=["s1"]),
         _step("s3", depends_on=["s1"]),
         _step("s4", depends_on=["s2", "s3"]),
     ]
 
+
+def test_step_grant_gives_a_bottleneck_step_a_waves_share(mocker):
+    """The schedule divisor governs the dimension the run is budgeted on."""
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {"token_limit": 300_000, "reserve_tokens": 0, "total_tokens": 0, "cost_limit_usd": 0.0, "reserve_cost_usd": 0.0}
+    )
+    controller = BudgetController(ledger)
+    diamond = _diamond_plan()
+
     grant = chat_orchestrator._grant_for(diamond[0], diamond, controller, 1)
 
     assert grant.tokens == 100_000  # one of three waves, not one of four steps
+
+
+def test_a_cost_budgeted_run_shares_cost_by_schedule_and_tokens_only_for_safety(mocker):
+    """Tokens are the backstop, so they carry the concurrency bound and no more.
+
+    Sharing a backstop by schedule is what cut every step of a 17-step expanded
+    plan at 1/24 of a ceiling that was never meant to bind (AGT-025).
+    """
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {
+            "token_limit": 300_000,
+            "reserve_tokens": 0,
+            "total_tokens": 0,
+            "cost_limit_usd": 3.0,
+            "reserve_cost_usd": 0.0,
+            "cost_usd": 0.0,
+        }
+    )
+    controller = BudgetController(ledger)
+    diamond = _diamond_plan()
+
+    grant = chat_orchestrator._grant_for(diamond[0], diamond, controller, 1)
+
+    # Cost still follows the schedule: one of three waves.
+    assert grant.cost_usd == pytest.approx(1.0)
+    # Tokens follow the batch width instead, so a lone step at a bottleneck is
+    # not rationed by a dimension that is only a safety net.
+    assert grant.tokens == 300_000
+    # And the step keeps a reserve on the dimension that binds it, so a step
+    # stopped by cost can still say what it found.
+    assert grant.soft_cost_usd < grant.cost_usd
+
+
+def test_cost_grants_stay_disjoint_across_a_concurrent_batch():
+    """Tokens are granted for safety, not fairness -- disjointness must still hold."""
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {
+            "token_limit": 120_000,
+            "reserve_tokens": 20_000,
+            "total_tokens": 0,
+            "cost_limit_usd": 2.0,
+            "reserve_cost_usd": 0.4,
+            "cost_usd": 0.0,
+        }
+    )
+    controller = BudgetController(ledger)
+    plan = [_step("s1", "ran"), _step("s2", "ran"), _step("s3", "ran")]
+
+    grants = [chat_orchestrator._grant_for(step, plan, controller, len(plan)) for step in plan]
+
+    assert sum(grant.tokens for grant in grants) <= 100_000
+    assert sum(grant.cost_usd for grant in grants) <= 1.6 + 1e-9
 
 
 async def test_planner_records_structured_output_fallback_as_run_error(mocker):
@@ -3808,3 +3870,38 @@ async def test_chaining_costs_no_extraction_call(mocker):
 
     assert invoke.await_count == 0  # the items are already steps
     assert len([step for step in plan if step.get("map_parent") == "s3"]) == 1
+
+
+# --- A step's own share is not the run's budget (AGT-025) ---------------------
+
+
+def test_a_step_that_used_its_share_does_not_report_the_run_as_exhausted():
+    """Measured: a turn reported budget_exhausted with 87% of its cost unspent.
+
+    Every second- and third-stage step of an expanded plan stopped at its own
+    grant, and one flag on a step result made the whole run say it had run out.
+    """
+    plan = [_step("s1", "passed"), _step("s2", "failed")]
+    results = [
+        {"step_id": "s1", "output": "found"},
+        {"step_id": "s2", "output": "", "budget_exhausted": True, "budget_step_share": True},
+    ]
+
+    assert chat_orchestrator._terminal_status(plan, results, None) == "partial"
+
+
+def test_the_run_running_out_is_still_reported_as_the_run_running_out():
+    plan = [_step("s1", "passed"), _step("s2", "skipped")]
+    results = [{"step_id": "s1", "output": "found"}, {"step_id": "s2", "budget_exhausted": True}]
+
+    assert chat_orchestrator._terminal_status(plan, results, None) == "budget_exhausted"
+
+
+async def test_verify_says_which_budget_stopped_the_step():
+    share = await chat_orchestrator._verify_step(
+        _step("s1"), {"step_id": "s1", "budget_exhausted": True, "budget_step_share": True}, {}
+    )
+    run = await chat_orchestrator._verify_step(_step("s1"), {"step_id": "s1", "budget_exhausted": True}, {})
+
+    assert share == (False, "Step stopped after using its share of the run budget.")
+    assert run == (False, "Step stopped because the run budget entered finalization.")

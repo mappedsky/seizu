@@ -91,6 +91,7 @@ def grant_ledger(
     soft_token_grant: int,
     cost_grant_usd: float,
     llm_call_grant: int,
+    soft_cost_grant_usd: float = 0.0,
 ) -> dict[str, Any]:
     """A self-contained ledger for one unit of work executing somewhere else.
 
@@ -116,7 +117,9 @@ def grant_ledger(
         # The reserve is what pays for the step's summary pass, which is the only
         # thing standing between a capped step and reporting nothing.
         "reserve_tokens": max(0, grant - max(0, soft_token_grant)) if soft_token_grant else 0,
-        "reserve_cost_usd": 0.0,
+        # The cost dimension needs the same reserve as the token one, or a step
+        # whose grant binds on cost is cut with nothing to show (AGT-025).
+        "reserve_cost_usd": (max(0.0, cost_grant_usd - max(0.0, soft_cost_grant_usd)) if soft_cost_grant_usd else 0.0),
         "max_llm_calls": max(0, llm_call_grant),
         "reserve_llm_calls": min(2, max(0, llm_call_grant - 1)),
     }

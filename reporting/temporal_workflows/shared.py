@@ -463,6 +463,7 @@ class ChatWorkerStepInvocation:
     token_grant: int = 0
     soft_token_grant: int = 0
     cost_grant_usd: float = 0.0
+    soft_cost_grant_usd: float = 0.0
     llm_call_grant: int = 0
     # The model the *turn* resolved, not a hint for the worker to re-resolve.
     # This was a bare ``economy: bool`` because settings could only express a

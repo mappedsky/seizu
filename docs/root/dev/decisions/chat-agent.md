@@ -583,6 +583,47 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-025 — Only the dimension that bounds the run is fair-shared
+
+**Applies to:** `chat_orchestrator._cost_is_primary`, `_grant_for`,
+`_step_thresholds`, `_dimension_share`, `_terminal_status`, `_verify_step`,
+`chat_budget.grant_ledger`
+
+Found by running a real interactive turn on an expanded plan (AGT-023). Three
+defects, all in the same seam between per-step budgeting and a plan that grows.
+
+**1. A backstop divided N ways stops being a backstop.** `_step_thresholds` and
+`_grant_for` sliced *both* dimensions by the schedule divisor
+([AGT-020](#agt-020)). Expansion made the plan 17 steps deep, so the divisor
+reached ~24 and the 2,000,000-token backstop became ~66,000 per step —
+small enough that every second- and third-stage step was cut before producing
+even a summary, while **87% of the cost budget was unspent**. Two different
+bounds live in that arithmetic: the schedule divisor shares what is left between
+the steps still to run (fairness), and the batch width keeps concurrent grants
+from overlapping (safety). When cost is the budget, fairness is cost's job, so
+the token dimension keeps **only the safety bound**. Grants stay disjoint, which
+is what [AGT-018](#agt-018) depends on — granting each step the whole remainder
+would break that on a model LiteLLM turns out not to price, since cost would
+then never bind.
+
+**2. A step that used its share is not a run that ran out.** `_terminal_status`
+returned `budget_exhausted` from any step's flag, so a turn with 13% of its cost
+spent reported itself as out of budget — and `_verify_step` told the reader "the
+run budget entered finalization" when it was the step's own grant, which for a
+distributed step is a separate ledger entirely. A step-level stop now carries
+`budget_step_share`, reports `partial`, and says so in its own words. The
+distinction matters because it is the difference between "raise the budget" and
+"this plan has more steps than it has room for".
+
+**3. Grants handed out the finalization reserve.** `_dimension_share` subtracted
+spend but not the reserve, where the token path used `remaining_normal_tokens`
+and did. Invisible while tokens were the budget; load-bearing once cost binds a
+step, because the reserve is what pays for the answer. `grant_ledger` also had
+`reserve_cost_usd` hard-coded to `0.0`, so a step whose grant bound on cost was
+cut with nothing to show — the failure [AGT-012](#agt-012) exists to prevent,
+reintroduced through the dimension that had no reserve. Both now mirror the
+token side.
+
 ## AGT-024 — The call ceiling is derived from the plan, not configured
 
 **Applies to:** `chat_budget.derived_call_ceiling`,

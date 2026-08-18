@@ -1612,6 +1612,7 @@ class _StepGrant:
     tokens: int
     cost_usd: float
     llm_calls: int
+    soft_cost_usd: float = 0.0
 
 
 def _grant_for(
@@ -1646,6 +1647,15 @@ def _grant_for(
     remaining = controller.remaining_normal_tokens if controller is not None else None
     if remaining is None:
         hard = floor
+    elif _cost_is_primary(controller):
+        # Two different bounds live in this arithmetic: the *schedule* divisor
+        # shares what is left between the steps still to run, and the batch
+        # width is what keeps concurrent grants from overlapping. Fairness
+        # between steps is the cost dimension's job when cost is the budget, so
+        # the backstop keeps only the safety bound -- grants stay disjoint, and
+        # a deep plan no longer cuts every step at 1/24 of a ceiling that was
+        # never meant to bind (AGT-025).
+        hard = remaining // max(1, batch_size)
     else:
         share = remaining // _budget_divisor(plan, batch_size)
         # Never more than an equal split of what is left, however generous the
@@ -1659,14 +1669,30 @@ def _grant_for(
     # bottleneck is not rationed as though the steps queued behind it were
     # running beside it (AGT-020).
     divisor = _budget_divisor(plan, batch_size)
+    cost_share = _dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor, "reserve_cost_usd")
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
         # Zero on either of these means "no limit configured", and it has to
         # travel as zero rather than as a share of zero.
-        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor)),
+        cost_usd=cost_share,
+        # The step's own reserve on the dimension that binds it, so it can still
+        # say what it found (AGT-012).
+        soft_cost_usd=max(0.0, cost_share - cost_share * reserve_ratio),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor, "reserve_llm_calls")),
     )
+
+
+def _cost_is_primary(controller: BudgetController | None) -> bool:
+    """Whether the run is budgeted in cost, making tokens a backstop (AGT-022).
+
+    Only the dimension that bounds the run is fair-shared between steps. A
+    backstop divided N ways stops being a backstop: measured on a 17-step
+    expanded plan, the 2,000,000-token ceiling became ~66,000 per step and cut
+    every second- and third-stage step short while 87% of the cost budget was
+    still unspent (AGT-025).
+    """
+    return controller is not None and float(controller.snapshot().get("cost_limit_usd") or 0.0) > 0
 
 
 def _remaining_waves(plan: list[dict[str, Any]]) -> int:
@@ -1710,12 +1736,22 @@ def _budget_divisor(plan: list[dict[str, Any]], concurrent: int) -> int:
     return max(1, _remaining_waves(plan) * max(1, concurrent))
 
 
-def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int) -> float:
-    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited."""
+def _dimension_share(
+    ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int, reserve_key: str = ""
+) -> float:
+    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited.
+
+    The finalization reserve comes off first, matching
+    ``remaining_normal_tokens``. Without it the grants of one batch hand out the
+    reserve the run keeps to write its answer with -- invisible while tokens
+    were the budget and the token path subtracted it, and load-bearing once cost
+    is what binds a step (AGT-025).
+    """
     limit = float(ledger.get(limit_key) or 0.0)
     if limit <= 0:
         return 0.0
-    remaining = max(0.0, limit - float(ledger.get(spent_key) or 0.0))
+    reserve = float(ledger.get(reserve_key) or 0.0) if reserve_key else 0.0
+    remaining = max(0.0, limit - reserve - float(ledger.get(spent_key) or 0.0))
     return remaining / max(1, divisor)
 
 
@@ -1859,6 +1895,7 @@ async def _dispatch_batch_distributed(
                 token_grant=grant.tokens,
                 soft_token_grant=grant.soft_tokens,
                 cost_grant_usd=grant.cost_usd,
+                soft_cost_grant_usd=grant.soft_cost_usd,
                 llm_call_grant=grant.llm_calls,
                 model_spec=model_spec,
                 summary_model_spec=summary_model_spec,
@@ -2327,7 +2364,12 @@ def _step_thresholds(
     # mid-work and handing the verifier a truncated summary to reject.
     multiple = max(1.0, settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE)
     soft_tokens = ceiling_tokens = 0
-    if remaining is not None:
+    if remaining is not None and _cost_is_primary(controller):
+        # The backstop keeps the safety bound only; cost shares the run out
+        # between steps (AGT-025).
+        soft_tokens = max(floor, remaining // max(1, concurrent))
+        ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
+    elif remaining is not None:
         soft_tokens = max(floor, remaining // divisor)
         ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
     soft_cost = ceiling_cost = 0.0
@@ -2551,6 +2593,7 @@ async def _run_worker_step(
     required_action = str(step.get("required_action") or "")
     execution_error = ""
     budget_exhausted = False
+    step_share_only = False
     budget_capped = False
     step_budget = int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
     controller = _budget_controller(config)
@@ -2640,6 +2683,12 @@ async def _run_worker_step(
             budget_exhausted = True
             execution_error = str(exc)
             if controller is not None:
+                # Whether this ends the *run* or only this step is the
+                # difference between "we are out of budget" and "this step used
+                # its share" -- and a distributed step's controller is its own
+                # grant, so its finalization says nothing about the run
+                # (AGT-025).
+                step_share_only = bool(controller.scope_exhausted(budget_scope)) and not controller.finalizing
                 controller.begin_finalization(str(exc))
             break
         step_input_tokens += turn.input_tokens
@@ -2921,6 +2970,10 @@ async def _run_worker_step(
         step_result["execution_error"] = execution_error
     if budget_exhausted:
         step_result["budget_exhausted"] = True
+        if step_share_only or budget_capped:
+            # The step stopped, the run did not. Recorded separately so the run
+            # is not reported as out of budget while most of it is unspent.
+            step_result["budget_step_share"] = True
     if stuck:
         # Terminal, not retryable: a step that ran out of new calls to make will
         # run out again. It keeps whatever it gathered -- the summary pass still
@@ -3155,7 +3208,11 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
     if result.get("execution_error"):
         return False, str(result["execution_error"])
     if result.get("budget_exhausted"):
-        return False, "Step stopped because the run budget entered finalization."
+        return False, (
+            "Step stopped after using its share of the run budget."
+            if result.get("budget_step_share")
+            else "Step stopped because the run budget entered finalization."
+        )
     output = result.get("output") or ""
     if not output.strip():
         return False, "Step produced no output."
@@ -3607,7 +3664,13 @@ def _terminal_status(
     controller: BudgetController | None,
 ) -> str:
     results_by_id = {result["step_id"]: result for result in results}
-    if (controller is not None and controller.finalizing) or any(result.get("budget_exhausted") for result in results):
+    run_out_of_budget = any(
+        result.get("budget_exhausted") and not result.get("budget_step_share") for result in results
+    )
+    # A step that used its own share is a step that stopped, not a run that
+    # ended: reporting the run as exhausted while most of its budget is unspent
+    # tells the reader the wrong thing to change (AGT-025).
+    if (controller is not None and controller.finalizing) or run_out_of_budget:
         return "budget_exhausted"
     if any(result.get("blocked") for result in results):
         return "blocked"
