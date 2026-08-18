@@ -134,9 +134,8 @@ bottleneck gets a whole pass's share.
 once per discovered thing — each CVE in a list, each repository in an
 organization — is planned as a single step that maps over the step producing the
 list. When that step finishes, it is replaced by one step per item, and those
-run in parallel like any other independent steps. Without this the planner can
-only fan out over items your *request* names, and anything it has to find first
-collapses into one step that loops internally.
+run in parallel like any other independent steps. A step whose collection comes
+back empty runs once, as written.
 
 `CHAT_ORCHESTRATOR_MAX_EXPANSION` (default 8) bounds how many steps one such
 step may become. A larger collection is cut to that many and the run reports the
@@ -145,9 +144,8 @@ coverage it did not have; `0` turns expansion off.
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
 **The call ceiling follows the plan.** `CHAT_RUN_MAX_LLM_CALLS` is an emergency
-loop guard rather than a spend limit, and it defaults to being derived from the
-plan — including when a step expands, which is when a fixed count would bind on
-work that is merely wide rather than wasteful.
+loop guard rather than a spend limit. It defaults to being derived from the
+plan's size, including after a step expands; set a positive value to pin it.
 
 **A run is budgeted in cost.** `CHAT_RUN_COST_BUDGET_USD` (default $2.00 per
 run) is the limit to tune: it bounds the run, and a share of it bounds each plan
@@ -158,10 +156,9 @@ value to bound runs by tokens instead. Each step is bounded in whichever
 dimension applies, and whichever binds first stops it.
 
 **A step's share comes out of the budget the run is bounded by.** With a cost
-budget set, each step gets a share of the *cost* and the token ceiling only
-bounds concurrent steps against each other — a backstop divided between every
-step in a large plan stops being a backstop. A step that uses its own share is
-reported as a partial run, not as the run running out of budget.
+budget set, each step gets a share of the *cost*; the token ceiling only bounds
+concurrent steps against each other. A step that uses up its own share is
+reported as a partial run rather than as the run running out of budget.
 
 **Concurrency throttles itself rather than ending the run.** A call is
 authorized against what the run has committed plus what is reserved by calls
