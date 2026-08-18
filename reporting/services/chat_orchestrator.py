@@ -55,6 +55,7 @@ from reporting.services import (
     mcp_builtins,
     mcp_runtime,
     sandbox_session,
+    telemetry,
 )
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, budget_controller_from_config
 from reporting.services.chat_graph import (
@@ -1290,7 +1291,14 @@ async def _expand_mapped_steps(
             parent["map_over"] = ""
             continue
 
-        _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
+        with telemetry.span(
+            "chat expand step",
+            step_id=str(parent["id"]),
+            source_step=source_id,
+            items=len(items),
+            limit=limit,
+        ):
+            _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
         _emit_plan(writer, plan)
     return notes
 
@@ -1399,6 +1407,11 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
 
 async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
     """Run the next batch of runnable steps as scoped sub-agent workers."""
+    with telemetry.span("chat dispatch batch"):
+        return await _dispatch_batch_traced(state, config)
+
+
+async def _dispatch_batch_traced(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
     plan = [dict(step) for step in state.get("plan") or []]
     results = list(state.get("step_results") or [])
     iteration = int(state.get("iteration") or 0)
@@ -1499,6 +1512,13 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
         state["messages"], max_chars=settings.CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS
     )
 
+    telemetry.set_attributes(
+        telemetry.current_span(),
+        batch_size=len(batch),
+        batch_steps=",".join(str(step["id"]) for step in batch),
+        plan_size=len(plan),
+        iteration=iteration,
+    )
     new_results: list[dict[str, Any]] | None = None
     if _distribution_eligible(batch, config):
         try:
@@ -2405,7 +2425,29 @@ async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> 
     dispatcher and outlives every step in the batch.
     """
     try:
-        return await _run_worker_step(step, **kwargs)
+        with telemetry.span("chat step", step_id=str(step.get("id", ""))) as current:
+            result = await _run_worker_step(step, **kwargs)
+            telemetry.set_attributes(
+                current,
+                # Why the step ended, which is the question a slow or empty step
+                # actually raises and which no single log line answered (AGT-026).
+                stopped_by=(
+                    "step_share"
+                    if result.get("budget_step_share")
+                    else "run_budget"
+                    if result.get("budget_exhausted")
+                    else "budget_cap"
+                    if result.get("budget_capped")
+                    else "blocked"
+                    if result.get("blocked")
+                    else "error"
+                    if result.get("execution_error")
+                    else "complete"
+                ),
+                output_chars=len(str(result.get("output") or "")),
+                tool_calls=len(result.get("tool_details") or []),
+            )
+            return result
     finally:
         # In a finally. The step closes its own scope before its summary pass,
         # but an exception in the loop skipped that -- and because open_scope
@@ -2629,6 +2671,16 @@ async def _run_worker_step(
     # what keeps one step from spending a whole run's budget.
     limits = thresholds or _step_thresholds(step, plan, controller, step_budget)
     step_soft, step_ceiling = limits.soft_tokens, limits.ceiling_tokens
+    telemetry.set_attributes(
+        telemetry.current_span(),
+        step_id=step_id,
+        map_item=str(step.get("map_item") or ""),
+        map_parent=str(step.get("map_parent") or ""),
+        action_kind=str(step.get("action_kind") or ""),
+        required_action=str(step.get("required_action") or ""),
+        grant_tokens=step_ceiling,
+        grant_cost_usd=limits.ceiling_cost_usd,
+    )
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far

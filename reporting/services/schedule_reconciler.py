@@ -40,6 +40,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from reporting import settings
 from reporting.schema.reporting_config import ScheduleSpec
+from reporting.services import telemetry
 from reporting.services.schedule_spec import run_requested, schedule_due
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,13 @@ async def get_client() -> Client:
     if _client is None:
         async with _client_lock:
             if _client is None:
+                telemetry.configure()
                 _client = await Client.connect(
                     settings.TEMPORAL_ADDRESS,
                     namespace=settings.TEMPORAL_NAMESPACE,
+                    # Carries trace context into the workflows started here, so a
+                    # turn and the steps it fans out to share one trace (AGT-026).
+                    interceptors=telemetry.temporal_interceptors(),
                 )
     return _client
 

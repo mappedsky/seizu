@@ -440,6 +440,11 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_ORCHESTRATOR_MAX_STEPS` | `8` | Maximum steps the planner may emit for one turn. Steps past it are dropped, along with any dependency pointing into them. |
 | `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` | `4096` | Planner generation budget, kept separate so thinking models have room to emit the structured plan. |
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
+| `TELEMETRY_ENABLED` | `true` | Master switch; tracing still needs an endpoint to do anything. |
+| `TELEMETRY_OTLP_ENDPOINT` | `""` | OTLP/HTTP traces endpoint. Empty disables tracing. |
+| `TELEMETRY_OTLP_HEADERS` | `""` | Comma-separated `k=v` headers for the collector, e.g. an API key. |
+| `TELEMETRY_SERVICE_NAME` | `seizu` | `service.name` on exported spans. |
+| `TELEMETRY_RECORD_CONTENT` | `false` | Include prompts, results and tool output in spans. Off by default: it exports graph data. |
 | `CHAT_ORCHESTRATOR_MAX_EXPANSION` | `8` | Maximum steps one step may expand into when it maps over items an earlier step discovered; `0` disables expansion. |
 | `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `8` | Independent steps dispatched concurrently in one batch. Matched to `CHAT_ORCHESTRATOR_MAX_EXPANSION`, so an expanded step's children run in one batch rather than several. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |

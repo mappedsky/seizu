@@ -583,6 +583,55 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-026 — Tracing is diagnosis, opt-in, and content-free by default
+
+**Applies to:** `reporting/services/telemetry.py`, `chat_graph._run_llm_tool_turn`,
+`chat_orchestrator._dispatch_batch` / `_run_worker_step_with_session` /
+`_expand_mapped_steps`, the Temporal client and worker;
+`TELEMETRY_*`
+
+Spans cover the turn, its dispatch batches, each plan step, each expansion and
+every model call, exported over OTLP to any collector. Off unless
+`TELEMETRY_OTLP_ENDPOINT` is set.
+
+**Why it needs the Temporal interceptor to be worth anything.** A turn spans at
+least three processes — the web service admits it, one worker activity drives
+it, and its plan steps run as further activities that may land on other replicas
+([AGT-018](#agt-018)). Without propagated context those are unrelated trees and
+the only question worth asking, *where did this turn spend its time*, has no
+answer. `temporalio.contrib.opentelemetry.TracingInterceptor` on both the client
+and the worker is what joins them.
+
+**What it answered on the first traced run**, a 208-second turn:
+
+| | share |
+|---|---|
+| `llm planner` (one call) | **54%** — 112.5s |
+| both dispatch batches (five steps, parallel) | 30% |
+| `llm synthesizer` | 12% |
+| every worker and verifier call | 12% |
+
+One planner call cost more than all the parallel step work put together. That
+had been invisible: the planner is a single structured call with no step of its
+own, and the whole of [AGT-023](#agt-023)'s tuning went into the steps. It is
+also the stage still on the reasoning model at adaptive effort.
+
+**Content is opt-in.** `telemetry.content()` returns `""` unless
+`TELEMETRY_RECORD_CONTENT` is set. A trace of this system carries graph rows,
+tool output and the user's own words, and exporting it sends them wherever the
+collector is — a different decision from wanting timings. Exceptions are
+recorded by **type** for the same reason: an exception string here routinely
+carries tool output.
+
+**Never load-bearing.** `configure()` swallows its own failures, a span is a
+no-op context manager when tracing is off, and budget decisions read the ledger
+(`chat_budget`) rather than any of this. A run must spend the same whether or
+not the collector is reachable.
+
+**Not metrics.** Step ids are content-derived (`s2-cve-2026-44432-61daf8`), which
+is fine as a span attribute and unusable as a metric label; anything wanting
+aggregate counters should derive them in the backend.
+
 ## AGT-025 — Only the dimension that bounds the run is fair-shared
 
 **Applies to:** `chat_orchestrator._cost_is_primary`, `_grant_for`,
