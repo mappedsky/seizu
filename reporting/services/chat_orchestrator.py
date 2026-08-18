@@ -1402,13 +1402,17 @@ def _grant_for(
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
     soft = max(1, hard - int(hard * reserve_ratio))
     ledger = controller.snapshot() if controller is not None else {}
+    # Cost and calls follow the same schedule divisor as tokens, so a step at a
+    # bottleneck is not rationed as though the steps queued behind it were
+    # running beside it (AGT-020).
+    divisor = _budget_divisor(plan, batch_size)
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
         # Zero on either of these means "no limit configured", and it has to
         # travel as zero rather than as a share of zero.
-        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", batch_size),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", batch_size)),
+        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor)),
     )
 
 
@@ -1453,13 +1457,13 @@ def _budget_divisor(plan: list[dict[str, Any]], concurrent: int) -> int:
     return max(1, _remaining_waves(plan) * max(1, concurrent))
 
 
-def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, batch_size: int) -> float:
-    """An equal split of one budget dimension's remainder, or 0 when unlimited."""
+def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int) -> float:
+    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited."""
     limit = float(ledger.get(limit_key) or 0.0)
     if limit <= 0:
         return 0.0
     remaining = max(0.0, limit - float(ledger.get(spent_key) or 0.0))
-    return remaining / max(1, batch_size)
+    return remaining / max(1, divisor)
 
 
 def _trimmed_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1995,36 +1999,48 @@ def _looks_stuck(novelty: "deque[bool]") -> bool:
     return len(novelty) == novelty.maxlen and not any(novelty)
 
 
+@dataclass(frozen=True)
+class _StepThresholds:
+    """What one step may spend before it converges, and before it is stopped.
+
+    Both dimensions, because a run may be budgeted on either (AGT-022). A
+    dimension left at ``0`` does not bound the step.
+    """
+
+    soft_tokens: int
+    ceiling_tokens: int
+    soft_cost_usd: float = 0.0
+    ceiling_cost_usd: float = 0.0
+
+
 def _step_thresholds(
     step: dict[str, Any],
     plan: list[dict[str, Any]],
     controller: BudgetController | None,
     step_budget: int,
-) -> tuple[int, int]:
+) -> _StepThresholds:
     """How much this step may spend, itself and everything it delegates to.
 
-    Derived from the run budget rather than the planner's complexity label. The
-    label is a guess made before any work happens and has no relationship to how
-    much sandbox delegation a goal implies: a step that queried eight CVEs and
-    their exposure was labelled "small" and cut at 4,000 x 12, on a question the
-    successful configuration answered using roughly 80,000 per step. Raising the
-    multiplier only moves the wall to the next mislabelled step.
+    A share of what the run has left, divided by the schedule still to run
+    (:func:`_budget_divisor`), so no step starves its siblings. Computed for
+    tokens and for cost independently, and whichever binds first stops the step.
+    The complexity estimate is a floor on the token share, so a trivial step
+    cannot claim a whole share it will never use; a run with no token limit gets
+    no token bound at all rather than that floor, leaving cost to do the work.
 
-    A share of what the run has left, divided between the steps still to finish,
-    states the actual purpose directly: no step may starve its siblings. It also
-    tracks CHAT_RUN_TOKEN_BUDGET automatically, instead of needing a second
-    constant retuned whenever that one changes. The complexity estimate stays as
-    a floor so a trivial step cannot claim a whole share it will never use.
+    Derived from the run budget rather than the planner's complexity label,
+    which is a guess made before any work happens: AGT-017 and AGT-022.
     """
     floor = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
     if controller is None:
-        return floor, floor
+        return _StepThresholds(soft_tokens=floor, ceiling_tokens=floor)
     remaining = controller.remaining_normal_tokens
-    if remaining is None:
-        return floor, floor
+    remaining_cost = controller.remaining_normal_cost_usd
+    if remaining is None and remaining_cost is None:
+        return _StepThresholds(soft_tokens=floor, ceiling_tokens=floor)
     # The concurrent width is the batch in flight; see ``_budget_divisor``.
     concurrent = sum(1 for item in plan if item.get("status") == "ran") or len(_runnable_steps(plan))
-    soft = max(floor, remaining // _budget_divisor(plan, concurrent))
+    divisor = _budget_divisor(plan, concurrent)
     # How far past its fair share a step may go before it is stopped outright.
     # At 1.0 the share is itself the hard cut; large values let a step use
     # everything the run can spend outside its finalization reserve. Between the
@@ -2032,7 +2048,20 @@ def _step_thresholds(
     # a fair share when no sibling is contending rather than being killed
     # mid-work and handing the verifier a truncated summary to reject.
     multiple = max(1.0, settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE)
-    return soft, max(soft, min(remaining, int(soft * multiple)))
+    soft_tokens = ceiling_tokens = 0
+    if remaining is not None:
+        soft_tokens = max(floor, remaining // divisor)
+        ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
+    soft_cost = ceiling_cost = 0.0
+    if remaining_cost is not None:
+        soft_cost = remaining_cost / divisor
+        ceiling_cost = max(soft_cost, min(remaining_cost, soft_cost * multiple))
+    return _StepThresholds(
+        soft_tokens=soft_tokens,
+        ceiling_tokens=ceiling_tokens,
+        soft_cost_usd=soft_cost,
+        ceiling_cost_usd=ceiling_cost,
+    )
 
 
 async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -2070,7 +2099,7 @@ async def _run_worker_step(
     writer: Any = None,
     skill_tools: list[chat_graph.Tool] | None = None,
     skill_prompts: list[chat_graph.Prompt] | None = None,
-    thresholds: tuple[int, int] | None = None,
+    thresholds: _StepThresholds | None = None,
     summary_model: Any = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
@@ -2263,7 +2292,8 @@ async def _run_worker_step(
     # from a coarse complexity label: degrading at the estimate is cheap if it
     # was low, whereas stopping there would kill legitimate work. The ceiling is
     # what keeps one step from spending a whole run's budget.
-    step_soft, step_ceiling = thresholds or _step_thresholds(step, plan, controller, step_budget)
+    limits = thresholds or _step_thresholds(step, plan, controller, step_budget)
+    step_soft, step_ceiling = limits.soft_tokens, limits.ceiling_tokens
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far
@@ -2272,7 +2302,13 @@ async def _run_worker_step(
     # sibling's spend to this one.
     budget_scope = f"worker:{step_id}"
     if controller is not None:
-        controller.open_scope(budget_scope, step_ceiling, soft_tokens=step_soft)
+        controller.open_scope(
+            budget_scope,
+            step_ceiling,
+            soft_tokens=step_soft,
+            ceiling_cost_usd=limits.ceiling_cost_usd,
+            soft_cost_usd=limits.soft_cost_usd,
+        )
     chat_budget.set_current_budget_scope(budget_scope)
     while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
@@ -2280,15 +2316,22 @@ async def _run_worker_step(
         step_spend = (
             controller.scope_spend(budget_scope) if controller is not None else step_input_tokens + step_output_tokens
         )
-        if step_spend >= step_ceiling:
+        capped = (
+            controller.scope_exhausted(budget_scope)
+            if controller is not None
+            else step_ceiling > 0 and step_spend >= step_ceiling
+        )
+        if capped:
             # Leave the loop with tool results but no final text, which is the
             # condition the summary pass below already handles: it asks the
             # worker to state what it found and what remains.
             logger.info(
-                "chat orchestrator: step %s stopped at its token ceiling (%d >= %d)",
+                "chat orchestrator: step %s stopped at its budget ceiling (%d/%d tokens, $%.4f/$%.4f)",
                 step_id,
                 step_spend,
                 step_ceiling,
+                controller.scope_cost_spend(budget_scope) if controller is not None else 0.0,
+                limits.ceiling_cost_usd,
             )
             budget_capped = True
             break

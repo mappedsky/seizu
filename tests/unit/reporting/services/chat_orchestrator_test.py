@@ -2185,10 +2185,10 @@ def test_step_ceiling_is_a_share_of_what_the_run_has_left():
     controller = BudgetController(ledger)
     plan = [_step("s1"), _step("s2", "passed"), _step("s3")]
 
-    soft, _hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+    limits = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
     # 320k spendable, two steps still outstanding.
-    assert soft == 160_000
+    assert limits.soft_tokens == 160_000
 
 
 def test_a_higher_multiple_gives_a_step_headroom_past_its_share(mocker):
@@ -2199,12 +2199,12 @@ def test_a_higher_multiple_gives_a_step_headroom_past_its_share(mocker):
     controller = BudgetController(ledger)
     plan = [_step("s1"), _step("s2")]
 
-    soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+    limits = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
 
-    assert soft == 160_000
-    assert hard == 320_000
+    assert limits.soft_tokens == 160_000
+    assert limits.ceiling_tokens == 320_000
     # Never past what the run can spend outside its finalization reserve.
-    assert hard <= 320_000
+    assert limits.ceiling_tokens <= 320_000
 
 
 def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
@@ -2215,18 +2215,40 @@ def test_step_ceiling_never_drops_below_the_complexity_floor(mocker):
     plan = [_step("s1"), _step("s2")]
 
     # Almost nothing left to share, so the floor governs instead.
-    assert chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)[0] == 48_000
+    assert chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000).soft_tokens == 48_000
 
 
-def test_step_ceiling_falls_back_to_the_floor_without_a_token_budget(mocker):
+def test_a_cost_budgeted_run_bounds_its_steps_in_cost_not_in_tokens(mocker):
+    """Turning the token ceiling off must not fall back to the complexity floor.
+
+    The floor is a guess made before any work happens (AGT-017); applying it to a
+    run deliberately budgeted on cost would cap every step at it.
+    """
     mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
     ledger = initial_budget_ledger()
-    ledger.update({"token_limit": 0})
+    ledger.update({"token_limit": 0, "cost_limit_usd": 2.0, "reserve_cost_usd": 0.4})
+    controller = BudgetController(ledger)
+    plan = [_step("s1"), _step("s2")]
+
+    limits = chat_orchestrator._step_thresholds(plan[0], plan, controller, 8_000)
+
+    assert (limits.soft_tokens, limits.ceiling_tokens) == (0, 0)  # unbounded in tokens
+    assert limits.soft_cost_usd == pytest.approx(0.8)  # $1.60 spendable, two steps
+    assert limits.ceiling_cost_usd == pytest.approx(1.6)
+
+
+def test_step_ceiling_falls_back_to_the_floor_without_any_budget(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN", 12.0)
+    ledger = initial_budget_ledger()
+    ledger.update({"token_limit": 0, "cost_limit_usd": 0.0, "reserve_cost_usd": 0.0})
     controller = BudgetController(ledger)
     plan = [_step("s1")]
 
-    assert chat_orchestrator._step_thresholds(plan[0], plan, controller, 8_000) == (96_000, 96_000)
-    assert chat_orchestrator._step_thresholds(plan[0], plan, None, 8_000) == (96_000, 96_000)
+    for limits in (
+        chat_orchestrator._step_thresholds(plan[0], plan, controller, 8_000),
+        chat_orchestrator._step_thresholds(plan[0], plan, None, 8_000),
+    ):
+        assert (limits.soft_tokens, limits.ceiling_tokens) == (96_000, 96_000)
 
 
 # --- Soft share, hard reserve, and resuming a capped step ----------------------
@@ -2238,7 +2260,8 @@ def test_the_fair_share_is_soft_and_the_reserve_is_the_hard_stop():
     controller = BudgetController(ledger)
     plan = [_step("s1"), _step("s2")]
 
-    soft, hard = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+    limits = chat_orchestrator._step_thresholds(plan[0], plan, controller, 4_000)
+    soft, hard = limits.soft_tokens, limits.ceiling_tokens
 
     assert soft == 160_000  # its share of the two outstanding steps
     # The share is a convergence signal, not the execution cut: at the default

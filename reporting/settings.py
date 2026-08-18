@@ -919,18 +919,20 @@ CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_C
 # only for final summaries/synthesis.
 # A zero token or cost limit disables that dimension; the LLM-call ceiling
 # remains an emergency loop guard.
-# Sized to cover sandbox sub-agent spend, which this budget now includes. Before
-# that spend was metered, a delegating turn billed only its outer loop -- two
-# measured turns put the sandbox at 69% and 84% of real usage -- so the previous
-# 120k default was, for such turns, closer to 400k in practice. Lower it if
-# delegation is disabled or rare; a turn that never delegates spends the same as
-# it always did.
-CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 400_000)
-# Estimated provider spend one run may reach, in USD, and the intended runaway
-# guard (AGT-021). Priced per call from LiteLLM's model data, cache-aware on
-# commit. Set 0 to disable the dimension -- required for a gateway or custom
-# model whose pricing LiteLLM does not know, since an unpriced run would
-# otherwise never charge against it.
+#
+# **A run is budgeted in cost.** CHAT_RUN_COST_BUDGET_USD below is the limit to
+# tune; this token ceiling is the backstop that bounds a run whose model LiteLLM
+# cannot price, and it is set high enough that cost normally binds first on a
+# model it can (AGT-022). Both the run and each individual step are bounded in
+# whichever dimension is configured. Lower this to bound runs by tokens instead.
+CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 2_000_000)
+# Estimated provider spend one run may reach, in USD. This is the budget a run
+# is meant to be tuned on (AGT-021, AGT-022): it bounds the run, and a share of
+# it bounds each plan step. Priced per call from LiteLLM's model data,
+# cache-aware on commit. Set 0 to disable the dimension -- required for a
+# gateway or custom model whose pricing LiteLLM does not know, since an unpriced
+# run would otherwise never charge against it, leaving CHAT_RUN_TOKEN_BUDGET as
+# the only guard.
 CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 2.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)

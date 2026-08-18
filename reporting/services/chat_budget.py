@@ -147,29 +147,51 @@ class BudgetController:
         self._scope_ceilings: dict[str, int] = {}
         self._scope_soft: dict[str, int] = {}
         self._scope_spend: dict[str, int] = {}
+        # The same three in cost, so a scope is bounded in whichever dimension
+        # the run is actually budgeted on (AGT-022).
+        self._scope_cost_ceilings: dict[str, float] = {}
+        self._scope_cost_soft: dict[str, float] = {}
+        self._scope_cost_spend: dict[str, float] = {}
 
-    def open_scope(self, scope: str, ceiling_tokens: int, soft_tokens: int = 0) -> None:
+    def open_scope(
+        self,
+        scope: str,
+        ceiling_tokens: int,
+        soft_tokens: int = 0,
+        *,
+        ceiling_cost_usd: float = 0.0,
+        soft_cost_usd: float = 0.0,
+    ) -> None:
         """Bound one unit of work, including anything it delegates to.
 
-        Two thresholds, because they answer different questions. ``soft_tokens``
-        is the step's fair share of what the run has left -- crossing it means
-        siblings are now being competed with, which is a reason to converge, not
-        a reason to die. ``ceiling_tokens`` is the point where continuing would
-        eat the run's finalization reserve, which is a reason to stop.
+        Two thresholds per dimension, because they answer different questions.
+        The soft one is the scope's fair share of what the run has left, and
+        crossing it means siblings are being competed with -- a reason to
+        converge. The ceiling is where continuing would eat the run's
+        finalization reserve -- a reason to stop.
 
-        Measured with the share as a hard cut, every configuration where it bound
-        produced a degraded answer, because a step killed mid-work hands the
-        verifier a truncated summary to reject.
+        A dimension left at ``0`` does not bound the scope, so a run budgeted
+        only on cost is still bounded per step, and one budgeted only on tokens
+        behaves exactly as before (AGT-022).
         """
-        if scope and ceiling_tokens > 0:
+        if not scope:
+            return
+        if ceiling_tokens > 0:
             self._scope_ceilings[scope] = ceiling_tokens
             self._scope_soft[scope] = soft_tokens if soft_tokens > 0 else ceiling_tokens
             self._scope_spend.setdefault(scope, 0)
+        if ceiling_cost_usd > 0:
+            self._scope_cost_ceilings[scope] = ceiling_cost_usd
+            self._scope_cost_soft[scope] = soft_cost_usd if soft_cost_usd > 0 else ceiling_cost_usd
+            self._scope_cost_spend.setdefault(scope, 0.0)
 
     def close_scope(self, scope: str) -> None:
         self._scope_ceilings.pop(scope, None)
         self._scope_soft.pop(scope, None)
         self._scope_spend.pop(scope, None)
+        self._scope_cost_ceilings.pop(scope, None)
+        self._scope_cost_soft.pop(scope, None)
+        self._scope_cost_spend.pop(scope, None)
         # Drop anything still reserved against it. A reservation that outlives
         # its scope keeps inflating the run's projected spend and call count for
         # the rest of the turn, on work that has already finished or been
@@ -191,9 +213,17 @@ class BudgetController:
         """
         return int(self._scope_spend.get(scope, 0))
 
+    def scope_cost_spend(self, scope: str) -> float:
+        """Estimated USD a scope has actually spent."""
+        return float(self._scope_cost_spend.get(scope, 0.0))
+
     def scope_exhausted(self, scope: str) -> bool:
+        """Whether either bound on the scope has been reached."""
         ceiling = self._scope_ceilings.get(scope)
-        return ceiling is not None and self.scope_spend(scope) >= ceiling
+        if ceiling is not None and self.scope_spend(scope) >= ceiling:
+            return True
+        cost_ceiling = self._scope_cost_ceilings.get(scope)
+        return cost_ceiling is not None and self.scope_cost_spend(scope) >= cost_ceiling
 
     def scope_remaining(self, scope: str) -> int | None:
         """Tokens the scope may still spend, or ``None`` when it is unbounded."""
@@ -211,7 +241,10 @@ class BudgetController:
         otherwise work until it is cut mid-task and lose what it had.
         """
         soft = self._scope_soft.get(scope)
-        return soft is not None and self.scope_spend(scope) >= soft
+        if soft is not None and self.scope_spend(scope) >= soft:
+            return True
+        cost_soft = self._scope_cost_soft.get(scope)
+        return cost_soft is not None and self.scope_cost_spend(scope) >= cost_soft
 
     def snapshot(self) -> dict[str, Any]:
         return dict(self._ledger)
@@ -308,6 +341,21 @@ class BudgetController:
         spent = int(self._ledger.get("total_tokens") or 0)
         reserve = int(self._ledger.get("reserve_tokens") or 0)
         return max(0, token_limit - reserve - spent)
+
+    @property
+    def remaining_normal_cost_usd(self) -> float | None:
+        """USD still spendable outside the finalization reserve.
+
+        ``None`` when no cost limit is configured, matching
+        :attr:`remaining_normal_tokens`, so a caller can tell "no constraint"
+        from "nothing left".
+        """
+        cost_limit = float(self._ledger.get("cost_limit_usd") or 0.0)
+        if not cost_limit:
+            return None
+        spent = float(self._ledger.get("cost_usd") or 0.0)
+        reserve = float(self._ledger.get("reserve_cost_usd") or 0.0)
+        return max(0.0, cost_limit - reserve - spent)
 
     def set_estimated_remaining_tokens(self, tokens: int) -> None:
         self._ledger["estimated_remaining_tokens"] = max(0, tokens)
@@ -414,6 +462,8 @@ class BudgetController:
             self._ledger["phases"] = phases
             if reservation.scope in self._scope_spend:
                 self._scope_spend[reservation.scope] += max(0, input_tokens) + max(0, output_tokens)
+            if reservation.scope in self._scope_cost_spend:
+                self._scope_cost_spend[reservation.scope] += max(0.0, cost_usd)
             if usage_estimated:
                 self._ledger["usage_estimated"] = True
             self._record_output_locked(reservation.phase, output_tokens)
@@ -484,6 +534,8 @@ class BudgetController:
             self._ledger["phases"] = phases
             if scope and scope in self._scope_spend:
                 self._scope_spend[scope] += input_tokens + output_tokens
+            if scope and scope in self._scope_cost_spend:
+                self._scope_cost_spend[scope] += max(0.0, float(usage.get("cost_usd") or 0.0))
             if usage.get("usage_estimated"):
                 self._ledger["usage_estimated"] = True
             self._refresh_mode_locked()
@@ -549,6 +601,18 @@ class BudgetController:
             )
             if spent + in_flight + requested_tokens > ceiling:
                 return f"Step {reservation.scope} has its share of the run budget in flight."
+        cost_ceiling = self._scope_cost_ceilings.get(reservation.scope)
+        if cost_ceiling is not None:
+            spent_cost = self.scope_cost_spend(reservation.scope)
+            if spent_cost + reservation.estimated_cost_usd > cost_ceiling:
+                raise BudgetExceeded(
+                    f"Step {reservation.scope} reached its share of the run cost budget (${cost_ceiling:.4f})."
+                )
+            in_flight_cost = sum(
+                item.estimated_cost_usd for item in self._reservations.values() if item.scope == reservation.scope
+            )
+            if spent_cost + in_flight_cost + reservation.estimated_cost_usd > cost_ceiling:
+                return f"Step {reservation.scope} has its share of the run cost budget in flight."
         if not self.enabled:
             return ""
         if self.finalizing and not reservation.allow_reserve:

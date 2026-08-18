@@ -583,6 +583,76 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-022 — A run is budgeted in cost; tokens are the backstop
+
+**Applies to:** `chat_budget.BudgetController.open_scope` / `scope_exhausted` /
+`scope_cost_spend` / `remaining_normal_cost_usd` / `_authorize_locked`,
+`chat_orchestrator._StepThresholds` / `_step_thresholds` / `_grant_for` /
+`_dimension_share`, `chat_step_worker`; `CHAT_RUN_COST_BUDGET_USD`,
+`CHAT_RUN_TOKEN_BUDGET`
+
+`CHAT_RUN_COST_BUDGET_USD` is the limit an operator tunes. It bounds the run,
+and a share of it bounds each plan step. `CHAT_RUN_TOKEN_BUDGET` is the backstop
+for a model LiteLLM cannot price, defaulted high (2,000,000) so that cost
+normally binds first on a model it can.
+
+**Why cost is the right denomination.** Tokens vary about a hundredfold in price
+across the models LiteLLM reaches, and a run that crosses its soft limit
+switches to `CHAT_LLM_ECONOMY_MODEL` and so changes its own token price
+part-way through — a token ceiling therefore bounds spend only for one model at
+a time, and has to be retuned for every model change. Dollars are what a
+"runaway" actually is.
+
+**Measured, on the run that prompted this** ([AGT-021](#agt-021), run B): a
+four-step turn exhausted its 400,000-token budget at 88% while spending **5.6%
+of the cost limit** — $0.056 of $1.00. The token ceiling was not protecting
+anything; it was ending useful work at an arbitrary point that happened to be
+denominated in the wrong unit.
+
+**Enabling cost was not enough on its own.** Per-step fair-share
+(`_step_thresholds`, `open_scope`) was token-only, so raising the token ceiling
+to let cost bind would have removed step-level bounding entirely: one step could
+spend the whole run's money while every token check passed. A scope therefore
+now carries a cost ceiling and cost spend alongside the token pair, and
+`scope_exhausted` / `scope_soft_limit_reached` are true when **either** binds.
+The worker loop asks the controller rather than comparing tokens itself.
+
+**A dimension left at zero does not bound.** `_step_thresholds` used to return
+the complexity floor when `remaining_normal_tokens` was `None`, which meant a
+run deliberately budgeted on cost had every step capped at a guess made before
+any work happened (the thing [AGT-017](#agt-017) removed). It now returns *no*
+token bound in that case and lets cost do the work; the floor applies only when
+neither dimension is budgeted.
+
+**The same schedule divisor everywhere.** Cost and call grants for a distributed
+step were an equal split by batch size while tokens used the wave-aware divisor
+([AGT-020](#agt-020)); `_dimension_share` now takes the divisor, so all three
+dimensions slice a bottleneck the same way.
+
+**What this does not change.** The distributed grant is still a hard cut
+(AGT-018) — it now carries a cost ceiling as well as a token one. Contention on
+the cost dimension waits exactly as it does on tokens (AGT-021). And an unpriced
+model is still bounded, by the token backstop, which is why that default rose
+rather than going to zero.
+
+### Verified on a real turn
+
+The same four-step request, run with a deliberately tight cost budget ($0.03)
+and the 2,000,000-token backstop:
+
+```
+status : budget_exhausted
+reason : Step worker:s4 reached its share of the run cost budget ($0.0056).
+cost   : $0.0290 / $0.03      tokens : 89,084 / 2,000,000
+per-step ceilings: tokens=529,584   cost=$0.0056 (soft $0.0019)
+```
+
+Every worker scope was handed both ceilings, **cost** was what stopped a step,
+and the run ended on cost at 4.5% of its token backstop — the inverse of
+[AGT-021](#agt-021)'s run B, which died on tokens at 5.6% of its cost limit. The
+run still delivered a 3,397-character partial answer, so the finalization
+reserve behaved as [AGT-012](#agt-012) requires.
+
 ## AGT-021 — A reservation is an authorization, and contention is not exhaustion
 
 **Applies to:** `chat_budget.BudgetController.reserve` / `_authorize_locked` /

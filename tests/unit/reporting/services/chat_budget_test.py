@@ -556,3 +556,73 @@ async def test_one_phases_cache_rate_cannot_discount_another_phases_call():
     cold = controller.project_cost_usd(expensive, 100_000, 1_000)
     assert cold == pytest.approx(usage_cost_usd(expensive, 100_000, 1_000))
     assert cold > usage_cost_usd(cheap, 100_000, 1_000)
+
+
+# --- A step is bounded in whichever dimension the run is budgeted on (AGT-022) --
+
+
+async def test_a_scope_is_bounded_by_cost_when_that_is_what_the_run_budgets():
+    controller = BudgetController(_ledger(token_limit=0))
+    controller.open_scope("worker:s1", 0, ceiling_cost_usd=0.10, soft_cost_usd=0.05)
+
+    reservation = await controller.reserve(
+        estimated_input_tokens=10, estimated_output_tokens=10, estimated_cost_usd=0.06, scope="worker:s1"
+    )
+    await controller.commit(reservation, input_tokens=10, output_tokens=10, cost_usd=0.06, usage_estimated=False)
+
+    assert controller.scope_cost_spend("worker:s1") == pytest.approx(0.06)
+    # Past its fair share, so it should converge, but not yet stopped.
+    assert controller.scope_soft_limit_reached("worker:s1")
+    assert not controller.scope_exhausted("worker:s1")
+
+    with pytest.raises(BudgetExceeded, match="share of the run cost budget"):
+        await controller.reserve(
+            estimated_input_tokens=10, estimated_output_tokens=10, estimated_cost_usd=0.05, scope="worker:s1"
+        )
+
+
+async def test_scope_cost_contention_waits_rather_than_failing_the_step():
+    controller = BudgetController(_ledger(token_limit=0))
+    controller.open_scope("worker:s1", 0, ceiling_cost_usd=0.10)
+    held = await controller.reserve(
+        estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.06, scope="worker:s1"
+    )
+
+    waiter = asyncio.ensure_future(
+        controller.reserve(
+            estimated_input_tokens=1, estimated_output_tokens=1, estimated_cost_usd=0.06, scope="worker:s1"
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    await controller.commit(held, input_tokens=1, output_tokens=1, cost_usd=0.01, usage_estimated=False)
+
+    assert await asyncio.wait_for(waiter, timeout=1)
+
+
+async def test_a_scope_exhausted_on_tokens_is_still_exhausted():
+    """The token bound is unchanged where a run is budgeted on tokens."""
+    controller = BudgetController(_ledger(token_limit=0))
+    controller.open_scope("worker:s1", 100)
+    reservation = await controller.reserve(estimated_input_tokens=90, estimated_output_tokens=10, scope="worker:s1")
+    await controller.commit(reservation, input_tokens=90, output_tokens=10, cost_usd=0.0, usage_estimated=False)
+
+    assert controller.scope_exhausted("worker:s1")
+
+
+def test_remaining_normal_cost_reports_none_when_cost_is_not_budgeted():
+    ledger = _ledger(token_limit=0)
+    assert BudgetController(ledger).remaining_normal_cost_usd is None
+
+    ledger.update({"cost_limit_usd": 2.0, "reserve_cost_usd": 0.4, "cost_usd": 0.5})
+    assert BudgetController(ledger).remaining_normal_cost_usd == pytest.approx(1.1)
+
+
+def test_closing_a_scope_clears_both_dimensions():
+    controller = BudgetController(_ledger(token_limit=0))
+    controller.open_scope("worker:s1", 100, ceiling_cost_usd=0.10)
+    controller.close_scope("worker:s1")
+
+    assert not controller.scope_exhausted("worker:s1")
+    assert controller.scope_cost_spend("worker:s1") == 0.0
