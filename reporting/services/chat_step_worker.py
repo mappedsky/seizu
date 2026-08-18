@@ -202,9 +202,13 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
                     writer=writer,
                     skill_tools=skill_tools,
                     skill_prompts=skill_prompts,
-                    thresholds=(
-                        invocation.soft_token_grant or invocation.token_grant,
-                        invocation.token_grant,
+                    # The grant is the step's whole allowance: it cannot ask the
+                    # run's controller for more from another process (AGT-018).
+                    thresholds=chat_orchestrator._StepThresholds(
+                        soft_tokens=invocation.soft_token_grant or invocation.token_grant,
+                        ceiling_tokens=invocation.token_grant,
+                        soft_cost_usd=invocation.cost_grant_usd,
+                        ceiling_cost_usd=invocation.cost_grant_usd,
                     ),
                     summary_model=summary_model,
                 )

@@ -155,9 +155,16 @@ class _RouteDecision(BaseModel):
 
 
 class _PlannedStep(BaseModel):
-    id: str
+    id: str = Field(description="Short id, unique within the plan (e.g. 's1').")
     goal: str
-    depends_on: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Ids of the steps whose output this step needs. Each entry must be the id of a"
+            " different step in this same plan. A step must not list its own id, and the"
+            " edges must not form a cycle."
+        ),
+    )
     suggested_tools: list[str] = Field(default_factory=list)
     action_kind: Literal["auto", "answer", "skill", "tool"] = "auto"
     required_action: str = ""
@@ -168,6 +175,12 @@ class _PlannedStep(BaseModel):
 
 
 class _Plan(BaseModel):
+    """A directed acyclic graph of steps: the nodes, with ``depends_on`` as the edges.
+
+    Stated in the schema as well as the prompt, since the schema is what reaches
+    the planner. Validated on the way in by :func:`_plan_problems` (AGT-020).
+    """
+
     steps: list[_PlannedStep] = Field(default_factory=list)
 
 
@@ -211,6 +224,14 @@ _PLANNER_PROMPT = (
     " parallel. Mark each step priority as required, supporting, or optional,"
     " and complexity as small, medium, or large. Do not invent tools or mark a"
     " live-data step as answer.\n"
+    "**The plan is a directed acyclic graph**, and depends_on is its edges."
+    " Every step id must be unique; every depends_on entry must be the id of a"
+    " different step in this same plan; a step must never list its own id; and"
+    " the edges must never form a cycle, directly (s1 -> s2 -> s1) or through"
+    " other steps. List steps so that a step's dependencies come before it."
+    " Steps run as soon as everything they depend on has finished, so an edge you"
+    " add only to impose an order costs parallelism, and an edge you leave out"
+    " where the data really is needed gives that step nothing to work from.\n"
     # The incident this came from is in AGT-016, not here: a prompt is read on
     # every planner call and needs the rule, not the postmortem.
     "**Never supply an identifier the request did not.** Repositories,"
@@ -650,42 +671,40 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         sandbox_id=str(state.get("sandbox_id") or ""),
     )
 
+    planner_messages: list[BaseMessage] = [
+        SystemMessage(content=planner_system),
+        HumanMessage(
+            content=_planner_user_message(
+                user_text,
+                _conversation_context(
+                    state["messages"],
+                    max_chars=settings.CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS,
+                ),
+            )
+        ),
+        # Last, for the same reason the chat loop carries it last.
+        *([chat_graph.session_memory_message(planner_digest)] if planner_digest else []),
+    ]
+
     run_errors: list[str] = []
+    planned: list[_PlannedStep] = []
     try:
-        plan_result = cast(
-            _Plan,
-            await _structured_invoke(
-                _Plan,
-                [
-                    SystemMessage(content=planner_system),
-                    HumanMessage(
-                        content=_planner_user_message(
-                            user_text,
-                            _conversation_context(
-                                state["messages"],
-                                max_chars=settings.CHAT_ORCHESTRATOR_PLANNER_CONTEXT_MAX_CHARS,
-                            ),
-                        )
-                    ),
-                    # Last, for the same reason the chat loop carries it last.
-                    *([chat_graph.session_memory_message(planner_digest)] if planner_digest else []),
-                ],
-                config,
-                role="planner",
-                max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
-            ),
-        )
-        planned = plan_result.steps[: settings.CHAT_ORCHESTRATOR_MAX_STEPS]
+        plan_result = await _invoke_planner(planner_messages, config)
+        planned, truncation_notes = _truncate_plan(plan_result.steps)
+        run_errors.extend(truncation_notes)
     except BudgetExceeded as exc:
         controller = _budget_controller(config)
         if controller is not None:
             controller.begin_finalization(str(exc))
-        planned = []
         run_errors = [str(exc)]
     except Exception as exc:
         logger.warning("Planner structured-output failed; falling back to a single-step plan", exc_info=True)
-        planned = []
         run_errors = [f"Planner structured output failed: {_safe_exception_text(exc)}"]
+
+    problems = _plan_problems(planned)
+    if planned and problems:
+        planned, replan_errors = await _replan_invalid_graph(planned, problems, planner_messages, config)
+        run_errors.extend(replan_errors)
 
     if not planned:
         # Fall back to a single step so the orchestrated path still answers.
@@ -693,6 +712,10 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
 
     plan = _init_plan(planned)
     _refresh_remaining_estimate(_budget_controller(config), plan)
+    body = _plan_summary(plan)
+    if run_errors:
+        # Beside the plan, as well as in the finished message's metadata.
+        body = f"{body}\n\nPlan diagnostics: " + "; ".join(run_errors)
     _emit(
         writer,
         {
@@ -700,7 +723,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
             "title": "Plan",
             "status": "completed",
             "steps": [{"id": s["id"], "goal": s["goal"], "depends_on": s["depends_on"]} for s in plan],
-            "body": _plan_summary(plan),
+            "body": body,
         },
         "plan",
     )
@@ -713,17 +736,182 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     }
 
 
-def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
-    ids = {step.id for step in planned}
-    plan: list[dict[str, Any]] = []
+async def _invoke_planner(messages: list[BaseMessage], config: RunnableConfig) -> _Plan:
+    return cast(
+        _Plan,
+        await _structured_invoke(
+            _Plan,
+            messages,
+            config,
+            role="planner",
+            max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
+        ),
+    )
+
+
+def _truncate_plan(steps: list[_PlannedStep]) -> tuple[list[_PlannedStep], list[str]]:
+    """Bound the plan at ``CHAT_ORCHESTRATOR_MAX_STEPS``, and clean up after the cut.
+
+    Returns the kept steps with every edge into a dropped step removed, plus a
+    note for ``run_errors`` when anything was cut. Repairing here keeps our own
+    truncation from reaching :func:`_plan_problems` as a dangling reference
+    (AGT-020).
+    """
+    limit = max(1, settings.CHAT_ORCHESTRATOR_MAX_STEPS)
+    if len(steps) <= limit:
+        return list(steps), []
+    kept = steps[:limit]
+    dropped = {step.id for step in steps[limit:]}
+    trimmed = [
+        step.model_copy(update={"depends_on": [d for d in step.depends_on if d not in dropped]}) for step in kept
+    ]
+    return trimmed, [f"Plan truncated to the first {limit} steps; {len(dropped)} further step(s) were discarded."]
+
+
+def _plan_problems(planned: list[_PlannedStep]) -> list[str]:
+    """Everything structurally wrong with the graph the planner returned.
+
+    Duplicate or empty ids, self-edges, references to steps outside the plan,
+    and any step a ready-set pass can never reach. Empty means a valid DAG. The
+    caller replans once on a non-empty result and only then repairs (AGT-020).
+    """
+    problems: list[str] = []
+    ids: set[str] = set()
+    for index, step in enumerate(planned):
+        step_id = str(step.id or "").strip()
+        if not step_id:
+            problems.append(f"Step {index + 1} has no id.")
+        elif step_id in ids:
+            problems.append(f"Duplicate step id '{step_id}'.")
+        else:
+            ids.add(step_id)
+
+    edges: dict[str, set[str]] = {}
     for step in planned:
+        step_id = str(step.id or "").strip()
+        if not step_id or step_id in edges:
+            continue
+        resolved: set[str] = set()
+        for dep in step.depends_on:
+            if dep == step_id:
+                problems.append(f"Step '{step_id}' depends on itself.")
+            elif dep not in ids:
+                problems.append(f"Step '{step_id}' depends on '{dep}', which is not a step in this plan.")
+            else:
+                resolved.add(dep)
+        edges[step_id] = resolved
+
+    # Only the edges that actually resolve, so a dangling reference is reported
+    # once as what it is rather than a second time as an imaginary cycle.
+    blocked = _never_runnable(edges)
+    if blocked:
+        problems.append(
+            "Steps " + ", ".join(sorted(blocked)) + " can never run: they are in, or wait on, a dependency cycle."
+        )
+    return problems
+
+
+def _never_runnable(edges: dict[str, set[str]]) -> set[str]:
+    """Ids that no ready-set pass ever reaches -- the cycles and what waits on them.
+
+    The closure :func:`_runnable_steps` computes one batch at a time, run to
+    completion; whatever is left over is what the dispatcher would leave pending
+    forever.
+    """
+    pending = {step_id: set(deps) for step_id, deps in edges.items()}
+    done: set[str] = set()
+    progressed = True
+    while pending and progressed:
+        progressed = False
+        for step_id, deps in list(pending.items()):
+            if deps <= done:
+                done.add(step_id)
+                pending.pop(step_id)
+                progressed = True
+    return set(pending)
+
+
+def _replan_message(planned: list[_PlannedStep], problems: list[str]) -> str:
+    # Ids and edges only: the goals are already in the model's context, and a
+    # goal is where graph text would have reached the plan.
+    graph = _truncate_text(
+        "\n".join(f"- {step.id}: depends_on={list(step.depends_on)}" for step in planned),
+        2000,
+    )
+    return (
+        "That plan's dependency graph is not valid, so as written it cannot be executed:\n"
+        + "\n".join(f"- {problem}" for problem in problems)
+        + "\n\nThe graph you returned was:\n"
+        + graph
+        + "\n\nRewrite the whole plan for the same request, keeping the intent, so that depends_on"
+        " forms a directed acyclic graph: unique ids, every depends_on entry the id of a different"
+        " step in this same plan, no step depending on itself, and no cycles. If two steps each seem"
+        " to need the other's output, that is one step, or a third step that both feed."
+    )
+
+
+async def _replan_invalid_graph(
+    planned: list[_PlannedStep],
+    problems: list[str],
+    planner_messages: list[BaseMessage],
+    config: RunnableConfig,
+) -> tuple[list[_PlannedStep], list[str]]:
+    """Ask once for a valid graph, and report whichever way it goes.
+
+    Returns the steps to use and the diagnostics for ``run_errors``. Exactly one
+    retry; if it is also invalid its steps are kept anyway and :func:`_init_plan`
+    repairs them, rather than falling back to a single step (AGT-020).
+    """
+    first = "The planner returned an invalid dependency graph: " + "; ".join(problems)
+    logger.warning("chat planner: invalid plan graph, replanning once (%s)", "; ".join(problems))
+    try:
+        retry = await _invoke_planner(
+            [*planner_messages, HumanMessage(content=_replan_message(planned, problems))], config
+        )
+    except BudgetExceeded as exc:
+        controller = _budget_controller(config)
+        if controller is not None:
+            controller.begin_finalization(str(exc))
+        return planned, [f"{first}. Replanning was not possible: {exc}. The graph was repaired instead."]
+    except Exception as exc:
+        logger.warning("chat planner: replanning after an invalid graph failed", exc_info=True)
+        return planned, [f"{first}. Replanning failed: {_safe_exception_text(exc)}. The graph was repaired instead."]
+
+    retried, notes = _truncate_plan(retry.steps)
+    if not retried:
+        return planned, [f"{first}. Replanning returned no steps. The graph was repaired instead.", *notes]
+    remaining = _plan_problems(retried)
+    if remaining:
+        return retried, [
+            f"{first}. The replanned graph was also invalid: " + "; ".join(remaining) + ". It was repaired instead.",
+            *notes,
+        ]
+    return retried, [f"{first}. It was replanned.", *notes]
+
+
+def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
+    """Materialize the plan, forcing it into a DAG whatever it arrived as.
+
+    Unconditional, because everything downstream -- the ready set, the retry
+    cycle, the budget divisor -- assumes a graph that terminates. Dangling and
+    self edges are dropped, duplicate ids renamed, cycles cut. Repair is the
+    last line, not the first: see :func:`_plan_problems` and AGT-020.
+    """
+    ids = _unique_ids(planned)
+    known = set(ids)
+    edges: dict[str, list[str]] = {}
+    for step_id, step in zip(ids, planned, strict=True):
+        # Dangling references and self-edges cannot be honoured at all.
+        edges[step_id] = [dep for dep in step.depends_on if dep in known and dep != step_id]
+    edges = _break_cycles(edges, ids)
+
+    plan: list[dict[str, Any]] = []
+    for step_id, step in zip(ids, planned, strict=True):
         plan.append(
             {
-                "id": step.id,
+                "id": step_id,
                 "goal": step.goal,
-                # Drop dangling dependencies so a bad reference can't deadlock
-                # the runnable-step selection.
-                "depends_on": [dep for dep in step.depends_on if dep in ids and dep != step.id],
+                "depends_on": edges[step_id],
                 "suggested_tools": list(step.suggested_tools),
                 "action_kind": step.action_kind,
                 "required_action": step.required_action,
@@ -736,6 +924,41 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
             }
         )
     return plan
+
+
+def _unique_ids(planned: list[_PlannedStep]) -> list[str]:
+    """One id per step, positionally aligned with *planned*.
+
+    A repeated or empty id is renamed rather than dropped, so no step is lost.
+    An edge naming the id resolves to the first step that claimed it.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+    for index, step in enumerate(planned):
+        candidate = str(step.id or "").strip() or f"s{index + 1}"
+        if candidate in seen:
+            suffix = 2
+            while f"{candidate}-{suffix}" in seen:
+                suffix += 1
+            candidate = f"{candidate}-{suffix}"
+        seen.add(candidate)
+        ids.append(candidate)
+    return ids
+
+
+def _break_cycles(edges: dict[str, list[str]], order: list[str]) -> dict[str, list[str]]:
+    """Cut the fewest edges that make the graph runnable, in plan order.
+
+    Frees the earliest step of each cycle, which makes its dependents ready in
+    turn, so one cut usually resolves a whole cycle.
+    """
+    resolved = {step_id: list(deps) for step_id, deps in edges.items()}
+    while True:
+        blocked = _never_runnable({step_id: set(deps) for step_id, deps in resolved.items()})
+        if not blocked:
+            return resolved
+        head = next(step_id for step_id in order if step_id in blocked)
+        resolved[head] = [dep for dep in resolved[head] if dep not in blocked]
 
 
 def _plan_summary(plan: list[dict[str, Any]]) -> str:
@@ -995,6 +1218,7 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
 
     runnable = _runnable_steps(plan)
     if not runnable:
+        results = _fail_unreachable_steps(plan, results)
         _refresh_remaining_estimate(controller, plan)
         return {"plan": plan, "step_results": results, "iteration": iteration, **_budget_state(config)}
 
@@ -1170,8 +1394,7 @@ def _grant_for(
     if remaining is None:
         hard = floor
     else:
-        outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
-        share = remaining // max(1, outstanding, batch_size)
+        share = remaining // _budget_divisor(plan, batch_size)
         # Never more than an equal split of what is left, however generous the
         # planner's estimate was: the floor is a fair share's replacement when
         # there is no budget at all, not a licence to exceed one.
@@ -1179,23 +1402,68 @@ def _grant_for(
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
     soft = max(1, hard - int(hard * reserve_ratio))
     ledger = controller.snapshot() if controller is not None else {}
+    # Cost and calls follow the same schedule divisor as tokens, so a step at a
+    # bottleneck is not rationed as though the steps queued behind it were
+    # running beside it (AGT-020).
+    divisor = _budget_divisor(plan, batch_size)
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
         # Zero on either of these means "no limit configured", and it has to
         # travel as zero rather than as a share of zero.
-        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", batch_size),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", batch_size)),
+        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor)),
     )
 
 
-def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, batch_size: int) -> float:
-    """An equal split of one budget dimension's remainder, or 0 when unlimited."""
+def _remaining_waves(plan: list[dict[str, Any]]) -> int:
+    """How many more dispatcher passes the unfinished part of the plan needs.
+
+    The dispatcher's own arithmetic: take the ready set, run at most
+    ``CHAT_ORCHESTRATOR_MAX_PARALLEL`` of it, repeat. Steps in flight count as
+    the current wave, so the result always includes the batch being granted.
+    """
+    limit = max(1, settings.CHAT_ORCHESTRATOR_MAX_PARALLEL)
+    outstanding = {step["id"] for step in plan if step.get("status") not in ("passed", "skipped")}
+    pending = {
+        step["id"]: {dep for dep in (step.get("depends_on") or []) if dep in outstanding}
+        for step in plan
+        if step["id"] in outstanding
+    }
+    waves = 0
+    while pending:
+        ready = [step_id for step_id, deps in pending.items() if not deps]
+        if not ready:
+            # A cycle: impossible for a validated plan, and not this function's
+            # job to resolve. Count what is left as one more wave rather than
+            # spinning.
+            return waves + 1
+        waves += 1
+        for step_id in ready[:limit]:
+            pending.pop(step_id)
+            for deps in pending.values():
+                deps.discard(step_id)
+    return max(1, waves)
+
+
+def _budget_divisor(plan: list[dict[str, Any]], concurrent: int) -> int:
+    """How many step-slices what the run has left must still cover.
+
+    Each remaining wave gets an equal share of what is left, and the steps in a
+    wave split that share -- so the denominator is the schedule, not the step
+    count. For a chain and for a single flat batch the two agree; they differ
+    where the graph has depth (AGT-020).
+    """
+    return max(1, _remaining_waves(plan) * max(1, concurrent))
+
+
+def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int) -> float:
+    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited."""
     limit = float(ledger.get(limit_key) or 0.0)
     if limit <= 0:
         return 0.0
     remaining = max(0.0, limit - float(ledger.get(spent_key) or 0.0))
-    return remaining / max(1, batch_size)
+    return remaining / max(1, divisor)
 
 
 def _trimmed_plan(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1509,6 +1777,53 @@ def _runnable_steps(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return runnable
 
 
+def _fail_unreachable_steps(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Record why a step that will never run never ran.
+
+    Called when nothing is runnable and nothing is in flight: each remaining
+    pending step is failed with the dependency that stopped short, so it reaches
+    ``_terminal_errors`` instead of vanishing from the plan the synthesizer
+    answers from (AGT-020).
+    """
+    if any(step["status"] in ("ran", "awaiting") for step in plan):
+        # Work is still in flight; those dependents are blocked, not unreachable.
+        return results
+    by_id = {step["id"]: step for step in plan}
+    for step in plan:
+        if step["status"] != "pending":
+            continue
+        unmet = [
+            f"{dep} ({by_id[dep]['status']})" if dep in by_id else f"{dep} (unknown step)"
+            for dep in (step.get("depends_on") or [])
+            if by_id.get(dep, {}).get("status") != "passed"
+        ]
+        step["status"] = "failed"
+        step["no_retry"] = True
+        reason = (
+            "Step never ran: it depends on " + ", ".join(unmet) + ", which did not complete."
+            if unmet
+            else "Step never ran: nothing in the plan could make it runnable."
+        )
+        prior = next((result for result in results if result["step_id"] == step["id"]), None)
+        results = _merge_results(
+            results,
+            [
+                {
+                    "step_id": step["id"],
+                    "goal": step["goal"],
+                    "output": "",
+                    "tools_used": [],
+                    # An earlier attempt's findings stay; only the reason is new
+                    # (AGT-012).
+                    **(prior or {}),
+                    "execution_error": reason,
+                    "verify_reason": reason,
+                }
+            ],
+        )
+    return results
+
+
 def _budget_stop_result(
     step: dict[str, Any],
     results: list[dict[str, Any]],
@@ -1684,35 +1999,48 @@ def _looks_stuck(novelty: "deque[bool]") -> bool:
     return len(novelty) == novelty.maxlen and not any(novelty)
 
 
+@dataclass(frozen=True)
+class _StepThresholds:
+    """What one step may spend before it converges, and before it is stopped.
+
+    Both dimensions, because a run may be budgeted on either (AGT-022). A
+    dimension left at ``0`` does not bound the step.
+    """
+
+    soft_tokens: int
+    ceiling_tokens: int
+    soft_cost_usd: float = 0.0
+    ceiling_cost_usd: float = 0.0
+
+
 def _step_thresholds(
     step: dict[str, Any],
     plan: list[dict[str, Any]],
     controller: BudgetController | None,
     step_budget: int,
-) -> tuple[int, int]:
+) -> _StepThresholds:
     """How much this step may spend, itself and everything it delegates to.
 
-    Derived from the run budget rather than the planner's complexity label. The
-    label is a guess made before any work happens and has no relationship to how
-    much sandbox delegation a goal implies: a step that queried eight CVEs and
-    their exposure was labelled "small" and cut at 4,000 x 12, on a question the
-    successful configuration answered using roughly 80,000 per step. Raising the
-    multiplier only moves the wall to the next mislabelled step.
+    A share of what the run has left, divided by the schedule still to run
+    (:func:`_budget_divisor`), so no step starves its siblings. Computed for
+    tokens and for cost independently, and whichever binds first stops the step.
+    The complexity estimate is a floor on the token share, so a trivial step
+    cannot claim a whole share it will never use; a run with no token limit gets
+    no token bound at all rather than that floor, leaving cost to do the work.
 
-    A share of what the run has left, divided between the steps still to finish,
-    states the actual purpose directly: no step may starve its siblings. It also
-    tracks CHAT_RUN_TOKEN_BUDGET automatically, instead of needing a second
-    constant retuned whenever that one changes. The complexity estimate stays as
-    a floor so a trivial step cannot claim a whole share it will never use.
+    Derived from the run budget rather than the planner's complexity label,
+    which is a guess made before any work happens: AGT-017 and AGT-022.
     """
     floor = int(step_budget * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN))
     if controller is None:
-        return floor, floor
+        return _StepThresholds(soft_tokens=floor, ceiling_tokens=floor)
     remaining = controller.remaining_normal_tokens
-    if remaining is None:
-        return floor, floor
-    outstanding = sum(1 for item in plan if item.get("status") not in ("passed", "skipped"))
-    soft = max(floor, remaining // max(1, outstanding))
+    remaining_cost = controller.remaining_normal_cost_usd
+    if remaining is None and remaining_cost is None:
+        return _StepThresholds(soft_tokens=floor, ceiling_tokens=floor)
+    # The concurrent width is the batch in flight; see ``_budget_divisor``.
+    concurrent = sum(1 for item in plan if item.get("status") == "ran") or len(_runnable_steps(plan))
+    divisor = _budget_divisor(plan, concurrent)
     # How far past its fair share a step may go before it is stopped outright.
     # At 1.0 the share is itself the hard cut; large values let a step use
     # everything the run can spend outside its finalization reserve. Between the
@@ -1720,7 +2048,20 @@ def _step_thresholds(
     # a fair share when no sibling is contending rather than being killed
     # mid-work and handing the verifier a truncated summary to reject.
     multiple = max(1.0, settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE)
-    return soft, max(soft, min(remaining, int(soft * multiple)))
+    soft_tokens = ceiling_tokens = 0
+    if remaining is not None:
+        soft_tokens = max(floor, remaining // divisor)
+        ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
+    soft_cost = ceiling_cost = 0.0
+    if remaining_cost is not None:
+        soft_cost = remaining_cost / divisor
+        ceiling_cost = max(soft_cost, min(remaining_cost, soft_cost * multiple))
+    return _StepThresholds(
+        soft_tokens=soft_tokens,
+        ceiling_tokens=ceiling_tokens,
+        soft_cost_usd=soft_cost,
+        ceiling_cost_usd=ceiling_cost,
+    )
 
 
 async def _run_worker_step_with_session(step: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
@@ -1758,7 +2099,7 @@ async def _run_worker_step(
     writer: Any = None,
     skill_tools: list[chat_graph.Tool] | None = None,
     skill_prompts: list[chat_graph.Prompt] | None = None,
-    thresholds: tuple[int, int] | None = None,
+    thresholds: _StepThresholds | None = None,
     summary_model: Any = None,
 ) -> dict[str, Any]:
     """Run one plan step as an isolated sub-agent; return its result dict.
@@ -1951,7 +2292,8 @@ async def _run_worker_step(
     # from a coarse complexity label: degrading at the estimate is cheap if it
     # was low, whereas stopping there would kill legitimate work. The ceiling is
     # what keeps one step from spending a whole run's budget.
-    step_soft, step_ceiling = thresholds or _step_thresholds(step, plan, controller, step_budget)
+    limits = thresholds or _step_thresholds(step, plan, controller, step_budget)
+    step_soft, step_ceiling = limits.soft_tokens, limits.ceiling_tokens
     # Bound the step in the controller rather than by counting locally. Local
     # counters only see this loop's own turns, so a step that delegates to a
     # sandbox sub-agent -- which reserves against the controller directly, far
@@ -1960,7 +2302,13 @@ async def _run_worker_step(
     # sibling's spend to this one.
     budget_scope = f"worker:{step_id}"
     if controller is not None:
-        controller.open_scope(budget_scope, step_ceiling, soft_tokens=step_soft)
+        controller.open_scope(
+            budget_scope,
+            step_ceiling,
+            soft_tokens=step_soft,
+            ceiling_cost_usd=limits.ceiling_cost_usd,
+            soft_cost_usd=limits.soft_cost_usd,
+        )
     chat_budget.set_current_budget_scope(budget_scope)
     while action_limit is None or action_count < action_limit:
         # Worker turns never stream user-visible tokens (writer=None); only the
@@ -1968,15 +2316,22 @@ async def _run_worker_step(
         step_spend = (
             controller.scope_spend(budget_scope) if controller is not None else step_input_tokens + step_output_tokens
         )
-        if step_spend >= step_ceiling:
+        capped = (
+            controller.scope_exhausted(budget_scope)
+            if controller is not None
+            else step_ceiling > 0 and step_spend >= step_ceiling
+        )
+        if capped:
             # Leave the loop with tool results but no final text, which is the
             # condition the summary pass below already handles: it asks the
             # worker to state what it found and what remains.
             logger.info(
-                "chat orchestrator: step %s stopped at its token ceiling (%d >= %d)",
+                "chat orchestrator: step %s stopped at its budget ceiling (%d/%d tokens, $%.4f/$%.4f)",
                 step_id,
                 step_spend,
                 step_ceiling,
+                controller.scope_cost_spend(budget_scope) if controller is not None else 0.0,
+                limits.ceiling_cost_usd,
             )
             budget_capped = True
             break

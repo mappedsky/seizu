@@ -4215,3 +4215,45 @@ async def test_a_plain_answer_drops_both_reasoning_shapes():
 
     assert "thinking_blocks" not in result.additional_kwargs
     assert "reasoning_content" not in result.additional_kwargs
+
+
+async def test_structured_output_reserves_from_observation_not_the_ceiling():
+    """A structured call books what calls of its phase emit, bounded by the ceiling.
+
+    Covers the reservation the planner and router make; the run's admission
+    control sums it across everything in flight (AGT-021).
+    """
+    from reporting.services.chat_budget import BudgetController, initial_budget_ledger
+
+    class _Decision(BaseModel):
+        ok: bool
+
+    class _Structured:
+        async def ainvoke(self, _messages, config=None):
+            return _Decision(ok=True)
+
+    class _Model:
+        def with_structured_output(self, _schema):
+            return _Structured()
+
+    controller = BudgetController(initial_budget_ledger())
+    reserved: list[int] = []
+    original = controller.reserve
+
+    async def _record(**kwargs):
+        reserved.append(int(kwargs["estimated_output_tokens"]))
+        return await original(**kwargs)
+
+    controller.reserve = _record  # type: ignore[method-assign]
+    config = {"configurable": {"budget_controller": controller}}
+
+    for _ in range(4):
+        await chat_graph._invoke_structured_output(
+            _Model(), _Decision, [HumanMessage(content="x")], config, phase="router", max_output_tokens=32_768
+        )
+
+    # First call takes the cold-start seed, never the 32,768 ceiling; the rest
+    # track the handful of tokens `{"ok": true}` actually costs.
+    assert reserved[0] == settings.CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS
+    assert reserved[-1] < 1_000
+    assert controller.snapshot()["phases"]["router"]["llm_calls"] == 4

@@ -583,6 +583,266 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-022 — A run is budgeted in cost; tokens are the backstop
+
+**Applies to:** `chat_budget.BudgetController.open_scope` / `scope_exhausted` /
+`scope_cost_spend` / `remaining_normal_cost_usd` / `_authorize_locked`,
+`chat_orchestrator._StepThresholds` / `_step_thresholds` / `_grant_for` /
+`_dimension_share`, `chat_step_worker`; `CHAT_RUN_COST_BUDGET_USD`,
+`CHAT_RUN_TOKEN_BUDGET`
+
+`CHAT_RUN_COST_BUDGET_USD` is the limit an operator tunes. It bounds the run,
+and a share of it bounds each plan step. `CHAT_RUN_TOKEN_BUDGET` is the backstop
+for a model LiteLLM cannot price, defaulted high (2,000,000) so that cost
+normally binds first on a model it can.
+
+**Why cost is the right denomination.** Tokens vary about a hundredfold in price
+across the models LiteLLM reaches, and a run that crosses its soft limit
+switches to `CHAT_LLM_ECONOMY_MODEL` and so changes its own token price
+part-way through — a token ceiling therefore bounds spend only for one model at
+a time, and has to be retuned for every model change. Dollars are what a
+"runaway" actually is.
+
+**Measured, on the run that prompted this** ([AGT-021](#agt-021), run B): a
+four-step turn exhausted its 400,000-token budget at 88% while spending **5.6%
+of the cost limit** — $0.056 of $1.00. The token ceiling was not protecting
+anything; it was ending useful work at an arbitrary point that happened to be
+denominated in the wrong unit.
+
+**Enabling cost was not enough on its own.** Per-step fair-share
+(`_step_thresholds`, `open_scope`) was token-only, so raising the token ceiling
+to let cost bind would have removed step-level bounding entirely: one step could
+spend the whole run's money while every token check passed. A scope therefore
+now carries a cost ceiling and cost spend alongside the token pair, and
+`scope_exhausted` / `scope_soft_limit_reached` are true when **either** binds.
+The worker loop asks the controller rather than comparing tokens itself.
+
+**A dimension left at zero does not bound.** `_step_thresholds` used to return
+the complexity floor when `remaining_normal_tokens` was `None`, which meant a
+run deliberately budgeted on cost had every step capped at a guess made before
+any work happened (the thing [AGT-017](#agt-017) removed). It now returns *no*
+token bound in that case and lets cost do the work; the floor applies only when
+neither dimension is budgeted.
+
+**The same schedule divisor everywhere.** Cost and call grants for a distributed
+step were an equal split by batch size while tokens used the wave-aware divisor
+([AGT-020](#agt-020)); `_dimension_share` now takes the divisor, so all three
+dimensions slice a bottleneck the same way.
+
+**What this does not change.** The distributed grant is still a hard cut
+(AGT-018) — it now carries a cost ceiling as well as a token one. Contention on
+the cost dimension waits exactly as it does on tokens (AGT-021). And an unpriced
+model is still bounded, by the token backstop, which is why that default rose
+rather than going to zero.
+
+### Verified on a real turn
+
+The same four-step request, run with a deliberately tight cost budget ($0.03)
+and the 2,000,000-token backstop:
+
+```
+status : budget_exhausted
+reason : Step worker:s4 reached its share of the run cost budget ($0.0056).
+cost   : $0.0290 / $0.03      tokens : 89,084 / 2,000,000
+per-step ceilings: tokens=529,584   cost=$0.0056 (soft $0.0019)
+```
+
+Every worker scope was handed both ceilings, **cost** was what stopped a step,
+and the run ended on cost at 4.5% of its token backstop — the inverse of
+[AGT-021](#agt-021)'s run B, which died on tokens at 5.6% of its cost limit. The
+run still delivered a 3,397-character partial answer, so the finalization
+reserve behaved as [AGT-012](#agt-012) requires.
+
+## AGT-021 — A reservation is an authorization, and contention is not exhaustion
+
+**Applies to:** `chat_budget.BudgetController.reserve` / `_authorize_locked` /
+`projected_output_tokens`, `chat_graph._run_llm_tool_turn` and
+`_structured_decision`, `mcp_builtins/sandbox.py` `ainvoke`;
+`CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS`, `CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY`,
+`CHAT_BUDGET_CONTENTION_WAIT_SECONDS`, `CHAT_RUN_COST_BUDGET_USD`
+
+Three changes to the same mechanism, which together were what made the budget
+bind on *useful* work — the failure [AGT-017](#agt-017) named but only half
+fixed.
+
+**1. Reserve what a call will emit, not what it is allowed to emit.** Every call
+booked `chat_context.max_output_tokens(model)` — 32,768 under the default
+`CHAT_LLM_MAX_OUTPUT_TOKENS_CAP` — as if it would be spent, and
+`_authorize_locked` summed that fiction across every call in flight, so parallel
+steps reserved most of a run's spendable budget before emitting a token.
+
+Measured with `scripts/budget_probe.py` on `deepseek-v4-pro`, against that same
+32,768 ceiling:
+
+| phase | actual output | the old reservation was |
+|-------|---------------|-------------------------|
+| router | 43, 46 tokens | **762×** the truth |
+| planner | 7,490 then 2,779 tokens | 4.4×, then 11.8× |
+
+So the error is not a uniform margin — it is enormous for the many small calls
+(router, verifier, and every worker and sandbox call that returns a short
+result) and modest for the few large ones. Note also that two identical planner
+calls differed threefold: an estimate has to carry headroom, which is what
+`CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY` is.
+
+`projected_output_tokens` now keys on the phase
+*family* (`worker:s1` and `worker:s2` share an estimate; a sandbox sub-agent
+keeps its own) and returns an EWMA of observed output times a safety multiple,
+bounded below by 256 and above by the model's real ceiling, seeded by
+`CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS` for the first call of a kind. A reservation
+only has to be an honest authorization; committed spend is exact, so the ledger
+self-corrects on every return and an outlier overshoots into the finalization
+reserve, which is what that reserve is for. The cold-start seed is deliberately
+allowed to *under*-reserve — the probe shows the planner's first call at 0.5× —
+for the same reason: one call's error is corrected the moment it commits.
+
+The two call paths were wrong in *opposite* directions, which is how it stayed
+hidden. The sandbox — measured at 69–84% of a delegating turn's usage — reserved
+`CHAT_LLM_MAX_TOKENS`, which defaults to `0` since AGT-019, so the biggest
+spender reserved no output at all while the smaller one reserved 32k it would
+never use.
+
+**2. A call refused for contention waits; only committed spend ends a run.**
+`_authorize_locked` judged every dimension on committed spend *plus* all
+in-flight estimates, and failing it called `begin_finalization` — which nothing
+ever reverses. A burst of concurrency, which is temporary, was therefore recorded
+as exhaustion, which is permanent, and `_dispatch_batch` then skipped every step
+the plan had left. **Going wider made a run likelier to abandon itself.** The
+check now separates the two: committed spend over the limit raises and finalizes
+as before; in-flight estimates over the limit return a reason, and `reserve`
+waits on a condition until a reservation commits or is released, re-authorizing
+against the actuals. The same applies to a step's scope ceiling, where a step's
+own parallel tool calls contend constantly.
+
+*The call count is deliberately exempt.* A reservation that commits raises
+`llm_calls` by exactly what it removes from the in-flight count, so waiting
+cannot change the projection. It stays a hard limit.
+
+**3. Cost is the runaway guard, and now has a default** (`$2.00` per run).
+AGT-017 already said a cost ceiling "remains the outer guard against genuine
+runaway, and is the one an operator should set" — and it shipped disabled, which
+left the token ceiling doing runaway prevention it is unsuited for: tokens vary
+~100× in price across models, and a run that switches to
+`CHAT_LLM_ECONOMY_MODEL` changes its own token price mid-run.
+
+**What this does not change.** The distributed grant stays a hard cut — AGT-018
+depends on slices being non-overlapping, and a worker in another process has no
+controller to wait on. Loop detection stays the thing that stops useless work
+(AGT-017); this only stops the budget refusing work it can afford.
+
+### Measured on full orchestrated turns
+
+Two headless turns on `deepseek-v4-pro`, same multi-part request, four plan steps
+with sandbox delegation:
+
+| | run budget | outcome | committed | cost | contention |
+|---|---|---|---|---|---|
+| A | 2,000,000 | completed, mode `normal` | 272,341 tokens, 41 calls | $0.049 | 0 |
+| B | 400,000 (the default) | `budget_exhausted`, partial answer | 350,937 tokens, 36 calls | $0.056 | 0 |
+
+Per-phase reserved-vs-actual output in run B totalled **2.4x** (80,588 booked,
+32,981 emitted), against a flat **32,768 per call** under the old sizing — about
+fifteen times less budget booked against output that never happens. The worst
+remaining ratio is the router's first call (152x), which is the cold-start seed
+on a phase that emits ~50 tokens; every phase with a second call converges.
+
+**Contention never fired in either run**, which is the intended outcome rather
+than an untested path: honest reservations are what make collisions rare, and the
+wait exists so that the collisions which do happen are survivable. Its behaviour
+is covered by unit tests instead.
+
+Two findings for later work, both visible above. Run B exhausted its **tokens**
+at 88% of budget while spending **5.6% of the cost limit** — the token ceiling
+binds first and arbitrarily, which is the case for cost being the real guard. And
+B was cut on committed spend, not on accounting: this workload genuinely does not
+fit 400,000 tokens, so what remains of "the budget stops long work" is now a
+question of quantity.
+
+**Not done, and deliberately:** sizing the run budget from the plan's own
+estimates, and lease-and-renew per step (renewal keyed on progress rather than
+quantity). Run B is the evidence that the first of these is now the binding
+constraint.
+
+## AGT-020 — The plan is a validated DAG, and an invalid one is replanned once
+
+**Applies to:** `chat_orchestrator._Plan` / `_PlannedStep`, `_plan_problems`,
+`_init_plan`, `_truncate_plan`, `_replan_invalid_graph`,
+`_fail_unreachable_steps`, `_remaining_waves` / `_budget_divisor`;
+`CHAT_ORCHESTRATOR_MAX_STEPS`, `CHAT_ORCHESTRATOR_MAX_PARALLEL`
+
+`depends_on` is the edge set of a directed acyclic graph. The contract is stated
+in the planner's **schema** (the field description and the `_Plan` docstring,
+both of which travel to the model as JSON Schema) and in the prompt, and it is
+checked on the way in: unique non-empty ids, every edge naming a different step
+of the same plan, no self-edges, no cycles, and nothing left waiting on one.
+
+**Why validate at all: a cycle failed silently and answered anyway.** `_init_plan`
+dropped dangling references and self-edges, so those were survivable. A
+multi-node cycle (`s1 -> s2 -> s1`) was not: `_runnable_steps` waits for every
+dependency to reach `passed`, so no step is ever runnable, `route_from_dispatcher`
+finds nothing in `ran` and goes to the synthesizer, and the turn produces a
+confident answer from **zero** evidence with no error anywhere. Same failure
+class as the planner fallback in [AGT-019](#agt-019):
+the expensive machinery reports success while doing nothing.
+
+**Reject and replan, rather than repair first.** A repair is not neutral —
+dropping the edge that closes a cycle invents an execution order nobody chose,
+and dropping a dangling reference hands a step none of the data its goal assumes
+it has. So `_plan_problems` reports, and the planner is asked once more, shown
+its own graph and what is wrong with it. Once, not in a loop: a second planner
+call is a second paid call against the turn's budget, and a model that cannot
+honour the contract when shown its broken graph will not honour it on the fourth
+attempt.
+
+**Repair is the floor, not the single-step fallback.** If the replan is also
+invalid, `_init_plan` forces a DAG — dangling and self edges dropped, duplicate
+ids renamed rather than dropped (the step is real work; an edge naming the id
+binds to the first claimant either way), and cycles cut by freeing their
+*earliest* member in plan order. Falling back to one step instead would throw
+away every step the planner wrote in order to punish an edge. The single-step
+fallback stays where it was: for a planner that returned nothing usable at all.
+
+**Truncation is our edit, so it is repaired, not replanned.** Cutting the plan at
+`CHAT_ORCHESTRATOR_MAX_STEPS` orphans any edge pointing into the tail;
+`_truncate_plan` removes those edges itself, so the cut does not present as the
+planner having emitted a dangling reference and cost a replan.
+
+**An invalid plan never looks like a valid empty one.** Every diagnostic goes to
+`run_errors` (persisted in the assistant message's metadata) and into the plan
+detail's body on the stream. And when the dispatcher finds nothing runnable with
+nothing in flight, `_fail_unreachable_steps` fails each still-pending step with
+the dependency that stopped short, so it reaches `_terminal_errors` instead of
+disappearing from the plan the synthesizer answers from.
+
+**Budget slicing had to move from breadth to depth.** `_grant_for` and
+`_step_thresholds` divided what the run has left by the number of *outstanding
+steps*. That is the right denominator only for a chain or a single wide batch,
+where the step count and the schedule agree. A DAG breaks it: at a bottleneck one
+step runs alone while five wait behind it, and dividing by six starves the only
+step that is running — the steps behind it will divide their own remainder among
+themselves *concurrently* when their turn comes. `_budget_divisor` divides by
+`remaining waves × the width in flight` instead: each remaining dispatcher pass
+gets an equal share, and the steps within a pass split it. For a chain (`n`
+waves of one) and for a flat batch (one wave of `n`) this is exactly the old
+number; it differs only where the graph has depth.
+
+**`MAX_STEPS` (8) and `MAX_PARALLEL` (3) are unchanged, deliberately.** A wider
+batch is not free: a step's grant is a share of the run divided by the width in
+flight, so raising `MAX_PARALLEL` makes every concurrent step poorer in exactly
+the proportion it makes the batch wider, and a plan of 8 already reaches the
+whole 3-wide fleet slot in three passes. Raise `MAX_PARALLEL` with the run token
+budget, not on its own.
+
+**Measure shape with `scripts/plan_probe.py`**, which now prints the dispatch
+wave count beside the widest independent batch — the depth the budget divisor
+keys on. Measured on `deepseek/deepseek-v4-pro` with the DAG contract in place:
+a chained request ("find the highest-risk CVE, *then* trace it, *then* write it
+up") planned 5–6 steps one wave wide across three samples, and a request with
+independent parts planned 4–5 steps three wide, fanning into one answer step, in
+both samples. Neither shape produced an invalid graph, so the replan path costs
+nothing on the normal case. The second shape is exactly where the divisor
+changed: its lone first step is granted a third of the run rather than a fifth.
+
 ## AGT-019 — What a call may spend is derived from the model, never a constant
 
 **Applies to:** `reporting/services/chat_models.py`, `chat_graph.build_chat_model`
