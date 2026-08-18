@@ -133,6 +133,10 @@ def grant_ledger(
     grant = max(0, token_grant)
     return {
         **initial_budget_ledger(),
+        # Marks this ledger as one unit of work's slice rather than the run's
+        # own. A step that exhausts it has used its share; the run is elsewhere
+        # and knows nothing about it (AGT-025).
+        "is_grant": True,
         "enabled": grant > 0 or cost_grant_usd > 0 or llm_call_grant > 0,
         "token_limit": grant,
         "cost_limit_usd": max(0.0, cost_grant_usd),
@@ -364,6 +368,11 @@ class BudgetController:
     @property
     def mode(self) -> BudgetMode:
         return cast(BudgetMode, str(self._ledger.get("mode", "normal")))
+
+    @property
+    def is_grant(self) -> bool:
+        """Whether this ledger is one step's slice rather than the run's own."""
+        return bool(self._ledger.get("is_grant"))
 
     @property
     def degraded(self) -> bool:

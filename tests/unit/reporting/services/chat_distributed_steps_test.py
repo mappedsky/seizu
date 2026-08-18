@@ -617,3 +617,51 @@ async def test_a_distributed_step_carries_its_summary_model_too(mocker):
     assert invocation.model_spec.get("model_id")
     assert invocation.summary_model_spec.get("model_id")
     assert invocation.summary_model_spec["role"] == "worker_summary"
+
+
+def test_a_cost_budgeted_run_grants_tokens_without_a_ceiling(mocker):
+    """With no token ceiling to share, the grant must not fall back to the floor.
+
+    Measured: a run deliberately bounded by cost handed every distributed step a
+    hard 96,000-token cut derived from the planner's complexity label, and the
+    second stage of an expanded plan was stopped by it (AGT-022).
+    """
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    controller = BudgetController(
+        {
+            **initial_budget_ledger(),
+            "token_limit": 0,
+            "reserve_tokens": 0,
+            "cost_limit_usd": 2.0,
+            "reserve_cost_usd": 0.4,
+            "cost_usd": 0.0,
+        }
+    )
+    plan = [_step("s1"), _step("s2")]
+
+    grant = chat_orchestrator._grant_for(plan[0], plan, controller, len(plan))
+
+    assert controller.remaining_normal_tokens is None
+    assert grant.tokens == 0 and grant.soft_tokens == 0  # unbounded in tokens
+    assert grant.cost_usd > 0  # and bounded in the dimension that budgets it
+
+    ledger = grant_ledger(
+        token_grant=grant.tokens,
+        soft_token_grant=grant.soft_tokens,
+        cost_grant_usd=grant.cost_usd,
+        soft_cost_grant_usd=grant.soft_cost_usd,
+        llm_call_grant=grant.llm_calls,
+    )
+    step = BudgetController(ledger)
+    assert step.enabled and step.remaining_normal_tokens is None
+    assert step.remaining_normal_cost_usd is not None
+
+
+def test_a_grant_ledger_knows_it_is_a_slice_not_the_run():
+    """A distributed step runs *on* its grant, so that ledger finalizing is the
+    step using its share -- reported as `partial`, not as the run running out."""
+    run = BudgetController(initial_budget_ledger())
+    step = BudgetController(grant_ledger(token_grant=1_000, soft_token_grant=800, cost_grant_usd=0.0, llm_call_grant=0))
+
+    assert step.is_grant is True
+    assert run.is_grant is False

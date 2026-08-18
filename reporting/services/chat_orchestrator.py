@@ -1645,7 +1645,12 @@ def _grant_for(
         * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN)
     )
     remaining = controller.remaining_normal_tokens if controller is not None else None
-    if remaining is None:
+    if remaining is None and _cost_is_primary(controller):
+        # No token ceiling to share out: cost bounds the step, and falling back
+        # to the complexity floor here would impose a *hard* token cut on a run
+        # that deliberately has none (AGT-022).
+        hard = 0
+    elif remaining is None:
         hard = floor
     elif _cost_is_primary(controller):
         # Two different bounds live in this arithmetic: the *schedule* divisor
@@ -1663,7 +1668,7 @@ def _grant_for(
         # there is no budget at all, not a licence to exceed one.
         hard = min(max(floor, share), remaining // max(1, batch_size))
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
-    soft = max(1, hard - int(hard * reserve_ratio))
+    soft = max(1, hard - int(hard * reserve_ratio)) if hard else 0
     ledger = controller.snapshot() if controller is not None else {}
     # Cost and calls follow the same schedule divisor as tokens, so a step at a
     # bottleneck is not rationed as though the steps queued behind it were
@@ -2688,7 +2693,11 @@ async def _run_worker_step(
                 # its share" -- and a distributed step's controller is its own
                 # grant, so its finalization says nothing about the run
                 # (AGT-025).
-                step_share_only = bool(controller.scope_exhausted(budget_scope)) and not controller.finalizing
+                # On a grant, the controller *is* this step's slice, so its
+                # finalization says nothing about the run (AGT-018, AGT-025).
+                step_share_only = controller.is_grant or (
+                    bool(controller.scope_exhausted(budget_scope)) and not controller.finalizing
+                )
                 controller.begin_finalization(str(exc))
             break
         step_input_tokens += turn.input_tokens
