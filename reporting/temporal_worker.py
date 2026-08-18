@@ -16,7 +16,7 @@ from reporting import (
     settings,
     setup_logging,  # noqa:F401
 )
-from reporting.services import chat_schedules, session_reaper_schedule, workflow_schedules
+from reporting.services import chat_schedules, session_reaper_schedule, telemetry, workflow_schedules
 from reporting.temporal_workflows.activities import (
     build_code_workflow_input,
     check_configured_workflow_watch,
@@ -69,7 +69,12 @@ async def _run_worker() -> None:
     _bootstrap()
     async with chat_worker_resources():
         await scheduled_query_modules.load_modules()
-        client = await Client.connect(settings.TEMPORAL_ADDRESS, namespace=settings.TEMPORAL_NAMESPACE)
+        telemetry.configure()
+        client = await Client.connect(
+            settings.TEMPORAL_ADDRESS,
+            namespace=settings.TEMPORAL_NAMESPACE,
+            interceptors=telemetry.temporal_interceptors(),
+        )
         worker = Worker(
             client,
             task_queue=settings.TEMPORAL_TASK_QUEUE,

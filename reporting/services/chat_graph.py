@@ -43,6 +43,7 @@ from reporting.services import (
     mcp_runtime,
     report_store,
     sandbox_session,
+    telemetry,
 )
 from reporting.services.chat_budget import (
     BudgetExceeded,
@@ -1522,6 +1523,42 @@ async def _run_llm_tool_turn(
     system_prompt: str,
     messages: list[BaseMessage],
     tools: list[ChatToolSpec],
+    *args: Any,
+    phase: str = "worker",
+    **kwargs: Any,
+) -> LLMTurnResult:
+    """One model call, traced.
+
+    A wrapper rather than a span threaded through the body below: the call it
+    measures streams through a few hundred lines with several exits, and a
+    context manager here closes the span on all of them. The figures it records
+    are ones the result already carries (AGT-026).
+    """
+    with telemetry.span(
+        f"llm {phase}",
+        phase=phase,
+        role=phase.split(":")[0],
+        model=chat_context.model_name_of(model),
+        tool_count=len(tools),
+    ) as current:
+        result = await _run_llm_tool_turn_inner(model, system_prompt, messages, tools, *args, phase=phase, **kwargs)
+        telemetry.set_attributes(
+            current,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=result.cost_usd,
+            finish_reason=result.finish_reason or "",
+            provider_finish_reason=result.provider_finish_reason or "",
+            response=telemetry.content(message_text(result.message.content)),
+        )
+        return result
+
+
+async def _run_llm_tool_turn_inner(
+    model: ChatModel,
+    system_prompt: str,
+    messages: list[BaseMessage],
+    tools: list[ChatToolSpec],
     config: RunnableConfig,
     writer: Callable[[dict[str, Any]], None] | None = None,
     *,
@@ -1559,6 +1596,7 @@ async def _run_llm_tool_turn(
     messages = _fit_messages_to_window(model, system_prompt, messages, tool_schemas, max_output_tokens=output_ceiling)
     estimated_input = estimate_tokens(model, system_prompt, messages, tool_schemas)
     reservation = None
+    estimated_output = 0
     if controller is not None:
         estimated_output = controller.projected_output_tokens(phase, output_ceiling)
         reservation = await controller.reserve(

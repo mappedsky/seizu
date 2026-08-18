@@ -979,6 +979,22 @@ CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY = float_env("CHAT_BUDGET_OUTPUT_ESTIMATE_SAFE
 # failing; committed spend over a limit still stops the run immediately. 0 fails
 # fast (AGT-021).
 CHAT_BUDGET_CONTENTION_WAIT_SECONDS = float_env("CHAT_BUDGET_CONTENTION_WAIT_SECONDS", 30.0)
+# Tracing. Off unless an OTLP endpoint is set. Spans cover the turn, its
+# dispatch batches, each plan step and every model call, and carry the token,
+# cost and stop-reason figures the run already computes -- the one view that
+# spans the web service, the turn activity and the step activities it fans out
+# to. Any OTLP/HTTP collector works; LangSmith is one such endpoint
+# (https://<host>/otel/v1/traces with an x-api-key header), not a dependency.
+TELEMETRY_ENABLED = bool_env("TELEMETRY_ENABLED", True)
+TELEMETRY_OTLP_ENDPOINT = str_env("TELEMETRY_OTLP_ENDPOINT", "")
+# Comma-separated k=v pairs, for the collector's authentication.
+TELEMETRY_OTLP_HEADERS = str_env("TELEMETRY_OTLP_HEADERS", "")
+TELEMETRY_SERVICE_NAME = str_env("TELEMETRY_SERVICE_NAME", "seizu")
+# Whether spans carry prompts, results and tool output. Off by default: a trace
+# of this system contains graph rows and the user's own words, and exporting it
+# sends them wherever the collector is. Timings and token counts do not.
+TELEMETRY_RECORD_CONTENT = bool_env("TELEMETRY_RECORD_CONTENT", False)
+
 # Optional role-specific models. Empty values inherit CHAT_LLM_MODEL. The
 # economy model is selected for read-only worker/synthesis calls after the run
 # crosses its soft budget limit.

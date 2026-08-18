@@ -37,7 +37,7 @@ from reporting.routes import toolsets as toolsets_routes
 from reporting.routes import users as users_routes
 from reporting.routes import validate as validate_routes
 from reporting.routes import workflows as workflows_routes
-from reporting.services import oauth_client, report_store
+from reporting.services import oauth_client, report_store, telemetry
 from reporting.services.chat_graph import (
     close_chat_checkpoints,
     initialize_chat_checkpoints,
@@ -282,6 +282,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await report_store.initialize()
     if settings.CHAT_ENABLED:
         validate_chat_llm_config()
+        telemetry.configure()
         await initialize_chat_checkpoints()
     try:
         mcp_session_manager = getattr(app.state, "mcp_session_manager", None)
