@@ -130,17 +130,35 @@ Each step's share of the run budget is divided by the remaining dispatcher
 passes rather than by the number of steps left, so a step that runs alone at a
 bottleneck gets a whole pass's share.
 
+**A step can fan out over what an earlier step found.** Work that has to be done
+once per discovered thing — each CVE in a list, each repository in an
+organization — is planned as a single step that maps over the step producing the
+list. When that step finishes, it is replaced by one step per item, and those
+run in parallel like any other independent steps. A step whose collection comes
+back empty runs once, as written.
+
+`CHAT_ORCHESTRATOR_MAX_EXPANSION` (default 8) bounds how many steps one such
+step may become. A larger collection is cut to that many and the run reports the
+coverage it did not have; `0` turns expansion off.
+
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
+
+**The call ceiling follows the plan.** `CHAT_RUN_MAX_LLM_CALLS` is an emergency
+loop guard rather than a spend limit. It defaults to being derived from the
+plan's size, including after a step expands; set a positive value to pin it.
 
 **A run is budgeted in cost.** `CHAT_RUN_COST_BUDGET_USD` (default $2.00 per
 run) is the limit to tune: it bounds the run, and a share of it bounds each plan
-step. `CHAT_RUN_TOKEN_BUDGET` is a backstop for a model LiteLLM cannot price,
-set high enough (2,000,000) that cost normally binds first on a model it can —
-lower it to bound runs by tokens instead. Set the cost budget to `0` when
-pointing Seizu at a gateway or custom model whose pricing LiteLLM does not know,
-since an unpriced run never charges against it; the token backstop is then the
-only guard. Each step is bounded in whichever dimension is configured, and
-whichever binds first stops it.
+step. `CHAT_RUN_TOKEN_BUDGET` defaults to being **derived** — a priced model
+needs no token ceiling, since cost already bounds the run, and a model LiteLLM
+cannot price falls back to `CHAT_RUN_UNPRICED_TOKEN_BUDGET`. Set a positive
+value to bound runs by tokens instead. Each step is bounded in whichever
+dimension applies, and whichever binds first stops it.
+
+**A step's share comes out of the budget the run is bounded by.** With a cost
+budget set, each step gets a share of the *cost*; the token ceiling only bounds
+concurrent steps against each other. A step that uses up its own share is
+reported as a partial run rather than as the run running out of budget.
 
 **Concurrency throttles itself rather than ending the run.** A call is
 authorized against what the run has committed plus what is reserved by calls
@@ -422,7 +440,8 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_ORCHESTRATOR_MAX_STEPS` | `8` | Maximum steps the planner may emit for one turn. Steps past it are dropped, along with any dependency pointing into them. |
 | `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` | `4096` | Planner generation budget, kept separate so thinking models have room to emit the structured plan. |
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
-| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. A step's budget slice is divided by the width in flight, so raise this together with the run token budget rather than on its own. |
+| `CHAT_ORCHESTRATOR_MAX_EXPANSION` | `8` | Maximum steps one step may expand into when it maps over items an earlier step discovered; `0` disables expansion. |
+| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `8` | Independent steps dispatched concurrently in one batch. Matched to `CHAT_ORCHESTRATOR_MAX_EXPANSION`, so an expanded step's children run in one batch rather than several. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED` | `true` | Schedule each independent step of a batch as its own Temporal activity. Interactive turns only. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS` | `2` | Batches smaller than this run inside the turn's own process. |
@@ -434,11 +453,13 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAT_RUN_TOKEN_BUDGET` | `2000000` | Per-run token backstop, for models LiteLLM cannot price; `0` disables this dimension. Lower it to bound runs by tokens rather than cost. Includes sandbox sub-agent spend, typically 70-85% of a delegating turn. |
+| `CHAT_RUN_TOKEN_BUDGET` | `0` | Per-run token ceiling. `0` derives it: none at all when a cost budget is set and the model is priced, otherwise `CHAT_RUN_UNPRICED_TOKEN_BUDGET`. A positive value bounds runs by tokens instead. Includes sandbox sub-agent spend, typically 70-85% of a delegating turn. |
+| `CHAT_RUN_UNPRICED_TOKEN_BUDGET` | `2000000` | The backstop used when a cost budget is set but LiteLLM cannot price the model, so cost can never accrue. |
 | `CHAT_RUN_COST_BUDGET_USD` | `2.0` | Per-run estimated-cost budget in USD — the limit a run is meant to be tuned on, bounding both the run and each step's share of it; `0` disables this dimension (do that for a gateway or custom model whose pricing LiteLLM does not know). Cache-aware: input the provider served from its prompt cache is priced at the cache rate. See [Prompt caching and cost](#prompt-caching-and-cost). |
 | `CHAT_RUN_RESERVE_PERCENT` | `20` | Portion of the budget reserved for final summaries and synthesis. |
 | `CHAT_RUN_SOFT_LIMIT_PERCENT` | `75` | Threshold after which eligible work switches to the economy model. |
-| `CHAT_RUN_MAX_LLM_CALLS` | `64` | Emergency ceiling on LLM calls per run. |
+| `CHAT_RUN_MAX_LLM_CALLS` | `0` | Emergency ceiling on LLM calls per run. `0` derives it from the plan (`8 + CHAT_RUN_LLM_CALLS_PER_STEP` per step, recomputed as the plan grows); a positive value pins it. |
+| `CHAT_RUN_LLM_CALLS_PER_STEP` | `24` | Calls one plan step may make, for that derivation. Set this and `CHAT_RUN_MAX_LLM_CALLS` both to `0` to disable the dimension. |
 | `CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS` | `4096` | What a call is assumed to emit when its budget is reserved, before any call of its kind has returned. After that, the observed figure is used. |
 | `CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY` | `1.5` | Headroom over the observed average when reserving. |
 | `CHAT_BUDGET_CONTENTION_WAIT_SECONDS` | `30` | How long a call waits for in-flight reservations to settle when the budget has room but the room is spoken for; `0` fails fast instead. |

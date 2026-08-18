@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from collections import deque
 from dataclasses import dataclass, replace
@@ -138,6 +139,10 @@ def _budget_state(config: RunnableConfig) -> dict[str, Any]:
 def _refresh_remaining_estimate(controller: BudgetController | None, plan: list[dict[str, Any]]) -> None:
     if controller is None:
         return
+    # The call ceiling is derived from the plan, so it follows the plan growing
+    # when a step expands (AGT-024). Steps that have finished are counted: their
+    # calls were spent against the same ceiling.
+    controller.set_planned_steps(len(plan))
     unfinished = sum(
         int(step.get("estimated_tokens") or 0)
         for step in plan
@@ -165,6 +170,15 @@ class _PlannedStep(BaseModel):
             " edges must not form a cycle."
         ),
     )
+    map_over: str = Field(
+        default="",
+        description=(
+            "Set this to the id of a dependency when the step must be carried out separately for"
+            " each item that dependency discovers. The step is expanded into one step per item"
+            " once that dependency finishes, and the copies run in parallel. Leave empty for a"
+            " step that is done once."
+        ),
+    )
     suggested_tools: list[str] = Field(default_factory=list)
     action_kind: Literal["auto", "answer", "skill", "tool"] = "auto"
     required_action: str = ""
@@ -182,6 +196,12 @@ class _Plan(BaseModel):
     """
 
     steps: list[_PlannedStep] = Field(default_factory=list)
+
+
+class _MapItems(BaseModel):
+    """The things a mapped step must be carried out once for, one label each."""
+
+    items: list[str] = Field(default_factory=list)
 
 
 class _Verdict(BaseModel):
@@ -224,6 +244,14 @@ _PLANNER_PROMPT = (
     " parallel. Mark each step priority as required, supporting, or optional,"
     " and complexity as small, medium, or large. Do not invent tools or mark a"
     " live-data step as answer.\n"
+    "**When the same work must be done for each of several things an earlier step"
+    " finds, write ONE step and set map_over to that step's id.** It is expanded"
+    " into one step per item as soon as that step finishes, and the copies run in"
+    " parallel. Write its goal for a single item ('investigate the CVE', not"
+    " 'investigate each CVE'), and never write a step that loops over a"
+    " collection internally -- a loop inside one step cannot be parallelised and"
+    " is the slowest way to do the work. A step's map_over must also be one of"
+    " its depends_on.\n"
     "**The plan is a directed acyclic graph**, and depends_on is its edges."
     " Every step id must be unique; every depends_on entry must be the id of a"
     " different step in this same plan; a step must never list its own id; and"
@@ -326,6 +354,11 @@ def _step_contract(step: dict[str, Any]) -> str:
     data said, and can carry that data's text with them.
     """
     parts: list[str] = []
+    if step.get("map_item"):
+        parts.append(
+            f"This step covers exactly one item: {_truncate_text(str(step['map_item']), 200)}."
+            " Sibling steps cover the others, so do not gather or report on any of them."
+        )
     criteria = step.get("success_criteria") or ""
     if criteria:
         parts.append(f"Success criteria: {criteria}.")
@@ -801,6 +834,16 @@ def _plan_problems(planned: list[_PlannedStep]) -> list[str]:
                 resolved.add(dep)
         edges[step_id] = resolved
 
+    for step in planned:
+        step_id = str(step.id or "").strip()
+        source = str(step.map_over or "").strip()
+        if not source:
+            continue
+        if source == step_id:
+            problems.append(f"Step '{step_id}' maps over itself.")
+        elif source not in ids:
+            problems.append(f"Step '{step_id}' maps over '{source}', which is not a step in this plan.")
+
     # Only the edges that actually resolve, so a dangling reference is reported
     # once as what it is rather than a second time as an imaginary cycle.
     blocked = _never_runnable(edges)
@@ -902,7 +945,13 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
     edges: dict[str, list[str]] = {}
     for step_id, step in zip(ids, planned, strict=True):
         # Dangling references and self-edges cannot be honoured at all.
-        edges[step_id] = [dep for dep in step.depends_on if dep in known and dep != step_id]
+        deps = [dep for dep in step.depends_on if dep in known and dep != step_id]
+        source = str(step.map_over or "").strip()
+        if source in known and source != step_id and source not in deps:
+            # A step cannot map over output it does not wait for, so the edge is
+            # implied by map_over whether or not the planner wrote it.
+            deps.append(source)
+        edges[step_id] = deps
     edges = _break_cycles(edges, ids)
 
     plan: list[dict[str, Any]] = []
@@ -912,6 +961,7 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
                 "id": step_id,
                 "goal": step.goal,
                 "depends_on": edges[step_id],
+                "map_over": str(step.map_over or "").strip() if str(step.map_over or "").strip() in known else "",
                 "suggested_tools": list(step.suggested_tools),
                 "action_kind": step.action_kind,
                 "required_action": step.required_action,
@@ -1113,6 +1163,200 @@ def _prepare_retries(
     return plan, iteration + 1
 
 
+_EXPANSION_PROMPT = (
+    "You are given one step's result and the goal of a follow-up step that must be carried out"
+    " separately for each thing that result identifies. List those things, one short label each"
+    " -- an identifier, name or key that names exactly one of them (e.g. 'CVE-2024-3094',"
+    " 'acme/api-gateway'). Do not invent items the result does not contain, do not include"
+    " commentary, and do not repeat an item. If the result identifies nothing to iterate over,"
+    " return an empty list."
+)
+
+
+def _child_step_id(parent_id: str, item: str, taken: set[str]) -> str:
+    """A child's id, derived from the item it covers.
+
+    Derived from content rather than from position or a counter, because the
+    fan-out's idempotency key is built from the ids in a batch (AGT-018): ids
+    that move when a list is reordered would let the same batch be scheduled --
+    and paid for -- twice. A short digest disambiguates items that slugify the
+    same and keeps an id bounded whatever the item's length.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", item.strip().lower()).strip("-")[:24].strip("-")
+    digest = hashlib.sha256(item.strip().encode("utf-8")).hexdigest()[:6]
+    candidate = f"{parent_id}-{slug}-{digest}" if slug else f"{parent_id}-{digest}"
+    suffix = 2
+    while candidate in taken:
+        candidate = f"{parent_id}-{slug}-{digest}-{suffix}" if slug else f"{parent_id}-{digest}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+async def _expand_mapped_steps(
+    plan: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    config: RunnableConfig,
+    writer: Any,
+) -> list[str]:
+    """Materialize one step per item for every mapped step whose source is ready.
+
+    A plan is written before anything runs, so a step can only fan out over items
+    the *request* names. This is the one construct that produces graph structure
+    at run time: a step declaring ``map_over`` becomes N ordinary steps as soon
+    as the step it maps over passes, and from there the existing ready-set and
+    fan-out machinery carries them unchanged (AGT-023).
+
+    Mutates *plan* in place and returns diagnostics for ``run_errors``. A parent
+    that cannot be expanded -- no items, or the extraction failed -- runs as an
+    ordinary step instead, which is what the plan said before expansion existed.
+    """
+    limit = max(0, settings.CHAT_ORCHESTRATOR_MAX_EXPANSION)
+    if not limit:
+        return []
+    results_by_id = {result["step_id"]: result for result in results}
+    by_id = {step["id"]: step for step in plan}
+    notes: list[str] = []
+    for parent in list(plan):
+        source_id = str(parent.get("map_over") or "")
+        if not source_id or parent.get("status") != "pending":
+            continue
+        source = by_id.get(source_id)
+        if source is None or source.get("status") not in ("passed", "expanded"):
+            continue
+
+        if source.get("status") == "expanded":
+            # The source was itself mapped, so the items are already known and
+            # already one step each: chain 1:1 rather than re-deriving them, and
+            # let each child wait only for its own counterpart. A per-item edge
+            # is also what lets s3-for-X start while s3-for-Y's input is still
+            # running.
+            counterparts = [item for item in plan if item.get("map_parent") == source_id]
+            if not counterparts:
+                continue
+            _materialize(
+                plan,
+                by_id,
+                parent,
+                [(str(item.get("map_item") or item["id"]), [item["id"]]) for item in counterparts],
+                source_id,
+            )
+            _emit_plan(writer, plan)
+            continue
+
+        output = str((results_by_id.get(source_id) or {}).get("output") or "")
+        items: list[str] = []
+        if output.strip():
+            try:
+                extracted = cast(
+                    _MapItems,
+                    await _structured_invoke(
+                        _MapItems,
+                        [
+                            SystemMessage(content=_EXPANSION_PROMPT),
+                            HumanMessage(
+                                content=(
+                                    f"Follow-up step, to be done once per item: {parent.get('goal', '')}\n\n"
+                                    f"Result of step {source_id} ({source.get('goal', '')}):\n"
+                                    + untrusted_text_within(output, 8000)
+                                )
+                            ),
+                        ],
+                        config,
+                        role="planner",
+                        max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
+                    ),
+                )
+                items = [item.strip() for item in extracted.items if item and item.strip()]
+            except BudgetExceeded:
+                raise
+            except Exception as exc:
+                logger.warning("chat dispatcher: could not expand step %s", parent["id"], exc_info=True)
+                notes.append(
+                    f"Step '{parent['goal']}' could not be split per item ({_safe_exception_text(exc)});"
+                    " it was run as a single step."
+                )
+        # Deduplicated preserving order: two labels for one thing would run the
+        # same work twice and charge the run for both.
+        items = list(dict.fromkeys(items))
+        if len(items) > limit:
+            notes.append(
+                f"Step '{parent['goal']}' matched {len(items)} items; only the first {limit} were run"
+                " (CHAT_ORCHESTRATOR_MAX_EXPANSION)."
+            )
+            items = items[:limit]
+        if not items:
+            # Nothing to map over: the step still has to happen, so it runs as
+            # written rather than silently disappearing from the plan.
+            parent["map_over"] = ""
+            continue
+
+        _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
+        _emit_plan(writer, plan)
+    return notes
+
+
+def _materialize(
+    plan: list[dict[str, Any]],
+    by_id: dict[str, dict[str, Any]],
+    parent: dict[str, Any],
+    items: list[tuple[str, list[str]]],
+    source_id: str,
+) -> None:
+    """Replace *parent* with one step per item, in place.
+
+    Each item carries the extra dependencies that item's step needs -- empty when
+    the items were extracted from one output, and the counterpart step when the
+    source was itself expanded.
+    """
+    taken = set(by_id)
+    children: list[dict[str, Any]] = []
+    for item, extra_deps in items:
+        child_id = _child_step_id(str(parent["id"]), item, taken)
+        taken.add(child_id)
+        children.append(
+            {
+                **parent,
+                "id": child_id,
+                "goal": f"{parent.get('goal', '')} — for: {item}",
+                # Scoped to the item, because the verifier judges a step against
+                # this text and the parent's was written for the whole
+                # collection: a child covering one CVE was failed for not
+                # covering all four, and the run reported partial (AGT-023).
+                "success_criteria": (
+                    f"{parent['success_criteria']} Judged for {item} alone; sibling steps cover the others."
+                    if parent.get("success_criteria")
+                    else f"The result accomplishes this step's goal for {item} alone."
+                ),
+                # The item is the child's whole share of the collection, so it
+                # does not depend on -- or re-read -- the source's full output.
+                "depends_on": [dep for dep in (parent.get("depends_on") or []) if dep != source_id] + extra_deps,
+                "map_over": "",
+                "map_item": item,
+                "map_parent": parent["id"],
+                "status": "pending",
+            }
+        )
+    parent["status"] = "expanded"
+    index = plan.index(parent)
+    plan[index + 1 : index + 1] = children
+    by_id.update({child["id"]: child for child in children})
+    logger.info("chat dispatcher: expanded step %s into %d steps", parent["id"], len(children))
+
+
+def _emit_plan(writer: Any, plan: list[dict[str, Any]]) -> None:
+    _emit(
+        writer,
+        {
+            "kind": "plan",
+            "title": "Plan",
+            "status": "completed",
+            "steps": [{"id": step["id"], "goal": step["goal"], "depends_on": step["depends_on"]} for step in plan],
+            "body": _plan_summary(plan),
+        },
+        "plan",
+    )
+
+
 async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str, Any]:
     """Own the turn's sandbox and session memory around a batch of steps.
 
@@ -1216,11 +1460,24 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
     # nothing forward is the thing that was worthless, not the retry itself.
     plan, iteration = _prepare_retries(plan, results, iteration)
 
+    # Expansion happens here, not in the planner: the items only exist once the
+    # step they come from has run (AGT-023). Its children join the plan as
+    # ordinary steps, so everything below this line is unchanged by it.
+    expansion_notes = await _expand_mapped_steps(plan, results, config, writer)
+    if expansion_notes:
+        _refresh_remaining_estimate(controller, plan)
+
     runnable = _runnable_steps(plan)
     if not runnable:
         results = _fail_unreachable_steps(plan, results)
         _refresh_remaining_estimate(controller, plan)
-        return {"plan": plan, "step_results": results, "iteration": iteration, **_budget_state(config)}
+        return {
+            "plan": plan,
+            "step_results": results,
+            "iteration": iteration,
+            **_run_error_state(state, expansion_notes),
+            **_budget_state(config),
+        }
 
     batch = runnable[: max(1, settings.CHAT_ORCHESTRATOR_MAX_PARALLEL)]
     for step in batch:
@@ -1298,7 +1555,12 @@ async def _dispatch_batch(state: ChatState, config: RunnableConfig) -> dict[str,
     for step in batch:
         if merged_by_id.get(step["id"], {}).get("awaiting_confirmation"):
             step["status"] = "awaiting"
-    update: dict[str, Any] = {"plan": plan, "step_results": merged, "iteration": iteration}
+    update: dict[str, Any] = {
+        "plan": plan,
+        "step_results": merged,
+        "iteration": iteration,
+        **_run_error_state(state, expansion_notes),
+    }
     if progressive:
         update["disclosed_tools"] = sorted(disclosed_names)
     _refresh_remaining_estimate(controller, plan)
@@ -1359,6 +1621,7 @@ class _StepGrant:
     tokens: int
     cost_usd: float
     llm_calls: int
+    soft_cost_usd: float = 0.0
 
 
 def _grant_for(
@@ -1391,8 +1654,22 @@ def _grant_for(
         * max(1.0, settings.CHAT_ORCHESTRATOR_STEP_BUDGET_OVERRUN)
     )
     remaining = controller.remaining_normal_tokens if controller is not None else None
-    if remaining is None:
+    if remaining is None and _cost_is_primary(controller):
+        # No token ceiling to share out: cost bounds the step, and falling back
+        # to the complexity floor here would impose a *hard* token cut on a run
+        # that deliberately has none (AGT-022).
+        hard = 0
+    elif remaining is None:
         hard = floor
+    elif _cost_is_primary(controller):
+        # Two different bounds live in this arithmetic: the *schedule* divisor
+        # shares what is left between the steps still to run, and the batch
+        # width is what keeps concurrent grants from overlapping. Fairness
+        # between steps is the cost dimension's job when cost is the budget, so
+        # the backstop keeps only the safety bound -- grants stay disjoint, and
+        # a deep plan no longer cuts every step at 1/24 of a ceiling that was
+        # never meant to bind (AGT-025).
+        hard = remaining // max(1, batch_size)
     else:
         share = remaining // _budget_divisor(plan, batch_size)
         # Never more than an equal split of what is left, however generous the
@@ -1400,20 +1677,36 @@ def _grant_for(
         # there is no budget at all, not a licence to exceed one.
         hard = min(max(floor, share), remaining // max(1, batch_size))
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
-    soft = max(1, hard - int(hard * reserve_ratio))
+    soft = max(1, hard - int(hard * reserve_ratio)) if hard else 0
     ledger = controller.snapshot() if controller is not None else {}
     # Cost and calls follow the same schedule divisor as tokens, so a step at a
     # bottleneck is not rationed as though the steps queued behind it were
     # running beside it (AGT-020).
     divisor = _budget_divisor(plan, batch_size)
+    cost_share = _dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor, "reserve_cost_usd")
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
         # Zero on either of these means "no limit configured", and it has to
         # travel as zero rather than as a share of zero.
-        cost_usd=_dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor)),
+        cost_usd=cost_share,
+        # The step's own reserve on the dimension that binds it, so it can still
+        # say what it found (AGT-012).
+        soft_cost_usd=max(0.0, cost_share - cost_share * reserve_ratio),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor, "reserve_llm_calls")),
     )
+
+
+def _cost_is_primary(controller: BudgetController | None) -> bool:
+    """Whether the run is budgeted in cost, making tokens a backstop (AGT-022).
+
+    Only the dimension that bounds the run is fair-shared between steps. A
+    backstop divided N ways stops being a backstop: measured on a 17-step
+    expanded plan, the 2,000,000-token ceiling became ~66,000 per step and cut
+    every second- and third-stage step short while 87% of the cost budget was
+    still unspent (AGT-025).
+    """
+    return controller is not None and float(controller.snapshot().get("cost_limit_usd") or 0.0) > 0
 
 
 def _remaining_waves(plan: list[dict[str, Any]]) -> int:
@@ -1424,7 +1717,7 @@ def _remaining_waves(plan: list[dict[str, Any]]) -> int:
     the current wave, so the result always includes the batch being granted.
     """
     limit = max(1, settings.CHAT_ORCHESTRATOR_MAX_PARALLEL)
-    outstanding = {step["id"] for step in plan if step.get("status") not in ("passed", "skipped")}
+    outstanding = {step["id"] for step in plan if step.get("status") not in ("passed", "skipped", "expanded")}
     pending = {
         step["id"]: {dep for dep in (step.get("depends_on") or []) if dep in outstanding}
         for step in plan
@@ -1457,12 +1750,22 @@ def _budget_divisor(plan: list[dict[str, Any]], concurrent: int) -> int:
     return max(1, _remaining_waves(plan) * max(1, concurrent))
 
 
-def _dimension_share(ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int) -> float:
-    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited."""
+def _dimension_share(
+    ledger: dict[str, Any], limit_key: str, spent_key: str, divisor: int, reserve_key: str = ""
+) -> float:
+    """One budget dimension's remainder, split *divisor* ways, or 0 when unlimited.
+
+    The finalization reserve comes off first, matching
+    ``remaining_normal_tokens``. Without it the grants of one batch hand out the
+    reserve the run keeps to write its answer with -- invisible while tokens
+    were the budget and the token path subtracted it, and load-bearing once cost
+    is what binds a step (AGT-025).
+    """
     limit = float(ledger.get(limit_key) or 0.0)
     if limit <= 0:
         return 0.0
-    remaining = max(0.0, limit - float(ledger.get(spent_key) or 0.0))
+    reserve = float(ledger.get(reserve_key) or 0.0) if reserve_key else 0.0
+    remaining = max(0.0, limit - reserve - float(ledger.get(spent_key) or 0.0))
     return remaining / max(1, divisor)
 
 
@@ -1606,6 +1909,7 @@ async def _dispatch_batch_distributed(
                 token_grant=grant.tokens,
                 soft_token_grant=grant.soft_tokens,
                 cost_grant_usd=grant.cost_usd,
+                soft_cost_grant_usd=grant.soft_cost_usd,
                 llm_call_grant=grant.llm_calls,
                 model_spec=model_spec,
                 summary_model_spec=summary_model_spec,
@@ -1772,9 +2076,26 @@ def _runnable_steps(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if step["status"] != "pending":
             continue
         deps = step.get("depends_on") or []
-        if all(by_id.get(dep, {}).get("status") == "passed" for dep in deps):
+        if all(_dependency_satisfied(by_id.get(dep), plan) for dep in deps):
             runnable.append(step)
     return runnable
+
+
+def _dependency_satisfied(dep: dict[str, Any] | None, plan: list[dict[str, Any]]) -> bool:
+    """Whether a dependency has produced everything a dependent is waiting for.
+
+    An expanded step never runs itself -- its children replaced it -- so what
+    satisfies a dependent is all of those children having passed (AGT-023).
+    """
+    if dep is None:
+        return False
+    status = dep.get("status")
+    if status == "passed":
+        return True
+    if status != "expanded":
+        return False
+    children = [step for step in plan if step.get("map_parent") == dep.get("id")]
+    return bool(children) and all(child.get("status") == "passed" for child in children)
 
 
 def _fail_unreachable_steps(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1861,6 +2182,14 @@ def _budget_stop_result(
     # The run-level reason supersedes the verifier's: it says what ended the
     # run, where the verifier only saw a step it could not pass.
     return {**prior, flag: True, "verify_reason": reason or prior.get("verify_reason")}
+
+
+def _run_error_state(state: ChatState, notes: list[str]) -> dict[str, Any]:
+    """Append run diagnostics without dropping the ones already recorded."""
+    if not notes:
+        return {}
+    existing = list(state.get("run_errors") or [])
+    return {"run_errors": list(dict.fromkeys([*existing, *notes]))}
 
 
 def _merge_results(existing: list[dict[str, Any]], new: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2049,7 +2378,12 @@ def _step_thresholds(
     # mid-work and handing the verifier a truncated summary to reject.
     multiple = max(1.0, settings.CHAT_ORCHESTRATOR_STEP_SHARE_HARD_MULTIPLE)
     soft_tokens = ceiling_tokens = 0
-    if remaining is not None:
+    if remaining is not None and _cost_is_primary(controller):
+        # The backstop keeps the safety bound only; cost shares the run out
+        # between steps (AGT-025).
+        soft_tokens = max(floor, remaining // max(1, concurrent))
+        ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
+    elif remaining is not None:
         soft_tokens = max(floor, remaining // divisor)
         ceiling_tokens = max(soft_tokens, min(remaining, int(soft_tokens * multiple)))
     soft_cost = ceiling_cost = 0.0
@@ -2273,6 +2607,7 @@ async def _run_worker_step(
     required_action = str(step.get("required_action") or "")
     execution_error = ""
     budget_exhausted = False
+    step_share_only = False
     budget_capped = False
     step_budget = int(step.get("estimated_tokens") or _STEP_TOKEN_ESTIMATES["medium"])
     controller = _budget_controller(config)
@@ -2362,6 +2697,16 @@ async def _run_worker_step(
             budget_exhausted = True
             execution_error = str(exc)
             if controller is not None:
+                # Whether this ends the *run* or only this step is the
+                # difference between "we are out of budget" and "this step used
+                # its share" -- and a distributed step's controller is its own
+                # grant, so its finalization says nothing about the run
+                # (AGT-025).
+                # On a grant, the controller *is* this step's slice, so its
+                # finalization says nothing about the run (AGT-018, AGT-025).
+                step_share_only = controller.is_grant or (
+                    bool(controller.scope_exhausted(budget_scope)) and not controller.finalizing
+                )
                 controller.begin_finalization(str(exc))
             break
         step_input_tokens += turn.input_tokens
@@ -2643,6 +2988,10 @@ async def _run_worker_step(
         step_result["execution_error"] = execution_error
     if budget_exhausted:
         step_result["budget_exhausted"] = True
+        if step_share_only or budget_capped:
+            # The step stopped, the run did not. Recorded separately so the run
+            # is not reported as out of budget while most of it is unspent.
+            step_result["budget_step_share"] = True
     if stuck:
         # Terminal, not retryable: a step that ran out of new calls to make will
         # run out again. It keeps whatever it gathered -- the summary pass still
@@ -2877,7 +3226,11 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
     if result.get("execution_error"):
         return False, str(result["execution_error"])
     if result.get("budget_exhausted"):
-        return False, "Step stopped because the run budget entered finalization."
+        return False, (
+            "Step stopped after using its share of the run budget."
+            if result.get("budget_step_share")
+            else "Step stopped because the run budget entered finalization."
+        )
     output = result.get("output") or ""
     if not output.strip():
         return False, "Step produced no output."
@@ -3152,6 +3505,10 @@ def _synthesis_context(plan: list[dict[str, Any]], results: list[dict[str, Any]]
     blocks: list[str] = []
     carries_evidence = False
     for step in plan:
+        # An expanded step has no result of its own; rendering it would add a
+        # "(no output)" block above the children that hold its findings.
+        if step.get("status") == "expanded":
+            continue
         result = results_by_id.get(step["id"], {})
         status = _rendered_step_status(step, result)
         output = result.get("output") or "(no output)"
@@ -3325,14 +3682,22 @@ def _terminal_status(
     controller: BudgetController | None,
 ) -> str:
     results_by_id = {result["step_id"]: result for result in results}
-    if (controller is not None and controller.finalizing) or any(result.get("budget_exhausted") for result in results):
+    run_out_of_budget = any(
+        result.get("budget_exhausted") and not result.get("budget_step_share") for result in results
+    )
+    # A step that used its own share is a step that stopped, not a run that
+    # ended: reporting the run as exhausted while most of its budget is unspent
+    # tells the reader the wrong thing to change (AGT-025).
+    if (controller is not None and controller.finalizing) or run_out_of_budget:
         return "budget_exhausted"
     if any(result.get("blocked") for result in results):
         return "blocked"
     for step in plan:
         if step.get("priority") == "optional":
             continue
-        if step.get("status") != "passed":
+        # An expanded step did not run and never will: its children did, and
+        # they are in this same list (AGT-023).
+        if step.get("status") not in ("passed", "expanded"):
             return "partial"
         result = results_by_id.get(step["id"], {})
         if result.get("execution_error") or result.get("budget_skipped"):
@@ -3354,7 +3719,7 @@ def _terminal_errors(
     results_by_id = {result["step_id"]: result for result in results}
     for step in plan:
         result = results_by_id.get(step["id"], {})
-        if step.get("status") == "passed":
+        if step.get("status") in ("passed", "expanded"):
             continue
         reason = result.get("execution_error") or result.get("verify_reason")
         if not reason and result.get("blocked"):
@@ -3377,6 +3742,8 @@ def _orchestration_details(plan: list[dict[str, Any]], results: list[dict[str, A
         }
     ]
     for step in plan:
+        if step.get("status") == "expanded":
+            continue  # replaced by its children, which follow it in the plan
         step_id = str(step["id"])
         result = results_by_id.get(step["id"], {})
         if result.get("awaiting_confirmation"):

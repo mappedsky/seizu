@@ -141,6 +141,7 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
             token_grant=invocation.token_grant,
             soft_token_grant=invocation.soft_token_grant,
             cost_grant_usd=invocation.cost_grant_usd,
+            soft_cost_grant_usd=invocation.soft_cost_grant_usd,
             llm_call_grant=invocation.llm_call_grant,
         )
     )
@@ -207,7 +208,7 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
                     thresholds=chat_orchestrator._StepThresholds(
                         soft_tokens=invocation.soft_token_grant or invocation.token_grant,
                         ceiling_tokens=invocation.token_grant,
-                        soft_cost_usd=invocation.cost_grant_usd,
+                        soft_cost_usd=invocation.soft_cost_grant_usd or invocation.cost_grant_usd,
                         ceiling_cost_usd=invocation.cost_grant_usd,
                     ),
                     summary_model=summary_model,

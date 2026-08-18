@@ -793,12 +793,22 @@ CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_DEPE
 # answer from whatever steps passed. Bounds self-correction so a persistently
 # failing step cannot loop forever.
 CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+# Maximum steps one mapped step may expand into, once the step it maps over has
+# run and its items are known (AGT-023). Bounds a collection nobody wrote down:
+# a step mapping over "every CVE in the graph" is cut to this many, and the run
+# reports the coverage it did not have. 0 disables expansion, and a mapped step
+# then runs once, iterating internally.
+CHAT_ORCHESTRATOR_MAX_EXPANSION = int_env("CHAT_ORCHESTRATOR_MAX_EXPANSION", 8)
 # Maximum independent steps the dispatcher runs concurrently in one batch.
 # This bounds one turn. Cluster-wide concurrency is bounded by the Temporal
 # worker's activity slots (TEMPORAL_MAX_CONCURRENT_ACTIVITIES) once steps are
 # distributed, so raising this for a wide investigation does not by itself let
 # one turn take the whole fleet.
-CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Matched to CHAT_ORCHESTRATOR_MAX_EXPANSION: a step that expands into more
+# children than this is split across batches that run one after another, so a
+# stage costs a multiple of its slowest step for no reason but the setting
+# (AGT-020).
+CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 8)
 # Run each independent plan step of a batch as its own Temporal activity instead
 # of a coroutine inside the turn's activity (AGT-018). Steps are then placed
 # across the worker fleet, time out and fail independently, and are visible in
@@ -921,11 +931,18 @@ CHAT_ORCHESTRATOR_WORKER_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_WORKER_C
 # remains an emergency loop guard.
 #
 # **A run is budgeted in cost.** CHAT_RUN_COST_BUDGET_USD below is the limit to
-# tune; this token ceiling is the backstop that bounds a run whose model LiteLLM
-# cannot price, and it is set high enough that cost normally binds first on a
-# model it can (AGT-022). Both the run and each individual step are bounded in
-# whichever dimension is configured. Lower this to bound runs by tokens instead.
-CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 2_000_000)
+# tune; this token ceiling is the backstop for a run whose model LiteLLM cannot
+# price. 0 (the default) derives it: no token ceiling at all when a cost budget
+# is set and the model is priced -- cost is then the only bound needed -- and
+# CHAT_RUN_UNPRICED_TOKEN_BUDGET when it is not (AGT-022). Set a positive value
+# to bound runs by tokens instead.
+CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 0)
+# The backstop that applies when a cost budget is configured but the model's
+# price is unknown, so cost can never accrue and never bind. Sized as a run that
+# has plainly gone wrong rather than as a budget: a priced run of this length
+# costs $0.25 on a cheap model and $30 on a frontier one, which is why it cannot
+# also serve as the spend limit.
+CHAT_RUN_UNPRICED_TOKEN_BUDGET = int_env("CHAT_RUN_UNPRICED_TOKEN_BUDGET", 2_000_000)
 # Estimated provider spend one run may reach, in USD. This is the budget a run
 # is meant to be tuned on (AGT-021, AGT-022): it bounds the run, and a share of
 # it bounds each plan step. Priced per call from LiteLLM's model data,
@@ -936,7 +953,19 @@ CHAT_RUN_TOKEN_BUDGET = int_env("CHAT_RUN_TOKEN_BUDGET", 2_000_000)
 CHAT_RUN_COST_BUDGET_USD = float_env("CHAT_RUN_COST_BUDGET_USD", 2.0)
 CHAT_RUN_RESERVE_PERCENT = int_env("CHAT_RUN_RESERVE_PERCENT", 20)
 CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
-CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 64)
+# Emergency loop guard on the number of LLM calls one run may make. 0 (the
+# default) derives it from the plan -- a fixed count is a bound on plan size
+# wearing a safety limit's clothes, and a plan grows when a step expands
+# (AGT-024). Set a positive value to pin it, or set both this and
+# CHAT_RUN_LLM_CALLS_PER_STEP to 0 to disable the dimension.
+CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 0)
+# Calls one plan step may make, for that derivation: its own loop, whatever it
+# delegates to, its summary pass, and the verifier's look at it, across retries.
+# Deliberately generous: what a step may *spend* is bounded by its share of the
+# run's cost and tokens, and a loop is caught by loop detection (AGT-017), so
+# this only has to stop a run that is making calls without spending or
+# progressing.
+CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 24)
 # Output tokens assumed for a call whose kind has not been seen yet. Every
 # later call of that kind is reserved from what it was observed to emit
 # instead (AGT-021). Raise it if cold-start calls on your model are large.

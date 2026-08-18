@@ -442,21 +442,83 @@ def test_budget_divisor_slices_by_depth_not_by_outstanding_count(mocker):
     assert chat_orchestrator._budget_divisor(flat, 3) == 3
 
 
-def test_step_grant_gives_a_bottleneck_step_a_waves_share(mocker):
-    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
-    ledger = initial_budget_ledger()
-    ledger.update({"token_limit": 300_000, "reserve_tokens": 0, "total_tokens": 0})
-    controller = BudgetController(ledger)
-    diamond = [
+def _diamond_plan() -> list[dict[str, Any]]:
+    return [
         _step("s1", "ran"),
         _step("s2", depends_on=["s1"]),
         _step("s3", depends_on=["s1"]),
         _step("s4", depends_on=["s2", "s3"]),
     ]
 
+
+def test_step_grant_gives_a_bottleneck_step_a_waves_share(mocker):
+    """The schedule divisor governs the dimension the run is budgeted on."""
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {"token_limit": 300_000, "reserve_tokens": 0, "total_tokens": 0, "cost_limit_usd": 0.0, "reserve_cost_usd": 0.0}
+    )
+    controller = BudgetController(ledger)
+    diamond = _diamond_plan()
+
     grant = chat_orchestrator._grant_for(diamond[0], diamond, controller, 1)
 
     assert grant.tokens == 100_000  # one of three waves, not one of four steps
+
+
+def test_a_cost_budgeted_run_shares_cost_by_schedule_and_tokens_only_for_safety(mocker):
+    """Tokens are the backstop, so they carry the concurrency bound and no more.
+
+    Sharing a backstop by schedule is what cut every step of a 17-step expanded
+    plan at 1/24 of a ceiling that was never meant to bind (AGT-025).
+    """
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {
+            "token_limit": 300_000,
+            "reserve_tokens": 0,
+            "total_tokens": 0,
+            "cost_limit_usd": 3.0,
+            "reserve_cost_usd": 0.0,
+            "cost_usd": 0.0,
+        }
+    )
+    controller = BudgetController(ledger)
+    diamond = _diamond_plan()
+
+    grant = chat_orchestrator._grant_for(diamond[0], diamond, controller, 1)
+
+    # Cost still follows the schedule: one of three waves.
+    assert grant.cost_usd == pytest.approx(1.0)
+    # Tokens follow the batch width instead, so a lone step at a bottleneck is
+    # not rationed by a dimension that is only a safety net.
+    assert grant.tokens == 300_000
+    # And the step keeps a reserve on the dimension that binds it, so a step
+    # stopped by cost can still say what it found.
+    assert grant.soft_cost_usd < grant.cost_usd
+
+
+def test_cost_grants_stay_disjoint_across_a_concurrent_batch():
+    """Tokens are granted for safety, not fairness -- disjointness must still hold."""
+    ledger = initial_budget_ledger()
+    ledger.update(
+        {
+            "token_limit": 120_000,
+            "reserve_tokens": 20_000,
+            "total_tokens": 0,
+            "cost_limit_usd": 2.0,
+            "reserve_cost_usd": 0.4,
+            "cost_usd": 0.0,
+        }
+    )
+    controller = BudgetController(ledger)
+    plan = [_step("s1", "ran"), _step("s2", "ran"), _step("s3", "ran")]
+
+    grants = [chat_orchestrator._grant_for(step, plan, controller, len(plan)) for step in plan]
+
+    assert sum(grant.tokens for grant in grants) <= 100_000
+    assert sum(grant.cost_usd for grant in grants) <= 1.6 + 1e-9
 
 
 async def test_planner_records_structured_output_fallback_as_run_error(mocker):
@@ -3562,3 +3624,309 @@ async def test_a_synthesis_that_stays_empty_still_falls_back(mocker):
 
     answer = update["messages"][-1].content
     assert "urllib3 2.6.3 installed" in answer  # the findings still reach the user
+
+
+# --- A step expands over what an earlier step discovered (AGT-023) -------------
+
+
+async def _expand(mocker, plan, results, items, **overrides):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_EXPANSION", overrides.get("limit", 8))
+    invoke = mocker.patch(
+        "reporting.services.chat_orchestrator._structured_invoke",
+        new_callable=AsyncMock,
+        side_effect=overrides.get("side_effect") or [chat_orchestrator._MapItems(items=items)],
+    )
+    notes = await chat_orchestrator._expand_mapped_steps(plan, results, {"configurable": {}}, lambda _e: None)
+    return notes, invoke
+
+
+async def test_a_mapped_step_becomes_one_step_per_discovered_item(mocker):
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "pending", depends_on=["s1"], map_over="s1"),
+        _step("s3", "pending", depends_on=["s2"]),
+    ]
+    results = [{"step_id": "s1", "output": "CVE-2024-3094 and CVE-2021-44228 are the highest severity."}]
+
+    notes, _ = await _expand(mocker, plan, results, ["CVE-2024-3094", "CVE-2021-44228"])
+
+    assert notes == []
+    by_id = {step["id"]: step for step in plan}
+    children = [step for step in plan if step.get("map_parent") == "s2"]
+    assert len(children) == 2
+    # The parent is replaced by its children rather than run itself.
+    assert by_id["s2"]["status"] == "expanded"
+    assert [child["status"] for child in children] == ["pending", "pending"]
+    # Each child names its own item and no longer waits on the collection.
+    assert "CVE-2024-3094" in children[0]["goal"] and children[0]["map_item"] == "CVE-2024-3094"
+    assert children[0]["depends_on"] == []
+    # Children are inserted after the parent, before the step that follows it.
+    assert [step["id"] for step in plan][0] == "s1"
+    assert [step["id"] for step in plan][-1] == "s3"
+
+
+async def test_children_are_the_widest_batch_the_dispatcher_has_seen(mocker):
+    """The point of the whole construct: work that was one step is now a ready set."""
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "a, b, c"}], ["a", "b", "c"])
+
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == [
+        step["id"] for step in plan if step.get("map_parent") == "s2"
+    ]
+    assert len(chat_orchestrator._runnable_steps(plan)) == 3
+
+
+async def test_child_ids_are_derived_from_the_item_not_its_position(mocker):
+    """The fan-out's idempotency key is built from step ids (AGT-018)."""
+    first = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+    await _expand(mocker, first, [{"step_id": "s1", "output": "x"}], ["CVE-2024-3094", "acme/api"])
+    second = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+    await _expand(mocker, second, [{"step_id": "s1", "output": "x"}], ["acme/api", "CVE-2024-3094"])
+
+    ids_first = {step["map_item"]: step["id"] for step in first if step.get("map_item")}
+    ids_second = {step["map_item"]: step["id"] for step in second if step.get("map_item")}
+    assert ids_first == ids_second  # reordering the list does not move an id
+
+
+async def test_expansion_is_bounded_and_says_what_it_dropped(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+
+    notes, _ = await _expand(
+        mocker, plan, [{"step_id": "s1", "output": "many"}], [f"CVE-{n}" for n in range(20)], limit=3
+    )
+
+    assert len([step for step in plan if step.get("map_parent") == "s2"]) == 3
+    # The gap in coverage reaches the run's errors rather than being silent.
+    assert "matched 20 items" in notes[0] and "first 3" in notes[0]
+
+
+async def test_duplicate_items_do_not_become_duplicate_steps(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["repo-a", "repo-a", "repo-b"])
+
+    assert len([step for step in plan if step.get("map_parent") == "s2"]) == 2
+
+
+async def test_a_step_with_nothing_to_map_over_runs_as_written(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+
+    notes, _ = await _expand(mocker, plan, [{"step_id": "s1", "output": "nothing found"}], [])
+
+    assert notes == []
+    assert plan[1]["status"] == "pending" and plan[1]["map_over"] == ""
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s2"]
+
+
+async def test_a_failed_extraction_runs_the_step_as_written(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+
+    notes, _ = await _expand(
+        mocker, plan, [{"step_id": "s1", "output": "x"}], [], side_effect=ValueError("no structured output")
+    )
+
+    assert plan[1]["status"] == "pending" and plan[1]["map_over"] == ""
+    assert "could not be split per item" in notes[0]
+
+
+async def test_a_step_is_not_expanded_before_its_source_has_passed(mocker):
+    plan = [_step("s1", "ran"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+
+    notes, invoke = await _expand(mocker, plan, [], [])
+
+    assert notes == [] and invoke.await_count == 0
+    assert plan[1]["status"] == "pending" and plan[1]["map_over"] == "s1"
+
+
+async def test_expanding_twice_is_not_possible(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1")]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["a", "b"])
+
+    notes, invoke = await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["a", "b"])
+
+    assert notes == [] and invoke.await_count == 0  # the parent is no longer pending
+    assert len([step for step in plan if step.get("map_parent") == "s2"]) == 2
+
+
+def test_a_dependent_of_an_expanded_step_waits_for_every_child():
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "expanded", depends_on=["s1"]),
+        _step("s2-a", "passed", depends_on=[], map_parent="s2"),
+        _step("s2-b", "pending", depends_on=[], map_parent="s2"),
+        _step("s3", "pending", depends_on=["s2"]),
+    ]
+
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s2-b"]
+
+    plan[3]["status"] = "passed"
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s3"]
+
+
+def test_a_failed_child_keeps_its_dependent_blocked_and_is_retried_alone(mocker):
+    mocker.patch("reporting.settings.CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+    plan = [
+        _step("s2", "expanded"),
+        _step("s2-a", "passed", map_parent="s2"),
+        _step("s2-b", "failed", map_parent="s2"),
+        _step("s3", "pending", depends_on=["s2"]),
+    ]
+
+    plan, iteration = chat_orchestrator._prepare_retries(plan, [{"step_id": "s2-b", "verify_reason": "thin"}], 0)
+
+    assert iteration == 1
+    # Only the failed child retries; the sibling that passed is not re-run and
+    # the parent is not expanded again.
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == ["s2-b"]
+    assert plan[0]["status"] == "expanded"
+
+
+def test_an_expanded_step_does_not_make_a_completed_run_look_partial():
+    plan = [_step("s2", "expanded"), _step("s2-a", "passed", map_parent="s2")]
+    assert chat_orchestrator._terminal_status(plan, [{"step_id": "s2-a", "output": "found"}], None) == "completed"
+
+
+def test_an_expanded_step_is_not_rendered_to_the_synthesizer():
+    plan = [_step("s2", "expanded"), _step("s2-a", "passed", map_parent="s2")]
+    context = chat_orchestrator._synthesis_context(plan, [{"step_id": "s2-a", "output": "the finding"}])
+
+    assert "the finding" in context
+    assert "(no output)" not in context
+
+
+def test_plan_problems_reports_a_map_over_that_names_nothing():
+    problems = chat_orchestrator._plan_problems(
+        [
+            _PlannedStep(id="s1", goal="find"),
+            _PlannedStep(id="s2", goal="each", depends_on=["s1"], map_over="ghost"),
+            _PlannedStep(id="s3", goal="self", map_over="s3"),
+        ]
+    )
+    assert "Step 's2' maps over 'ghost', which is not a step in this plan." in problems
+    assert "Step 's3' maps over itself." in problems
+
+
+def test_init_plan_makes_map_over_an_edge_even_when_the_planner_forgot():
+    plan = chat_orchestrator._init_plan(
+        [_PlannedStep(id="s1", goal="find"), _PlannedStep(id="s2", goal="each", map_over="s1")]
+    )
+    assert plan[1]["depends_on"] == ["s1"]
+    assert plan[1]["map_over"] == "s1"
+
+
+def test_a_half_expanded_plan_is_still_a_pending_plan():
+    """AGT-011 discards an unfinished plan unless the turn resumes it.
+
+    A plan caught between expanding a step and running its children is
+    unfinished in the ordinary way -- its children are pending -- so it needs no
+    rule of its own.
+    """
+    half_expanded = {
+        "plan": [_step("s2", "expanded"), _step("s2-a", "pending", map_parent="s2")],
+        "messages": [],
+    }
+    assert chat_orchestrator._has_pending_plan(half_expanded)
+    assert chat_orchestrator._abandoned_plan_reset(half_expanded)["plan"] == []
+
+    finished = {"plan": [_step("s2", "expanded"), _step("s2-a", "passed", map_parent="s2")], "messages": []}
+    assert not chat_orchestrator._has_pending_plan(finished)
+
+
+async def test_mapping_over_an_already_expanded_step_chains_one_to_one(mocker):
+    """The shape the planner actually produces: find, then per-item, then per-item.
+
+    The second mapped step's items are already known -- they are the first one's
+    children -- so it needs no extraction call, and each child waits only for its
+    own counterpart rather than for the whole previous stage.
+    """
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "pending", depends_on=["s1"], map_over="s1"),
+        _step("s3", "pending", depends_on=["s2"], map_over="s2"),
+    ]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["CVE-1", "CVE-2"])
+
+    findings = [step for step in plan if step.get("map_parent") == "s2"]
+    reachability = [step for step in plan if step.get("map_parent") == "s3"]
+    assert len(findings) == len(reachability) == 2
+    assert [step["map_item"] for step in reachability] == ["CVE-1", "CVE-2"]
+    # Each second-stage child depends on its own counterpart, so it can start as
+    # soon as that one passes rather than waiting for the whole stage.
+    assert reachability[0]["depends_on"] == [findings[0]["id"]]
+    assert [step["id"] for step in chat_orchestrator._runnable_steps(plan)] == [s["id"] for s in findings]
+
+    findings[0]["status"] = "passed"
+    assert reachability[0]["id"] in [step["id"] for step in chat_orchestrator._runnable_steps(plan)]
+
+
+async def test_chaining_costs_no_extraction_call(mocker):
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "expanded", depends_on=["s1"]),
+        _step("s2-a", "pending", map_parent="s2", map_item="CVE-1"),
+        _step("s3", "pending", depends_on=["s2"], map_over="s2"),
+    ]
+
+    _notes, invoke = await _expand(mocker, plan, [], [])
+
+    assert invoke.await_count == 0  # the items are already steps
+    assert len([step for step in plan if step.get("map_parent") == "s3"]) == 1
+
+
+# --- A step's own share is not the run's budget (AGT-025) ---------------------
+
+
+def test_a_step_that_used_its_share_does_not_report_the_run_as_exhausted():
+    """Measured: a turn reported budget_exhausted with 87% of its cost unspent.
+
+    Every second- and third-stage step of an expanded plan stopped at its own
+    grant, and one flag on a step result made the whole run say it had run out.
+    """
+    plan = [_step("s1", "passed"), _step("s2", "failed")]
+    results = [
+        {"step_id": "s1", "output": "found"},
+        {"step_id": "s2", "output": "", "budget_exhausted": True, "budget_step_share": True},
+    ]
+
+    assert chat_orchestrator._terminal_status(plan, results, None) == "partial"
+
+
+def test_the_run_running_out_is_still_reported_as_the_run_running_out():
+    plan = [_step("s1", "passed"), _step("s2", "skipped")]
+    results = [{"step_id": "s1", "output": "found"}, {"step_id": "s2", "budget_exhausted": True}]
+
+    assert chat_orchestrator._terminal_status(plan, results, None) == "budget_exhausted"
+
+
+async def test_verify_says_which_budget_stopped_the_step():
+    share = await chat_orchestrator._verify_step(
+        _step("s1"), {"step_id": "s1", "budget_exhausted": True, "budget_step_share": True}, {}
+    )
+    run = await chat_orchestrator._verify_step(_step("s1"), {"step_id": "s1", "budget_exhausted": True}, {})
+
+    assert share == (False, "Step stopped after using its share of the run budget.")
+    assert run == (False, "Step stopped because the run budget entered finalization.")
+
+
+async def test_a_child_is_judged_on_its_own_item_not_the_whole_collection(mocker):
+    """Measured: a per-CVE child was failed for "not covering all four CVEs".
+
+    The verifier judges a step against its success_criteria, and the parent's
+    was written for the collection the step was going to iterate over.
+    """
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "pending", depends_on=["s1"], map_over="s1", success_criteria="All four CVEs are covered."),
+    ]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["CVE-1", "CVE-2"])
+
+    child = next(step for step in plan if step.get("map_parent") == "s2")
+    assert "CVE-1 alone" in child["success_criteria"]
+    assert "sibling steps cover the others" in child["success_criteria"].lower()
+
+
+async def test_a_child_without_inherited_criteria_still_gets_scoped_ones(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1", success_criteria="")]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["repo-a"])
+
+    child = next(step for step in plan if step.get("map_parent") == "s2")
+    assert child["success_criteria"] == "The result accomplishes this step's goal for repo-a alone."

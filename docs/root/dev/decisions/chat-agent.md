@@ -583,6 +583,203 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-025 — Only the dimension that bounds the run is fair-shared
+
+**Applies to:** `chat_orchestrator._cost_is_primary`, `_grant_for`,
+`_step_thresholds`, `_dimension_share`, `_terminal_status`, `_verify_step`,
+`chat_budget.grant_ledger`
+
+Found by running a real interactive turn on an expanded plan (AGT-023). Three
+defects, all in the same seam between per-step budgeting and a plan that grows.
+
+**1. A backstop divided N ways stops being a backstop.** `_step_thresholds` and
+`_grant_for` sliced *both* dimensions by the schedule divisor
+([AGT-020](#agt-020)). Expansion made the plan 17 steps deep, so the divisor
+reached ~24 and the 2,000,000-token backstop became ~66,000 per step —
+small enough that every second- and third-stage step was cut before producing
+even a summary, while **87% of the cost budget was unspent**. Two different
+bounds live in that arithmetic: the schedule divisor shares what is left between
+the steps still to run (fairness), and the batch width keeps concurrent grants
+from overlapping (safety). When cost is the budget, fairness is cost's job, so
+the token dimension keeps **only the safety bound**. Grants stay disjoint, which
+is what [AGT-018](#agt-018) depends on — granting each step the whole remainder
+would break that on a model LiteLLM turns out not to price, since cost would
+then never bind.
+
+**2. A step that used its share is not a run that ran out.** `_terminal_status`
+returned `budget_exhausted` from any step's flag, so a turn with 13% of its cost
+spent reported itself as out of budget — and `_verify_step` told the reader "the
+run budget entered finalization" when it was the step's own grant, which for a
+distributed step is a separate ledger entirely. A step-level stop now carries
+`budget_step_share`, reports `partial`, and says so in its own words. The
+distinction matters because it is the difference between "raise the budget" and
+"this plan has more steps than it has room for".
+
+**3. Grants handed out the finalization reserve.** `_dimension_share` subtracted
+spend but not the reserve, where the token path used `remaining_normal_tokens`
+and did. Invisible while tokens were the budget; load-bearing once cost binds a
+step, because the reserve is what pays for the answer. `grant_ledger` also had
+`reserve_cost_usd` hard-coded to `0.0`, so a step whose grant bound on cost was
+cut with nothing to show — the failure [AGT-012](#agt-012) exists to prevent,
+reintroduced through the dimension that had no reserve. Both now mirror the
+token side.
+
+## AGT-024 — The call ceiling is derived from the plan, not configured
+
+**Applies to:** `chat_budget.derived_call_ceiling`,
+`BudgetController.set_planned_steps`, `_refresh_remaining_estimate`;
+`CHAT_RUN_MAX_LLM_CALLS`, `CHAT_RUN_LLM_CALLS_PER_STEP`
+
+`CHAT_RUN_MAX_LLM_CALLS` defaults to `0`, meaning *derive*: a ceiling of
+`8 + CHAT_RUN_LLM_CALLS_PER_STEP x steps`, recomputed wherever the plan changes.
+A positive value pins it; zeroing both it and the per-step figure disables the
+dimension.
+
+**Why a constant is wrong here specifically.** The call ceiling is an emergency
+loop guard — what a run may *spend* is bounded by cost and tokens
+([AGT-022](#agt-022)), and a loop is caught by loop detection
+([AGT-017](#agt-017)). A fixed count does not bound spend or detect loops; what
+it actually bounds is **plan size**, wearing a safety limit's clothing. 64 was
+chosen when a plan was at most eight steps, and it silently became "at most
+about five steps' worth of work" the moment a step could expand into eight
+([AGT-023](#agt-023)).
+
+**Measured:** the expansion run in AGT-023 ended `exhausted` on the call ceiling
+at 120 calls, having spent **28% of its cost budget** — the same failure shape as
+[AGT-019](#agt-019)'s output ceiling and AGT-021's reservation sizing, one level
+up: an expensive, productive run stopped by a number that had no relationship to
+what it was doing.
+
+**Only ever raises.** `set_planned_steps` never lowers the ceiling. A plan that
+shrinks — steps skipped by the budget sweep, a retry cycle that drops one — would
+otherwise pull the ceiling below what the run had already spent and finalize it
+retroactively.
+
+**The per-step figure is deliberately generous** (24). It covers a step's own
+loop, whatever it delegates to, its summary pass and the verifier's look at it,
+across retries; and since every one of those calls is already bounded by the
+step's share of cost and tokens, a high count cannot translate into high spend.
+The number only has to be above what legitimate work does and below what a
+run making calls without spending or progressing would reach.
+
+## AGT-023 — A step maps over what an earlier step discovered
+
+**Applies to:** `chat_orchestrator._PlannedStep.map_over`, `_MapItems`,
+`_expand_mapped_steps`, `_child_step_id`, `_dependency_satisfied`,
+`_runnable_steps`, `_step_contract`; `CHAT_ORCHESTRATOR_MAX_EXPANSION`
+
+A planned step may declare `map_over: <dependency id>`. When that dependency
+passes, the dispatcher extracts the items from its output and replaces the step
+with one step per item; the parent takes the status `expanded` and never runs.
+The children are ordinary steps, so the ready set, the fan-out
+([AGT-018](#agt-018)) and the retry cycle carry them with no changes.
+
+**Why the planner cannot do this.** `planner_node` runs once, before anything
+executes, so it can only fan out over items the *request* names. Measured on
+`deepseek-v4-pro`, same graph and session: "investigate these four CVEs: …"
+planned 5-7 steps, **4 wide**; "find the four highest-severity CVEs, then
+investigate each" planned **1 step**. The second is the shape the work actually
+has, and the planner was right — the ids did not exist yet. The cost of being
+right was that one step rendered a skill five times and made 57 tool calls in
+sequence, at the one level where nothing could parallelise it.
+
+**Ids are derived from the item, never from position.** `_child_step_id` slugs
+the item and appends a digest of it. The fan-out's idempotency key is built from
+the step ids in a batch, which is what stops a repeat from paying for the same
+batch twice ([AGT-018](#agt-018)); ids minted from list order or a counter would
+move when the model returns the same items in a different order, and the
+guarantee would quietly stop holding.
+
+**The budget re-allocates itself.** `_budget_divisor` and `_remaining_waves`
+([AGT-020](#agt-020)) are computed from the live plan every time a batch is
+granted, so children are budgeted as the steps they are the moment they join it.
+Nothing subdivides the parent's slice, because the parent never had one — it had
+not run. An `expanded` step is excluded from the outstanding set, so it is not
+counted as work the run still has to pay for.
+
+**Expansion is bounded where the items arrive**, not by trusting the model:
+`CHAT_ORCHESTRATOR_MAX_EXPANSION` (default 8) cuts the list, and the run records
+what it dropped in `run_errors` so a partial sweep is stated rather than implied.
+Items are deduplicated first — two labels for one thing would run the work twice
+and charge for both. `0` disables expansion entirely.
+
+**A step that cannot be expanded runs as written.** No items, or a failed
+extraction, clears `map_over` and leaves the step pending. The alternative — a
+step that disappears because its collection came back empty — loses work the plan
+said was necessary, and the failure would be invisible.
+
+**A dependent of an expanded step waits for every child**
+(`_dependency_satisfied`). The parent's `passed` never arrives, so without this a
+synthesis step that depends on it would either block forever or, worse, run with
+nothing.
+
+**Each child carries its item, not the collection.** The child's goal names the
+item, its contract says siblings cover the rest, and its `depends_on` drops the
+step it was mapped over — so it is not handed, and does not pay for, the whole
+list it was sliced from. **Its `success_criteria` is rewritten for the item as
+well**: the verifier judges a step against that text, and the parent's was
+written for the collection, so a child covering one CVE was failed for "not
+covering all four" and the run reported `partial` with every step complete.
+
+**Retry works per child.** Children are ordinary steps: `_prepare_retries` resets
+a failed one and the siblings that passed are not re-run, while the parent stays
+`expanded` and is never expanded a second time (it is no longer `pending`).
+
+**A half-expanded plan needs no rule of its own.** Its children are pending, so
+`_has_pending_plan` and [AGT-011](#agt-011)'s discard-unless-resumed treat it
+exactly like any other unfinished plan.
+
+**Mapping over an already-expanded step chains 1:1.** The planner reliably
+produces this shape — find the CVEs, then per CVE confirm the finding, then per
+CVE judge reachability — so a `map_over` whose source is `expanded` takes that
+source's *children* as its items: no extraction call (the items are already
+steps), and each child depends on its own counterpart rather than on the whole
+previous stage, so `s3-for-X` starts as soon as `s2-for-X` passes. Without this
+the second mapped step degrades to one step looping internally, which is the
+thing the construct exists to remove.
+
+### Measured
+
+`scripts/plan_probe.py` on the discovery-shaped request ("find the four
+highest-severity CVEs, then investigate each one separately") now plans a
+`map_over` step in both samples, where it previously planned one step. A full
+headless turn on the same request:
+
+```
+expansions: s2 -> 4 (CVE-2017-12791:…, CVE-2017-14695:…, CVE-2017-7893:…, CVE-2019-17361:…)
+            s3 -> 4 (chained 1:1 off s2's children)
+ready sets: [s1] [s1] [4 x s2-child] [1 x s2-child + 3 x s3-child]
+widest ready set: 4
+```
+
+Four wide — the same width the issue measured for the *enumerated-ids* baseline,
+now reached without the ids appearing in the request. The last batch mixes a
+first-stage child with three second-stage ones, which is the per-item edge
+working: `s3-for-X` started while `s2-for-Y` was still running.
+
+**The call ceiling is what binds now** — which is why it became derived
+([AGT-024](#agt-024)): that run ended `exhausted` on `CHAT_RUN_MAX_LLM_CALLS`
+having spent 28% of its cost budget, and expansion multiplies calls by design.
+
+### What a wide plan actually costs, once it is allowed to finish
+
+A complete three-stage expansion (15 steps, four CVEs, every step producing
+output) on `deepseek-v4-pro` for planning and synthesis and
+`deepseek-v4-flash` at `reasoning_effort=low` for the per-step stages:
+**22 minutes, 274 calls, $0.18, batches of four starting together, step
+durations 39-320s.**
+
+The same request with the reasoning model on every stage and
+`CHAT_ORCHESTRATOR_MAX_PARALLEL=3` did not finish in 42 minutes: steps ran
+317-600s, three hit the 600s step timeout, and a stage of four children was
+split into two sequential batches. Two things were wrong and both mattered —
+adaptive reasoning on work that is mostly tool-calling, and a concurrency width
+narrower than the expansion it had to carry. The per-step stages are the ones to
+put on a fast model: they are the ones expansion multiplies.
+
+**Not done:** a general map/reduce planner, and reduce steps other than an
+ordinary step that depends on the expanded one. This is one construct.
+
 ## AGT-022 — A run is budgeted in cost; tokens are the backstop
 
 **Applies to:** `chat_budget.BudgetController.open_scope` / `scope_exhausted` /
@@ -631,9 +828,30 @@ dimensions slice a bottleneck the same way.
 
 **What this does not change.** The distributed grant is still a hard cut
 (AGT-018) — it now carries a cost ceiling as well as a token one. Contention on
-the cost dimension waits exactly as it does on tokens (AGT-021). And an unpriced
-model is still bounded, by the token backstop, which is why that default rose
-rather than going to zero.
+the cost dimension waits exactly as it does on tokens (AGT-021).
+
+### The backstop is derived, because a fixed one can never let cost bind
+
+`CHAT_RUN_TOKEN_BUDGET` defaults to `0` = derive: **no token ceiling at all**
+when a cost budget is set and litellm can price the model, and
+`CHAT_RUN_UNPRICED_TOKEN_BUDGET` when it cannot. A positive value pins it;
+zeroing both it and the cost budget is an explicit "no limit" and is respected.
+
+**Why a fixed backstop cannot work.** Measured on two real turns: a run cost
+**$0.126 per million tokens**, so the $2.00 cost budget is worth ~16M tokens and
+a 2,000,000-token backstop is *eight times tighter than the budget it backs up*.
+It ended the run at 10% of the cost limit. On a frontier model the same 2M
+figure would be ~$30 — five times too loose. There is no single number that is a
+backstop for both, which is the same argument as [AGT-019](#agt-019) for output
+ceilings and [AGT-024](#agt-024) for the call ceiling: a constant that has to
+track a model's properties belongs to the model, not to configuration.
+
+**Pricing is asked, not assumed.** `ModelCapability.priced` comes from litellm's
+`input_cost_per_token`/`output_cost_per_token`. If it says priced and the price
+turns out to be zero at runtime, the run keeps the derived call ceiling
+(AGT-024) and each step keeps its cost share, but nothing bounds total tokens —
+the case for setting `CHAT_RUN_TOKEN_BUDGET` explicitly on a gateway that
+proxies a priced model under a private name.
 
 ### Verified on a real turn
 
@@ -826,12 +1044,14 @@ gets an equal share, and the steps within a pass split it. For a chain (`n`
 waves of one) and for a flat batch (one wave of `n`) this is exactly the old
 number; it differs only where the graph has depth.
 
-**`MAX_STEPS` (8) and `MAX_PARALLEL` (3) are unchanged, deliberately.** A wider
-batch is not free: a step's grant is a share of the run divided by the width in
-flight, so raising `MAX_PARALLEL` makes every concurrent step poorer in exactly
-the proportion it makes the batch wider, and a plan of 8 already reaches the
-whole 3-wide fleet slot in three passes. Raise `MAX_PARALLEL` with the run token
-budget, not on its own.
+**`MAX_PARALLEL` matches `MAX_EXPANSION` (8).** It was 3, on the reasoning that a
+wider batch made every concurrent step poorer — true while the *token* budget was
+fair-shared by width. It is not true now: tokens keep only the safety bound and
+cost is what steps share ([AGT-025](#agt-025)), and a step's cost slice is far
+from binding. Measured against it: a stage of four expanded children ran as two
+sequential batches, so the stage cost twice its slowest step — about ten
+minutes — purely because the setting was narrower than the expansion it had to
+carry.
 
 **Measure shape with `scripts/plan_probe.py`**, which now prints the dispatch
 wave count beside the widest independent batch — the depth the budget divisor

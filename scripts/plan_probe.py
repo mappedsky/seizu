@@ -32,6 +32,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS
 from reporting.schema.report_config import User
@@ -89,18 +90,26 @@ def render(index: int, result: dict[str, Any]) -> int:
     # what each step's budget slice is now divided by.
     print(f"    dispatch waves: {chat_orchestrator._remaining_waves(plan)}")
     for step in plan:
+        maps_over = f"  map_over={step['map_over']}" if step.get("map_over") else ""
         print(
             f"    {step['id']}  deps={step.get('depends_on') or []}  "
-            f"kind={step.get('action_kind')}  action={step.get('required_action') or '-'}"
+            f"kind={step.get('action_kind')}  action={step.get('required_action') or '-'}{maps_over}"
         )
         print(f"        goal: {str(step.get('goal'))[:140]}")
         if step.get("required_arguments"):
             print(f"        args: {json.dumps(step['required_arguments'])[:140]}")
+    mapped = [step["id"] for step in plan if step.get("map_over")]
     print(f"    widest independent batch: {batches}")
+    if mapped:
+        # A mapped step is one step here and N at run time (AGT-023), so the
+        # written plan understates the width this request can actually reach.
+        projected = _independent_batches(plan, expand=settings.CHAT_ORCHESTRATOR_MAX_EXPANSION)
+        print(f"    expands at run time: {mapped} -> up to {projected} wide")
+        return projected
     return batches
 
 
-def _independent_batches(plan: list[dict[str, Any]]) -> int:
+def _independent_batches(plan: list[dict[str, Any]], *, expand: int = 1) -> int:
     """The largest number of steps that could ever run at once.
 
     This, not the step count, is what parallelism is available to: a plan of
@@ -109,13 +118,14 @@ def _independent_batches(plan: list[dict[str, Any]]) -> int:
     runnable together (``_runnable_steps``).
     """
     done: set[str] = set()
+    by_id = {step["id"]: step for step in plan}
     remaining = {step["id"]: set(step.get("depends_on") or []) for step in plan}
     widest = 0
     while remaining:
         ready = [step_id for step_id, deps in remaining.items() if deps <= done]
         if not ready:
             break  # an unsatisfiable dependency; the dispatcher stops here too
-        widest = max(widest, len(ready))
+        widest = max(widest, sum(max(1, expand) if by_id[step_id].get("map_over") else 1 for step_id in ready))
         done.update(ready)
         for step_id in ready:
             remaining.pop(step_id)

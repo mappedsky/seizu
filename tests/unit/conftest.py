@@ -20,6 +20,21 @@ os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 # ``external_mcp.settings.MCP_EXTERNAL_PROXIES`` directly.
 os.environ["MCP_EXTERNAL_PROXIES"] = "[]"
 
+# Same shape of problem for the per-stage reasoning efforts: a developer tuning
+# them in `.env` (they reach the container now that Compose forwards them) would
+# change what "the default effort" is under the tests that assert it. Cleared
+# for the same reason -- the point is to ignore the value the environment has;
+# a test that wants an effort patches `settings` directly.
+for _effort in (
+    "CHAT_LLM_REASONING_EFFORT",
+    "CHAT_LLM_PLANNER_REASONING_EFFORT",
+    "CHAT_LLM_WORKER_REASONING_EFFORT",
+    "CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT",
+    "CHAT_LLM_VERIFIER_REASONING_EFFORT",
+    "CHAT_LLM_SYNTHESIZER_REASONING_EFFORT",
+):
+    os.environ.pop(_effort, None)
+
 from reporting.services import reporting_neo4j  # noqa: E402
 
 

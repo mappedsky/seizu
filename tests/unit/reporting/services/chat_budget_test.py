@@ -11,6 +11,7 @@ from reporting.services.chat_budget import (
     usage_cost_usd,
     usage_from_message,
 )
+from reporting.services.chat_models import ModelCapability
 
 
 def _ledger(
@@ -626,3 +627,132 @@ def test_closing_a_scope_clears_both_dimensions():
 
     assert not controller.scope_exhausted("worker:s1")
     assert controller.scope_cost_spend("worker:s1") == 0.0
+
+
+# --- The call ceiling is derived from the plan (AGT-024) ----------------------
+
+
+def test_the_call_ceiling_is_derived_from_the_plan(mocker):
+    from reporting.services.chat_budget import derived_call_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+
+    # A run has to route and plan before there is a plan to derive from.
+    assert derived_call_ceiling(0) == derived_call_ceiling(1) == 32
+    assert derived_call_ceiling(4) == 104
+    # A plan that expands is a bigger plan, and gets a bigger ceiling.
+    assert derived_call_ceiling(9) == 224
+
+
+def test_an_explicit_ceiling_still_wins(mocker):
+    from reporting.services.chat_budget import derived_call_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 64)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+
+    assert derived_call_ceiling(1) == derived_call_ceiling(40) == 64
+
+
+def test_zeroing_both_disables_the_dimension(mocker):
+    from reporting.services.chat_budget import derived_call_ceiling, initial_budget_ledger
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 0)
+
+    assert derived_call_ceiling(9) == 0
+    assert initial_budget_ledger()["max_llm_calls"] == 0
+
+
+def test_a_growing_plan_raises_the_ceiling_but_nothing_lowers_it(mocker):
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+    controller = BudgetController(_ledger(max_llm_calls=32, reserve_llm_calls=2))
+
+    controller.set_planned_steps(4)
+    assert controller.snapshot()["max_llm_calls"] == 104
+
+    # A step expanding into four makes the plan bigger, not the run's allowance
+    # smaller; and a plan that shrinks must not retroactively exhaust the run.
+    controller.set_planned_steps(9)
+    assert controller.snapshot()["max_llm_calls"] == 224
+    controller.set_planned_steps(2)
+    assert controller.snapshot()["max_llm_calls"] == 224
+
+
+async def test_a_wide_plan_is_not_stopped_by_a_ceiling_meant_for_a_narrow_one(mocker):
+    """The failure this replaces: an expanded plan died on a count, not on spend."""
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+    controller = BudgetController(_ledger(token_limit=0, max_llm_calls=32, reserve_llm_calls=0))
+    controller.set_planned_steps(9)
+
+    for _ in range(60):
+        reservation = await controller.reserve(estimated_input_tokens=1, estimated_output_tokens=1)
+        await controller.commit(reservation, input_tokens=1, output_tokens=1, cost_usd=0.0, usage_estimated=False)
+
+    assert controller.mode == "normal"
+    assert controller.snapshot()["llm_calls"] == 60
+
+
+# --- The token backstop is derived too (AGT-022) ------------------------------
+
+
+def test_a_priced_model_with_a_cost_budget_needs_no_token_ceiling(mocker):
+    """Measured: a 2M-token backstop is ~$0.25 on a cheap model, so a $2 cost
+    budget could never be what binds."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=True))
+
+    assert derived_token_ceiling() == 0
+
+
+def test_an_unpriced_model_keeps_the_backstop(mocker):
+    """Cost cannot accrue on a model litellm cannot price, so something must."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_RUN_UNPRICED_TOKEN_BUDGET", 2_000_000)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "my-gateway/private-model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=False))
+
+    assert derived_token_ceiling() == 2_000_000
+
+
+def test_an_explicit_token_budget_still_wins(mocker):
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 400_000)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+
+    assert derived_token_ceiling() == 400_000
+
+
+def test_budgeting_on_neither_leaves_both_off(mocker):
+    """Zeroing both is an explicit choice, not a gap to fill in."""
+    from reporting.services.chat_budget import derived_token_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 0.0)
+
+    assert derived_token_ceiling() == 0
+
+
+def test_a_cost_budgeted_run_is_bounded_by_cost_alone(mocker):
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.settings.CHAT_LLM_MODEL", "priced/model")
+    mocker.patch("reporting.services.chat_models.capability", return_value=ModelCapability(priced=True))
+    from reporting.services.chat_budget import initial_budget_ledger
+
+    controller = BudgetController(initial_budget_ledger())
+
+    assert controller.remaining_normal_tokens is None  # no token bound at all
+    assert controller.remaining_normal_cost_usd == pytest.approx(1.6)
+    assert controller.enabled

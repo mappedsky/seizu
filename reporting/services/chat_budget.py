@@ -33,12 +33,54 @@ class BudgetReservation:
     scope: str = ""
 
 
+#: Calls a run makes whatever its plan costs: routing, planning, synthesis, and
+#: the retries those three are allowed.
+_CALL_CEILING_BASE = 8
+
+
+def derived_call_ceiling(steps: int) -> int:
+    """The call ceiling a plan of *steps* steps implies, or 0 when disabled.
+
+    ``CHAT_RUN_MAX_LLM_CALLS`` overrides it when set. Rationale: AGT-024.
+    """
+    override = max(0, settings.CHAT_RUN_MAX_LLM_CALLS)
+    if override:
+        return override
+    per_step = max(0, settings.CHAT_RUN_LLM_CALLS_PER_STEP)
+    return _CALL_CEILING_BASE + per_step * max(1, steps) if per_step else 0
+
+
+def derived_token_ceiling() -> int:
+    """The run's token ceiling, or 0 when cost is bound to do the bounding.
+
+    ``CHAT_RUN_TOKEN_BUDGET`` pins it when set. Otherwise: a run budgeted in
+    cost on a model LiteLLM can price needs no token ceiling, because cost
+    already bounds it and a token figure that also bounded it would have to be
+    re-derived for every model's price. When the model is *not* priced, cost can
+    never accrue, and the backstop is the only guard left. Rationale: AGT-022.
+    """
+    configured = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
+    if configured:
+        return configured
+    if max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) <= 0:
+        # Not budgeting on cost either: this is an explicit "no token limit".
+        return 0
+    from reporting.services.chat_models import capability
+
+    if capability(settings.CHAT_LLM_MODEL).priced:
+        return 0
+    return max(0, settings.CHAT_RUN_UNPRICED_TOKEN_BUDGET)
+
+
 def initial_budget_ledger() -> dict[str, Any]:
-    token_limit = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
+    token_limit = derived_token_ceiling()
     cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD)
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
+    # One step's worth until a plan exists: routing and planning happen before
+    # there is anything to derive from.
+    max_calls = derived_call_ceiling(1)
     return {
-        "enabled": token_limit > 0 or cost_limit > 0 or settings.CHAT_RUN_MAX_LLM_CALLS > 0,
+        "enabled": token_limit > 0 or cost_limit > 0 or max_calls > 0,
         "token_limit": token_limit,
         "cost_limit_usd": cost_limit,
         "reserve_tokens": math.ceil(token_limit * reserve_ratio) if token_limit else 0,
@@ -55,8 +97,8 @@ def initial_budget_ledger() -> dict[str, Any]:
         "cache_creation_tokens": 0,
         "cost_usd": 0.0,
         "llm_calls": 0,
-        "max_llm_calls": max(0, settings.CHAT_RUN_MAX_LLM_CALLS),
-        "reserve_llm_calls": min(2, max(0, settings.CHAT_RUN_MAX_LLM_CALLS - 1)),
+        "max_llm_calls": max_calls,
+        "reserve_llm_calls": min(2, max(0, max_calls - 1)),
         "usage_estimated": False,
         "mode": "normal",
         "exhaustion_reason": None,
@@ -71,6 +113,7 @@ def grant_ledger(
     soft_token_grant: int,
     cost_grant_usd: float,
     llm_call_grant: int,
+    soft_cost_grant_usd: float = 0.0,
 ) -> dict[str, Any]:
     """A self-contained ledger for one unit of work executing somewhere else.
 
@@ -90,13 +133,19 @@ def grant_ledger(
     grant = max(0, token_grant)
     return {
         **initial_budget_ledger(),
+        # Marks this ledger as one unit of work's slice rather than the run's
+        # own. A step that exhausts it has used its share; the run is elsewhere
+        # and knows nothing about it (AGT-025).
+        "is_grant": True,
         "enabled": grant > 0 or cost_grant_usd > 0 or llm_call_grant > 0,
         "token_limit": grant,
         "cost_limit_usd": max(0.0, cost_grant_usd),
         # The reserve is what pays for the step's summary pass, which is the only
         # thing standing between a capped step and reporting nothing.
         "reserve_tokens": max(0, grant - max(0, soft_token_grant)) if soft_token_grant else 0,
-        "reserve_cost_usd": 0.0,
+        # The cost dimension needs the same reserve as the token one, or a step
+        # whose grant binds on cost is cut with nothing to show (AGT-025).
+        "reserve_cost_usd": (max(0.0, cost_grant_usd - max(0.0, soft_cost_grant_usd)) if soft_cost_grant_usd else 0.0),
         "max_llm_calls": max(0, llm_call_grant),
         "reserve_llm_calls": min(2, max(0, llm_call_grant - 1)),
     }
@@ -321,6 +370,11 @@ class BudgetController:
         return cast(BudgetMode, str(self._ledger.get("mode", "normal")))
 
     @property
+    def is_grant(self) -> bool:
+        """Whether this ledger is one step's slice rather than the run's own."""
+        return bool(self._ledger.get("is_grant"))
+
+    @property
     def degraded(self) -> bool:
         return self.mode in ("degraded", "finalizing", "exhausted")
 
@@ -356,6 +410,21 @@ class BudgetController:
         spent = float(self._ledger.get("cost_usd") or 0.0)
         reserve = float(self._ledger.get("reserve_cost_usd") or 0.0)
         return max(0.0, cost_limit - reserve - spent)
+
+    def set_planned_steps(self, steps: int) -> None:
+        """Re-derive the call ceiling for a plan of *steps* steps.
+
+        Called wherever the plan changes, including when a step expands into
+        several (AGT-023), so the ceiling tracks the work rather than the shape
+        the plan happened to have when the turn started. Only ever raises: a
+        ceiling that fell below what a run had already spent would finalize it
+        retroactively.
+        """
+        derived = derived_call_ceiling(steps)
+        if not derived or derived <= int(self._ledger.get("max_llm_calls") or 0):
+            return
+        self._ledger["max_llm_calls"] = derived
+        self._ledger["reserve_llm_calls"] = min(2, max(0, derived - 1))
 
     def set_estimated_remaining_tokens(self, tokens: int) -> None:
         self._ledger["estimated_remaining_tokens"] = max(0, tokens)

@@ -63,6 +63,10 @@ class ModelCapability:
     #: Whether the model accepts a `temperature` at all. Reasoning models on
     #: OpenAI do not, and `litellm.drop_params` is False, so sending one raises.
     supports_temperature: bool = True
+    #: Whether litellm knows what this model costs. False for a self-hosted or
+    #: gateway model, where a cost budget can never accrue and so cannot bound a
+    #: run (AGT-022).
+    priced: bool = False
 
 
 #: Stages that are not roles of their own: they run on a role's model but want
@@ -138,6 +142,7 @@ def capability(model_id: str) -> ModelCapability:
         supports_reasoning=bool(info.get("supports_reasoning")),
         provider=_provider_of(model_id),
         supports_temperature=_accepts_temperature(model_id),
+        priced=bool(info.get("input_cost_per_token") or info.get("output_cost_per_token")),
     )
 
 
