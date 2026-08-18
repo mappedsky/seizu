@@ -130,6 +130,18 @@ Each step's share of the run budget is divided by the remaining dispatcher
 passes rather than by the number of steps left, so a step that runs alone at a
 bottleneck gets a whole pass's share.
 
+**A step can fan out over what an earlier step found.** Work that has to be done
+once per discovered thing — each CVE in a list, each repository in an
+organization — is planned as a single step that maps over the step producing the
+list. When that step finishes, it is replaced by one step per item, and those
+run in parallel like any other independent steps. Without this the planner can
+only fan out over items your *request* names, and anything it has to find first
+collapses into one step that loops internally.
+
+`CHAT_ORCHESTRATOR_MAX_EXPANSION` (default 8) bounds how many steps one such
+step may become. A larger collection is cut to that many and the run reports the
+coverage it did not have; `0` turns expansion off.
+
 Every run — interactive or scheduled — is governed by a shared budget ledger tracking tokens, estimated USD cost (when LiteLLM knows the model price), and LLM call count. `CHAT_RUN_RESERVE_PERCENT` holds back part of the budget so final summaries and synthesis can produce an explicit partial result instead of stopping mid-plan; after the soft limit, eligible read-only work switches to `CHAT_LLM_ECONOMY_MODEL` when one is configured. Run outcomes distinguish `success`, `partial`, `budget_exhausted`, `blocked`, and `failure`.
 
 **A run is budgeted in cost.** `CHAT_RUN_COST_BUDGET_USD` (default $2.00 per
@@ -422,6 +434,7 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_ORCHESTRATOR_MAX_STEPS` | `8` | Maximum steps the planner may emit for one turn. Steps past it are dropped, along with any dependency pointing into them. |
 | `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` | `4096` | Planner generation budget, kept separate so thinking models have room to emit the structured plan. |
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
+| `CHAT_ORCHESTRATOR_MAX_EXPANSION` | `8` | Maximum steps one step may expand into when it maps over items an earlier step discovered; `0` disables expansion. |
 | `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. A step's budget slice is divided by the width in flight, so raise this together with the run token budget rather than on its own. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED` | `true` | Schedule each independent step of a batch as its own Temporal activity. Interactive turns only. |

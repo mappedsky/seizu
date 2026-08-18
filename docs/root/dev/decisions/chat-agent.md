@@ -583,6 +583,108 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-023 — A step maps over what an earlier step discovered
+
+**Applies to:** `chat_orchestrator._PlannedStep.map_over`, `_MapItems`,
+`_expand_mapped_steps`, `_child_step_id`, `_dependency_satisfied`,
+`_runnable_steps`, `_step_contract`; `CHAT_ORCHESTRATOR_MAX_EXPANSION`
+
+A planned step may declare `map_over: <dependency id>`. When that dependency
+passes, the dispatcher extracts the items from its output and replaces the step
+with one step per item; the parent takes the status `expanded` and never runs.
+The children are ordinary steps, so the ready set, the fan-out
+([AGT-018](#agt-018)) and the retry cycle carry them with no changes.
+
+**Why the planner cannot do this.** `planner_node` runs once, before anything
+executes, so it can only fan out over items the *request* names. Measured on
+`deepseek-v4-pro`, same graph and session: "investigate these four CVEs: …"
+planned 5-7 steps, **4 wide**; "find the four highest-severity CVEs, then
+investigate each" planned **1 step**. The second is the shape the work actually
+has, and the planner was right — the ids did not exist yet. The cost of being
+right was that one step rendered a skill five times and made 57 tool calls in
+sequence, at the one level where nothing could parallelise it.
+
+**Ids are derived from the item, never from position.** `_child_step_id` slugs
+the item and appends a digest of it. The fan-out's idempotency key is built from
+the step ids in a batch, which is what stops a repeat from paying for the same
+batch twice ([AGT-018](#agt-018)); ids minted from list order or a counter would
+move when the model returns the same items in a different order, and the
+guarantee would quietly stop holding.
+
+**The budget re-allocates itself.** `_budget_divisor` and `_remaining_waves`
+([AGT-020](#agt-020)) are computed from the live plan every time a batch is
+granted, so children are budgeted as the steps they are the moment they join it.
+Nothing subdivides the parent's slice, because the parent never had one — it had
+not run. An `expanded` step is excluded from the outstanding set, so it is not
+counted as work the run still has to pay for.
+
+**Expansion is bounded where the items arrive**, not by trusting the model:
+`CHAT_ORCHESTRATOR_MAX_EXPANSION` (default 8) cuts the list, and the run records
+what it dropped in `run_errors` so a partial sweep is stated rather than implied.
+Items are deduplicated first — two labels for one thing would run the work twice
+and charge for both. `0` disables expansion entirely.
+
+**A step that cannot be expanded runs as written.** No items, or a failed
+extraction, clears `map_over` and leaves the step pending. The alternative — a
+step that disappears because its collection came back empty — loses work the plan
+said was necessary, and the failure would be invisible.
+
+**A dependent of an expanded step waits for every child**
+(`_dependency_satisfied`). The parent's `passed` never arrives, so without this a
+synthesis step that depends on it would either block forever or, worse, run with
+nothing.
+
+**Each child carries its item, not the collection.** The child's goal names the
+item, its contract says siblings cover the rest, and its `depends_on` drops the
+step it was mapped over — so it is not handed, and does not pay for, the whole
+list it was sliced from.
+
+**Retry works per child.** Children are ordinary steps: `_prepare_retries` resets
+a failed one and the siblings that passed are not re-run, while the parent stays
+`expanded` and is never expanded a second time (it is no longer `pending`).
+
+**A half-expanded plan needs no rule of its own.** Its children are pending, so
+`_has_pending_plan` and [AGT-011](#agt-011)'s discard-unless-resumed treat it
+exactly like any other unfinished plan.
+
+**Mapping over an already-expanded step chains 1:1.** The planner reliably
+produces this shape — find the CVEs, then per CVE confirm the finding, then per
+CVE judge reachability — so a `map_over` whose source is `expanded` takes that
+source's *children* as its items: no extraction call (the items are already
+steps), and each child depends on its own counterpart rather than on the whole
+previous stage, so `s3-for-X` starts as soon as `s2-for-X` passes. Without this
+the second mapped step degrades to one step looping internally, which is the
+thing the construct exists to remove.
+
+### Measured
+
+`scripts/plan_probe.py` on the discovery-shaped request ("find the four
+highest-severity CVEs, then investigate each one separately") now plans a
+`map_over` step in both samples, where it previously planned one step. A full
+headless turn on the same request:
+
+```
+expansions: s2 -> 4 (CVE-2017-12791:…, CVE-2017-14695:…, CVE-2017-7893:…, CVE-2019-17361:…)
+            s3 -> 4 (chained 1:1 off s2's children)
+ready sets: [s1] [s1] [4 x s2-child] [1 x s2-child + 3 x s3-child]
+widest ready set: 4
+```
+
+Four wide — the same width the issue measured for the *enumerated-ids* baseline,
+now reached without the ids appearing in the request. The last batch mixes a
+first-stage child with three second-stage ones, which is the per-item edge
+working: `s3-for-X` started while `s2-for-Y` was still running.
+
+**The call ceiling is what binds now.** That run ended `exhausted` on
+`CHAT_RUN_MAX_LLM_CALLS` (120 on the box it ran on; the shipped default is 64)
+having spent 28% of its cost budget. Expansion multiplies calls by design, so a
+deployment enabling it should expect `CHAT_RUN_MAX_LLM_CALLS` to be the dimension
+that stops a wide investigation, and size it with `CHAT_ORCHESTRATOR_MAX_EXPANSION`
+rather than leaving it at a value chosen when a plan was at most eight steps.
+
+**Not done:** a general map/reduce planner, and reduce steps other than an
+ordinary step that depends on the expanded one. This is one construct.
+
 ## AGT-022 — A run is budgeted in cost; tokens are the backstop
 
 **Applies to:** `chat_budget.BudgetController.open_scope` / `scope_exhausted` /

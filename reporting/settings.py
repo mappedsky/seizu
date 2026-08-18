@@ -793,6 +793,12 @@ CHAT_ORCHESTRATOR_DEPENDENCY_CONTEXT_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_DEPE
 # answer from whatever steps passed. Bounds self-correction so a persistently
 # failing step cannot loop forever.
 CHAT_ORCHESTRATOR_MAX_ITERATIONS = int_env("CHAT_ORCHESTRATOR_MAX_ITERATIONS", 3)
+# Maximum steps one mapped step may expand into, once the step it maps over has
+# run and its items are known (AGT-023). Bounds a collection nobody wrote down:
+# a step mapping over "every CVE in the graph" is cut to this many, and the run
+# reports the coverage it did not have. 0 disables expansion, and a mapped step
+# then runs once, iterating internally.
+CHAT_ORCHESTRATOR_MAX_EXPANSION = int_env("CHAT_ORCHESTRATOR_MAX_EXPANSION", 8)
 # Maximum independent steps the dispatcher runs concurrently in one batch.
 # This bounds one turn. Cluster-wide concurrency is bounded by the Temporal
 # worker's activity slots (TEMPORAL_MAX_CONCURRENT_ACTIVITIES) once steps are
