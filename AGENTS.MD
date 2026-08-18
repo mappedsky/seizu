@@ -84,11 +84,23 @@ docker compose run --rm seizu-node bun run type-check
 
 **Backend (`seizu`):**
 ```bash
-docker compose run --rm --user root seizu uv sync --frozen --all-groups --all-packages --no-install-workspace
 docker compose run --rm seizu uv run --frozen --no-sync pytest tests/unit
 docker compose run --rm seizu uv add [--dev] <package>
+docker compose run --rm seizu uv lock          # after editing pyproject.toml by hand
+docker compose build seizu                     # REQUIRED after any dependency change
 ```
-> Always run tests via `uv run --frozen --no-sync` **in the container** so they use the synced Docker env and `uv.lock`. After editing `pyproject.toml`, run `docker compose run --rm seizu uv lock`; commit `pyproject.toml` + `uv.lock` together.
+> Always run tests via `uv run --frozen --no-sync` **in the container** so they use the synced Docker env and `uv.lock`. Commit `pyproject.toml` + `uv.lock` together.
+
+> **A dependency change needs a rebuild, not a `uv sync`.** The environment lives
+> in the image, and `docker compose run --rm` discards the container it synced —
+> so `uv sync` appears to succeed, the new package is gone the moment the command
+> exits, and the failure surfaces later as a `ModuleNotFoundError` in a test or at
+> runtime, far from the change that caused it. After `uv add` (or any edit to
+> `pyproject.toml`/`uv.lock`), run **`docker compose build seizu`**, then
+> `docker compose up -d --force-recreate` for any service already running.
+> `seizu-node` and `seizu-cartography-worker` are the same: rebuild the image
+> whose dependencies changed. `make build` does it, `make test_unit` depends on
+> it, and it is cached when `pyproject.toml` and `uv.lock` have not moved.
 
 **Docs (Sphinx):** isolated venv under `docs/.venv`, pinned in `docs/requirements.txt`. Sphinx is **not** in the project `pyproject.toml` — don't add it there. `make docs` runs `docs/build.sh` (bootstraps the venv). To change a docs dep, edit `docs/requirements.txt` and re-run `make docs`.
 
@@ -98,6 +110,7 @@ docker compose run --rm seizu uv add [--dev] <package>
 
 **Makefile shortcuts:**
 ```
+make build              # rebuild the backend image; required after a dependency change
 make test / test_unit / test_frontend
 make lint
 make schema             # regenerate schema/reporting-schema.json + schema/openapi.json
@@ -460,4 +473,4 @@ List-view conventions live in shared components — compose these rather than re
 
 ## Keeping Supporting Files Up to Date
 
-When changing the codebase, update as needed: **`Makefile`** (new targets), **`.github/workflows/`** (CI), **`Dockerfile`/`docker-compose.yml`** (services, files, env), **`.pre-commit-config.yaml`** (linting), **`pyproject.toml` + `uv.lock`** (commit together; `uv lock` after edits), **`docs/`** (user-facing changes — grep for removed items), **`schema/reporting-schema.json`** (`make schema` after Pydantic changes), **`.env.example`** (env vars), **`AGENTS.MD`** (conventions/tooling changes).
+When changing the codebase, update as needed: **`Makefile`** (new targets), **`.github/workflows/`** (CI), **`Dockerfile`/`docker-compose.yml`** (services, files, env), **`.pre-commit-config.yaml`** (linting), **`pyproject.toml` + `uv.lock`** (commit together; `uv lock` after edits, then `docker compose build`), **`docs/`** (user-facing changes — grep for removed items), **`schema/reporting-schema.json`** (`make schema` after Pydantic changes), **`.env.example`** (env vars), **`AGENTS.MD`** (conventions/tooling changes).

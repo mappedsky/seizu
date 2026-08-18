@@ -9,9 +9,17 @@ AUTH_PROFILE := $(shell grep -q 'DEVELOPMENT_ONLY_REQUIRE_AUTH=true' .env 2>/dev
 EXTERNAL_MCP_PROFILE := $(shell grep -q '^MCP_EXTERNAL_ENABLED=true' .env 2>/dev/null && echo '--profile external-mcp' || echo '')
 COMPOSE_PROFILES := $(AUTH_PROFILE) $(EXTERNAL_MCP_PROFILE)
 
+# The environment lives in the image, so a dependency change is a rebuild. A
+# `uv sync` in `docker compose run --rm` is discarded with the container it ran
+# in, and the test container that follows never sees it. Cached when
+# pyproject.toml and uv.lock have not moved.
+.PHONY: build
+build:
+	docker compose build seizu
+
+# Deprecated alias: syncing a throwaway container never affected anything.
 .PHONY: uv_sync
-uv_sync:
-	docker compose run --rm --user root seizu uv sync --frozen --all-groups --all-packages --no-install-workspace
+uv_sync: build
 
 junit:
 	mkdir -p junit
@@ -20,7 +28,7 @@ junit:
 test: test_unit test_frontend
 
 .PHONY: test_unit
-test_unit: junit uv_sync
+test_unit: junit build
 	docker compose run --rm seizu uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=term --no-cov-on-fail tests/unit
 
 .PHONY: test_integration
