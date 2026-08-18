@@ -3905,3 +3905,28 @@ async def test_verify_says_which_budget_stopped_the_step():
 
     assert share == (False, "Step stopped after using its share of the run budget.")
     assert run == (False, "Step stopped because the run budget entered finalization.")
+
+
+async def test_a_child_is_judged_on_its_own_item_not_the_whole_collection(mocker):
+    """Measured: a per-CVE child was failed for "not covering all four CVEs".
+
+    The verifier judges a step against its success_criteria, and the parent's
+    was written for the collection the step was going to iterate over.
+    """
+    plan = [
+        _step("s1", "passed"),
+        _step("s2", "pending", depends_on=["s1"], map_over="s1", success_criteria="All four CVEs are covered."),
+    ]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["CVE-1", "CVE-2"])
+
+    child = next(step for step in plan if step.get("map_parent") == "s2")
+    assert "CVE-1 alone" in child["success_criteria"]
+    assert "sibling steps cover the others" in child["success_criteria"].lower()
+
+
+async def test_a_child_without_inherited_criteria_still_gets_scoped_ones(mocker):
+    plan = [_step("s1", "passed"), _step("s2", "pending", depends_on=["s1"], map_over="s1", success_criteria="")]
+    await _expand(mocker, plan, [{"step_id": "s1", "output": "x"}], ["repo-a"])
+
+    child = next(step for step in plan if step.get("map_parent") == "s2")
+    assert child["success_criteria"] == "The result accomplishes this step's goal for repo-a alone."

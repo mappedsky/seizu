@@ -1318,6 +1318,15 @@ def _materialize(
                 **parent,
                 "id": child_id,
                 "goal": f"{parent.get('goal', '')} — for: {item}",
+                # Scoped to the item, because the verifier judges a step against
+                # this text and the parent's was written for the whole
+                # collection: a child covering one CVE was failed for not
+                # covering all four, and the run reported partial (AGT-023).
+                "success_criteria": (
+                    f"{parent['success_criteria']} Judged for {item} alone; sibling steps cover the others."
+                    if parent.get("success_criteria")
+                    else f"The result accomplishes this step's goal for {item} alone."
+                ),
                 # The item is the child's whole share of the collection, so it
                 # does not depend on -- or re-read -- the source's full output.
                 "depends_on": [dep for dep in (parent.get("depends_on") or []) if dep != source_id] + extra_deps,

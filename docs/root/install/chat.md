@@ -444,7 +444,7 @@ catalogue-wide declaration taking a turn from 1 bound tool to 43 — is
 | `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS` | `4096` | Planner generation budget, kept separate so thinking models have room to emit the structured plan. |
 | `CHAT_ORCHESTRATOR_MAX_ITERATIONS` | `3` | Verify-driven retry cycles before synthesizing an answer from the steps that passed. |
 | `CHAT_ORCHESTRATOR_MAX_EXPANSION` | `8` | Maximum steps one step may expand into when it maps over items an earlier step discovered; `0` disables expansion. |
-| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `3` | Independent steps dispatched concurrently in one batch. A step's budget slice is divided by the width in flight, so raise this together with the run token budget rather than on its own. |
+| `CHAT_ORCHESTRATOR_MAX_PARALLEL` | `8` | Independent steps dispatched concurrently in one batch. Matched to `CHAT_ORCHESTRATOR_MAX_EXPANSION`, so an expanded step's children run in one batch rather than several. |
 | `CHAT_ORCHESTRATOR_WORKER_MAX_ACTIONS` | `24` | Per-step action-count guard, used only when all shared budget dimensions are disabled. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_ENABLED` | `true` | Schedule each independent step of a batch as its own Temporal activity. Interactive turns only. |
 | `CHAT_ORCHESTRATOR_DISTRIBUTED_MIN_STEPS` | `2` | Batches smaller than this run inside the turn's own process. |

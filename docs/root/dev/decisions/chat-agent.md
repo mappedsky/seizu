@@ -716,7 +716,10 @@ nothing.
 **Each child carries its item, not the collection.** The child's goal names the
 item, its contract says siblings cover the rest, and its `depends_on` drops the
 step it was mapped over — so it is not handed, and does not pay for, the whole
-list it was sliced from.
+list it was sliced from. **Its `success_criteria` is rewritten for the item as
+well**: the verifier judges a step against that text, and the parent's was
+written for the collection, so a child covering one CVE was failed for "not
+covering all four" and the run reported `partial` with every step complete.
 
 **Retry works per child.** Children are ordinary steps: `_prepare_retries` resets
 a failed one and the siblings that passed are not re-run, while the parent stays
@@ -754,12 +757,25 @@ now reached without the ids appearing in the request. The last batch mixes a
 first-stage child with three second-stage ones, which is the per-item edge
 working: `s3-for-X` started while `s2-for-Y` was still running.
 
-**The call ceiling is what binds now.** That run ended `exhausted` on
-`CHAT_RUN_MAX_LLM_CALLS` (120 on the box it ran on; the shipped default is 64)
-having spent 28% of its cost budget. Expansion multiplies calls by design, so a
-deployment enabling it should expect `CHAT_RUN_MAX_LLM_CALLS` to be the dimension
-that stops a wide investigation, and size it with `CHAT_ORCHESTRATOR_MAX_EXPANSION`
-rather than leaving it at a value chosen when a plan was at most eight steps.
+**The call ceiling is what binds now** — which is why it became derived
+([AGT-024](#agt-024)): that run ended `exhausted` on `CHAT_RUN_MAX_LLM_CALLS`
+having spent 28% of its cost budget, and expansion multiplies calls by design.
+
+### What a wide plan actually costs, once it is allowed to finish
+
+A complete three-stage expansion (15 steps, four CVEs, every step producing
+output) on `deepseek-v4-pro` for planning and synthesis and
+`deepseek-v4-flash` at `reasoning_effort=low` for the per-step stages:
+**22 minutes, 274 calls, $0.18, batches of four starting together, step
+durations 39-320s.**
+
+The same request with the reasoning model on every stage and
+`CHAT_ORCHESTRATOR_MAX_PARALLEL=3` did not finish in 42 minutes: steps ran
+317-600s, three hit the 600s step timeout, and a stage of four children was
+split into two sequential batches. Two things were wrong and both mattered —
+adaptive reasoning on work that is mostly tool-calling, and a concurrency width
+narrower than the expansion it had to carry. The per-step stages are the ones to
+put on a fast model: they are the ones expansion multiplies.
 
 **Not done:** a general map/reduce planner, and reduce steps other than an
 ordinary step that depends on the expanded one. This is one construct.
@@ -1028,12 +1044,14 @@ gets an equal share, and the steps within a pass split it. For a chain (`n`
 waves of one) and for a flat batch (one wave of `n`) this is exactly the old
 number; it differs only where the graph has depth.
 
-**`MAX_STEPS` (8) and `MAX_PARALLEL` (3) are unchanged, deliberately.** A wider
-batch is not free: a step's grant is a share of the run divided by the width in
-flight, so raising `MAX_PARALLEL` makes every concurrent step poorer in exactly
-the proportion it makes the batch wider, and a plan of 8 already reaches the
-whole 3-wide fleet slot in three passes. Raise `MAX_PARALLEL` with the run token
-budget, not on its own.
+**`MAX_PARALLEL` matches `MAX_EXPANSION` (8).** It was 3, on the reasoning that a
+wider batch made every concurrent step poorer — true while the *token* budget was
+fair-shared by width. It is not true now: tokens keep only the safety bound and
+cost is what steps share ([AGT-025](#agt-025)), and a step's cost slice is far
+from binding. Measured against it: a stage of four expanded children ran as two
+sequential batches, so the stage cost twice its slowest step — about ten
+minutes — purely because the setting was narrower than the expansion it had to
+carry.
 
 **Measure shape with `scripts/plan_probe.py`**, which now prints the dispatch
 wave count beside the widest independent batch — the depth the budget divisor

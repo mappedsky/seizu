@@ -804,7 +804,11 @@ CHAT_ORCHESTRATOR_MAX_EXPANSION = int_env("CHAT_ORCHESTRATOR_MAX_EXPANSION", 8)
 # worker's activity slots (TEMPORAL_MAX_CONCURRENT_ACTIVITIES) once steps are
 # distributed, so raising this for a wide investigation does not by itself let
 # one turn take the whole fleet.
-CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 3)
+# Matched to CHAT_ORCHESTRATOR_MAX_EXPANSION: a step that expands into more
+# children than this is split across batches that run one after another, so a
+# stage costs a multiple of its slowest step for no reason but the setting
+# (AGT-020).
+CHAT_ORCHESTRATOR_MAX_PARALLEL = int_env("CHAT_ORCHESTRATOR_MAX_PARALLEL", 8)
 # Run each independent plan step of a batch as its own Temporal activity instead
 # of a coroutine inside the turn's activity (AGT-018). Steps are then placed
 # across the worker fleet, time out and fail independently, and are visible in
