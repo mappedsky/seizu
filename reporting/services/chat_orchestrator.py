@@ -174,10 +174,19 @@ class _PlannedStep(BaseModel):
     map_over: str = Field(
         default="",
         description=(
-            "Set this to the id of a dependency when the step must be carried out separately for"
-            " each item that dependency discovers. The step is expanded into one step per item"
-            " once that dependency finishes, and the copies run in parallel. Leave empty for a"
-            " step that is done once."
+            "Set this to the id of a dependency ONLY when each item that dependency discovers"
+            " needs its own investigation -- different tools per item, or a decision that depends"
+            " on what the item turns out to be. The step is then expanded into one step per item,"
+            " and each copy runs its own sub-agent, which starts knowing nothing. Leave it empty"
+            " when the per-item work is the same query or call with a different argument: that is"
+            " one step fetching every item at once, and it is both cheaper and faster."
+        ),
+    )
+    map_reason: str = Field(
+        default="",
+        description=(
+            "Required when map_over is set: what differs between items, such that they cannot be"
+            " done in one call. If the answer is 'only the identifier', do not set map_over."
         ),
     )
     suggested_tools: list[str] = Field(default_factory=list)
@@ -245,14 +254,27 @@ _PLANNER_PROMPT = (
     " parallel. Mark each step priority as required, supporting, or optional,"
     " and complexity as small, medium, or large. Do not invent tools or mark a"
     " live-data step as answer.\n"
-    "**When the same work must be done for each of several things an earlier step"
-    " finds, write ONE step and set map_over to that step's id.** It is expanded"
-    " into one step per item as soon as that step finishes, and the copies run in"
-    " parallel. Write its goal for a single item ('investigate the CVE', not"
-    " 'investigate each CVE'), and never write a step that loops over a"
-    " collection internally -- a loop inside one step cannot be parallelised and"
-    " is the slowest way to do the work. A step's map_over must also be one of"
-    " its depends_on.\n"
+    "**Fetching many things is one step; investigating each of them is a mapped"
+    " step. Decide which before you write either.**\n"
+    "- When the per-item work is the same query or tool call with a different"
+    " argument, write ONE step that gets them all in a single call -- one query"
+    " with a list of ids, one call with a list argument -- and say so in the"
+    " goal. Looking a property up per CVE, per repository or per package is"
+    " almost always this. Do not set map_over for it, and do not write a step"
+    " that loops internally either: one call, not N.\n"
+    "- Set map_over to a dependency's id only when each item needs its own"
+    " investigation: different tools per item, a decision that depends on what"
+    " the item turns out to be, or exploration whose shape is not known in"
+    " advance. Give map_reason saying what differs. The step is expanded into"
+    " one step per item as soon as that dependency finishes and the copies run"
+    " in parallel, so write its goal for a single item ('investigate the CVE',"
+    " not 'investigate each CVE'). A step's map_over must also be one of its"
+    " depends_on.\n"
+    "Every mapped item pays for its own sub-agent, which starts knowing nothing"
+    " and has to rediscover the ground the last one covered. A fan-out of eight"
+    " over work that one query would have done costs several times the query and"
+    " answers nothing sooner. When several steps need the same data, plan one"
+    " step to fetch it and write the later goals to read what it saved.\n"
     "**The plan is a directed acyclic graph**, and depends_on is its edges."
     " Every step id must be unique; every depends_on entry must be the id of a"
     " different step in this same plan; a step must never list its own id; and"
@@ -963,6 +985,7 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
                 "goal": step.goal,
                 "depends_on": edges[step_id],
                 "map_over": str(step.map_over or "").strip() if str(step.map_over or "").strip() in known else "",
+                "map_reason": str(step.map_reason or "").strip(),
                 "suggested_tools": list(step.suggested_tools),
                 "action_kind": step.action_kind,
                 "required_action": step.required_action,
@@ -1297,6 +1320,10 @@ async def _expand_mapped_steps(
             source_step=source_id,
             items=len(items),
             limit=limit,
+            # Planner-authored, so it is content and off unless recording is on
+            # (AGT-026). It is what tells a wide trace whether the fan-out was
+            # divergent work or a query that should have been one call.
+            reason=telemetry.content(str(parent.get("map_reason") or ""), 200),
         ):
             _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
         _emit_plan(writer, plan)
