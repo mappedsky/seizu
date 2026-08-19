@@ -23,6 +23,25 @@ services:
       - METRICS_PREFIX=seizu
     networks:
       stats:
+  # ── OTLP trace sink (opt-in: `docker compose --profile tracing up -d`) ──
+  # A turn spans the web service and several worker activities, so its spans are
+  # only one tree if something collects them (AGT-026). This writes them to
+  # .compose/otel/spans.jsonl rather than to a UI, which is what makes a run's
+  # step and model-call spans aggregatable. Set
+  # TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces to export here.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    profiles:
+      - tracing
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./.config/dev/otel/collector.yaml:/etc/otel/collector.yaml:ro
+      - ./.compose/otel:/traces
+    networks:
+      # Reachable from both sides of a turn: `seizu` admits it on proxy, the
+      # worker runs it on stats.
+      stats:
+      proxy:
   # ── PostgreSQL (application records + independently named chat database) ──
   postgres:
     image: postgres:18-alpine

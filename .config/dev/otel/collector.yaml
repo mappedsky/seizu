@@ -1,0 +1,28 @@
+# Dev-only trace sink for the `tracing` profile. Receives OTLP over HTTP (what
+# reporting/services/telemetry.py exports) and writes every span to a JSON-lines
+# file, so a turn's spans can be read back and aggregated without standing up a
+# tracing backend. Point TELEMETRY_OTLP_ENDPOINT at
+# http://otel-collector:4318/v1/traces to use it.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  # One JSON object per export batch, appended. Read it from .compose/otel/.
+  file:
+    path: /traces/spans.jsonl
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file, debug]
+  telemetry:
+    logs:
+      level: warn
