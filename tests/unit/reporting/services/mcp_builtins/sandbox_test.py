@@ -2532,3 +2532,48 @@ async def test_run_bash_reports_a_timeout_instead_of_raising():
 
     assert "too long" in out
     assert "narrower command" in out
+
+
+def test_a_parameter_type_reaches_the_sub_agent_as_the_type_it_is():
+    """An unmapped type used to fall back to str, so every array parameter was
+    declared to the sub-agent as a string (AGT-031)."""
+    from reporting.services.mcp_builtins.sandbox import _py_type_for
+
+    assert _py_type_for({"type": "array", "items": {"type": "string"}}) == list[str]
+    assert _py_type_for({"type": "array", "items": {"type": "integer"}}) == list[int]
+    # An array that does not say what it holds is a list of strings, not a string.
+    assert _py_type_for({"type": "array"}) == list[str]
+    assert _py_type_for({"type": "object"}) == dict[str, Any]
+    assert _py_type_for({"type": "integer"}) is int
+    assert _py_type_for({}) is str
+
+
+async def test_an_array_parameter_is_bound_as_a_list_not_a_string() -> None:
+    """The signature the model is shown is what it answers, so this is the whole
+    bug: 12 calls in one turn were refused by the server for passing a string to
+    a []string parameter it had been told was a string."""
+    fake_tools = [
+        Tool(
+            name="graph__query",
+            description="Query",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "fields": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer"},
+                },
+            },
+        )
+    ]
+    with (
+        _disclosure(False),
+        patch("reporting.services.mcp_runtime.list_tools_for_user", AsyncMock(return_value=fake_tools)),
+    ):
+        tools = await _build_seizu_tools(_current_user())
+
+    bound = next(t for t in tools if t.name == "graph__query")
+    annotations = bound.args_schema.model_fields
+    assert annotations["fields"].annotation == list[str] | None
+    assert annotations["query"].annotation == str | None
+    assert annotations["limit"].annotation == int | None

@@ -583,6 +583,32 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-031 — A sub-agent's tool signature is the tool's schema, composite types included
+
+**Applies to:** `mcp_builtins/sandbox.py::_py_type_for`, `_JSON_SCALAR_TO_PY`,
+`_build_seizu_tools`
+
+A sub-agent's tools are built as pydantic models from each tool's JSON Schema.
+The type map held the three scalars and fell back to `str` for anything else, so
+every **array** parameter was declared to the sub-agent as a string.
+
+**A model told a parameter is a string passes a string.** It then failed at the
+far end — `parameter fields could not be coerced to []string, is string` — which
+reads as the model getting it wrong and is the schema telling it wrong. Measured
+on one reachability turn: **12 of the turn's 12 tool errors were this**, across
+`search_code`, `list_commits` and `get_file_contents`, and it was the only thing
+failing in that run.
+
+`array` maps to `list[<item type>]` (a list of strings when the schema does not
+say what it holds, never a string), and `object` to `dict[str, Any]`. The fallback
+for a genuinely unknown type is still `str`, but composite types no longer reach
+it.
+
+**Found by the tool spans** ([AGT-029](#agt-029)), not by reading the code. The
+failures were ordinary tool results — the sub-agent absorbed each one and carried
+on — so before those spans existed they left no trace to notice, and the same bug
+had been running through every delegating turn.
+
 ## AGT-030 — The call ceiling only ever fires; it never throttles
 
 **Applies to:** `chat_budget._refresh_mode_locked`, `derived_call_ceiling`;

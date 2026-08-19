@@ -616,7 +616,6 @@ async def _build_seizu_tools(
     reachable_by_name = {tool.name: tool for tool in reachable}
     seizu_tools = [t for t in reachable if t.name in _bound_tool_names(reachable, disclosed, requested)]
 
-    _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
     # Shared by every tool in this delegation so paths stay distinct.
     _result_seq = itertools.count(1)
     # What each exact call already returned, for calls whose outcome cannot
@@ -725,7 +724,7 @@ async def _build_seizu_tools(
         fields: dict[str, Any] = {}
         for prop_name, prop_info in properties.items():
             desc = str(prop_info.get("description", ""))
-            py_type: type = _JSON_TYPE_TO_PY.get(prop_info.get("type", "string"), str)
+            py_type = _py_type_for(prop_info)
             if prop_name in required:
                 fields[prop_name] = (py_type, Field(..., description=desc))
             else:
@@ -757,6 +756,28 @@ async def _build_seizu_tools(
     if skills:
         result.extend(_skill_discovery_tools(current_user, skills, undiscovered, _invoke, bound_names))
     return result
+
+
+#: JSON Schema scalars, in the types a pydantic model needs them as. Composite
+#: types are not here: see :func:`_py_type_for`, which has to look inside them.
+_JSON_SCALAR_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool, "string": str}
+
+
+def _py_type_for(prop_info: dict[str, Any]) -> Any:
+    """One tool parameter's JSON Schema type, as the sub-agent should see it.
+
+    Composite types are the point, and the reason this is a function rather than
+    a lookup: an unmapped type must never quietly become ``str``, because the
+    signature the sub-agent is shown is the signature it answers (AGT-031).
+    """
+    json_type = prop_info.get("type", "string")
+    if json_type == "array":
+        items = prop_info.get("items") or {}
+        item_type = _JSON_SCALAR_TO_PY.get(items.get("type", "string"), str)
+        return list[item_type]  # type: ignore[valid-type]
+    if json_type == "object":
+        return dict[str, Any]
+    return _JSON_SCALAR_TO_PY.get(json_type, str)
 
 
 def _settings_progressive_disclosure() -> bool:
