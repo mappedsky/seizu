@@ -1279,13 +1279,23 @@ def _wrap_with_detail_events(
             if children is not None:
                 children.append(child)
             _emit_section("running")
-            try:
-                out = await _orig(**kwargs)
-            except Exception as exc:
-                child["status"] = "error"
-                child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
-                _emit_section("running")
-                raise
+            # Every tool a sub-agent calls passes here, including the sandbox's
+            # own five, which never reach mcp_runtime's span (AGT-029).
+            with telemetry.span(f"sandbox tool {_name}", tool=_name) as current:
+                try:
+                    out = await _orig(**kwargs)
+                except Exception as exc:
+                    telemetry.set_attributes(
+                        current,
+                        outcome="error",
+                        error_type=exc.__class__.__name__,
+                        error_text=telemetry.content(str(exc), 400),
+                    )
+                    child["status"] = "error"
+                    child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
+                    _emit_section("running")
+                    raise
+                telemetry.set_attributes(current, outcome="ok")
             child["status"] = "completed"
             child["body"] = _truncate(str(out) if out is not None else "", _CHILD_BODY_MAX)
             _emit_section("running")

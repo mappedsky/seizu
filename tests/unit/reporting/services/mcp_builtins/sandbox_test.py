@@ -2477,3 +2477,58 @@ def test_no_budget_controller_means_no_note(mocker) -> None:
     mocker.patch("reporting.services.chat_budget.current_budget_scope", return_value="")
 
     assert _live_budget_note() == ""
+
+
+# ---------------------------------------------------------------------------
+# _E2BSandboxBackend.run_bash — a non-zero exit is output, not a fault
+# ---------------------------------------------------------------------------
+
+
+async def test_run_bash_reports_a_non_zero_exit_instead_of_raising():
+    """grep exits 1 when it matches nothing. Raising for that ended the whole
+    delegation and lost every result the sub-agent had gathered (AGT-029)."""
+    from e2b import CommandExitException
+
+    sandbox = MagicMock()
+    sandbox.commands.run = AsyncMock(
+        side_effect=CommandExitException(stderr="no such file", stdout="partial", exit_code=2, error=None)
+    )
+
+    out = await _E2BSandboxBackend(sandbox).run_bash("grep needle missing.txt")
+
+    assert "partial" in out
+    assert "no such file" in out
+    assert "exit code: 2" in out
+
+
+async def test_run_bash_does_not_mention_an_exit_code_on_success():
+    sandbox = MagicMock()
+    sandbox.commands.run = AsyncMock(return_value=MagicMock(stdout="hello", stderr="", exit_code=0))
+
+    out = await _E2BSandboxBackend(sandbox).run_bash("echo hello")
+
+    assert out == "hello"
+
+
+async def test_run_bash_says_something_when_a_command_fails_silently():
+    from e2b import CommandExitException
+
+    sandbox = MagicMock()
+    sandbox.commands.run = AsyncMock(side_effect=CommandExitException(stderr="", stdout="", exit_code=1, error=None))
+
+    # "(no output)" alone would read as a broken tool rather than as a verdict.
+    assert await _E2BSandboxBackend(sandbox).run_bash("grep needle haystack") == "exit code: 1"
+
+
+async def test_run_bash_reports_a_timeout_instead_of_raising():
+    """A different exception from the exit-code one, and the first fix for this
+    covered only the latter -- delegations went on dying on it (AGT-029)."""
+    from e2b.exceptions import TimeoutException
+
+    sandbox = MagicMock()
+    sandbox.commands.run = AsyncMock(side_effect=TimeoutException("context deadline exceeded"))
+
+    out = await _E2BSandboxBackend(sandbox).run_bash("grep -r needle /")
+
+    assert "too long" in out
+    assert "narrower command" in out

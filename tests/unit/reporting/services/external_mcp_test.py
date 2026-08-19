@@ -294,3 +294,79 @@ async def test_call_tool_bounds_text_output(mocker) -> None:
 
     assert len(result.text.encode()) <= 80
     assert "truncated" in result.text
+
+
+# The refusal GitHub's code-search endpoint actually returns, verbatim.
+_RATE_LIMITED = (
+    "failed to search code with query '\"from jwt\" repo:mappedsky/confidant': "
+    "GitHub API rate limit exceeded. Retry after 44s."
+)
+
+
+def _rate_limited_then_ok(mocker, *, texts: list[tuple[str, bool]]):
+    session = mocker.AsyncMock()
+    session.call_tool.side_effect = [
+        SimpleNamespace(content=[TextContent(type="text", text=text)], structured_content=None, is_error=err)
+        for text, err in texts
+    ]
+
+    @asynccontextmanager
+    async def fake_session(proxy, current_user):
+        yield session
+
+    mocker.patch.object(external_mcp, "_session", fake_session)
+    return session
+
+
+def test_a_rate_limit_names_its_own_delay():
+    assert external_mcp._rate_limit_delay(_RATE_LIMITED) == 44.0
+    assert external_mcp._rate_limit_delay("429 Too Many Requests") is not None
+    # Not a rate limit: a 404 must not be retried into the same 404.
+    assert external_mcp._rate_limit_delay("repository not found") is None
+
+
+async def test_a_rate_limited_call_waits_the_stated_delay_and_retries(mocker) -> None:
+    session = _rate_limited_then_ok(mocker, texts=[(_RATE_LIMITED, True), ("hit", False)])
+    slept: list[float] = []
+    mocker.patch.object(external_mcp.asyncio, "sleep", mocker.AsyncMock(side_effect=lambda d: slept.append(d)))
+
+    result = await external_mcp.call_tool(_proxy(), "search_code", {}, _user())
+
+    assert result.text == "hit" and result.is_error is False
+    assert slept == [44.0]
+    assert session.call_tool.await_count == 2
+
+
+async def test_a_delay_longer_than_the_cap_is_handed_back_instead(mocker) -> None:
+    session = _rate_limited_then_ok(mocker, texts=[("rate limit exceeded. Retry after 600s", True)])
+    sleep = mocker.patch.object(external_mcp.asyncio, "sleep", mocker.AsyncMock())
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS", 60)
+
+    result = await external_mcp.call_tool(_proxy(), "search_code", {}, _user())
+
+    # One delegation must not spend its whole timeout asleep.
+    assert result.is_error is True
+    sleep.assert_not_awaited()
+    assert session.call_tool.await_count == 1
+
+
+async def test_a_non_rate_limit_error_is_not_retried(mocker) -> None:
+    session = _rate_limited_then_ok(mocker, texts=[("repository not found", True)])
+    sleep = mocker.patch.object(external_mcp.asyncio, "sleep", mocker.AsyncMock())
+
+    result = await external_mcp.call_tool(_proxy(), "search_code", {}, _user())
+
+    assert result.is_error is True
+    sleep.assert_not_awaited()
+    assert session.call_tool.await_count == 1
+
+
+async def test_retries_are_bounded(mocker) -> None:
+    session = _rate_limited_then_ok(mocker, texts=[(_RATE_LIMITED, True)] * 3)
+    mocker.patch.object(external_mcp.asyncio, "sleep", mocker.AsyncMock())
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_RATE_LIMIT_RETRIES", 2)
+
+    result = await external_mcp.call_tool(_proxy(), "search_code", {}, _user())
+
+    assert result.is_error is True
+    assert session.call_tool.await_count == 3  # the call plus two retries

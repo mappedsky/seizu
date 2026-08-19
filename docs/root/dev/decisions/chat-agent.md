@@ -583,6 +583,78 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-029 — A tool call is traced by its outcome, and a named rate limit is waited out
+
+**Applies to:** `mcp_runtime._guarded`, `mcp_builtins/sandbox.py` sub-agent tool
+wrapper; `external_mcp.call_tool` / `_call_tool_once` / `_rate_limit_delay`,
+`MCP_EXTERNAL_RATE_LIMIT_*`
+
+**A failing tool was invisible.** Spans covered the turn, its batches, its steps
+and every model call, and the `mcp-python-sdk` contributes its own for external
+MCP traffic — but nothing recorded whether a call *worked*. Across one
+reachability turn, **no span carried an error status or event at all**, while the
+stream log showed 21 errored tool results. Seizu's own tools (`graph__query`,
+`github_security__*`, the sandbox's five) had no spans of any kind.
+
+They are traced now at the two places every call already passes: `_guarded`,
+which is where a call's outcome is decided for built-in, user-defined and
+external tools alike, and the sub-agent's tool wrapper, which is the only path
+the sandbox's own five take. `outcome` is a string — `ok`, `error`, or the block
+reason — for the same reason `stopped_by` is on a step span: "it failed" and "it
+was refused" are different questions. Error text is content and stays behind
+`TELEMETRY_RECORD_CONTENT`.
+
+**What that made visible immediately.** Two runs of the same request, believed
+comparable, were not:
+
+| | run 1 | run 2 |
+|---|---|---|
+| external `tools/call` | 92 | 89 |
+| median call | 1,272 ms | 544 ms |
+| calls over 5s | 5 (max 15.5s, all `search_code`) | 0 |
+| hard rate-limit refusals | not recorded | 5 named, 19 errored calls |
+
+One run absorbed GitHub's code-search limit as throttling, the other as refusals.
+**Do not compare two runs' cost without checking this**; the difference between
+those two was substantially upstream conditions, not anything in Seizu.
+
+**A refusal is an ordinary result, so nobody was waiting.** The upstream says
+`"GitHub API rate limit exceeded. Retry after 44s."`, that string reaches the
+sub-agent as tool output, and the sub-agent does the only thing it can — call
+again, into the same closed window. 13 of 34 code searches were refused this way
+in one turn.
+
+`call_tool` now reads the delay **out of the refusal** rather than backing off
+blindly: the upstream knows when its window resets and says so, and a guess
+either wastes the wait or spends the retry on the same refusal. Bounded three
+ways, because a sub-agent's whole delegation is bounded by
+`SANDBOX_TIMEOUT_SECONDS` and one tool call must not spend it asleep — a retry
+count, a cap past which the refusal is handed back unretried, and a default only
+for a limit that names no delay. A non-rate-limit error is never retried: a 404
+retried is a 404.
+
+**A non-zero shell exit is output, not a fault.** `grep` exits 1 when it matches
+nothing; `curl` exits 2 on a bad flag. E2B raises for all of them, and letting
+that propagate ended the *whole* delegation — the sub-agent lost every result it
+had gathered because one command reported "no match". Two delegations died this
+way in one measured turn. `run_bash` now returns the exit code with stdout and
+stderr, in the same shape a success returns, and the sub-agent decides what a
+failure means. The exit code is stated only when non-zero: noise on every
+success, and the entire finding on a failure, where `(no output)` alone reads as
+a broken tool.
+
+**There were two exceptions doing this, not one.** A command outrunning E2B's
+deadline raises `TimeoutException`, not `CommandExitException`, and a fix written
+from the one traceback that had been seen covered only the exit code — the next
+live run lost a delegation to the other. Both are now reported as text. The
+timeout says so in words because E2B keeps nothing the command had printed, so
+there is no output to return: what the sub-agent can use is the fact, and the
+suggestion to narrow the command or background it and read a file.
+
+`run_bash_streaming` deliberately still raises. Its caller is the remediation
+workflow, which runs builds and tests, and there a non-zero exit is the phase
+failing — reporting it as output would let a failed build read as a result.
+
 ## AGT-028 — Trace the sub-agent, and recognise a rejection it has already had
 
 **Applies to:** `mcp_builtins/sandbox.py::_ToolMessageNormalizingModel.ainvoke`;

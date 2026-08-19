@@ -1,5 +1,6 @@
 import dataclasses
 import json
+from typing import Any
 
 import pytest
 from mcp.types import ToolAnnotations
@@ -1833,3 +1834,77 @@ async def test_normalizing_does_not_reopen_string_coercion(mocker):
         assert result.is_error is True, value
         assert "Input validation error" in json.loads(result.content[0].text)["error"], value
     run_query.assert_not_awaited()
+
+
+class _RecordingSpan:
+    def __init__(self) -> None:
+        self.attributes: dict[str, Any] = {}
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        self.attributes[key] = value
+
+    def __enter__(self) -> "_RecordingSpan":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+
+class _RecordingTracer:
+    def __init__(self) -> None:
+        self.spans: list[tuple[str, _RecordingSpan]] = []
+
+    def start_as_current_span(self, name: str) -> _RecordingSpan:
+        span = _RecordingSpan()
+        self.spans.append((name, span))
+        return span
+
+
+def _trace(mocker) -> _RecordingTracer:
+    tracer = _RecordingTracer()
+    mocker.patch.object(mcp_runtime.telemetry, "_tracer", tracer)
+    return tracer
+
+
+async def test_a_tool_call_is_traced_with_its_outcome(mocker):
+    tracer = _trace(mocker)
+
+    async def _ok() -> tuple[list[Any], Any]:
+        return [], None
+
+    await mcp_runtime._guarded("graph__query", _ok())
+
+    name, span = tracer.spans[0]
+    assert name == "tool graph__query"
+    assert span.attributes["seizu.outcome"] == "ok"
+
+
+async def test_a_tools_own_failure_is_visible_on_its_span(mocker):
+    """The case this exists for: an upstream refusal is an ordinary result to
+    the caller, so nothing else in the trace shows it happened (AGT-029)."""
+    tracer = _trace(mocker)
+    mocker.patch.object(mcp_runtime.telemetry.settings, "TELEMETRY_RECORD_CONTENT", True)
+
+    async def _refused() -> tuple[list[Any], Any]:
+        raise mcp_runtime._ToolFailure({"error": "GitHub API rate limit exceeded. Retry after 44s."})
+
+    _content, _blocked, is_error = await mcp_runtime._guarded("ext__github__search_code", _refused())
+
+    assert is_error is True
+    _name, span = tracer.spans[0]
+    assert span.attributes["seizu.outcome"] == "error"
+    assert "rate limit exceeded" in span.attributes["seizu.error_text"]
+
+
+async def test_span_error_text_is_withheld_unless_content_recording_is_on(mocker):
+    tracer = _trace(mocker)
+    mocker.patch.object(mcp_runtime.telemetry.settings, "TELEMETRY_RECORD_CONTENT", False)
+
+    async def _refused() -> tuple[list[Any], Any]:
+        raise mcp_runtime._ToolFailure({"error": "secret-bearing upstream message"})
+
+    await mcp_runtime._guarded("ext__github__search_code", _refused())
+
+    _name, span = tracer.spans[0]
+    assert span.attributes["seizu.outcome"] == "error"
+    assert "seizu.error_text" not in span.attributes

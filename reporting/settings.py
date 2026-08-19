@@ -1100,6 +1100,17 @@ MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS = list_env("MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS", [])
+# Retries for an external tool call the upstream refused as rate-limited. The
+# refusal names its own delay ("Retry after 44s") and Seizu waits that long, so
+# these bound how much waiting a single call may do, not how long it waits.
+# 0 disables retrying and hands the refusal straight to the agent.
+MCP_EXTERNAL_RATE_LIMIT_RETRIES = int_env("MCP_EXTERNAL_RATE_LIMIT_RETRIES", 2)
+# Longest delay worth honouring. Past this the call returns the refusal instead:
+# a sub-agent's whole delegation is bounded by SANDBOX_TIMEOUT_SECONDS, and one
+# tool call must not spend it sleeping.
+MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS = int_env("MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS", 60)
+# Used when the upstream says it is rate-limited but names no delay.
+MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS = int_env("MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS", 5)
 
 # ---------------------------------------------------------------------------
 # Sandbox delegation (sandbox__delegate chat tool)
