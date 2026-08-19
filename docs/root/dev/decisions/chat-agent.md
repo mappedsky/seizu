@@ -583,6 +583,32 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-032 — Every attempt records its trace, not only the ones cut short
+
+**Applies to:** `chat_orchestrator._run_worker_step` (the `_persist_step_record`
+branch), `_prepare_retries`, `_RETRY_EVIDENCE_MAX_CHARS`
+
+A retry is handed what the previous attempt established: a digest in the prompt,
+and — where one exists — the path to the whole trace on the sandbox's disk
+([AGT-013](#agt-013)). The file was written only when the attempt ended early,
+on budget or on an execution error.
+
+**The commonest retry is neither.** A step that *finished* and was then failed by
+the verifier is the ordinary case, and it is the one whose previous attempt
+produced the most: a complete result, judged incomplete. It was the single case
+that wrote no file.
+
+**Measured.** A reachability step wrote a seven-CVE assessment in 396s and was
+rejected — *"claims to review 8 findings but only covers 7 CVEs"*. Its retry got
+`_step_evidence(..., 4000)`: a 4,000-character excerpt cut off exactly where the
+per-CVE detail lives. It re-derived the rest in **307s**, only 23% cheaper than
+the cold attempt, and passed with *"all 7 selected CVEs"* — the same seven. That
+is 26% of the turn spent re-deriving what was already on disk, for a rejection
+whose own count moved between attempts.
+
+The branch now runs whenever the attempt made calls. The cost is one small
+sandbox write per step, against a re-derivation measured in minutes.
+
 ## AGT-031 — A sub-agent's tool signature is the tool's schema, composite types included
 
 **Applies to:** `mcp_builtins/sandbox.py::_py_type_for`, `_JSON_SCALAR_TO_PY`,

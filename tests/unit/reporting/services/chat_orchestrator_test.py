@@ -4103,3 +4103,26 @@ def test_a_call_grant_is_shared_by_schedule_when_calls_are_the_only_bound():
     # Nothing else bounds the run, so the loop guard is the budget and is
     # fair-shared like one: two waves of three.
     assert grant.llm_calls == (176 - 2) // 6
+
+
+async def test_a_step_that_finished_still_records_its_trace(mocker):
+    """A step failed by the verifier is the commonest retry there is, and its
+    attempt produced the most: a whole result, judged incomplete. It used to be
+    the one case that wrote no trace file, so the retry got the 4,000-character
+    digest instead (AGT-032)."""
+    persist = mocker.patch.object(
+        chat_orchestrator, "_persist_step_record", AsyncMock(return_value="/home/user/seizu_results/step_s1.json")
+    )
+
+    result, _calls = await _run_protocol_step(
+        mocker,
+        _ProtocolModel(
+            [AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": "c1"}]), _submit("a full answer")]
+        ),
+    )
+
+    # It neither ran out of budget nor errored: it simply finished.
+    assert result["output"] == "a full answer"
+    assert not result.get("budget_capped") and not result.get("execution_error")
+    persist.assert_awaited_once()
+    assert result["record_path"] == "/home/user/seizu_results/step_s1.json"

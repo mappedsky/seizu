@@ -3226,13 +3226,21 @@ async def _run_worker_step(
         # protocol. A persistent nonzero count means the sentinel is not landing
         # with this provider and the fallback is carrying the step.
         step_result["finalize_violations"] = finalize_violations
-    if tool_details and (budget_capped or budget_exhausted or execution_error):
-        # An attempt that ended early is the one a retry has to build on, and
-        # what it established is far larger than any digest carried through a
-        # prompt. Put the whole trace on the sandbox's disk and let the retry
-        # read it there. Best-effort and only into a sandbox that is already
-        # open: this is a convenience for the next attempt, never a reason to
-        # open one or to fail a step that has otherwise finished.
+    if tool_details:
+        # Any attempt is one a retry may have to build on, and what it
+        # established is far larger than any digest carried through a prompt.
+        # Put the whole trace on the sandbox's disk and let the retry read it
+        # there. Best-effort and only into a sandbox that is already open: this
+        # is a convenience for the next attempt, never a reason to open one or
+        # to fail a step that has otherwise finished.
+        #
+        # Not just the attempts that ended early. A step that *finished* and was
+        # then failed by the verifier is the commonest retry there is, and it is
+        # the one whose previous attempt produced the most -- a whole result,
+        # judged incomplete. One measured step wrote a seven-CVE assessment, was
+        # rejected for covering six of them, and its retry was handed the 4,000
+        # character digest instead of the file: 307 seconds to re-derive what was
+        # already on disk (AGT-032).
         record_path = await _persist_step_record(step["id"], step_result, tool_details)
         if record_path:
             step_result["record_path"] = record_path
