@@ -3930,3 +3930,88 @@ async def test_a_child_without_inherited_criteria_still_gets_scoped_ones(mocker)
 
     child = next(step for step in plan if step.get("map_parent") == "s2")
     assert child["success_criteria"] == "The result accomplishes this step's goal for repo-a alone."
+
+
+def _seed_session(mocker, *, opened: bool = True, sandbox_id: str = "sbx-1") -> Any:
+    session = mocker.MagicMock()
+    session.opened = opened
+    session.sandbox_id = sandbox_id
+    backend = mocker.MagicMock()
+    backend.write_file = AsyncMock()
+    session.backend = AsyncMock(return_value=backend)
+    mocker.patch.object(chat_orchestrator.sandbox_session, "current_sandbox_session", return_value=session)
+    return session
+
+
+def _seed_user(*permissions: str) -> CurrentUser:
+    return CurrentUser(
+        user=User(user_id="user-1", sub="sub", iss="iss", created_at=_NOW, last_login=_NOW),
+        jwt_claims={},
+        permissions=frozenset(permissions or {Permission.QUERY_EXECUTE.value}),
+    )
+
+
+async def test_the_graph_schema_is_fetched_once_for_a_batch(mocker):
+    ledger = chat_orchestrator.episodic_memory.start_session_ledger()
+    session = _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(
+        chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock(return_value={"labels": ["CVE"]})
+    )
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        # A second batch of the same turn reuses the file rather than re-fetching.
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+    assert fetch.await_count == 1
+    written = (await session.backend()).write_file
+    assert written.await_count == 1
+    path = written.await_args.args[0]
+    assert path.endswith("/graph_schema.json")
+    # And the receipt is what carries it to every step of the batch.
+    assert [(r.path, r.sandbox_id) for r in ledger.receipts] == [(path, "sbx-1")]
+
+
+async def test_a_single_step_batch_is_not_seeded(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock())
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 1)
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+    fetch.assert_not_awaited()
+
+
+async def test_seeding_needs_an_open_sandbox_and_the_query_permission(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock())
+    try:
+        _seed_session(mocker, opened=False)
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        fetch.assert_not_awaited()
+
+        _seed_session(mocker, opened=True)
+        await chat_orchestrator._seed_shared_schema(_seed_user(Permission.CHAT_USE.value), 3)
+        fetch.assert_not_awaited()
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+
+async def test_a_failed_seed_never_fails_the_batch(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    mocker.patch.object(
+        chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock(side_effect=RuntimeError("neo4j down"))
+    )
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        # No receipt, no exception: the sub-agents fetch it themselves as before.
+        assert chat_orchestrator.episodic_memory.current_session_ledger().receipts == []
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()

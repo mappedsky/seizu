@@ -665,3 +665,48 @@ def test_a_grant_ledger_knows_it_is_a_slice_not_the_run():
 
     assert step.is_grant is True
     assert run.is_grant is False
+
+
+async def test_the_seeded_schema_receipt_travels_to_the_workers(mocker):
+    """The batch it was fetched for must be the batch that can see it.
+
+    Seeding after ``_shared_sandbox_id`` opens the sandbox but *before* the
+    ledger is serialized is the whole ordering: a receipt recorded after that
+    reaches the next batch and not this one, which is the case seeding exists
+    for (AGT-027).
+    """
+    batch = [_step("s1"), _step("s2")]
+    client = _fanout_client(
+        mocker,
+        [ChatWorkerStepOutcome(step_id="s1", result_json="{}"), ChatWorkerStepOutcome(step_id="s2", result_json="{}")],
+    )
+    mocker.patch.object(chat_orchestrator, "_shared_sandbox_id", AsyncMock(return_value="sbx-1"))
+
+    def _seed(_user: Any, _size: int) -> None:
+        chat_orchestrator.episodic_memory.current_session_ledger().record_receipt(
+            path="/home/user/seizu_results/graph_schema.json",
+            source="graph__schema",
+            purpose="the graph schema",
+            sandbox_id="sbx-1",
+        )
+
+    mocker.patch.object(chat_orchestrator, "_seed_shared_schema", AsyncMock(side_effect=_seed))
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    try:
+        await chat_orchestrator._dispatch_batch_distributed(
+            batch,
+            plan=batch,
+            results=[],
+            conversation_context="",
+            current_user=_user(),
+            config=_config(),
+            iteration=0,
+            disclosed_names=set(),
+            progressive=True,
+            controller=None,
+        )
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+    invocation = client.start_workflow.await_args.args[1].steps[0]
+    assert "graph_schema.json" in invocation.session_memory_json

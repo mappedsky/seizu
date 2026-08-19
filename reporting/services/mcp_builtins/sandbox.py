@@ -177,6 +177,17 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
 # pointed into /tmp, so the cross-turn half of SBX-002/SBX-008 could never have
 # worked: the next turn was always sent to read a file that no longer existed.
 _RESULT_DIR = "/home/user/seizu_results"
+
+
+def sandbox_result_dir() -> str:
+    """Where a delegation's oversized results are written (SBX-010).
+
+    Exposed so a caller putting a file where sub-agents already look does not
+    have to restate the path.
+    """
+    return _RESULT_DIR
+
+
 # Rows returned per sample in a receipt: enough to show the shape, not the data.
 _RECEIPT_SAMPLE_ROWS = 2
 

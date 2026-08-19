@@ -583,6 +583,73 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-027 — Fan out over divergent work, and seed what a batch will all want
+
+**Applies to:** `_PLANNER_PROMPT`, `_PlannedStep.map_over` / `map_reason`,
+`chat_orchestrator._seed_shared_schema`, `_dispatch_batch_distributed`;
+`mcp_builtins.sandbox_result_dir`
+
+Expansion ([AGT-023](#agt-023)) fans a step out over the items an earlier step
+found. What it cannot tell on its own is whether those items need *different
+work* or are the same call with a different argument, and the planner prompt
+used to push it one way: "never write a step that loops over a collection
+internally". That is right for an agentic loop and wrong for a data one.
+
+**Measured, on a request to review one repository's CVEs.** The planner mapped
+"query the graph for the repositories and packages carrying this CVE" over eight
+CVEs. That is one Cypher query with an `IN` list. The fan-out took **70 of the
+run's 80 LLM calls and 219,049 of its 297,017 tokens, and returned nothing** —
+the answer was written from the un-mapped first step.
+
+**So the planner is told the test, not a preference.** Same call with a
+different argument is one step that fetches everything at once; its own tools,
+or a decision that depends on what the item turns out to be, is a mapped step.
+`map_over` is paired with `map_reason` — a planner that has to name what differs
+between items writes fewer fan-outs — and the reason rides the `chat expand
+step` span, so a wide trace says whether the width was earned.
+
+**Measured after, on the same build.** The CVE request planned two steps and no
+fan-out (0 of 3 samples), finishing in 263s on 18 calls and $0.020 against 433s,
+80 calls and $0.044 — with a *better* answer, covering all 19 findings where the
+old one had reported a gap. A reachability request over three CVEs still fanned
+out (2 of 3 samples), `map_reason`: *"Each selected CVE can belong to a different
+repository and needs its own repository CVE finding call with that repo and CVE
+id."* The discrimination runs both ways, which is the whole point.
+
+### The batch, not the carry, is what made eight sub-agents fetch one schema
+
+Each of those eight children opened by fetching the same 52,846-byte schema,
+writing it to its own file **on the disk they were already sharing**, and reading
+it back — two of the four calls each could afford, before reaching its question.
+
+**The obvious fix was already built, and was not the fix.** Handing a step the
+files its dependency saved duplicates two existing mechanisms: `EpisodeLog.recall`
+already advertises a sandbox's receipts to a sub-agent, and `session_digest`
+already puts the same manifest in the *worker's* prompt for the model deciding
+whether to delegate at all ([SBX-008](sandbox.md#sbx-008)). A parallel path was
+built, measured against them, and **reverted** — it emitted a near-identical
+second copy of the same list, and unlike `render_receipts` it did not filter on
+`sandbox_id`, so the one case where it said anything new was the case where the
+file was not readable.
+
+**The steps of a batch start together**, and a receipt reaches a sibling only
+once the batch it was written in has returned. No carry can close that, because
+there is nothing yet to carry. `_seed_shared_schema` fetches the schema once
+before a distributed batch of two or more, writes it to a fixed path under
+`sandbox_result_dir()`, and records the receipt — after `_shared_sandbox_id` has
+opened the sandbox and **before the ledger is serialized for the workers**, or
+the batch it was fetched for is the one batch that cannot see it.
+
+Bounded deliberately: batches of one are skipped (a lone step's delegations
+already carry it to each other), it never opens a sandbox that SBX-015 did not
+already open, it re-uses the file across a turn's later batches, and it is
+skipped for a caller without `query:execute` so seeding cannot hand anyone data
+they could not have asked for. Every failure path is a warning and a return.
+
+**Not done:** seeding anything else. The schema earns it by being the one thing
+every sub-agent wants, identical for all of them, and the largest single result
+the graph returns; nothing else on that list is obvious.
+
 ## AGT-026 — Tracing is diagnosis, opt-in, and content-free by default
 
 **Applies to:** `reporting/services/telemetry.py`, `chat_graph._run_llm_tool_turn`,

@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
+from reporting.authnz.permissions import Permission
 from reporting.services import (
     chat_budget,
     chat_context,
@@ -54,6 +55,7 @@ from reporting.services import (
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
+    reporting_neo4j,
     sandbox_session,
     telemetry,
 )
@@ -1837,6 +1839,71 @@ def _dependency_payload(step: dict[str, Any], results: list[dict[str, Any]]) -> 
     ]
 
 
+#: The turn's one copy of the graph schema. A fixed name, unlike an ordinary
+#: spilled result: the point is that every step of a batch is told about the
+#: same file.
+_SHARED_SCHEMA_NAME = "graph_schema.json"
+
+
+async def _seed_shared_schema(current_user: CurrentUser | None, batch_size: int) -> None:
+    """Put the graph schema on the batch's shared disk before the batch starts.
+
+    The receipt mechanism (SBX-008) carries a fetched file to whatever runs
+    *after* it. It cannot help the steps of one batch, which start together: a
+    receipt written by one of them only reaches its siblings once the batch it
+    was written in has returned. So each of eight concurrent children fetched
+    the same 52,846-byte schema, wrote it to its own file on the disk they were
+    already sharing, and read it back -- two of the four calls each could afford,
+    before any of them reached the question it was asked.
+
+    Fetching it once here closes that. It is the only thing every sub-agent
+    wants, it is identical for all of them, and it is the largest single result
+    the graph returns.
+
+    Best effort throughout. A batch runs fine without it -- the sub-agents fetch
+    it themselves, exactly as they did before -- so nothing here is a reason to
+    fail one.
+    """
+    if batch_size < 2 or not settings.SANDBOX_ENABLED:
+        # One step has no sibling to share with, and its own delegations already
+        # carry the file to each other through the episode log.
+        return
+    if current_user is None or Permission.QUERY_EXECUTE.value not in current_user.permissions:
+        # Seeding must not hand a caller data they could not have asked for.
+        return
+    session = sandbox_session.current_sandbox_session()
+    ledger = episodic_memory.current_session_ledger()
+    if session is None or ledger is None or not session.opened:
+        # Never opened just for this: SBX-015 weighed opening a sandbox for a
+        # batch that may not delegate and accepted it only where a distributed
+        # step cannot open its own.
+        return
+    sandbox_id = session.sandbox_id
+    path = f"{mcp_builtins.sandbox_result_dir()}/{_SHARED_SCHEMA_NAME}"
+    if any(receipt.path == path and receipt.sandbox_id == sandbox_id for receipt in ledger.receipts):
+        return  # already on this disk, from an earlier batch of the same turn
+    try:
+        backend = await session.backend()
+        schema = await reporting_neo4j.fetch_graph_schema()
+        await backend.write_file(path, json.dumps(schema, default=str))
+    except Exception:
+        logger.warning("chat dispatcher: could not seed the graph schema for a batch", exc_info=True)
+        return
+    ledger.record_receipt(
+        path=path,
+        source="graph__schema",
+        purpose="the graph's labels, relationship types, property keys and indexes",
+        sandbox_id=sandbox_id,
+        columns=sorted(schema)[:_SCHEMA_RECEIPT_KEYS] if isinstance(schema, dict) else None,
+    )
+    logger.info("chat dispatcher: seeded the graph schema for a batch of %d", batch_size)
+
+
+#: Top-level schema keys named in the receipt, so a sub-agent knows what is in
+#: the file without opening it.
+_SCHEMA_RECEIPT_KEYS = 8
+
+
 async def _shared_sandbox_id(config: RunnableConfig) -> str:
     """Open the conversation's sandbox now, so distributed steps can attach to it.
 
@@ -1917,9 +1984,13 @@ async def _dispatch_batch_distributed(
         raise _FanoutUnavailable("a distributed batch needs a resolved user")
     turn_id = chat_graph.turn_id_from_config(config)
     thread_id = _client_thread_id_from_config(config) or ""
+    sandbox_id = await _shared_sandbox_id(config)
+    # After the sandbox is open and before the ledger is serialized: the seeded
+    # receipt has to travel to the workers with the rest of the session memory,
+    # or the batch it was fetched for is exactly the batch that cannot see it.
+    await _seed_shared_schema(current_user, len(batch))
     ledger = episodic_memory.current_session_ledger()
     session_memory_json = json.dumps(ledger.to_state()) if ledger is not None else ""
-    sandbox_id = await _shared_sandbox_id(config)
     trimmed_plan = json.dumps(_trimmed_plan(plan))
     # Resolved here, once, and carried: every step of the batch runs on the
     # model this turn resolved rather than on whatever each worker's settings
