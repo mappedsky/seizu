@@ -4066,3 +4066,40 @@ def test_short_rejections_are_compared_exactly_not_by_overlap():
     # further than a whole shared complaint does in a real verdict.
     assert not chat_orchestrator._same_rejection("Now missing evidence for CVE-2", "Missing a verdict for CVE-1")
     assert chat_orchestrator._same_rejection("Missing a verdict for CVE-1", "Missing a verdict for CVE-1")
+
+
+def _call_grant_plan() -> list[dict[str, Any]]:
+    """Three ready steps with one more waiting behind them: two schedule waves."""
+    return [
+        _step("a", "pending"),
+        _step("b", "pending"),
+        _step("c", "pending"),
+        _step("d", "pending", depends_on=["a", "b", "c"]),
+    ]
+
+
+def _controller_with(**ledger: Any) -> BudgetController:
+    return BudgetController({**initial_budget_ledger(), **ledger})
+
+
+def test_a_call_grant_is_not_sliced_by_the_schedule_when_cost_binds():
+    """A backstop divided by the schedule stops being a backstop: this is what
+    cut a step to 6 calls out of a 176-call ceiling (AGT-030)."""
+    plan = _call_grant_plan()
+    controller = _controller_with(token_limit=0, cost_limit_usd=1.0, max_llm_calls=176, reserve_llm_calls=2)
+
+    grant = chat_orchestrator._grant_for(plan[0], plan, controller, 3)
+
+    # Batch width only: (176 - 2) / 3, not / (2 waves x 3).
+    assert grant.llm_calls == (176 - 2) // 3
+
+
+def test_a_call_grant_is_shared_by_schedule_when_calls_are_the_only_bound():
+    plan = _call_grant_plan()
+    controller = _controller_with(token_limit=0, cost_limit_usd=0.0, max_llm_calls=176, reserve_llm_calls=2)
+
+    grant = chat_orchestrator._grant_for(plan[0], plan, controller, 3)
+
+    # Nothing else bounds the run, so the loop guard is the budget and is
+    # fair-shared like one: two waves of three.
+    assert grant.llm_calls == (176 - 2) // 6

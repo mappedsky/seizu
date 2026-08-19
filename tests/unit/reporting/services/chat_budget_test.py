@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -756,3 +757,67 @@ def test_a_cost_budgeted_run_is_bounded_by_cost_alone(mocker):
     assert controller.remaining_normal_tokens is None  # no token bound at all
     assert controller.remaining_normal_cost_usd == pytest.approx(1.6)
     assert controller.enabled
+
+
+def test_the_call_ceiling_is_loose_where_cost_can_bind(mocker):
+    """It is a loop guard, not a spend limit: where cost bounds the run, reaching
+    this should itself be evidence of pathology rather than of a busy step
+    (AGT-030)."""
+    from reporting.services.chat_budget import derived_call_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 96)
+    mocker.patch("reporting.settings.CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP", 24)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.services.chat_models.capability", lambda _model: SimpleNamespace(priced=True))
+
+    # A delegating step was measured at ~20 calls, so 7 steps must clear 140.
+    assert derived_call_ceiling(7) == 8 + 96 * 7
+
+
+def test_the_call_ceiling_stays_tight_where_cost_cannot(mocker):
+    from reporting.services.chat_budget import derived_call_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 96)
+    mocker.patch("reporting.settings.CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP", 24)
+    mocker.patch("reporting.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
+    mocker.patch("reporting.services.chat_models.capability", lambda _model: SimpleNamespace(priced=False))
+
+    assert derived_call_ceiling(7) == 8 + 24 * 7
+
+
+def test_the_unpriced_figure_never_resurrects_a_disabled_dimension(mocker):
+    from reporting.services.chat_budget import derived_call_ceiling
+
+    mocker.patch("reporting.settings.CHAT_RUN_MAX_LLM_CALLS", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_LLM_CALLS_PER_STEP", 0)
+    mocker.patch("reporting.settings.CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP", 24)
+
+    assert derived_call_ceiling(9) == 0
+
+
+async def test_a_busy_run_is_not_degraded_by_its_call_count():
+    """The measured failure: 135 of 176 calls crossed the 0.75 soft limit and
+    downgraded a run that had spent 17.6% of its money (AGT-030)."""
+    from reporting.services.chat_budget import initial_budget_ledger
+
+    controller = BudgetController(
+        {**initial_budget_ledger(), "token_limit": 0, "cost_limit_usd": 1.0, "max_llm_calls": 176}
+    )
+    await controller.absorb({"input_tokens": 100, "output_tokens": 100, "cost_usd": 0.176, "llm_calls": 135})
+
+    assert controller.snapshot()["llm_calls"] == 135
+    assert controller.mode == "normal"
+
+
+async def test_the_call_ceiling_still_stops_a_run_dead():
+    from reporting.services.chat_budget import initial_budget_ledger
+
+    controller = BudgetController(
+        {**initial_budget_ledger(), "token_limit": 0, "cost_limit_usd": 1.0, "max_llm_calls": 176}
+    )
+    await controller.absorb({"input_tokens": 100, "output_tokens": 100, "cost_usd": 0.2, "llm_calls": 176})
+
+    assert controller.mode == "exhausted"
+    assert "LLM-call" in str(controller.snapshot()["exhaustion_reason"])

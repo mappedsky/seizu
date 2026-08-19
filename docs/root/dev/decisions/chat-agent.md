@@ -583,6 +583,59 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-030 — The call ceiling only ever fires; it never throttles
+
+**Applies to:** `chat_budget._refresh_mode_locked`, `derived_call_ceiling`;
+`chat_orchestrator._grant_for` / `_calls_are_primary`;
+`CHAT_RUN_LLM_CALLS_PER_STEP`, `CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP`
+
+[AGT-024](#agt-024) established what the call ceiling is: an emergency loop
+guard, where cost bounds spend ([AGT-022](#agt-022)) and loop detection catches
+loops ([AGT-017](#agt-017)). The code did not treat it that way, and a measured
+run showed all three ways it did not.
+
+**It throttled a healthy run.** `_refresh_mode_locked` took the maximum ratio
+across tokens, cost *and* calls against the soft limit. A reachability turn
+crossed 0.75 on calls alone — **135 of 176, with 17.6% of its cost budget
+spent** — and went `degraded`, which is not cosmetic: optional steps are skipped
+outright, and the worker and synthesizer drop to the economy model. A run doing a
+lot of productive work was quietly given a worse model and fewer steps. Calls are
+now out of the soft-limit calculation entirely; the hard stop is unchanged, and
+is the only thing the dimension does.
+
+**It was sliced per step.** The call grant went through the schedule divisor,
+which is [AGT-025](#agt-025)'s exact finding one dimension over: a backstop
+divided by the schedule stops being a backstop. On the measured plan a 176-call
+ceiling became 6 calls for a step that needed about 20, and the step stopped on
+`budget_step_share` before its first delegation finished. Calls now take the
+batch-width bound that keeps concurrent grants disjoint — unless neither cost nor
+tokens is budgeted, in which case the loop guard genuinely *is* the budget
+(`_calls_are_primary`) and is fair-shared like one.
+
+**It was sized at the median, not above the maximum.** 24 calls per step was
+chosen before a step could delegate. Measured on a delegating turn: **13.4
+sub-agent calls per completed step**, plus the worker's own loop, its summary and
+the verifier — around 20 for an ordinary step, more with a retry. So the figure
+sat at roughly what legitimate work costs, which is the one place a safety limit
+must never sit. It is 96 where cost can bind, and `CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP`
+(24) tightens it where LiteLLM cannot price the model and cost can therefore never
+accrue — the same split `derived_token_ceiling` makes for tokens. Zeroing
+`CHAT_RUN_LLM_CALLS_PER_STEP` still disables the dimension outright; the unpriced
+figure only ever lowers a ceiling, never restores one.
+
+**Why not simply raise the number.** That would be the third re-fit of the same
+constant (64 → 120 → `8 + 24n`), each correct for the plan in front of it. The
+count is not what should be doing this work: cost bounds what progress may cost,
+the turn and sandbox timeouts bound how long it may take, and `_looks_stuck`
+bounds going nowhere. The ceiling exists for what those three miss — cheap, fast,
+novel-every-time and useless — and should be sized so that reaching it is itself
+the evidence.
+
+**Worth knowing:** `_looks_stuck` keys on an exact tool-plus-arguments signature,
+so 88 distinct-but-fruitless searches pass it untouched. If a per-step "is this
+going anywhere" signal is wanted, widening that is the mechanism; a call count
+only proxies it.
+
 ## AGT-029 — A tool call is traced by its outcome, and a named rate limit is waited out
 
 **Applies to:** `mcp_runtime._guarded`, `mcp_builtins/sandbox.py` sub-agent tool

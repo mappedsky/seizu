@@ -961,11 +961,18 @@ CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
 CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 0)
 # Calls one plan step may make, for that derivation: its own loop, whatever it
 # delegates to, its summary pass, and the verifier's look at it, across retries.
-# Deliberately generous: what a step may *spend* is bounded by its share of the
-# run's cost and tokens, and a loop is caught by loop detection (AGT-017), so
-# this only has to stop a run that is making calls without spending or
-# progressing.
-CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+# Deliberately far above what work costs rather than near it: spend is bounded by
+# cost and repetition by loop detection (AGT-017), so reaching this should itself
+# be evidence of pathology. A delegating step was measured at ~20 calls, most of
+# them its sub-agent's, which is why 24 was not headroom -- it was the median
+# (AGT-030).
+CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 96)
+# Tightens the figure above for a model LiteLLM cannot price. Cost never accrues
+# there, so the call ceiling is the last guard rather than a backstop -- the same
+# split CHAT_RUN_UNPRICED_TOKEN_BUDGET makes for tokens (AGT-030). It only ever
+# lowers the ceiling: zeroing CHAT_RUN_LLM_CALLS_PER_STEP still disables the
+# dimension outright.
+CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP", 24)
 # Output tokens assumed for a call whose kind has not been seen yet. Every
 # later call of that kind is reserved from what it was observed to emit
 # instead (AGT-021). Raise it if cold-start calls on your model are large.

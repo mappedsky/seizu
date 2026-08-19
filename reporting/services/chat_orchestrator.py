@@ -1777,6 +1777,12 @@ def _grant_for(
     # running beside it (AGT-020).
     divisor = _budget_divisor(plan, batch_size)
     cost_share = _dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor, "reserve_cost_usd")
+    # Calls follow the token rule, not the cost one: a backstop divided by the
+    # schedule stops being a backstop (AGT-025). Where cost or tokens bound the
+    # run, the call grant keeps only the batch-width bound that makes concurrent
+    # grants disjoint; where neither does, calls *are* the bound and are shared
+    # out by schedule like any binding dimension (AGT-030).
+    call_divisor = divisor if _calls_are_primary(controller) else max(1, batch_size)
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
@@ -1786,8 +1792,22 @@ def _grant_for(
         # The step's own reserve on the dimension that binds it, so it can still
         # say what it found (AGT-012).
         soft_cost_usd=max(0.0, cost_share - cost_share * reserve_ratio),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor, "reserve_llm_calls")),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", call_divisor, "reserve_llm_calls")),
     )
+
+
+def _calls_are_primary(controller: BudgetController | None) -> bool:
+    """Whether the call ceiling is the only thing bounding this run.
+
+    True only when neither cost nor tokens is budgeted. Then the loop guard is
+    also the spend guard by default, and fair-sharing it between steps is the
+    right thing; otherwise it is a backstop and slicing it by the schedule is
+    what made a 176-call ceiling into 6 calls for a step that needed 20.
+    """
+    if controller is None:
+        return False
+    ledger = controller.snapshot()
+    return float(ledger.get("cost_limit_usd") or 0.0) <= 0 and int(ledger.get("token_limit") or 0) <= 0
 
 
 def _cost_is_primary(controller: BudgetController | None) -> bool:
