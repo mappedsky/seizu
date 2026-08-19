@@ -1102,7 +1102,6 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         # delegating instead of continuing to spend invisibly.
         messages = normalized if isinstance(normalized, list) else []
         estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
-        phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
         # Was `CHAT_LLM_MAX_TOKENS`, which defaults to 0 (= "derive it from the
         # model") -- so the run's *largest* spender reserved no output at all
         # while the outer path reserved a full 32,768 it would never use. Both
