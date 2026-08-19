@@ -1687,6 +1687,184 @@ def _sandbox_enabled() -> bool:
     return settings.SANDBOX_ENABLED
 
 
+def _sandbox_direct_enabled() -> bool:
+    from reporting import settings
+
+    return settings.SANDBOX_ENABLED and settings.SANDBOX_DIRECT_TOOLS_ENABLED
+
+
+async def _direct_backend() -> tuple[Any, str]:
+    """The conversation's sandbox, for a tool the *outer* agent called.
+
+    Returns ``(backend, "")`` or ``(None, reason)``. There is no private
+    fallback: a sandbox nobody holds the id of would take the file with it when
+    the call ended, which is the opposite of what these tools are for.
+    """
+    session = sandbox_session.current_sandbox_session()
+    if session is None:
+        return None, "The sandbox is only available inside a chat conversation."
+    try:
+        return await session.backend(), ""
+    except Exception as exc:
+        # A step that attaches rather than owns cannot open one (SBX-015); so
+        # can a provider outage. Either way the caller gets a reason, not a
+        # traceback.
+        logger.warning("sandbox: could not open the conversation sandbox for a direct call", exc_info=True)
+        return None, f"Could not open the conversation's sandbox: {_safe_error(exc)}"
+
+
+def _capped(text: str) -> str:
+    from reporting import settings
+
+    return _truncate_bytes(text, settings.SANDBOX_MAX_OUTPUT_BYTES)
+
+
+async def _handle_write_file(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    path, content = str(args.get("path") or ""), str(args.get("content") or "")
+    if not path:
+        return {"error": "path is required"}
+    try:
+        message = await backend.write_file(path, content)
+    except Exception as exc:
+        return {"error": f"Could not write {path}: {_safe_error(exc)}"}
+    # A receipt, so every later delegation is told the file is there without the
+    # caller having to name it in each task. This is what makes priming a file
+    # useful to sub-agents that have not been written yet (SBX-008, SBX-016).
+    _record_receipt(path, "sandbox__write_file", str(args.get("purpose") or f"written to {path}"), backend, None)
+    return {"result": message, "path": path}
+
+
+async def _handle_read_file(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    path = str(args.get("path") or "")
+    if not path:
+        return {"error": "path is required"}
+    try:
+        return {"result": _capped(await backend.read_file(path))}
+    except Exception as exc:
+        return {"error": f"Could not read {path}: {_safe_error(exc)}"}
+
+
+async def _handle_list_files(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    try:
+        return {"result": _capped(await backend.list_files(str(args.get("path") or _RESULT_DIR)))}
+    except Exception as exc:
+        return {"error": f"Could not list files: {_safe_error(exc)}"}
+
+
+async def _handle_run_python(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    code = str(args.get("code") or "")
+    if not code.strip():
+        return {"error": "code is required"}
+    try:
+        return {"result": _capped(await backend.run_python(code))}
+    except Exception as exc:
+        return {"error": f"Could not run the code: {_safe_error(exc)}"}
+
+
+def _safe_error(exc: Exception) -> str:
+    return f"{exc.__class__.__name__}: {exc}"[:400]
+
+
+def _direct_tools() -> list[BuiltinTool]:
+    """The conversation's sandbox, reachable without spawning a sub-agent.
+
+    ``sandbox__delegate`` runs a whole agent loop inside one tool call, which is
+    right for exploration and wasteful for one operation: a measured turn spent
+    569 seconds across 43 sub-agent calls, where reading a file is one round
+    trip. These four are prime, inspect and compute; shell work stays
+    delegation-only because it is the exploratory shape delegation exists for.
+
+    They grant nothing ``sandbox__delegate`` does not already grant -- it can run
+    arbitrary code in the same sandbox -- so they share its permission and its
+    reasoning about confirmation (SBX-009, SBX-016).
+    """
+    shared: dict[str, Any] = {
+        "group": GROUP,
+        "required_permissions": [Permission.SANDBOX_DELEGATE.value],
+        "enabled": _sandbox_direct_enabled,
+        "chat_only": True,
+        "chat_safe_without_confirmation": True,
+        "always_disclosed": True,
+    }
+    return [
+        BuiltinTool(
+            name="sandbox__write_file",
+            description=(
+                "Write a file into the conversation's sandbox. Use this to put data where code can "
+                "work on it -- query results to reshape, a document to process -- instead of passing "
+                "it through a prompt. The file persists for the conversation, and any later "
+                "sandbox__delegate is told it is there, so you can prepare data for work you have "
+                "not delegated yet. Give `purpose` so that notice says what the file holds."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path, under /home/user."},
+                    "content": {"type": "string", "description": "File contents."},
+                    "purpose": {"type": "string", "description": "What the file holds, for later readers."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=_handle_write_file,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__read_file",
+            description=(
+                "Read a file from the conversation's sandbox. Bounded output: for a large file, "
+                "process it with sandbox__run_python rather than reading it whole."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Absolute path to read."}},
+                "required": ["path"],
+            },
+            handler=_handle_read_file,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__list_files",
+            description=(
+                "List a directory in the conversation's sandbox. Defaults to the directory where "
+                "saved tool results are kept, which is where earlier work leaves its data."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Directory to list."}},
+            },
+            handler=_handle_list_files,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__run_python",
+            description=(
+                "Run Python in the conversation's sandbox and return its output. For one computation "
+                "over data already there -- reshaping, aggregating, checking. Use sandbox__delegate "
+                "instead when the work needs several steps decided as it goes."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "Python source to run."}},
+                "required": ["code"],
+            },
+            handler=_handle_run_python,
+            **shared,
+        ),
+    ]
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
@@ -1726,5 +1904,6 @@ GROUP_DEF = BuiltinGroup(
             # execution tools (bash, text_editor) work in other agent harnesses.
             always_disclosed=True,
         ),
+        *_direct_tools(),
     ],
 )

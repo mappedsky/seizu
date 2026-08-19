@@ -17,6 +17,7 @@ from reporting.schema.report_config import User
 from reporting.services import chat_budget, episodic_memory, mcp_runtime
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
+from reporting.services.mcp_builtins import sandbox as sandbox_module
 from reporting.services.mcp_builtins.sandbox import (
     SandboxBackend,
     _build_sandbox_tools,
@@ -2577,3 +2578,90 @@ async def test_an_array_parameter_is_bound_as_a_list_not_a_string() -> None:
     assert annotations["fields"].annotation == list[str] | None
     assert annotations["query"].annotation == str | None
     assert annotations["limit"].annotation == int | None
+
+
+# ---------------------------------------------------------------------------
+# The conversation's sandbox, reachable without a sub-agent (SBX-016)
+# ---------------------------------------------------------------------------
+
+
+def _direct_session(mocker, backend=None):
+    session = MagicMock()
+    session.backend = AsyncMock(return_value=backend if backend is not None else MagicMock())
+    session.sandbox_id = "sbx-1"
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=session)
+    return session
+
+
+async def test_priming_a_file_tells_later_delegations_it_is_there(mocker):
+    """The point of writing from the outer agent: a sub-agent that has not been
+    delegated yet still learns the data is on disk."""
+    backend = MagicMock()
+    backend.write_file = AsyncMock(return_value="Wrote 12 bytes to /home/user/rows.json")
+    backend.sandbox_id = "sbx-1"
+    _direct_session(mocker, backend)
+    ledger = sandbox_module.episodic_memory.start_session_ledger()
+    try:
+        out = await sandbox_module._handle_write_file(
+            {"path": "/home/user/rows.json", "content": "[]", "purpose": "the CVE rows"}, None
+        )
+    finally:
+        sandbox_module.episodic_memory.clear_session_ledger()
+
+    assert out["path"] == "/home/user/rows.json"
+    assert [(r.path, r.purpose) for r in ledger.receipts] == [("/home/user/rows.json", "the CVE rows")]
+
+
+async def test_a_direct_sandbox_call_without_a_conversation_says_so(mocker):
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=None)
+
+    for handler, args in (
+        (sandbox_module._handle_write_file, {"path": "/home/user/a", "content": "x"}),
+        (sandbox_module._handle_read_file, {"path": "/home/user/a"}),
+        (sandbox_module._handle_list_files, {}),
+        (sandbox_module._handle_run_python, {"code": "print(1)"}),
+    ):
+        out = await handler(args, None)
+        assert "only available inside a chat conversation" in out["error"]
+
+
+async def test_a_sandbox_that_will_not_open_is_reported_not_raised(mocker):
+    session = MagicMock()
+    session.backend = AsyncMock(side_effect=RuntimeError("no sandbox to attach to"))
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=session)
+
+    out = await sandbox_module._handle_read_file({"path": "/home/user/a"}, None)
+
+    # A step that attaches rather than owns cannot open one (SBX-015).
+    assert "Could not open" in out["error"] and "RuntimeError" in out["error"]
+
+
+async def test_direct_sandbox_output_is_bounded(mocker):
+    backend = MagicMock()
+    backend.read_file = AsyncMock(return_value="x" * 200_000)
+    _direct_session(mocker, backend)
+    mocker.patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000)
+
+    out = await sandbox_module._handle_read_file({"path": "/home/user/big"}, None)
+
+    # Bounded to the same setting the sub-agent's own reads are, marker included.
+    assert len(out["result"].encode()) < 1_100
+    assert "truncated" in out["result"]
+
+
+def test_the_direct_tools_grant_no_more_than_delegate_already_does():
+    """They share its permission because it can already run arbitrary code in
+    the same sandbox: this is a cheaper path, not a wider one (SBX-016)."""
+    direct = sandbox_module._direct_tools()
+    assert {t.name for t in direct} == {
+        "sandbox__write_file",
+        "sandbox__read_file",
+        "sandbox__list_files",
+        "sandbox__run_python",
+    }
+    for tool in direct:
+        assert tool.required_permissions == [Permission.SANDBOX_DELEGATE.value]
+        # chat_only: the sandbox is a conversation's, so it has no meaning on the
+        # MCP server endpoint.
+        assert tool.chat_only is True
+        assert tool.chat_safe_without_confirmation is True

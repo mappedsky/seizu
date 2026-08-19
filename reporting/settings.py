@@ -1168,6 +1168,13 @@ SANDBOX_CORE_TOOLS = _core_tools_from_env()
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+# Whether the chat agent may use the conversation's sandbox directly, rather
+# than only through sandbox__delegate. Five more always-disclosed tools cost
+# schema tokens on every call; what they buy is a single round trip where a
+# delegation would pay for a sub-agent's whole loop, and a way to put a file in
+# the sandbox for later delegations to read (SBX-016). They grant nothing
+# sandbox__delegate does not already grant.
+SANDBOX_DIRECT_TOOLS_ENABLED = bool_env("SANDBOX_DIRECT_TOOLS_ENABLED", True)
 # Caps for a sub-agent tool result written to a sandbox file rather than
 # returned. Far larger than the in-context caps because the context window they
 # protect is not involved: the agent computes over the file with run_python and

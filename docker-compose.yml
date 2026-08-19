@@ -459,6 +459,7 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
       # Chat feature flags. The worker reads these for scheduled-chat schedule
       # reconciliation; without them it treats chat as disabled and reconciles
@@ -723,6 +724,7 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
       # Interactive chat creates the sandboxes the worker later reaps, and the
       # deployment id is stamped at creation — so it has to match here or the

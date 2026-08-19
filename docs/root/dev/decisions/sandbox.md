@@ -346,6 +346,46 @@ sandbox of a thread that is abandoned rather than deleted is reclaimed only when
 the *thread* is retired by the sweep in [SBX-011](#sbx-011) — a scheduled pass
 on a multi-day threshold, not a guarantee the lifecycle itself provides.
 
+## SBX-016 — The conversation's sandbox is reachable without a sub-agent
+
+**Applies to:** `sandbox.py::_direct_tools`, `_direct_backend`,
+`_handle_write_file` / `_handle_read_file` / `_handle_list_files` /
+`_handle_run_python`; `SANDBOX_DIRECT_TOOLS_ENABLED`
+
+`sandbox__delegate` runs a whole agent loop inside one tool call. That is right
+for exploration and wasteful for one operation: a measured turn spent **569
+seconds across 43 sub-agent calls** at 13.2s each, where reading a file is one
+round trip. The sandbox tools themselves ran at 739ms.
+
+So the chat agent gets four of them directly — **prime** (`write_file`),
+**inspect** (`read_file`, `list_files`) and **compute** (`run_python`). Shell
+work stays delegation-only: it is the exploratory shape delegation exists for.
+
+**They grant nothing `sandbox__delegate` does not already grant.** It can run
+arbitrary code in the same sandbox, so these share its permission and its
+reasoning about confirmation ([SBX-009](#sbx-009)): isolation is the control.
+`chat_only` for the same reason it is on delegate — a sandbox belongs to a
+conversation, so the tools have no meaning on the MCP endpoint.
+
+**Writing records a receipt**, which is the point rather than a detail. A file
+the outer agent primes is then advertised to every later delegation through the
+existing manifest ([SBX-008](#sbx-008)), so data can be prepared for work that
+has not been delegated yet, and a sub-agent written later still finds it.
+
+**There is no private-sandbox fallback.** `_direct_backend` returns a reason
+instead: a sandbox nobody holds the id of would take the file with it when the
+call ended, which is the opposite of what these are for. A step that *attaches*
+rather than owns cannot open one ([SBX-015](#sbx-015)), and says so.
+
+**The cost is schema.** Four more always-disclosed tools sit in the outer agent's
+context on every call; without `always_disclosed` a skill would have to unlock
+them and the capability would not be there when the model wanted it.
+`SANDBOX_DIRECT_TOOLS_ENABLED` turns them off without disabling delegation,
+which `MCP_ENABLED_BUILTINS` cannot do at group granularity.
+
+**Not done:** routing between the two. Which shape a task is remains the model's
+call, as the `tools` narrowing on delegate already assumes.
+
 ## SBX-015 — A distributed plan step attaches to the conversation's sandbox; it never owns one
 
 **Applies to:** `sandbox_session.attach_sandbox_session`,
