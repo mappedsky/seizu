@@ -43,7 +43,7 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session
+from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session, telemetry
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -1073,11 +1073,28 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         return chat_context.with_message_cache_breakpoints(self._model, normalized)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
+        # Traced here for the same reason it is budgeted here: this is the one
+        # place every inner call passes. A sub-agent runs on `create_react_agent`,
+        # whose model calls never reach `chat_graph._run_llm_tool_turn` -- so
+        # without this the majority of a delegating turn's calls and most of its
+        # cost were absent from the trace while sitting in the ledger (AGT-026).
+        scope = chat_budget.current_budget_scope()
+        phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
+        with telemetry.span(
+            f"llm {phase}",
+            phase=phase,
+            role=phase.split(":")[0],
+            model=chat_context.model_name_of(self._model),
+        ) as current:
+            return await self._ainvoke_traced(input, config, current, scope, phase, **kwargs)
+
+    async def _ainvoke_traced(
+        self, input: Any, config: Any, current: Any, scope: str, phase: str, **kwargs: Any
+    ) -> Any:
         normalized = self._cacheable(self._normalize(input))
         controller = chat_budget.current_budget_controller()
         if controller is None:
             return await self._model.ainvoke(normalized, config=config, **kwargs)
-        scope = chat_budget.current_budget_scope()
 
         # Every inner LLM call funnels through here, so this is the one place
         # the sandbox subagent's spend can be seen at all. Reserving (rather
@@ -1132,23 +1149,34 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # unreported call still moves the ledger.
             input_tokens, output_tokens = estimated_input, 0
         settled = True
+        # The sub-agent loop is where cached input dominates: it re-sends a
+        # growing prefix on every call, and the provider serves nearly all of it
+        # from cache after the first.
+        cost_usd = chat_budget.usage_cost_usd(
+            self._model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        )
         await controller.commit(
             reservation,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            # The sub-agent loop is where cached input dominates: it re-sends a
-            # growing prefix on every call, and the provider serves nearly all
-            # of it from cache after the first.
-            cost_usd=chat_budget.usage_cost_usd(
-                self._model,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_creation_tokens=usage.cache_creation_tokens,
-            ),
+            cost_usd=cost_usd,
             usage_estimated=estimated,
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
+        )
+        telemetry.set_attributes(
+            current,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            cache_read_tokens=usage.cache_read_tokens,
+            usage_estimated=estimated,
+            finish_reason=str((getattr(response, "response_metadata", None) or {}).get("finish_reason") or ""),
+            response=telemetry.content(message_text(getattr(response, "content", ""))),
         )
         return response
 

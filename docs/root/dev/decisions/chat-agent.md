@@ -583,6 +583,50 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-028 — Trace the sub-agent, and recognise a rejection it has already had
+
+**Applies to:** `mcp_builtins/sandbox.py::_ToolMessageNormalizingModel.ainvoke`;
+`chat_orchestrator._same_rejection`, `_SAME_REJECTION_SIMILARITY`,
+`_SAME_REJECTION_MIN_TOKENS`, `_prepare_retries`
+
+Two defects found by running a delegating turn against a trace ([AGT-026](#agt-026)).
+
+**The sub-agent was untraced.** `chat_graph._run_llm_tool_turn` carries the span
+for a model call, and a sandbox sub-agent never reaches it — it runs on
+`create_react_agent`, whose calls go straight to the model. Measured on one
+reachability turn: **51 traced `llm` spans against 107 calls in the ledger, the
+missing 56 being every sub-agent call** — 52% of the run's calls and about 60% of
+its cost, invisible in the trace while fully present in the budget. That makes
+the one ratio worth watching on a delegating turn — cost per step that completed
+— uncomputable from traces. The span now sits where the budget reservation
+already sits, which the code says is the one place every inner call passes.
+
+**A rejection restated in new words was not recognised as the same one.** The
+guard added by [AGT-017](#agt-017) compared a verdict to the previous one with
+`==`, and a verifier writes its verdict fresh every time. A step was observed
+failing three times for the one thing its dependency could not supply, each
+rejection worded differently, each one passing the guard as new.
+
+**Measured, on the verdicts that run actually produced** (Jaccard over content
+words):
+
+| pair | overlap |
+|------|---------|
+| the two rejections of the same step, reworded | **0.500** |
+| two different "incomplete" complaints | 0.103 |
+| unrelated rejections | 0.022 – 0.023 |
+
+`0.4` sits in a five-fold gap. **The length floor is not decoration:** at three
+or four content words one shared word carries the ratio, and the first version of
+this scored two plainly different terse rejections at exactly 0.400 — caught by
+an existing test, not by inspection. Below `_SAME_REJECTION_MIN_TOKENS` the
+comparison stays exact.
+
+**Direction of error.** A false positive ends a step that a retry might have
+saved; a false negative spends another attempt. AGT-017's finding is that the
+second is the one that actually happens, so the threshold is set to catch the
+observed repeat rather than to be safe against every conceivable one.
+
 ## AGT-027 — Fan out over divergent work, and seed what a batch will all want
 
 **Applies to:** `_PLANNER_PROMPT`, `_PlannedStep.map_over` / `map_reason`,

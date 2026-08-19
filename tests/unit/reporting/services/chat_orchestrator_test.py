@@ -4015,3 +4015,54 @@ async def test_a_failed_seed_never_fails_the_batch(mocker):
         assert chat_orchestrator.episodic_memory.current_session_ledger().receipts == []
     finally:
         chat_orchestrator.episodic_memory.clear_session_ledger()
+
+
+# The two verdicts one measured step actually received, in order, for the one
+# thing its dependency could not supply. Kept verbatim: the guard exists for
+# this shape, and paraphrasing them would stop testing it.
+_REJECTION_FIRST = (
+    "Success criteria require each selected CVE to record the vulnerable package and installed"
+    " version. The result provides only patch targets (e.g., PyJWT 2.13.0, urllib3 2.7.0) and"
+    " explicitly states exact installed versions are not present, leaving that required field"
+    " unresolved."
+)
+_REJECTION_REWORDED = (
+    "The result fails to provide a concrete vulnerable installed version for each selected package."
+    " It explicitly states 'installed version: not present in s1 output' and only supplies"
+    " fixed/patch versions (e.g., pyjwt < 2.13.0, urllib3 < 2.7.0, react-router < 6.30.4). The"
+    " success criteria require a 'vulnerable installed version' for each CVE."
+)
+_REJECTION_DIFFERENT = (
+    "The result only lists 8 of 19 open findings (top-8 cutoff), so the CVE list is incomplete."
+    " Additionally, CVSS vectors are not provided (only scores), though the data source lacks them;"
+    " completeness is the primary failure."
+)
+
+
+def test_a_reworded_repeat_of_a_rejection_counts_as_the_same_one():
+    assert chat_orchestrator._same_rejection(_REJECTION_REWORDED, _REJECTION_FIRST)
+    assert chat_orchestrator._same_rejection(_REJECTION_FIRST, _REJECTION_FIRST)
+
+
+def test_a_different_rejection_is_not_treated_as_a_repeat():
+    assert not chat_orchestrator._same_rejection(_REJECTION_DIFFERENT, _REJECTION_FIRST)
+    assert not chat_orchestrator._same_rejection("", _REJECTION_FIRST)
+    assert not chat_orchestrator._same_rejection(_REJECTION_FIRST, "")
+
+
+def test_a_step_rejected_twice_in_different_words_is_not_retried_again():
+    plan = [_step("s1", "failed", retry_guidance=_REJECTION_FIRST)]
+    results = [{"step_id": "s1", "verify_reason": _REJECTION_REWORDED, "output": "partial"}]
+
+    plan, iteration = chat_orchestrator._prepare_retries(plan, results, iteration=1)
+
+    assert plan[0]["no_retry"] is True
+    # Nothing left to retry, so the cycle does not advance.
+    assert iteration == 1
+
+
+def test_short_rejections_are_compared_exactly_not_by_overlap():
+    # Three or four content words apiece: one shared word moves the ratio
+    # further than a whole shared complaint does in a real verdict.
+    assert not chat_orchestrator._same_rejection("Now missing evidence for CVE-2", "Missing a verdict for CVE-1")
+    assert chat_orchestrator._same_rejection("Missing a verdict for CVE-1", "Missing a verdict for CVE-1")

@@ -1116,6 +1116,50 @@ async def _persist_step_record(
     return path
 
 
+#: Token overlap above which two rejections are the same complaint reworded.
+#: Jaccard, so a longer restatement of the same point counts against itself
+#: rather than for itself. Rationale and the measured separation: AGT-028.
+_SAME_REJECTION_SIMILARITY = 0.4
+#: Content words a rejection needs before overlap says anything about it. Below
+#: this, one shared word moves the ratio further than a whole shared complaint
+#: does in a real verdict, so short reasons are compared exactly instead.
+_SAME_REJECTION_MIN_TOKENS = 8
+
+#: Words carrying no complaint. Small and closed on purpose: this is a
+#: similarity floor between two sentences about the same step, not a search
+#: index, and every word left in is one both rejections have to share.
+_REJECTION_STOPWORDS = frozenset(
+    "a an the and or but if of to in on for with without that this it its is are was were be been"
+    " being as by from at not no only each every some their there they them then than so which what"
+    " when whose result step".split()
+)
+
+
+def _rejection_tokens(text: str) -> frozenset[str]:
+    return frozenset(
+        word for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in _REJECTION_STOPWORDS and len(word) > 2
+    )
+
+
+def _same_rejection(reason: str, previous: str) -> bool:
+    """Whether a rejection repeats one this step has already been given.
+
+    Exact equality does not answer this. A verifier writes its verdict fresh
+    every time, so the same complaint comes back in different words and a string
+    comparison passes it through as new -- a step was observed being failed three
+    times for the one thing its dependency could not supply, each rejection
+    worded differently. Compared on content-word overlap instead.
+    """
+    if not reason or not previous:
+        return False
+    if reason == previous:
+        return True
+    first, second = _rejection_tokens(reason), _rejection_tokens(previous)
+    if min(len(first), len(second)) < _SAME_REJECTION_MIN_TOKENS:
+        return False
+    return len(first & second) / len(first | second) >= _SAME_REJECTION_SIMILARITY
+
+
 def _prepare_retries(
     plan: list[dict[str, Any]],
     results: list[dict[str, Any]],
@@ -1172,7 +1216,7 @@ def _prepare_retries(
         if step["status"] != "failed" or step.get("no_retry"):
             continue
         reason = str((results_by_id.get(step["id"], {}) or {}).get("verify_reason") or "").strip()
-        if reason and reason == str(step.get("retry_guidance") or "").strip():
+        if _same_rejection(reason, str(step.get("retry_guidance") or "").strip()):
             step["no_retry"] = True
             logger.info("chat dispatcher: step %s rejected twice for the same reason; not retrying", step["id"])
 
