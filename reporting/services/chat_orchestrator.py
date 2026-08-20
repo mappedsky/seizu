@@ -716,6 +716,10 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         skills,
         capability_tools,
         available_tools=available_tools_for_capability,
+        # The planner names capabilities; it cannot call them. Given the
+        # executor's wording it spends its reasoning deciding whether to emit a
+        # plan or a tool call it has no way to make (AGT-034).
+        for_planner=True,
     )
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
     # The planner is where a re-fetch becomes a step, so it is the earliest

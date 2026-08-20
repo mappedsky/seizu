@@ -583,6 +583,63 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-034 — What the planner is told about capabilities, and what it is not
+
+**Applies to:** `chat_graph.build_capability_context(for_planner=)`,
+`_PLANNER_CAPABILITY_HEADER`, `_format_skills(with_tools=)`,
+`_skill_required_tool_names`; `chat_orchestrator.planner_node`
+
+The planner sees each skill's name, description, trigger phrases and argument
+names, plus the always-disclosed tools. It has **no tool-calling at all** —
+`_structured_invoke` passes an empty tool list — so it names capabilities and the
+worker renders them at execution time. Two things followed from that being
+implicit rather than stated.
+
+**It was told to do something it cannot do.** The capability header is shared
+with the executing agent and is written in the imperative: *"call the relevant
+skill tool"*, *"if the current user request matches a trigger phrase, call that
+skill now instead of describing how to trigger it."* The planner has neither the
+mechanism nor the tools bound. Its own thinking, read off the span: *"This is
+strange: as planner, if task matches trigger, call skill now instead of
+describing how to trigger it. But the output expected is a plan."* It now gets a
+header describing the same catalogue as **names its steps may use**.
+
+**Measured, and it did not help:** median reasoning 22,810 chars before against
+24,262 after, four samples each, ranges 705–34,107 and 17,564–29,692. The
+contradiction is real and worth removing on correctness grounds — an instruction
+that cannot be followed is a defect — but **it is not what the planner's thinking
+is spent on**, and this entry exists so nobody re-derives that hypothesis from the
+same quotes. Plan shape was unaffected (3/3 `plan_probe` samples valid, fan-out
+preserved).
+
+**It could not see what a skill can reach.** `seizu_tools_required` rides on every
+skill listing and was dropped by `_format_skills`. The cost was concrete: one plan
+set a step's success criteria to an installed package version, gave it a
+dependency whose skill has no tool returning one, and the step failed three times
+for the gap ([AGT-032](#agt-032)). The planner's listing now renders those names.
+
+**Names, not descriptions.** Measured on this deployment: names inline cost 1,847
+characters, names plus a de-duplicated description glossary 6,288, a description
+at every mention 6,719 — 75 references over 49 distinct tools, so de-duplication
+saves almost nothing. Tool names here are descriptive enough to carry the
+mapping (`github_security__top_vulnerabilities` against
+`github_security__repo_dependencies`), which is what the planner lacked. The
+**planner's** listing only: the executing agent is given a skill's tools when it
+renders one, and its context is the one [SBX-003](sandbox.md#sbx-003) measured.
+
+**Not done: an interactive planner.** Letting it call `load_seizu_skill` was
+probed. The mechanism works — it breaks off after the first round and reliably
+loads the three relevant skills — and over four samples it is *suggestive but not
+established*: median 87s and 16,150 reasoning characters against a
+non-interactive median of ~23,000, with ranges overlapping almost entirely, and
+one early sample at 52s that did not survive repetition. Judging it properly
+needs the real structured-output path (schema enforcement, budget accounting,
+`_plan_problems` validation) rather than a probe, because the metric that matters
+is plan validity and a probe without the schema cannot produce a valid plan. The
+objection that stopped it earlier — "two or three calls at planner latency" — is
+**wrong** and recorded here so it is not reused: that latency largely *is* the
+speculation the loading removes.
+
 ## AGT-033 — What a stage spends thinking is recorded, and graded for the two that answer once
 
 **Applies to:** `chat_budget.LlmUsage.reasoning_tokens` / `usage_from_message`,
