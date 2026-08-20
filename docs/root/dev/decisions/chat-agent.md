@@ -691,6 +691,14 @@ long plan. LangChain reports the split as `output_token_details.reasoning` and
 in and 6,621 out; synthesizer 229s, 9,401 in and 10,084 out for an answer of
 about 2,400 tokens. **27% of wall clock for 3 of ~70 calls**, most of it thinking.
 
+**The sub-agent's thinking is recorded the other way round.** It does not
+stream -- `create_react_agent` calls the model directly -- so its span reads
+`reasoning_content` off the finished message where the outer path accumulates
+deltas. Both end up on the span under `telemetry.content`, which is what makes a
+delegation's deliberation readable at all: it is the largest single consumer of a
+turn's model time (141-144s inside each parallel step of one measured batch) and
+was previously visible only as a token count.
+
 **The effort is read off the model, not re-resolved.** `reasoning_effort` reaches
 the provider through `model_kwargs` because ChatLiteLLM swallows it as a
 constructor argument ([AGT-019](#agt-019)), so "what this deployment configured"

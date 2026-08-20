@@ -1188,11 +1188,17 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
         )
+        from reporting.services.chat_graph import _chunk_reasoning_delta
+
         telemetry.set_attributes(
             current,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             reasoning_tokens=usage.reasoning_tokens,
+            # The thinking itself. The sub-agent does not stream, so this reads
+            # the finished message rather than accumulating deltas as the outer
+            # path does. Content, so opt-in (AGT-026, AGT-033).
+            reasoning=telemetry.content(_chunk_reasoning_delta(response) or "", 4000),
             cost_usd=cost_usd,
             cache_read_tokens=usage.cache_read_tokens,
             usage_estimated=estimated,
