@@ -636,9 +636,17 @@ Y, and by what path"* directly, so a sub-agent asking that fetches the resolved
 graph and walks it in `run_python`. That works and costs a round trip and some
 tokens. Worth adding upstream if reachability becomes a common workflow.
 
-**Not done: making the agent use it.** No prompt, skill or `tools_required`
-names these tools, so under progressive disclosure a sub-agent will rarely find
-them. Today this is a capability, not a behaviour.
+**Declaring it in a skill is what made it reachable.** Under progressive
+disclosure a sub-agent only sees what a skill declares, so until one named these
+tools nothing directed it to them. `cve_response/dependency_provenance` covers
+the standalone question, and `repo_cve_reachability` — where the guessing was
+measured — carries `find_dependency_path` and `get_requirements` plus a step
+telling it never to state a pin from memory.
+
+**Verified on a full turn:** the sub-agent called
+`ext__deps__depsdev_get_requirements` six times, all succeeding in under a
+second, in place of recalling a pin. `find_dependency_path` was not reached in
+that run, so the transitive-path tool is exercised only by its own tests so far.
 
 ## AGT-035 — The planner believed two false things about its own system
 
