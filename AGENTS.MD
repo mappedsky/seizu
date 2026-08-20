@@ -384,6 +384,7 @@ Settings: `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, `TEMP
 | `postgres-create-chat-checkpoint-db` | Idempotent local checkpoint-database provisioning |
 | `sqs` | ElasticMQ (local SQS) |
 | `authentik-*` | OIDC provider (`auth` profile) |
+| `external-mcp-deps` | deps.dev package-metadata MCP proxy (`external-mcp` profile, prototype) |
 | `cartography` | Graph data sync (`nostart` profile) |
 
 Dev URLs: frontend `:3000`, backend `:8080`, Authentik `:9000`, Temporal UI `:8233`.

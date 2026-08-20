@@ -583,6 +583,60 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-036 — Package metadata comes from an external MCP, because nothing else can supply it
+
+**Applies to:** `scripts/deps_dev_mcp.py`, the `external-mcp-deps` Compose
+service, `MCP_EXTERNAL_PROXIES`
+
+Seizu's graph records which package versions are **installed** — `version` and a
+resolved `requirements` pin per manifest — and which fall in a CVE's vulnerable
+range. It does not record what a package *declares it needs*. There is no
+property or edge saying `botocore 1.42.91 requires urllib3 <2.0`, because that is
+registry metadata rather than scan output.
+
+**A sub-agent asked to judge reachability filled the gap from memory.** Read off
+its own thinking: *"botocore pins urllib3 < 1.27 historically, but modern
+botocore (>=1.29) requires urllib3 >= 1.25.4, < 2.0? … Actually botocore 1.29.0
+was released around Dec 2022 and it still required urllib3<1.27… **But this is a
+fictional future scenario (2026 versions)**"*. It discarded the speculation that
+time. A security verdict resting on remembered version history is the failure
+this exists to prevent — [AGT-016](#agt-016)'s rule about invented identifiers,
+one layer down.
+
+**The sandbox cannot fetch it.** Measured: `curl` to pypi.org and
+raw.githubusercontent.com both time out, and `getent hosts pypi.org` fails — no
+egress, not even DNS. So an instruction to "look it up" would have sent it
+somewhere it cannot reach, and its discovery clause would then have had it
+conclude the data does not exist.
+
+**Not a call from the Seizu backend either.** Third-party egress belongs in a
+component the operator runs, which is what the external MCP proxy mechanism
+already is. The tools arrive as `ext__deps__*`, carry `readOnlyHint` so
+[AGT-010](#agt-010)'s gating skips confirmation (verified), and inherit the
+rate-limit retry from [AGT-029](#agt-029). Only a package name and version leave
+the network.
+
+**Three tools, not one.** `get_requirements` answers the constraint question
+directly. `get_dependencies` returns the resolved graph, bounded — deps.dev
+graphs run to hundreds of nodes and past that it is a listing rather than an
+answer. `find_dependency_path` is the one the reachability workflow actually
+wants: *"confidant does not import urllib3, but does botocore pull it in, and
+how?"* — returning a chain (`urllib3@2.7.0 <- botocore@1.34.100`) instead of a
+graph. A target that is not pulled in returns `pulls_in: false` **as a result,
+not an error**, so a sub-agent does not read "no" as a failed lookup and go back
+to guessing.
+
+**Mounted at the root, not at `/mcp`.** Starlette's `Mount` redirects the mount
+path to itself with a trailing slash, and the 307 reaches an MCP client as
+"request failed" — the same trailing-slash problem Seizu's own transport avoids
+by not using `Mount` at all.
+
+**Prototype.** It lives in `scripts/` and runs on the Seizu image because that
+image already carries the MCP SDK and an HTTP client. What it does not yet have:
+caching (package metadata is immutable per version and a reachability sub-agent
+will ask repeatedly), and any use by the agent — no prompt or skill directs it
+there yet, so today it is a capability rather than a behaviour.
+
 ## AGT-035 — The planner believed two false things about its own system
 
 **Applies to:** `mcp_builtins/sandbox.py::_delegate_description`, `_PLANNER_PROMPT`
