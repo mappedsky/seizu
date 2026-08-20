@@ -1192,6 +1192,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             current,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
             cost_usd=cost_usd,
             cache_read_tokens=usage.cache_read_tokens,
             usage_estimated=estimated,

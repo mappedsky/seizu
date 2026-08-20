@@ -241,6 +241,8 @@ class LLMTurnResult:
     leaked_tool_names: tuple[str, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    # Part of output_tokens: what the model spent thinking (AGT-033).
+    reasoning_tokens: int = 0
     cost_usd: float = 0.0
     usage_estimated: bool = False
 
@@ -1546,6 +1548,12 @@ async def _run_llm_tool_turn(
             current,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+            # Both, because a stage that is slow for its output size is usually
+            # thinking rather than writing, and the two are billed as one number
+            # (AGT-033). The effort is read off the model, so it says what the
+            # provider was told rather than what was configured.
+            reasoning_tokens=result.reasoning_tokens,
+            reasoning_effort=chat_models.applied_reasoning_effort(model),
             cost_usd=result.cost_usd,
             finish_reason=result.finish_reason or "",
             provider_finish_reason=result.provider_finish_reason or "",
@@ -1765,6 +1773,7 @@ async def _run_llm_tool_turn_inner(
             leaked_tool_names=leaked_tool_names,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
         )
@@ -1789,6 +1798,7 @@ async def _run_llm_tool_turn_inner(
         leaked_tool_names=leaked_tool_names,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
         cost_usd=cost_usd,
         usage_estimated=usage_estimated,
     )

@@ -821,3 +821,28 @@ async def test_the_call_ceiling_still_stops_a_run_dead():
 
     assert controller.mode == "exhausted"
     assert "LLM-call" in str(controller.snapshot()["exhaustion_reason"])
+
+
+def test_usage_reads_what_the_model_spent_thinking():
+    """A reasoning model spends most of an answer here, and it is billed inside
+    output_tokens, so a slow stage looks like a slow model without it (AGT-033)."""
+    message = MagicMock()
+    message.usage_metadata = {
+        "input_tokens": 93,
+        "output_tokens": 47,
+        "input_token_details": {"cache_read": 0},
+        "output_token_details": {"reasoning": 37},
+    }
+
+    usage = usage_from_message(message)
+
+    assert usage.output_tokens == 47
+    # A subset of output_tokens, not an addition to it.
+    assert usage.reasoning_tokens == 37
+
+
+def test_usage_tolerates_a_provider_that_reports_no_reasoning():
+    message = MagicMock()
+    message.usage_metadata = {"input_tokens": 10, "output_tokens": 5}
+
+    assert usage_from_message(message).reasoning_tokens == 0

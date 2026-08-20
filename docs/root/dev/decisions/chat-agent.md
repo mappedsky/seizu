@@ -583,6 +583,59 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-033 — What a stage spends thinking is recorded, and graded for the two that answer once
+
+**Applies to:** `chat_budget.LlmUsage.reasoning_tokens` / `usage_from_message`,
+`chat_models.applied_reasoning_effort`, the `llm` span in
+`chat_graph._run_llm_tool_turn` and the sub-agent span in `sandbox.py`;
+`CHAT_LLM_PLANNER_REASONING_EFFORT`, `CHAT_LLM_SYNTHESIZER_REASONING_EFFORT`
+
+**A slow stage looked like a slow model.** Spans carried duration, tokens, cost
+and finish reason, and on a reasoning model the thinking and the answer come out
+of one `output_tokens` figure — so a planner emitting 6,621 tokens for a plan
+whose JSON is under a thousand is indistinguishable from a planner writing a very
+long plan. LangChain reports the split as `output_token_details.reasoning` and
+`usage_from_message` read only the input side. It reads both now.
+
+**Measured on the turn that prompted this** (1,194s total): planner 110s, 3,385
+in and 6,621 out; synthesizer 229s, 9,401 in and 10,084 out for an answer of
+about 2,400 tokens. **27% of wall clock for 3 of ~70 calls**, most of it thinking.
+
+**The effort is read off the model, not re-resolved.** `reasoning_effort` reaches
+the provider through `model_kwargs` because ChatLiteLLM swallows it as a
+constructor argument ([AGT-019](#agt-019)), so "what this deployment configured"
+and "what the provider was told" are different questions, and only the second one
+is worth putting in a trace.
+
+### What the level is actually worth, measured
+
+Six samples per level on `deepseek-v4-pro`, median reasoning tokens:
+
+| effort | median | range |
+|--------|--------|-------|
+| (unset) | 179 | 83–223 |
+| **low** | **104** | 63–164 |
+| medium | 229 | 89–359 |
+| high | 212 | 87–388 |
+
+**Only `low` is distinguishable.** `medium`, `high` and unset overlap almost
+entirely and their medians are not even correctly ordered — which is consistent
+with DeepSeek grading coarsely, and is why `reasoning_kwargs` sends the level
+through `extra_body` rather than trusting litellm's mapping.
+
+So on this provider the graded default is **explicitness, not a saving**: it
+makes the value visible, portable to the providers that do grade natively
+(OpenAI, Gemini), and a single place to change. `low` is the level that would buy
+time here, and it is deliberately not the default for these two:
+[AGT-019](#agt-019) records a starved planner returning nothing and falling back
+to a one-step plan, which removes the orchestrator's parallelism silently. That
+is a worse failure than a slow plan, and the probe that would settle it
+(`scripts/plan_probe.py`, on plan *shape*) has not been run at `low`.
+
+**Note the prompt.** Those six samples used a trivial prompt, not a planning call
+with a full schema and 3,385 tokens of context. They say the knob is coarse on
+this provider; they do not say what it does to the real workload.
+
 ## AGT-032 — Every attempt records its trace, not only the ones cut short
 
 **Applies to:** `chat_orchestrator._run_worker_step` (the `_persist_step_record`

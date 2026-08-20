@@ -827,6 +827,10 @@ class LlmUsage:
     # each at its own rate.
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    # A subset of output_tokens, not an addition to it: what the model spent
+    # thinking rather than answering. Diagnosis only -- it is already paid for
+    # and already counted (AGT-033).
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -852,11 +856,18 @@ def usage_from_message(message: Any) -> LlmUsage:
         return LlmUsage()
     details = usage.get("input_token_details")
     details = details if isinstance(details, dict) else {}
+    # The output side of the same accounting. A reasoning model spends most of
+    # an answer here -- 37 of 47 output tokens on a "name three primes" call --
+    # and without reading it a slow stage looks like a slow model rather than a
+    # thinking one (AGT-033).
+    out_details = usage.get("output_token_details")
+    out_details = out_details if isinstance(out_details, dict) else {}
     return LlmUsage(
         input_tokens=int(usage.get("input_tokens") or 0),
         output_tokens=int(usage.get("output_tokens") or 0),
         cache_read_tokens=int(details.get("cache_read") or 0),
         cache_creation_tokens=int(details.get("cache_creation") or 0),
+        reasoning_tokens=int(out_details.get("reasoning") or 0),
     )
 
 

@@ -297,6 +297,33 @@ def reasoning_kwargs(spec: "ModelSpec") -> dict[str, object]:
     return {"reasoning_effort": spec.reasoning_effort}
 
 
+def applied_reasoning_effort(model: object) -> str:
+    """The reasoning setting that actually reached the wire, read back off the model.
+
+    Read rather than re-resolved on purpose. ``reasoning_effort`` is delivered
+    through ``model_kwargs`` because ChatLiteLLM silently swallows it as a
+    constructor argument (AGT-019) -- so "what this deployment configured" and
+    "what the provider was told" are two different questions, and a trace that
+    answers the first cannot show that the second went missing.
+    """
+    kwargs = getattr(model, "model_kwargs", None) or {}
+    if not isinstance(kwargs, dict):
+        return ""
+    direct = kwargs.get("reasoning_effort")
+    if direct:
+        return str(direct)
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict) and extra.get("reasoning_effort"):
+        return str(extra["reasoning_effort"])
+    thinking = kwargs.get("thinking")
+    if isinstance(thinking, dict):
+        if thinking.get("type") == "disabled":
+            return "none"
+        if thinking.get("budget_tokens"):
+            return f"budget:{thinking['budget_tokens']}"
+    return ""
+
+
 def temperature_for(spec: "ModelSpec") -> float | None:
     """The temperature to send, or ``None`` to send none at all.
 
