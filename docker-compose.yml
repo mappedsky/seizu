@@ -300,21 +300,17 @@ services:
       database:
   # deps.dev package metadata, reached the way every other third party is: an
   # external MCP proxy, so the egress is here rather than in the Seizu backend.
-  # Prototype -- runs the Seizu image because it already carries the MCP SDK.
   external-mcp-deps:
-    image: ghcr.io/mappedsky/seizu
-    user: seizu
-    working_dir: /home/seizu/seizu
-    command: ["python", "-m", "scripts.deps_dev_mcp"]
+    image: ghcr.io/mappedsky/depsdevmcp:0.2.0
+    command: ["-transport", "http"]
     profiles:
       - external-mcp
-    volumes:
-      - .:/home/seizu/seizu
     environment:
-      - PORT=8080
-      - DEPS_DEV_API
-      - DEPS_DEV_TIMEOUT_SECONDS
-      - DEPS_DEV_MAX_NODES
+      # Its default binds loopback, which nothing outside the container can
+      # reach; the path is what MCP_EXTERNAL_PROXIES points at.
+      - DEPSDEVMCP_HTTP_ADDRESS=0.0.0.0:8080
+      - DEPSDEVMCP_HTTP_PATH=/mcp
+      - DEPSDEVMCP_CACHE_CAPACITY
     networks:
       database:
   external-mcp-github:

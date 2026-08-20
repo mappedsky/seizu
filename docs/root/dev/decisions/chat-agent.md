@@ -585,8 +585,8 @@ Three rules fall out of that object, and each was a live defect without it:
 
 ## AGT-036 — Package metadata comes from an external MCP, because nothing else can supply it
 
-**Applies to:** `scripts/deps_dev_mcp.py`, the `external-mcp-deps` Compose
-service, `MCP_EXTERNAL_PROXIES`
+**Applies to:** the `external-mcp-deps` Compose service
+(`ghcr.io/mappedsky/depsdevmcp`), `MCP_EXTERNAL_PROXIES`
 
 Seizu's graph records which package versions are **installed** — `version` and a
 resolved `requirements` pin per manifest — and which fall in a CVE's vulnerable
@@ -611,31 +611,34 @@ conclude the data does not exist.
 
 **Not a call from the Seizu backend either.** Third-party egress belongs in a
 component the operator runs, which is what the external MCP proxy mechanism
-already is. The tools arrive as `ext__deps__*`, carry `readOnlyHint` so
-[AGT-010](#agt-010)'s gating skips confirmation (verified), and inherit the
-rate-limit retry from [AGT-029](#agt-029). Only a package name and version leave
-the network.
+already is. The tools arrive as `ext__deps__depsdev_*`, all carry `readOnlyHint`
+so [AGT-010](#agt-010)'s gating skips confirmation (verified), and they inherit
+the rate-limit retry from [AGT-029](#agt-029). Only a package name and version
+leave the network.
 
-**Three tools, not one.** `get_requirements` answers the constraint question
-directly. `get_dependencies` returns the resolved graph, bounded — deps.dev
-graphs run to hundreds of nodes and past that it is a listing rather than an
-answer. `find_dependency_path` is the one the reachability workflow actually
-wants: *"confidant does not import urllib3, but does botocore pull it in, and
-how?"* — returning a chain (`urllib3@2.7.0 <- botocore@1.34.100`) instead of a
-graph. A target that is not pulled in returns `pulls_in: false` **as a result,
-not an error**, so a sub-agent does not read "no" as a failed lookup and go back
-to guessing.
+**Transport, not tools, was the integration question.** `depsdevmcp` began
+stdio-only, and Seizu's external MCP speaks `sse` or `streamable_http`. Teaching
+Seizu stdio was rejected: the no-pooling rule (a fresh transport per call per
+user, for identity isolation) would make it a **process spawn per tool call**,
+and it would move the egress back into the Seizu backend. A bridge sidecar was
+the fallback; upstream adding a streamable-HTTP mode removed the need for either.
+Its default listen address is loopback, so the container is given
+`DEPSDEVMCP_HTTP_ADDRESS=0.0.0.0:8080` or nothing can reach it.
 
-**Mounted at the root, not at `/mcp`.** Starlette's `Mount` redirects the mount
-path to itself with a trailing slash, and the 307 reaches an MCP client as
-"request failed" — the same trailing-slash problem Seizu's own transport avoids
-by not using `Mount` at all.
+**What it gives.** Nine read-only tools: declared requirements, resolved
+dependency graphs, package and version metadata (advisory keys, licences,
+attestations), OSV advisories, project metadata and a Graphviz rendering. It
+holds a process-local LRU cache, which matters because a reachability sub-agent
+asks repeatedly — measured `cached:false` then `cached:true`, 0.36s then 0.16s.
 
-**Prototype.** It lives in `scripts/` and runs on the Seizu image because that
-image already carries the MCP SDK and an HTTP client. What it does not yet have:
-caching (package metadata is immutable per version and a reachability sub-agent
-will ask repeatedly), and any use by the agent — no prompt or skill directs it
-there yet, so today it is a capability rather than a behaviour.
+**Known gap.** There is no chain-shaped answer: nothing returns *"does X pull in
+Y, and by what path"* directly, so a sub-agent asking that fetches the resolved
+graph and walks it in `run_python`. That works and costs a round trip and some
+tokens. Worth adding upstream if reachability becomes a common workflow.
+
+**Not done: making the agent use it.** No prompt, skill or `tools_required`
+names these tools, so under progressive disclosure a sub-agent will rarely find
+them. Today this is a capability, not a behaviour.
 
 ## AGT-035 — The planner believed two false things about its own system
 
