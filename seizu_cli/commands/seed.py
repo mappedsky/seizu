@@ -43,7 +43,25 @@ def _list_reports() -> list[dict[str, Any]]:
 
 
 def _publish_report(report_id: str) -> None:
-    state.get_client().put(f"/api/v1/reports/{report_id}/visibility", json={"access": {"scope": "public"}})
+    """Make a seeded report public, unless this identity does not own it.
+
+    A report's access is its owner's to change, and durable identity is
+    ``(iss, sub)`` -- so a report seeded while the auth profile was on cannot be
+    published by the local dev identity afterwards, and the server is right to
+    refuse. That is not a reason to abandon the run: seeding is additive, the
+    report keeps the visibility it already has, and everything after reports --
+    toolsets, skillsets, workflows, scheduled queries -- still needs to happen.
+    One report nobody can republish used to stop all of it.
+    """
+    try:
+        state.get_client().put(f"/api/v1/reports/{report_id}/visibility", json={"access": {"scope": "public"}})
+    except APIError as exc:
+        if exc.status_code != 403:
+            raise
+        err_console.print(
+            f"[yellow]Skipped[/yellow]: report {report_id} is owned by another identity, "
+            "so its visibility was left as it is. Seeding continues."
+        )
 
 
 def _pin_report(report_id: str, pinned: bool) -> None:
