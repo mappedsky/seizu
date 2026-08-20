@@ -301,7 +301,7 @@ services:
   # deps.dev package metadata, reached the way every other third party is: an
   # external MCP proxy, so the egress is here rather than in the Seizu backend.
   external-mcp-deps:
-    image: ghcr.io/mappedsky/depsdevmcp:0.2.0
+    image: ghcr.io/mappedsky/depsdevmcp:0.3.0
     command: ["-transport", "http"]
     profiles:
       - external-mcp

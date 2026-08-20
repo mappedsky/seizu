@@ -1934,6 +1934,7 @@ skillsets:
           4. Look for mitigations: input validation or allowlists, the feature disabled by default, a non-privileged context, a pinned safe version elsewhere.
           5. Check whether it is already fixed but not yet re-synced: `ext__github__list_commits` on the manifest or lockfile path, and `ext__github__get_commit` for a promising SHA.
           6. `ext__github__search_code` only indexes the default branch and can lag. If a search returns nothing, say so and fall back to directory listings before concluding the package is unused.
+          7. A package with no direct import may still arrive through another dependency. Ask `ext__deps__depsdev_find_dependency_path` (system, name, version, target) whether the intermediate pulls it in, and `ext__deps__depsdev_get_requirements` for the range it declares. **Never state a version pin or compatibility range from memory** — the security graph records installed versions, not declared requirements, and the sandbox has no network to check them. If those tools cannot answer, say the relationship is undetermined rather than asserting one.
 
           Verdict rules — assign exactly one per CVE:
           - `Exploitable`: the vulnerable version is present AND the vulnerable API is called AND untrusted input can reach it. Requires a cited file path (and line or quoted snippet) for the call site and the input path.
@@ -1988,6 +1989,8 @@ skillsets:
           - ext__github__list_commits
           - ext__github__get_commit
           - github_security__repo_dependencies
+          - ext__deps__depsdev_find_dependency_path
+          - ext__deps__depsdev_get_requirements
         enabled: true
       repo_cve_exploitability:
         name: Repository CVE Exploitability Review
@@ -2756,6 +2759,79 @@ skillsets:
           - reports__get
           - reports__create
           - reports__create_version
+        enabled: true
+      dependency_provenance:
+        name: Dependency Provenance
+        description: >-
+          Establish where an installed package version comes from and what pulls
+          it in, from registry metadata rather than recollection. Use when a
+          vulnerable package is not imported directly and the question is
+          whether it arrives transitively, or when a version pin or
+          compatibility range decides the verdict.
+        template: |-
+          Establish, from registry metadata, how `{% $package %}` `{% $version %}` relates to `{% $target %}` in the `{% $ecosystem %}` ecosystem.
+
+          **This is the one question the security graph cannot answer.** The graph records which versions are *installed* and which fall in a CVE's vulnerable range. It does not record what a package *declares* it needs — there is no node or edge saying one package requires a range of another. Neither can the sandbox look it up: it has no network egress and no DNS. The `ext__deps__depsdev_*` tools are the only source. Never state a version pin, a compatibility range, or a transitive relationship from memory; if these tools cannot answer it, say so instead.
+
+          Tool arguments — use exactly these field names:
+          - `ext__deps__depsdev_find_dependency_path`: system, name, version, target
+          - `ext__deps__depsdev_get_requirements`: system, name, version
+          - `ext__deps__depsdev_get_dependencies`: system, name, version
+          - `ext__deps__depsdev_get_version`: system, name, version
+          - `github_security__repo_dependencies`: repos, packages, manifest
+
+          `system` is the ecosystem in lower case: npm, cargo, maven, pypi, go, nuget, rubygems.
+
+          How to work:
+          1. When a target package is named, start with `ext__deps__depsdev_find_dependency_path`. It answers "does this pull that in, and by what chain" directly and returns a short path rather than a graph. `"pulls_in": false` is an answer, not a failed lookup — report it as "not pulled in" and stop.
+          2. When no target is named, or you need the declared constraints, use `ext__deps__depsdev_get_requirements`. It returns what the version declares, per ecosystem, with any environment markers.
+          3. Reach for `ext__deps__depsdev_get_dependencies` only when you need the whole resolved graph — it runs to hundreds of nodes. Prefer the path tool.
+          4. `ext__deps__depsdev_get_version` adds licences, attestations and the advisory keys recorded against that exact version.
+          5. Where the installed version is what matters, take it from `github_security__repo_dependencies` — that is what the scan actually found — and use deps.dev for what it requires.
+
+          Two things that look like errors and are not:
+          - **Resolved graphs exist only for npm, cargo, maven and pypi.** For go, nuget and rubygems the requirements tool works but the path and graph tools refuse. That is a real limit; report it rather than treating the absence as "nothing depends on it".
+          - **Declared requirements and the resolved graph can disagree.** `botocore` may declare `urllib3 <1.27` and still resolve to `urllib3 2.7.0`, because the declaration carries an environment marker and another line covers other environments. Read the marker before calling it a contradiction.
+
+          Report:
+          - The relationship in one line: pulled in or not, direct or transitive, and the chain with the constraint on each hop.
+          - The constraint that decided it, quoted from the tool output.
+          - What you could not determine, and why — an unsupported ecosystem, a version deps.dev does not know, a chain that stops short.
+          Cite the tool each fact came from. Do not fill a gap with a remembered version history.
+        parameters:
+          - name: ecosystem
+            type: string
+            description: Package ecosystem in lower case — npm, cargo, maven, pypi, go, nuget, rubygems.
+            required: true
+          - name: package
+            type: string
+            description: Package name as the ecosystem spells it, e.g. `botocore`.
+            required: true
+          - name: version
+            type: string
+            description: Exact installed version, e.g. `1.42.91`. Not a range.
+            required: true
+          - name: target
+            type: string
+            description: >-
+              Optional. The package to look for in its dependency graph, e.g.
+              `urllib3`. Empty means report the declared requirements instead of
+              a path.
+            required: false
+            default: ""
+        triggers:
+          - does this package pull in another
+          - why is this dependency installed
+          - is this a direct or transitive dependency
+          - what requires this package version
+          - check a dependency version pin or compatibility range
+          - trace a transitive dependency path
+        tools_required:
+          - ext__deps__depsdev_find_dependency_path
+          - ext__deps__depsdev_get_requirements
+          - ext__deps__depsdev_get_dependencies
+          - ext__deps__depsdev_get_version
+          - github_security__repo_dependencies
         enabled: true
       cve_severity_analysis:
         name: CVE Severity Analysis
