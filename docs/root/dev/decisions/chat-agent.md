@@ -583,6 +583,47 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-037 — The answer is written once, from output that keeps its conclusion
+
+**Applies to:** `chat_orchestrator._keep_ends`,
+`CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS`, `_closing_summary_ids`,
+`_init_plan`, `_PLANNER_PROMPT`
+
+A reachability turn's final answer did not carry the source-level findings its
+own steps had produced. Two separate causes.
+
+**The bound took the wrong end.** Each step's output reached the synthesizer
+through an unnamed 4,000-character cut taken from the front. A step's answer is
+at its *end* — the reachability skill instructs its sub-agent to state the
+verdict last — so the cut removed the verdict and kept the working. Measured on
+one turn: three reachability steps produced 3,414, 4,383 and 2,772 characters and
+only the longest lost its conclusion, which is the shape of a bug rather than of
+a budget. `_keep_ends` keeps both ends and drops the middle, weighted to the
+tail.
+
+The bound is now named and larger, and it is **not** the real limit: the request
+is fitted to the model's window afterwards ([CTX-001](chat-context.md#ctx-001)),
+which is what has to hold. This is only a guard against one enormous step
+crowding the others — the same relationship
+`CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS` has, and that one applies to a
+different thing entirely: steps that produced *no* output and are shown their
+tool trace instead.
+
+**The plan summarized, then the synthesizer summarized the summary.** Plans ended
+with an `answer` step gathering the earlier findings, and the turn's answer is
+already written from every step's output — so the same summary was produced
+twice, losing detail at the extra hop and paying a worker and a verifier call for
+it.
+
+**Told not to, the planner kept doing it: three of four samples.** So it is
+removed rather than asked again. `_closing_summary_ids` drops an `answer` step
+that waits on other steps and that **nothing waits on**. Narrow deliberately: a
+mid-plan decision later steps consume is kept (selecting three CVEs is an answer
+step), and a plan that is a single answer step — the request needing no live
+action, or reporting that nothing can obtain the evidence — is untouched. The
+prompt rule stays, because it tells the planner *why*; the code is what makes it
+hold.
+
 ## AGT-036 — Package metadata comes from an external MCP, because nothing else can supply it
 
 **Applies to:** the `external-mcp-deps` Compose service

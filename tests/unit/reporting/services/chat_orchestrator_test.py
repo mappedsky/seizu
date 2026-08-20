@@ -172,7 +172,9 @@ def test_init_plan_drops_dangling_and_self_dependencies():
                 required_action="investigation__triage",
                 required_arguments={"org": "mappedsky"},
             ),
-            _PlannedStep(id="s2", goal="b", depends_on=["s1"], action_kind="answer"),
+            # Not an answer step: a terminal one is dropped as a closing summary
+            # (AGT-037), and this case is about edge repair.
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"], action_kind="tool"),
         ]
     )
     assert plan[0]["depends_on"] == []
@@ -180,7 +182,7 @@ def test_init_plan_drops_dangling_and_self_dependencies():
     assert plan[0]["action_kind"] == "skill"
     assert plan[0]["required_action"] == "investigation__triage"
     assert plan[0]["required_arguments"] == {"org": "mappedsky"}
-    assert plan[1]["action_kind"] == "answer"
+    assert plan[1]["action_kind"] == "tool"
     assert all(step["status"] == "pending" for step in plan)
 
 
@@ -4145,3 +4147,43 @@ def test_a_steps_conclusion_survives_the_synthesis_bound():
 def test_output_within_the_bound_is_untouched():
     assert chat_orchestrator._keep_ends("short", 300) == "short"
     assert chat_orchestrator._keep_ends("unbounded", 0) == "unbounded"
+
+
+def _planned(step_id: str, kind: str, deps: list[str]) -> _PlannedStep:
+    return _PlannedStep(id=step_id, goal=f"goal {step_id}", depends_on=deps, action_kind=kind)
+
+
+def test_a_closing_summary_step_is_dropped():
+    """The synthesizer writes the answer from every step's output, so a plan
+    ending in "summarize the findings" summarizes twice (AGT-037)."""
+    plan = chat_orchestrator._init_plan(
+        [
+            _planned("s1", "skill", []),
+            _planned("s2", "skill", ["s1"]),
+            _planned("s3", "answer", ["s1", "s2"]),
+        ]
+    )
+
+    assert [s["id"] for s in plan] == ["s1", "s2"]
+
+
+def test_an_answer_step_others_depend_on_is_kept():
+    # Selecting the three highest-risk CVEs is an answer step, and the steps
+    # that investigate them consume it.
+    plan = chat_orchestrator._init_plan(
+        [
+            _planned("s1", "skill", []),
+            _planned("s2", "answer", ["s1"]),
+            _planned("s3", "skill", ["s2"]),
+        ]
+    )
+
+    assert [s["id"] for s in plan] == ["s1", "s2", "s3"]
+
+
+def test_an_answer_only_plan_is_left_alone():
+    # Nothing needs fetching, or nothing can obtain the evidence: the answer
+    # step is the whole plan and dropping it would leave none.
+    plan = chat_orchestrator._init_plan([_planned("s1", "answer", [])])
+
+    assert [s["id"] for s in plan] == ["s1"]

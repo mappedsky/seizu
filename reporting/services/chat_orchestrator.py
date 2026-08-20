@@ -967,6 +967,31 @@ async def _replan_invalid_graph(
     return retried, [f"{first}. It was replanned.", *notes]
 
 
+def _closing_summary_ids(ids: list[str], planned: list["_PlannedStep"], edges: dict[str, list[str]]) -> set[str]:
+    """Answer steps that only restate what the plan already gathered.
+
+    The turn's answer is written by the synthesizer from every step's output, so
+    a plan ending in "summarize the findings" produces that summary twice: the
+    step writes one, the synthesizer writes another from it, and detail is lost
+    at the extra hop. Told not to, the planner still wrote one in three of four
+    measured samples, so this removes it rather than asking again (AGT-037).
+
+    Narrow on purpose. A step qualifies only if it is an ``answer`` step, waits
+    on other steps, and **nothing waits on it** -- so a mid-plan decision that
+    later steps consume is kept, and a plan that is a single answer step (the
+    request needing no live action, or reporting that nothing can obtain the
+    evidence) is left exactly as written.
+    """
+    if len(ids) < 2:
+        return set()
+    depended_on = {dep for deps in edges.values() for dep in deps}
+    return {
+        step_id
+        for step_id, step in zip(ids, planned, strict=True)
+        if step.action_kind == "answer" and edges[step_id] and step_id not in depended_on
+    }
+
+
 def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
     """Materialize the plan, forcing it into a DAG whatever it arrived as.
 
@@ -988,9 +1013,12 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
             deps.append(source)
         edges[step_id] = deps
     edges = _break_cycles(edges, ids)
+    dropped = _closing_summary_ids(ids, planned, edges)
 
     plan: list[dict[str, Any]] = []
     for step_id, step in zip(ids, planned, strict=True):
+        if step_id in dropped:
+            continue
         plan.append(
             {
                 "id": step_id,
