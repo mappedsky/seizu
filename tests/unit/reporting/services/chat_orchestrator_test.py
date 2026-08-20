@@ -4126,3 +4126,22 @@ async def test_a_step_that_finished_still_records_its_trace(mocker):
     assert not result.get("budget_capped") and not result.get("execution_error")
     persist.assert_awaited_once()
     assert result["record_path"] == "/home/user/seizu_results/step_s1.json"
+
+
+def test_a_steps_conclusion_survives_the_synthesis_bound():
+    """A step's verdict is at its end -- the reachability skill tells its
+    sub-agent to put it there -- so a head-first cut removed exactly the
+    conclusion and kept the working (AGT-037)."""
+    body = "PREAMBLE " + ("working " * 400) + "VERDICT: not reachable."
+
+    kept = chat_orchestrator._keep_ends(body, 300)
+
+    assert "VERDICT: not reachable." in kept
+    assert kept.startswith("PREAMBLE")
+    assert "omitted" in kept
+    assert len(kept) <= 300
+
+
+def test_output_within_the_bound_is_untouched():
+    assert chat_orchestrator._keep_ends("short", 300) == "short"
+    assert chat_orchestrator._keep_ends("unbounded", 0) == "unbounded"

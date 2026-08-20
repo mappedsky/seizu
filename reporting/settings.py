@@ -919,6 +919,12 @@ CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES = int_env("CHAT_ORCHESTRATOR_WORKER_FI
 # means the synthesizer can still answer when a summary comes back thin. Set 0
 # to send summaries only (the pre-existing behavior).
 CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
+# How much of one step's *output* the synthesizer is shown. A guard against a
+# single enormous step crowding the rest, not the real bound: the request is
+# fitted to the model's window afterwards. Was an unnamed 4,000 that cut a
+# measured reachability verdict off its finding, so it is both larger and
+# middle-truncating now -- a step's conclusion is at its end (AGT-037).
+CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS", 12_000)
 # Characters of earlier conversation given to the planner, so a follow-up whose
 # subject is a back-reference ("cross-check that", "which of those findings")
 # can be resolved into self-contained step goals. The orchestrated path is

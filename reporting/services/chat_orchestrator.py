@@ -3712,6 +3712,31 @@ async def confirmation_pause_node(state: ChatState, config: RunnableConfig) -> d
 _MIN_EVIDENCE_CHARS_PER_CALL = 400
 
 
+def _keep_ends(text: str, budget: int) -> str:
+    """Bound a step's output for synthesis without removing its conclusion.
+
+    Truncating from the front takes the tail, and a step's tail is where its
+    answer is: the reachability skill tells its sub-agent to state the verdict
+    last, so a head-first cut removed exactly the verdict and left the working.
+    One measured turn lost a 4,383-character finding's conclusion that way while
+    its two siblings, being shorter, kept theirs.
+
+    So keep both ends and drop the middle, which is the working. This is a guard
+    against one enormous step crowding the rest, not the real bound -- the
+    request is fitted to the model's window afterwards (CTX-001), which is the
+    thing that actually has to hold.
+    """
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = "\n\n[… middle of this step's output omitted …]\n\n"
+    room = budget - len(marker)
+    if room <= 0:
+        return text[:budget]
+    # Weighted to the tail: the conclusion is worth more than the preamble.
+    head = room // 3
+    return f"{text[:head]}{marker}{text[-(room - head) :]}"
+
+
 def _synthesis_context(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     """Render the executed plan for the synthesizer: each step's summary + evidence.
 
@@ -3863,7 +3888,7 @@ def _step_summaries_for_display(plan: list[dict[str, Any]], results: list[dict[s
     for step in plan:
         result = results_by_id.get(step["id"], {}) or {}
         status = _rendered_step_status(step, result)
-        output = _truncate_text(result.get("output") or "", 4000).strip()
+        output = _keep_ends(result.get("output") or "", settings.CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS).strip()
         if not output:
             evidence = _step_evidence(result, max_chars=per_step)
             output = (
