@@ -607,7 +607,7 @@ constructor argument ([AGT-019](#agt-019)), so "what this deployment configured"
 and "what the provider was told" are different questions, and only the second one
 is worth putting in a trace.
 
-### What the level is actually worth, measured
+### The levels are the provider's, not ours, and they are not all distinct
 
 Six samples per level on `deepseek-v4-pro`, median reasoning tokens:
 
@@ -618,23 +618,27 @@ Six samples per level on `deepseek-v4-pro`, median reasoning tokens:
 | medium | 229 | 89–359 |
 | high | 212 | 87–388 |
 
-**Only `low` is distinguishable.** `medium`, `high` and unset overlap almost
-entirely and their medians are not even correctly ordered — which is consistent
-with DeepSeek grading coarsely, and is why `reasoning_kwargs` sends the level
-through `extra_body` rather than trusting litellm's mapping.
+Only `low` separates. That is not noise and not litellm flattening the level:
+**DeepSeek collapses `medium`, `high` and `xhigh` into one setting and defaults
+to it**, so three of those four rows are the same configuration sampled three
+times. Its distinct levels are `low`, the collapsed middle, and `max`.
 
-So on this provider the graded default is **explicitness, not a saving**: it
-makes the value visible, portable to the providers that do grade natively
-(OpenAI, Gemini), and a single place to change. `low` is the level that would buy
-time here, and it is deliberately not the default for these two:
-[AGT-019](#agt-019) records a starved planner returning nothing and falling back
-to a one-step plan, which removes the orchestrator's parallelism silently. That
-is a worse failure than a slow plan, and the probe that would settle it
-(`scripts/plan_probe.py`, on plan *shape*) has not been run at `low`.
+So the portable four-level vocabulary is a *request*, not a guarantee, and a
+level that reads like a reduction can be identical to the default. Measure the
+dimension that moves — reasoning tokens — rather than trusting the name; that is
+what this entry's instrumentation is for, and it is why `reasoning_kwargs` sends
+DeepSeek's level through `extra_body` rather than letting litellm map it.
 
-**Note the prompt.** Those six samples used a trivial prompt, not a planning call
-with a full schema and 3,385 tokens of context. They say the knob is coarse on
-this provider; they do not say what it does to the real workload.
+Both stages are set to **`low`**, the one level that measurably reduces thinking
+on this provider. The risk to watch is plan *shape*, not truncation:
+[AGT-019](#agt-019)'s one-step-plan failure was an output *ceiling* of 4,096
+leaving no room to think and then emit, which is a different mechanism from
+thinking less within an ample ceiling. `scripts/plan_probe.py` measures shape in
+seconds and is the check before assuming `low` is free.
+
+**Note the prompt.** Those samples used a trivial one, not a planning call with a
+full schema and 3,385 tokens of context. They establish what the levels *are* on
+this provider; they do not predict the real workload.
 
 ## AGT-032 — Every attempt records its trace, not only the ones cut short
 

@@ -653,13 +653,13 @@ CHAT_LLM_REASONING_EFFORT = str_env("CHAT_LLM_REASONING_EFFORT", "")
 # correct with reasoning off while median output halved (78 -> 37 tokens), on
 # every turn. Set to "" to restore the provider's default.
 CHAT_LLM_ROUTER_REASONING_EFFORT = str_env("CHAT_LLM_ROUTER_REASONING_EFFORT", "none")
-# Graded rather than left to the provider. Unset means the model's own default,
+# Graded down rather than left to the provider. Unset is the model's own default,
 # which on a reasoning model is a great deal of thinking for a structured plan:
 # measured at 6,621 output tokens for a plan whose JSON is under a thousand, and
-# 110s of a 1,194s turn. Not "low" either -- AGT-019 records a starved planner
-# returning nothing and falling back to a one-step plan, which silently removes
-# the orchestrator's parallelism (AGT-033).
-CHAT_LLM_PLANNER_REASONING_EFFORT = str_env("CHAT_LLM_PLANNER_REASONING_EFFORT", "medium")
+# 110s of a 1,194s turn. Note that a provider's levels may not be the four
+# written here -- DeepSeek collapses medium/high/xhigh into one and defaults to
+# it, so only "low" and "max" differ from leaving this unset (AGT-033).
+CHAT_LLM_PLANNER_REASONING_EFFORT = str_env("CHAT_LLM_PLANNER_REASONING_EFFORT", "low")
 CHAT_LLM_WORKER_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_REASONING_EFFORT", "")
 # The worker's summary passes, which run on the worker's model but are doing a
 # different job: writing down what the step already established rather than
@@ -669,7 +669,7 @@ CHAT_LLM_VERIFIER_REASONING_EFFORT = str_env("CHAT_LLM_VERIFIER_REASONING_EFFORT
 # Same reasoning as the planner's. Measured at 10,084 output tokens for an answer
 # of about 2,400 -- roughly three quarters of it thinking -- and 229s of a
 # 1,194s turn (AGT-033).
-CHAT_LLM_SYNTHESIZER_REASONING_EFFORT = str_env("CHAT_LLM_SYNTHESIZER_REASONING_EFFORT", "medium")
+CHAT_LLM_SYNTHESIZER_REASONING_EFFORT = str_env("CHAT_LLM_SYNTHESIZER_REASONING_EFFORT", "low")
 CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
 CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
 # When a final answer is cut off by the output-token limit (finish_reason

@@ -319,7 +319,7 @@ def test_the_router_defaults_to_no_reasoning(mocker):
     # provider: they are 27% of a measured turn's wall clock for 3 of its ~70
     # calls, and most of what they emit is thinking (AGT-033).
     for stage in ("planner", "synthesizer"):
-        assert chat_models.resolve(stage).reasoning_effort == "medium"
+        assert chat_models.resolve(stage).reasoning_effort == "low"
     # The per-step stages stay on the provider's default here and are set per
     # deployment; AGT-023 measured them belonging on the fast model.
     for stage in ("worker", "worker_summary", "verifier"):
