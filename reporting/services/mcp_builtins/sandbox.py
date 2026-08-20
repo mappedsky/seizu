@@ -1866,25 +1866,47 @@ def _direct_tools() -> list[BuiltinTool]:
     ]
 
 
+def _delegate_description() -> str:
+    """What the delegation tool is, including what the sub-agent can already reach.
+
+    The core tools are named because leaving them out read as their absence: a
+    planner reasoning about this listing concluded "no graph tool listed... all
+    graph tools are only accessible via skills" and planned skill-mediated routes
+    to data one delegation would have answered directly. The
+    surrounding text pointed the same way, saying only what a delegation is *not*
+    for (AGT-035).
+
+    Built from the setting rather than written out, because the set is
+    configurable and a description that drifts from it is worse than none.
+    """
+    from reporting import settings as _s
+
+    text = (
+        "Delegate a task requiring code execution or file operations to an isolated sandbox agent. The agent can "
+        "run Python, execute shell commands, and read/write files. Returns a summary of what was done and any "
+        "outputs. Use this when the task involves iterative computation, data transformation, chart or file "
+        "generation, or scripting that cannot be expressed as a single MCP tool call. Direct the sub-agent: say what "
+        "to produce, name the tools the task needs in `tools`, and name any already-saved file it should read rather "
+        "than re-fetching. It plans its own steps, so the less it has to infer, the less it spends."
+    )
+    core = [name for name in (_s.SANDBOX_CORE_TOOLS or ()) if name]
+    if core:
+        text += (
+            " The sub-agent is always given these tools without any skill having to unlock them: "
+            f"{', '.join(core)}. So a task needing graph data can be delegated directly; it does not need a skill "
+            "to reach the graph. Prefer a single graph tool call over a delegation when one call answers the "
+            "question."
+        )
+    return text
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
         BuiltinTool(
             name="sandbox__delegate",
             group=GROUP,
-            description=(
-                "Delegate a task requiring code execution or file operations to an "
-                "isolated sandbox agent. The agent can run Python, execute shell "
-                "commands, and read/write files. Returns a summary of what was done "
-                "and any outputs. Use this when the task involves iterative "
-                "computation, data transformation, chart or file generation, or "
-                "scripting that cannot be expressed as a Cypher query or a single "
-                "MCP tool call. Do not use for tasks a graph query or existing tool "
-                "can answer directly — prefer those first. Direct the sub-agent: say "
-                "what to produce, name the tools the task needs in `tools`, and name "
-                "any already-saved file it should read rather than re-fetching. It "
-                "plans its own steps, so the less it has to infer, the less it spends."
-            ),
+            description=_delegate_description(),
             input_schema=_INPUT_SCHEMA,
             required_permissions=[Permission.SANDBOX_DELEGATE.value],
             handler=_handle_delegate,

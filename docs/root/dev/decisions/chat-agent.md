@@ -583,6 +583,39 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-035 — The planner believed two false things about its own system
+
+**Applies to:** `mcp_builtins/sandbox.py::_delegate_description`, `_PLANNER_PROMPT`
+
+Read off the planner's own reasoning ([AGT-033](#agt-033)'s instrumentation),
+against the listing [AGT-034](#agt-034) gave it. It uses the tool names as
+intended — *"cve_severity_analysis? That gives CVSS distribution, not individual
+CVE vectors, and not remote. Not enough."* is the plan-time capability check the
+names were added for. But it held two beliefs that are simply wrong.
+
+**"No graph tool listed… all graph tools are only accessible via skills."** Every
+delegation is bound `SANDBOX_CORE_TOOLS` — `graph__query`, `graph__schema`,
+`graph__validate_query`, `graph__explain` ([SBX-003](sandbox.md#sbx-003)) — and
+the tool's description never said so. It said what a delegation is *not* for
+("cannot be expressed as a Cypher query… prefer those first"), which points the
+same way. The description now names the core tools, **built from the setting**
+rather than written out, because the set is configurable and a description that
+drifts from it is worse than none.
+
+**"It can likely run one skill only?"** Every skill is a tool spec on every
+worker (`_worker_tool_specs`), so a step can render as many as it needs. Believing
+otherwise, the planner adds a step to reach a second skill — and a dependent step
+waits for its parent and runs in a *later wave*, so the belief costs wall-clock
+parallelism rather than tidiness. The prompt now states it, with that consequence
+attached.
+
+**Measured: no detectable change in plan shape.** Before, one of three samples
+chained findings into reachability; after, one of four. Dispatch waves 3–5 either
+way. Both corrections stand on being *true* — a planner reasoning carefully from
+false premises reaches wrong conclusions, and this is the third change in a row
+whose value is correctness rather than a number ([AGT-034](#agt-034)). Recorded so
+the shape hypothesis is not re-tested from scratch.
+
 ## AGT-034 — What the planner is told about capabilities, and what it is not
 
 **Applies to:** `chat_graph.build_capability_context(for_planner=)`,
