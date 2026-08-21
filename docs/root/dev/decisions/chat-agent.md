@@ -583,6 +583,555 @@ Three rules fall out of that object, and each was a live defect without it:
   been evaluated — mocking `ai` does not change what `SeizuChatTransport`
   extends. Stub the instance method instead.
 
+## AGT-037 — The answer is written once, from output that keeps its conclusion
+
+**Applies to:** `chat_orchestrator._keep_ends`,
+`CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS`, `_closing_summary_ids`,
+`_init_plan`, `_PLANNER_PROMPT`
+
+A reachability turn's final answer did not carry the source-level findings its
+own steps had produced. Two separate causes.
+
+**The bound took the wrong end.** Each step's output reached the synthesizer
+through an unnamed 4,000-character cut taken from the front. A step's answer is
+at its *end* — the reachability skill instructs its sub-agent to state the
+verdict last — so the cut removed the verdict and kept the working. Measured on
+one turn: three reachability steps produced 3,414, 4,383 and 2,772 characters and
+only the longest lost its conclusion, which is the shape of a bug rather than of
+a budget. `_keep_ends` keeps both ends and drops the middle, weighted to the
+tail.
+
+The bound is now named and larger, and it is **not** the real limit: the request
+is fitted to the model's window afterwards ([CTX-001](chat-context.md#ctx-001)),
+which is what has to hold. This is only a guard against one enormous step
+crowding the others — the same relationship
+`CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS` has, and that one applies to a
+different thing entirely: steps that produced *no* output and are shown their
+tool trace instead.
+
+**The plan summarized, then the synthesizer summarized the summary.** Plans ended
+with an `answer` step gathering the earlier findings, and the turn's answer is
+already written from every step's output — so the same summary was produced
+twice, losing detail at the extra hop and paying a worker and a verifier call for
+it.
+
+**Told not to, the planner kept doing it: three of four samples.** So it is
+removed rather than asked again. `_closing_summary_ids` drops an `answer` step
+that waits on other steps and that **nothing waits on**. Narrow deliberately: a
+mid-plan decision later steps consume is kept (selecting three CVEs is an answer
+step), and a plan that is a single answer step — the request needing no live
+action, or reporting that nothing can obtain the evidence — is untouched. The
+prompt rule stays, because it tells the planner *why*; the code is what makes it
+hold.
+
+## AGT-036 — Package metadata comes from an external MCP, because nothing else can supply it
+
+**Applies to:** the `external-mcp-deps` Compose service
+(`ghcr.io/mappedsky/depsdevmcp`), `MCP_EXTERNAL_PROXIES`
+
+Seizu's graph records which package versions are **installed** — `version` and a
+resolved `requirements` pin per manifest — and which fall in a CVE's vulnerable
+range. It does not record what a package *declares it needs*. There is no
+property or edge saying `botocore 1.42.91 requires urllib3 <2.0`, because that is
+registry metadata rather than scan output.
+
+**A sub-agent asked to judge reachability filled the gap from memory.** Read off
+its own thinking: *"botocore pins urllib3 < 1.27 historically, but modern
+botocore (>=1.29) requires urllib3 >= 1.25.4, < 2.0? … Actually botocore 1.29.0
+was released around Dec 2022 and it still required urllib3<1.27… **But this is a
+fictional future scenario (2026 versions)**"*. It discarded the speculation that
+time. A security verdict resting on remembered version history is the failure
+this exists to prevent — [AGT-016](#agt-016)'s rule about invented identifiers,
+one layer down.
+
+**The sandbox cannot fetch it.** Measured: `curl` to pypi.org and
+raw.githubusercontent.com both time out, and `getent hosts pypi.org` fails — no
+egress, not even DNS. So an instruction to "look it up" would have sent it
+somewhere it cannot reach, and its discovery clause would then have had it
+conclude the data does not exist.
+
+**Not a call from the Seizu backend either.** Third-party egress belongs in a
+component the operator runs, which is what the external MCP proxy mechanism
+already is. The tools arrive as `ext__deps__depsdev_*`, all carry `readOnlyHint`
+so [AGT-010](#agt-010)'s gating skips confirmation (verified), and they inherit
+the rate-limit retry from [AGT-029](#agt-029). Only a package name and version
+leave the network.
+
+**Transport, not tools, was the integration question.** `depsdevmcp` began
+stdio-only, and Seizu's external MCP speaks `sse` or `streamable_http`. Teaching
+Seizu stdio was rejected: the no-pooling rule (a fresh transport per call per
+user, for identity isolation) would make it a **process spawn per tool call**,
+and it would move the egress back into the Seizu backend. A bridge sidecar was
+the fallback; upstream adding a streamable-HTTP mode removed the need for either.
+Its default listen address is loopback, so the container is given
+`DEPSDEVMCP_HTTP_ADDRESS=0.0.0.0:8080` or nothing can reach it.
+
+**What it gives.** Nine read-only tools: declared requirements, resolved
+dependency graphs, package and version metadata (advisory keys, licences,
+attestations), OSV advisories, project metadata and a Graphviz rendering. It
+holds a process-local LRU cache, which matters because a reachability sub-agent
+asks repeatedly — measured `cached:false` then `cached:true`, 0.36s then 0.16s.
+
+**Known gap.** There is no chain-shaped answer: nothing returns *"does X pull in
+Y, and by what path"* directly, so a sub-agent asking that fetches the resolved
+graph and walks it in `run_python`. That works and costs a round trip and some
+tokens. Worth adding upstream if reachability becomes a common workflow.
+
+**Declaring it in a skill is what made it reachable.** Under progressive
+disclosure a sub-agent only sees what a skill declares, so until one named these
+tools nothing directed it to them. `cve_response/dependency_provenance` covers
+the standalone question, and `repo_cve_reachability` — where the guessing was
+measured — carries `find_dependency_path` and `get_requirements` plus a step
+telling it never to state a pin from memory.
+
+**Verified on a full turn:** the sub-agent called
+`ext__deps__depsdev_get_requirements` six times, all succeeding in under a
+second, in place of recalling a pin. `find_dependency_path` was not reached in
+that run, so the transitive-path tool is exercised only by its own tests so far.
+
+## AGT-035 — The planner believed two false things about its own system
+
+**Applies to:** `mcp_builtins/sandbox.py::_delegate_description`, `_PLANNER_PROMPT`
+
+Read off the planner's own reasoning ([AGT-033](#agt-033)'s instrumentation),
+against the listing [AGT-034](#agt-034) gave it. It uses the tool names as
+intended — *"cve_severity_analysis? That gives CVSS distribution, not individual
+CVE vectors, and not remote. Not enough."* is the plan-time capability check the
+names were added for. But it held two beliefs that are simply wrong.
+
+**"No graph tool listed… all graph tools are only accessible via skills."** Every
+delegation is bound `SANDBOX_CORE_TOOLS` — `graph__query`, `graph__schema`,
+`graph__validate_query`, `graph__explain` ([SBX-003](sandbox.md#sbx-003)) — and
+the tool's description never said so. It said what a delegation is *not* for
+("cannot be expressed as a Cypher query… prefer those first"), which points the
+same way. The description now names the core tools, **built from the setting**
+rather than written out, because the set is configurable and a description that
+drifts from it is worse than none.
+
+**"It can likely run one skill only?"** Every skill is a tool spec on every
+worker (`_worker_tool_specs`), so a step can render as many as it needs. Believing
+otherwise, the planner adds a step to reach a second skill — and a dependent step
+waits for its parent and runs in a *later wave*, so the belief costs wall-clock
+parallelism rather than tidiness. The prompt now states it, with that consequence
+attached.
+
+**Measured: no detectable change in plan shape.** Before, one of three samples
+chained findings into reachability; after, one of four. Dispatch waves 3–5 either
+way. Both corrections stand on being *true* — a planner reasoning carefully from
+false premises reaches wrong conclusions, and this is the third change in a row
+whose value is correctness rather than a number ([AGT-034](#agt-034)). Recorded so
+the shape hypothesis is not re-tested from scratch.
+
+## AGT-034 — What the planner is told about capabilities, and what it is not
+
+**Applies to:** `chat_graph.build_capability_context(for_planner=)`,
+`_PLANNER_CAPABILITY_HEADER`, `_format_skills(with_tools=)`,
+`_skill_required_tool_names`; `chat_orchestrator.planner_node`
+
+The planner sees each skill's name, description, trigger phrases and argument
+names, plus the always-disclosed tools. It has **no tool-calling at all** —
+`_structured_invoke` passes an empty tool list — so it names capabilities and the
+worker renders them at execution time. Two things followed from that being
+implicit rather than stated.
+
+**It was told to do something it cannot do.** The capability header is shared
+with the executing agent and is written in the imperative: *"call the relevant
+skill tool"*, *"if the current user request matches a trigger phrase, call that
+skill now instead of describing how to trigger it."* The planner has neither the
+mechanism nor the tools bound. Its own thinking, read off the span: *"This is
+strange: as planner, if task matches trigger, call skill now instead of
+describing how to trigger it. But the output expected is a plan."* It now gets a
+header describing the same catalogue as **names its steps may use**.
+
+**Measured, and it did not help:** median reasoning 22,810 chars before against
+24,262 after, four samples each, ranges 705–34,107 and 17,564–29,692. The
+contradiction is real and worth removing on correctness grounds — an instruction
+that cannot be followed is a defect — but **it is not what the planner's thinking
+is spent on**, and this entry exists so nobody re-derives that hypothesis from the
+same quotes. Plan shape was unaffected (3/3 `plan_probe` samples valid, fan-out
+preserved).
+
+**It could not see what a skill can reach.** `seizu_tools_required` rides on every
+skill listing and was dropped by `_format_skills`. The cost was concrete: one plan
+set a step's success criteria to an installed package version, gave it a
+dependency whose skill has no tool returning one, and the step failed three times
+for the gap ([AGT-032](#agt-032)). The planner's listing now renders those names.
+
+**Names, not descriptions.** Measured on this deployment: names inline cost 1,847
+characters, names plus a de-duplicated description glossary 6,288, a description
+at every mention 6,719 — 75 references over 49 distinct tools, so de-duplication
+saves almost nothing. Tool names here are descriptive enough to carry the
+mapping (`github_security__top_vulnerabilities` against
+`github_security__repo_dependencies`), which is what the planner lacked. The
+**planner's** listing only: the executing agent is given a skill's tools when it
+renders one, and its context is the one [SBX-003](sandbox.md#sbx-003) measured.
+
+**Not done: an interactive planner.** Letting it call `load_seizu_skill` was
+probed. The mechanism works — it breaks off after the first round and reliably
+loads the three relevant skills — and over four samples it is *suggestive but not
+established*: median 87s and 16,150 reasoning characters against a
+non-interactive median of ~23,000, with ranges overlapping almost entirely, and
+one early sample at 52s that did not survive repetition. Judging it properly
+needs the real structured-output path (schema enforcement, budget accounting,
+`_plan_problems` validation) rather than a probe, because the metric that matters
+is plan validity and a probe without the schema cannot produce a valid plan. The
+objection that stopped it earlier — "two or three calls at planner latency" — is
+**wrong** and recorded here so it is not reused: that latency largely *is* the
+speculation the loading removes.
+
+## AGT-033 — What a stage spends thinking is recorded, and graded for the two that answer once
+
+**Applies to:** `chat_budget.LlmUsage.reasoning_tokens` / `usage_from_message`,
+`chat_models.applied_reasoning_effort`, the `llm` span in
+`chat_graph._run_llm_tool_turn` and the sub-agent span in `sandbox.py`;
+`CHAT_LLM_PLANNER_REASONING_EFFORT`, `CHAT_LLM_SYNTHESIZER_REASONING_EFFORT`
+
+**A slow stage looked like a slow model.** Spans carried duration, tokens, cost
+and finish reason, and on a reasoning model the thinking and the answer come out
+of one `output_tokens` figure — so a planner emitting 6,621 tokens for a plan
+whose JSON is under a thousand is indistinguishable from a planner writing a very
+long plan. LangChain reports the split as `output_token_details.reasoning` and
+`usage_from_message` read only the input side. It reads both now.
+
+**Measured on the turn that prompted this** (1,194s total): planner 110s, 3,385
+in and 6,621 out; synthesizer 229s, 9,401 in and 10,084 out for an answer of
+about 2,400 tokens. **27% of wall clock for 3 of ~70 calls**, most of it thinking.
+
+**The sub-agent's thinking is recorded the other way round.** It does not
+stream -- `create_react_agent` calls the model directly -- so its span reads
+`reasoning_content` off the finished message where the outer path accumulates
+deltas. Both end up on the span under `telemetry.content`, which is what makes a
+delegation's deliberation readable at all: it is the largest single consumer of a
+turn's model time (141-144s inside each parallel step of one measured batch) and
+was previously visible only as a token count.
+
+**The effort is read off the model, not re-resolved.** `reasoning_effort` reaches
+the provider through `model_kwargs` because ChatLiteLLM swallows it as a
+constructor argument ([AGT-019](#agt-019)), so "what this deployment configured"
+and "what the provider was told" are different questions, and only the second one
+is worth putting in a trace.
+
+### The levels are the provider's, not ours, and they are not all distinct
+
+Six samples per level on `deepseek-v4-pro`, median reasoning tokens:
+
+| effort | median | range |
+|--------|--------|-------|
+| (unset) | 179 | 83–223 |
+| **low** | **104** | 63–164 |
+| medium | 229 | 89–359 |
+| high | 212 | 87–388 |
+
+Only `low` separates. That is not noise and not litellm flattening the level:
+**DeepSeek collapses `medium`, `high` and `xhigh` into one setting and defaults
+to it**, so three of those four rows are the same configuration sampled three
+times. Its distinct levels are `low`, the collapsed middle, and `max`.
+
+So the portable four-level vocabulary is a *request*, not a guarantee, and a
+level that reads like a reduction can be identical to the default. Measure the
+dimension that moves — reasoning tokens — rather than trusting the name; that is
+what this entry's instrumentation is for, and it is why `reasoning_kwargs` sends
+DeepSeek's level through `extra_body` rather than letting litellm map it.
+
+Both stages are set to **`low`**, the one level that measurably reduces thinking
+on this provider. The risk to watch is plan *shape*, not truncation:
+[AGT-019](#agt-019)'s one-step-plan failure was an output *ceiling* of 4,096
+leaving no room to think and then emit, which is a different mechanism from
+thinking less within an ample ceiling. `scripts/plan_probe.py` measures shape in
+seconds and is the check before assuming `low` is free.
+
+**Note the prompt.** Those samples used a trivial one, not a planning call with a
+full schema and 3,385 tokens of context. They establish what the levels *are* on
+this provider; they do not predict the real workload.
+
+## AGT-032 — Every attempt records its trace, not only the ones cut short
+
+**Applies to:** `chat_orchestrator._run_worker_step` (the `_persist_step_record`
+branch), `_prepare_retries`, `_RETRY_EVIDENCE_MAX_CHARS`
+
+A retry is handed what the previous attempt established: a digest in the prompt,
+and — where one exists — the path to the whole trace on the sandbox's disk
+([AGT-013](#agt-013)). The file was written only when the attempt ended early,
+on budget or on an execution error.
+
+**The commonest retry is neither.** A step that *finished* and was then failed by
+the verifier is the ordinary case, and it is the one whose previous attempt
+produced the most: a complete result, judged incomplete. It was the single case
+that wrote no file.
+
+**Measured.** A reachability step wrote a seven-CVE assessment in 396s and was
+rejected — *"claims to review 8 findings but only covers 7 CVEs"*. Its retry got
+`_step_evidence(..., 4000)`: a 4,000-character excerpt cut off exactly where the
+per-CVE detail lives. It re-derived the rest in **307s**, only 23% cheaper than
+the cold attempt, and passed with *"all 7 selected CVEs"* — the same seven. That
+is 26% of the turn spent re-deriving what was already on disk, for a rejection
+whose own count moved between attempts.
+
+The branch now runs whenever the attempt made calls. The cost is one small
+sandbox write per step, against a re-derivation measured in minutes.
+
+## AGT-031 — A sub-agent's tool signature is the tool's schema, composite types included
+
+**Applies to:** `mcp_builtins/sandbox.py::_py_type_for`, `_JSON_SCALAR_TO_PY`,
+`_build_seizu_tools`
+
+A sub-agent's tools are built as pydantic models from each tool's JSON Schema.
+The type map held the three scalars and fell back to `str` for anything else, so
+every **array** parameter was declared to the sub-agent as a string.
+
+**A model told a parameter is a string passes a string.** It then failed at the
+far end — `parameter fields could not be coerced to []string, is string` — which
+reads as the model getting it wrong and is the schema telling it wrong. Measured
+on one reachability turn: **12 of the turn's 12 tool errors were this**, across
+`search_code`, `list_commits` and `get_file_contents`, and it was the only thing
+failing in that run.
+
+`array` maps to `list[<item type>]` (a list of strings when the schema does not
+say what it holds, never a string), and `object` to `dict[str, Any]`. The fallback
+for a genuinely unknown type is still `str`, but composite types no longer reach
+it.
+
+**Found by the tool spans** ([AGT-029](#agt-029)), not by reading the code. The
+failures were ordinary tool results — the sub-agent absorbed each one and carried
+on — so before those spans existed they left no trace to notice, and the same bug
+had been running through every delegating turn.
+
+## AGT-030 — The call ceiling only ever fires; it never throttles
+
+**Applies to:** `chat_budget._refresh_mode_locked`, `derived_call_ceiling`;
+`chat_orchestrator._grant_for` / `_calls_are_primary`;
+`CHAT_RUN_LLM_CALLS_PER_STEP`, `CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP`
+
+[AGT-024](#agt-024) established what the call ceiling is: an emergency loop
+guard, where cost bounds spend ([AGT-022](#agt-022)) and loop detection catches
+loops ([AGT-017](#agt-017)). The code did not treat it that way, and a measured
+run showed all three ways it did not.
+
+**It throttled a healthy run.** `_refresh_mode_locked` took the maximum ratio
+across tokens, cost *and* calls against the soft limit. A reachability turn
+crossed 0.75 on calls alone — **135 of 176, with 17.6% of its cost budget
+spent** — and went `degraded`, which is not cosmetic: optional steps are skipped
+outright, and the worker and synthesizer drop to the economy model. A run doing a
+lot of productive work was quietly given a worse model and fewer steps. Calls are
+now out of the soft-limit calculation entirely; the hard stop is unchanged, and
+is the only thing the dimension does.
+
+**It was sliced per step.** The call grant went through the schedule divisor,
+which is [AGT-025](#agt-025)'s exact finding one dimension over: a backstop
+divided by the schedule stops being a backstop. On the measured plan a 176-call
+ceiling became 6 calls for a step that needed about 20, and the step stopped on
+`budget_step_share` before its first delegation finished. Calls now take the
+batch-width bound that keeps concurrent grants disjoint — unless neither cost nor
+tokens is budgeted, in which case the loop guard genuinely *is* the budget
+(`_calls_are_primary`) and is fair-shared like one.
+
+**It was sized at the median, not above the maximum.** 24 calls per step was
+chosen before a step could delegate. Measured on a delegating turn: **13.4
+sub-agent calls per completed step**, plus the worker's own loop, its summary and
+the verifier — around 20 for an ordinary step, more with a retry. So the figure
+sat at roughly what legitimate work costs, which is the one place a safety limit
+must never sit. It is 96 where cost can bind, and `CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP`
+(24) tightens it where LiteLLM cannot price the model and cost can therefore never
+accrue — the same split `derived_token_ceiling` makes for tokens. Zeroing
+`CHAT_RUN_LLM_CALLS_PER_STEP` still disables the dimension outright; the unpriced
+figure only ever lowers a ceiling, never restores one.
+
+**Why not simply raise the number.** That would be the third re-fit of the same
+constant (64 → 120 → `8 + 24n`), each correct for the plan in front of it. The
+count is not what should be doing this work: cost bounds what progress may cost,
+the turn and sandbox timeouts bound how long it may take, and `_looks_stuck`
+bounds going nowhere. The ceiling exists for what those three miss — cheap, fast,
+novel-every-time and useless — and should be sized so that reaching it is itself
+the evidence.
+
+**Worth knowing:** `_looks_stuck` keys on an exact tool-plus-arguments signature,
+so 88 distinct-but-fruitless searches pass it untouched. If a per-step "is this
+going anywhere" signal is wanted, widening that is the mechanism; a call count
+only proxies it.
+
+## AGT-029 — A tool call is traced by its outcome, and a named rate limit is waited out
+
+**Applies to:** `mcp_runtime._guarded`, `mcp_builtins/sandbox.py` sub-agent tool
+wrapper; `external_mcp.call_tool` / `_call_tool_once` / `_rate_limit_delay`,
+`MCP_EXTERNAL_RATE_LIMIT_*`
+
+**A failing tool was invisible.** Spans covered the turn, its batches, its steps
+and every model call, and the `mcp-python-sdk` contributes its own for external
+MCP traffic — but nothing recorded whether a call *worked*. Across one
+reachability turn, **no span carried an error status or event at all**, while the
+stream log showed 21 errored tool results. Seizu's own tools (`graph__query`,
+`github_security__*`, the sandbox's five) had no spans of any kind.
+
+They are traced now at the two places every call already passes: `_guarded`,
+which is where a call's outcome is decided for built-in, user-defined and
+external tools alike, and the sub-agent's tool wrapper, which is the only path
+the sandbox's own five take. `outcome` is a string — `ok`, `error`, or the block
+reason — for the same reason `stopped_by` is on a step span: "it failed" and "it
+was refused" are different questions. Error text is content and stays behind
+`TELEMETRY_RECORD_CONTENT`.
+
+**What that made visible immediately.** Two runs of the same request, believed
+comparable, were not:
+
+| | run 1 | run 2 |
+|---|---|---|
+| external `tools/call` | 92 | 89 |
+| median call | 1,272 ms | 544 ms |
+| calls over 5s | 5 (max 15.5s, all `search_code`) | 0 |
+| hard rate-limit refusals | not recorded | 5 named, 19 errored calls |
+
+One run absorbed GitHub's code-search limit as throttling, the other as refusals.
+**Do not compare two runs' cost without checking this**; the difference between
+those two was substantially upstream conditions, not anything in Seizu.
+
+**A refusal is an ordinary result, so nobody was waiting.** The upstream says
+`"GitHub API rate limit exceeded. Retry after 44s."`, that string reaches the
+sub-agent as tool output, and the sub-agent does the only thing it can — call
+again, into the same closed window. 13 of 34 code searches were refused this way
+in one turn.
+
+`call_tool` now reads the delay **out of the refusal** rather than backing off
+blindly: the upstream knows when its window resets and says so, and a guess
+either wastes the wait or spends the retry on the same refusal. Bounded three
+ways, because a sub-agent's whole delegation is bounded by
+`SANDBOX_TIMEOUT_SECONDS` and one tool call must not spend it asleep — a retry
+count, a cap past which the refusal is handed back unretried, and a default only
+for a limit that names no delay. A non-rate-limit error is never retried: a 404
+retried is a 404.
+
+**A non-zero shell exit is output, not a fault.** `grep` exits 1 when it matches
+nothing; `curl` exits 2 on a bad flag. E2B raises for all of them, and letting
+that propagate ended the *whole* delegation — the sub-agent lost every result it
+had gathered because one command reported "no match". Two delegations died this
+way in one measured turn. `run_bash` now returns the exit code with stdout and
+stderr, in the same shape a success returns, and the sub-agent decides what a
+failure means. The exit code is stated only when non-zero: noise on every
+success, and the entire finding on a failure, where `(no output)` alone reads as
+a broken tool.
+
+**There were two exceptions doing this, not one.** A command outrunning E2B's
+deadline raises `TimeoutException`, not `CommandExitException`, and a fix written
+from the one traceback that had been seen covered only the exit code — the next
+live run lost a delegation to the other. Both are now reported as text. The
+timeout says so in words because E2B keeps nothing the command had printed, so
+there is no output to return: what the sub-agent can use is the fact, and the
+suggestion to narrow the command or background it and read a file.
+
+`run_bash_streaming` deliberately still raises. Its caller is the remediation
+workflow, which runs builds and tests, and there a non-zero exit is the phase
+failing — reporting it as output would let a failed build read as a result.
+
+## AGT-028 — Trace the sub-agent, and recognise a rejection it has already had
+
+**Applies to:** `mcp_builtins/sandbox.py::_ToolMessageNormalizingModel.ainvoke`;
+`chat_orchestrator._same_rejection`, `_SAME_REJECTION_SIMILARITY`,
+`_SAME_REJECTION_MIN_TOKENS`, `_prepare_retries`
+
+Two defects found by running a delegating turn against a trace ([AGT-026](#agt-026)).
+
+**The sub-agent was untraced.** `chat_graph._run_llm_tool_turn` carries the span
+for a model call, and a sandbox sub-agent never reaches it — it runs on
+`create_react_agent`, whose calls go straight to the model. Measured on one
+reachability turn: **51 traced `llm` spans against 107 calls in the ledger, the
+missing 56 being every sub-agent call** — 52% of the run's calls and about 60% of
+its cost, invisible in the trace while fully present in the budget. That makes
+the one ratio worth watching on a delegating turn — cost per step that completed
+— uncomputable from traces. The span now sits where the budget reservation
+already sits, which the code says is the one place every inner call passes.
+
+**A rejection restated in new words was not recognised as the same one.** The
+guard added by [AGT-017](#agt-017) compared a verdict to the previous one with
+`==`, and a verifier writes its verdict fresh every time. A step was observed
+failing three times for the one thing its dependency could not supply, each
+rejection worded differently, each one passing the guard as new.
+
+**Measured, on the verdicts that run actually produced** (Jaccard over content
+words):
+
+| pair | overlap |
+|------|---------|
+| the two rejections of the same step, reworded | **0.500** |
+| two different "incomplete" complaints | 0.103 |
+| unrelated rejections | 0.022 – 0.023 |
+
+`0.4` sits in a five-fold gap. **The length floor is not decoration:** at three
+or four content words one shared word carries the ratio, and the first version of
+this scored two plainly different terse rejections at exactly 0.400 — caught by
+an existing test, not by inspection. Below `_SAME_REJECTION_MIN_TOKENS` the
+comparison stays exact.
+
+**Direction of error.** A false positive ends a step that a retry might have
+saved; a false negative spends another attempt. AGT-017's finding is that the
+second is the one that actually happens, so the threshold is set to catch the
+observed repeat rather than to be safe against every conceivable one.
+
+## AGT-027 — Fan out over divergent work, and seed what a batch will all want
+
+**Applies to:** `_PLANNER_PROMPT`, `_PlannedStep.map_over` / `map_reason`,
+`chat_orchestrator._seed_shared_schema`, `_dispatch_batch_distributed`;
+`mcp_builtins.sandbox_result_dir`
+
+Expansion ([AGT-023](#agt-023)) fans a step out over the items an earlier step
+found. What it cannot tell on its own is whether those items need *different
+work* or are the same call with a different argument, and the planner prompt
+used to push it one way: "never write a step that loops over a collection
+internally". That is right for an agentic loop and wrong for a data one.
+
+**Measured, on a request to review one repository's CVEs.** The planner mapped
+"query the graph for the repositories and packages carrying this CVE" over eight
+CVEs. That is one Cypher query with an `IN` list. The fan-out took **70 of the
+run's 80 LLM calls and 219,049 of its 297,017 tokens, and returned nothing** —
+the answer was written from the un-mapped first step.
+
+**So the planner is told the test, not a preference.** Same call with a
+different argument is one step that fetches everything at once; its own tools,
+or a decision that depends on what the item turns out to be, is a mapped step.
+`map_over` is paired with `map_reason` — a planner that has to name what differs
+between items writes fewer fan-outs — and the reason rides the `chat expand
+step` span, so a wide trace says whether the width was earned.
+
+**Measured after, on the same build.** The CVE request planned two steps and no
+fan-out (0 of 3 samples), finishing in 263s on 18 calls and $0.020 against 433s,
+80 calls and $0.044 — with a *better* answer, covering all 19 findings where the
+old one had reported a gap. A reachability request over three CVEs still fanned
+out (2 of 3 samples), `map_reason`: *"Each selected CVE can belong to a different
+repository and needs its own repository CVE finding call with that repo and CVE
+id."* The discrimination runs both ways, which is the whole point.
+
+### The batch, not the carry, is what made eight sub-agents fetch one schema
+
+Each of those eight children opened by fetching the same 52,846-byte schema,
+writing it to its own file **on the disk they were already sharing**, and reading
+it back — two of the four calls each could afford, before reaching its question.
+
+**The obvious fix was already built, and was not the fix.** Handing a step the
+files its dependency saved duplicates two existing mechanisms: `EpisodeLog.recall`
+already advertises a sandbox's receipts to a sub-agent, and `session_digest`
+already puts the same manifest in the *worker's* prompt for the model deciding
+whether to delegate at all ([SBX-008](sandbox.md#sbx-008)). A parallel path was
+built, measured against them, and **reverted** — it emitted a near-identical
+second copy of the same list, and unlike `render_receipts` it did not filter on
+`sandbox_id`, so the one case where it said anything new was the case where the
+file was not readable.
+
+**The steps of a batch start together**, and a receipt reaches a sibling only
+once the batch it was written in has returned. No carry can close that, because
+there is nothing yet to carry. `_seed_shared_schema` fetches the schema once
+before a distributed batch of two or more, writes it to a fixed path under
+`sandbox_result_dir()`, and records the receipt — after `_shared_sandbox_id` has
+opened the sandbox and **before the ledger is serialized for the workers**, or
+the batch it was fetched for is the one batch that cannot see it.
+
+Bounded deliberately: batches of one are skipped (a lone step's delegations
+already carry it to each other), it never opens a sandbox that SBX-015 did not
+already open, it re-uses the file across a turn's later batches, and it is
+skipped for a caller without `query:execute` so seeding cannot hand anyone data
+they could not have asked for. Every failure path is a warning and a return.
+
+**Not done:** seeding anything else. The schema earns it by being the one thing
+every sub-agent wants, identical for all of them, and the largest single result
+the graph returns; nothing else on that list is obvious.
+
 ## AGT-026 — Tracing is diagnosis, opt-in, and content-free by default
 
 **Applies to:** `reporting/services/telemetry.py`, `chat_graph._run_llm_tool_turn`,

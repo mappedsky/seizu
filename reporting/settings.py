@@ -653,14 +653,23 @@ CHAT_LLM_REASONING_EFFORT = str_env("CHAT_LLM_REASONING_EFFORT", "")
 # correct with reasoning off while median output halved (78 -> 37 tokens), on
 # every turn. Set to "" to restore the provider's default.
 CHAT_LLM_ROUTER_REASONING_EFFORT = str_env("CHAT_LLM_ROUTER_REASONING_EFFORT", "none")
-CHAT_LLM_PLANNER_REASONING_EFFORT = str_env("CHAT_LLM_PLANNER_REASONING_EFFORT", "")
+# Graded down rather than left to the provider. Unset is the model's own default,
+# which on a reasoning model is a great deal of thinking for a structured plan:
+# measured at 6,621 output tokens for a plan whose JSON is under a thousand, and
+# 110s of a 1,194s turn. Note that a provider's levels may not be the four
+# written here -- DeepSeek collapses medium/high/xhigh into one and defaults to
+# it, so only "low" and "max" differ from leaving this unset (AGT-033).
+CHAT_LLM_PLANNER_REASONING_EFFORT = str_env("CHAT_LLM_PLANNER_REASONING_EFFORT", "low")
 CHAT_LLM_WORKER_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_REASONING_EFFORT", "")
 # The worker's summary passes, which run on the worker's model but are doing a
 # different job: writing down what the step already established rather than
 # deciding what to do next. Empty inherits CHAT_LLM_WORKER_REASONING_EFFORT.
 CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT", "")
 CHAT_LLM_VERIFIER_REASONING_EFFORT = str_env("CHAT_LLM_VERIFIER_REASONING_EFFORT", "")
-CHAT_LLM_SYNTHESIZER_REASONING_EFFORT = str_env("CHAT_LLM_SYNTHESIZER_REASONING_EFFORT", "")
+# Same reasoning as the planner's. Measured at 10,084 output tokens for an answer
+# of about 2,400 -- roughly three quarters of it thinking -- and 229s of a
+# 1,194s turn (AGT-033).
+CHAT_LLM_SYNTHESIZER_REASONING_EFFORT = str_env("CHAT_LLM_SYNTHESIZER_REASONING_EFFORT", "low")
 CHAT_LLM_TIMEOUT_SECONDS = int_env("CHAT_LLM_TIMEOUT_SECONDS", 60)
 CHAT_LLM_MAX_RETRIES = int_env("CHAT_LLM_MAX_RETRIES", 2)
 # When a final answer is cut off by the output-token limit (finish_reason
@@ -910,6 +919,12 @@ CHAT_ORCHESTRATOR_WORKER_FINALIZE_RETRIES = int_env("CHAT_ORCHESTRATOR_WORKER_FI
 # means the synthesizer can still answer when a summary comes back thin. Set 0
 # to send summaries only (the pre-existing behavior).
 CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_EVIDENCE_MAX_CHARS", 12_000)
+# How much of one step's *output* the synthesizer is shown. A guard against a
+# single enormous step crowding the rest, not the real bound: the request is
+# fitted to the model's window afterwards. Was an unnamed 4,000 that cut a
+# measured reachability verdict off its finding, so it is both larger and
+# middle-truncating now -- a step's conclusion is at its end (AGT-037).
+CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS = int_env("CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS", 12_000)
 # Characters of earlier conversation given to the planner, so a follow-up whose
 # subject is a back-reference ("cross-check that", "which of those findings")
 # can be resolved into self-contained step goals. The orchestrated path is
@@ -961,11 +976,18 @@ CHAT_RUN_SOFT_LIMIT_PERCENT = int_env("CHAT_RUN_SOFT_LIMIT_PERCENT", 75)
 CHAT_RUN_MAX_LLM_CALLS = int_env("CHAT_RUN_MAX_LLM_CALLS", 0)
 # Calls one plan step may make, for that derivation: its own loop, whatever it
 # delegates to, its summary pass, and the verifier's look at it, across retries.
-# Deliberately generous: what a step may *spend* is bounded by its share of the
-# run's cost and tokens, and a loop is caught by loop detection (AGT-017), so
-# this only has to stop a run that is making calls without spending or
-# progressing.
-CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 24)
+# Deliberately far above what work costs rather than near it: spend is bounded by
+# cost and repetition by loop detection (AGT-017), so reaching this should itself
+# be evidence of pathology. A delegating step was measured at ~20 calls, most of
+# them its sub-agent's, which is why 24 was not headroom -- it was the median
+# (AGT-030).
+CHAT_RUN_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_LLM_CALLS_PER_STEP", 96)
+# Tightens the figure above for a model LiteLLM cannot price. Cost never accrues
+# there, so the call ceiling is the last guard rather than a backstop -- the same
+# split CHAT_RUN_UNPRICED_TOKEN_BUDGET makes for tokens (AGT-030). It only ever
+# lowers the ceiling: zeroing CHAT_RUN_LLM_CALLS_PER_STEP still disables the
+# dimension outright.
+CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP = int_env("CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP", 24)
 # Output tokens assumed for a call whose kind has not been seen yet. Every
 # later call of that kind is reserved from what it was observed to emit
 # instead (AGT-021). Raise it if cold-start calls on your model are large.
@@ -1100,6 +1122,17 @@ MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS = list_env("MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS", [])
+# Retries for an external tool call the upstream refused as rate-limited. The
+# refusal names its own delay ("Retry after 44s") and Seizu waits that long, so
+# these bound how much waiting a single call may do, not how long it waits.
+# 0 disables retrying and hands the refusal straight to the agent.
+MCP_EXTERNAL_RATE_LIMIT_RETRIES = int_env("MCP_EXTERNAL_RATE_LIMIT_RETRIES", 2)
+# Longest delay worth honouring. Past this the call returns the refusal instead:
+# a sub-agent's whole delegation is bounded by SANDBOX_TIMEOUT_SECONDS, and one
+# tool call must not spend it sleeping.
+MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS = int_env("MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS", 60)
+# Used when the upstream says it is rate-limited but names no delay.
+MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS = int_env("MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS", 5)
 
 # ---------------------------------------------------------------------------
 # Sandbox delegation (sandbox__delegate chat tool)
@@ -1150,6 +1183,13 @@ SANDBOX_CORE_TOOLS = _core_tools_from_env()
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+# Whether the chat agent may use the conversation's sandbox directly, rather
+# than only through sandbox__delegate. Five more always-disclosed tools cost
+# schema tokens on every call; what they buy is a single round trip where a
+# delegation would pay for a sub-agent's whole loop, and a way to put a file in
+# the sandbox for later delegations to read (SBX-016). They grant nothing
+# sandbox__delegate does not already grant.
+SANDBOX_DIRECT_TOOLS_ENABLED = bool_env("SANDBOX_DIRECT_TOOLS_ENABLED", True)
 # Caps for a sub-agent tool result written to a sandbox file rather than
 # returned. Far larger than the in-context caps because the context window they
 # protect is not involved: the agent computes over the file with run_python and

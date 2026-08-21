@@ -315,6 +315,35 @@ def test_the_router_defaults_to_no_reasoning(mocker):
     _capability(mocker, max_output_tokens=32_768)
 
     assert chat_models.resolve("router").reasoning_effort == "none"
-    # Every other stage stays on the provider's default until measured.
-    for stage in ("planner", "worker", "worker_summary", "verifier", "synthesizer"):
+    # The two once-per-turn stages are graded explicitly rather than left to the
+    # provider: they are 27% of a measured turn's wall clock for 3 of its ~70
+    # calls, and most of what they emit is thinking (AGT-033).
+    for stage in ("planner", "synthesizer"):
+        assert chat_models.resolve(stage).reasoning_effort == "low"
+    # The per-step stages stay on the provider's default here and are set per
+    # deployment; AGT-023 measured them belonging on the fast model.
+    for stage in ("worker", "worker_summary", "verifier"):
         assert chat_models.resolve(stage).reasoning_effort == ""
+
+
+def test_the_effort_on_the_wire_is_read_back_per_provider():
+    """Read off the model, not re-resolved: reasoning_effort travels through
+    model_kwargs because ChatLiteLLM swallows it as a constructor argument, so
+    "configured" and "sent" are different questions (AGT-019, AGT-033)."""
+    from types import SimpleNamespace
+
+    from reporting.services.chat_models import applied_reasoning_effort
+
+    # OpenAI/Gemini: graded natively.
+    assert applied_reasoning_effort(SimpleNamespace(model_kwargs={"reasoning_effort": "medium"})) == "medium"
+    # DeepSeek: passed through extra_body so litellm cannot flatten the level.
+    assert applied_reasoning_effort(SimpleNamespace(model_kwargs={"extra_body": {"reasoning_effort": "low"}})) == "low"
+    # Anthropic: a token budget rather than a level.
+    assert (
+        applied_reasoning_effort(SimpleNamespace(model_kwargs={"thinking": {"type": "enabled", "budget_tokens": 4096}}))
+        == "budget:4096"
+    )
+    assert applied_reasoning_effort(SimpleNamespace(model_kwargs={"thinking": {"type": "disabled"}})) == "none"
+    # Nothing configured, and a model that carries no kwargs at all.
+    assert applied_reasoning_effort(SimpleNamespace(model_kwargs={})) == ""
+    assert applied_reasoning_effort(SimpleNamespace()) == ""

@@ -41,13 +41,29 @@ _CALL_CEILING_BASE = 8
 def derived_call_ceiling(steps: int) -> int:
     """The call ceiling a plan of *steps* steps implies, or 0 when disabled.
 
-    ``CHAT_RUN_MAX_LLM_CALLS`` overrides it when set. Rationale: AGT-024.
+    ``CHAT_RUN_MAX_LLM_CALLS`` overrides it when set (AGT-024).
+
+    Two per-step figures, for the same reason :func:`derived_token_ceiling` has
+    two: what a run may spend is bounded by cost, so where cost can bind, this
+    only has to sit above what legitimate work does -- reaching it should itself
+    be evidence of pathology. Where the model is unpriced, cost never accrues and
+    this is the last guard, so it stays tight (AGT-030).
     """
     override = max(0, settings.CHAT_RUN_MAX_LLM_CALLS)
     if override:
         return override
     per_step = max(0, settings.CHAT_RUN_LLM_CALLS_PER_STEP)
-    return _CALL_CEILING_BASE + per_step * max(1, steps) if per_step else 0
+    if not per_step:
+        # The explicit off switch, whatever the pricing: the unpriced figure
+        # tightens this dimension, it never resurrects one that was turned off.
+        return 0
+    from reporting.services.chat_models import capability
+
+    priced = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) > 0 and capability(settings.CHAT_LLM_MODEL).priced
+    if not priced:
+        tight = max(0, settings.CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP)
+        per_step = min(per_step, tight) if tight else per_step
+    return _CALL_CEILING_BASE + per_step * max(1, steps)
 
 
 def derived_token_ceiling() -> int:
@@ -725,10 +741,16 @@ class BudgetController:
         token_limit = int(self._ledger.get("token_limit") or 0)
         cost_limit = float(self._ledger.get("cost_limit_usd") or 0.0)
         max_calls = int(self._ledger.get("max_llm_calls") or 0)
+        # Deliberately not the call count. Degrading is a real cost -- optional
+        # steps are dropped and the worker and synthesizer fall to the economy
+        # model -- and the call ceiling is a loop guard, not a spend limit
+        # (AGT-024). A run was measured crossing the soft limit on calls alone
+        # with 17.6% of its cost budget spent, and was quietly downgraded for
+        # having done a lot of productive work. A guard against pathology does
+        # nothing until it fires; the hard stop below is where it fires (AGT-030).
         ratios = [
             int(self._ledger["total_tokens"]) / token_limit if token_limit else 0.0,
             float(self._ledger["cost_usd"]) / cost_limit if cost_limit else 0.0,
-            int(self._ledger["llm_calls"]) / max_calls if max_calls else 0.0,
         ]
         if max(ratios) >= float(self._ledger.get("soft_limit_ratio") or 1.0) and self.mode == "normal":
             self._ledger["mode"] = "degraded"
@@ -805,6 +827,10 @@ class LlmUsage:
     # each at its own rate.
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    # A subset of output_tokens, not an addition to it: what the model spent
+    # thinking rather than answering. Diagnosis only -- it is already paid for
+    # and already counted (AGT-033).
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -830,11 +856,18 @@ def usage_from_message(message: Any) -> LlmUsage:
         return LlmUsage()
     details = usage.get("input_token_details")
     details = details if isinstance(details, dict) else {}
+    # The output side of the same accounting. A reasoning model spends most of
+    # an answer here -- 37 of 47 output tokens on a "name three primes" call --
+    # and without reading it a slow stage looks like a slow model rather than a
+    # thinking one (AGT-033).
+    out_details = usage.get("output_token_details")
+    out_details = out_details if isinstance(out_details, dict) else {}
     return LlmUsage(
         input_tokens=int(usage.get("input_tokens") or 0),
         output_tokens=int(usage.get("output_tokens") or 0),
         cache_read_tokens=int(details.get("cache_read") or 0),
         cache_creation_tokens=int(details.get("cache_creation") or 0),
+        reasoning_tokens=int(out_details.get("reasoning") or 0),
     )
 
 

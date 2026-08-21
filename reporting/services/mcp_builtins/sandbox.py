@@ -43,7 +43,7 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session
+from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session, telemetry
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -177,6 +177,17 @@ def _build_sandbox_tools(backend: SandboxBackend) -> list[Any]:
 # pointed into /tmp, so the cross-turn half of SBX-002/SBX-008 could never have
 # worked: the next turn was always sent to read a file that no longer existed.
 _RESULT_DIR = "/home/user/seizu_results"
+
+
+def sandbox_result_dir() -> str:
+    """Where a delegation's oversized results are written (SBX-010).
+
+    Exposed so a caller putting a file where sub-agents already look does not
+    have to restate the path.
+    """
+    return _RESULT_DIR
+
+
 # Rows returned per sample in a receipt: enough to show the shape, not the data.
 _RECEIPT_SAMPLE_ROWS = 2
 
@@ -605,7 +616,6 @@ async def _build_seizu_tools(
     reachable_by_name = {tool.name: tool for tool in reachable}
     seizu_tools = [t for t in reachable if t.name in _bound_tool_names(reachable, disclosed, requested)]
 
-    _JSON_TYPE_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool}
     # Shared by every tool in this delegation so paths stay distinct.
     _result_seq = itertools.count(1)
     # What each exact call already returned, for calls whose outcome cannot
@@ -714,7 +724,7 @@ async def _build_seizu_tools(
         fields: dict[str, Any] = {}
         for prop_name, prop_info in properties.items():
             desc = str(prop_info.get("description", ""))
-            py_type: type = _JSON_TYPE_TO_PY.get(prop_info.get("type", "string"), str)
+            py_type = _py_type_for(prop_info)
             if prop_name in required:
                 fields[prop_name] = (py_type, Field(..., description=desc))
             else:
@@ -746,6 +756,28 @@ async def _build_seizu_tools(
     if skills:
         result.extend(_skill_discovery_tools(current_user, skills, undiscovered, _invoke, bound_names))
     return result
+
+
+#: JSON Schema scalars, in the types a pydantic model needs them as. Composite
+#: types are not here: see :func:`_py_type_for`, which has to look inside them.
+_JSON_SCALAR_TO_PY: dict[str, type] = {"integer": int, "number": float, "boolean": bool, "string": str}
+
+
+def _py_type_for(prop_info: dict[str, Any]) -> Any:
+    """One tool parameter's JSON Schema type, as the sub-agent should see it.
+
+    Composite types are the point, and the reason this is a function rather than
+    a lookup: an unmapped type must never quietly become ``str``, because the
+    signature the sub-agent is shown is the signature it answers (AGT-031).
+    """
+    json_type = prop_info.get("type", "string")
+    if json_type == "array":
+        items = prop_info.get("items") or {}
+        item_type = _JSON_SCALAR_TO_PY.get(items.get("type", "string"), str)
+        return list[item_type]  # type: ignore[valid-type]
+    if json_type == "object":
+        return dict[str, Any]
+    return _JSON_SCALAR_TO_PY.get(json_type, str)
 
 
 def _settings_progressive_disclosure() -> bool:
@@ -1062,11 +1094,28 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         return chat_context.with_message_cache_breakpoints(self._model, normalized)
 
     async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:  # type: ignore[override]
+        # Traced here for the same reason it is budgeted here: this is the one
+        # place every inner call passes. A sub-agent runs on `create_react_agent`,
+        # whose model calls never reach `chat_graph._run_llm_tool_turn` -- so
+        # without this the majority of a delegating turn's calls and most of its
+        # cost were absent from the trace while sitting in the ledger (AGT-026).
+        scope = chat_budget.current_budget_scope()
+        phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
+        with telemetry.span(
+            f"llm {phase}",
+            phase=phase,
+            role=phase.split(":")[0],
+            model=chat_context.model_name_of(self._model),
+        ) as current:
+            return await self._ainvoke_traced(input, config, current, scope, phase, **kwargs)
+
+    async def _ainvoke_traced(
+        self, input: Any, config: Any, current: Any, scope: str, phase: str, **kwargs: Any
+    ) -> Any:
         normalized = self._cacheable(self._normalize(input))
         controller = chat_budget.current_budget_controller()
         if controller is None:
             return await self._model.ainvoke(normalized, config=config, **kwargs)
-        scope = chat_budget.current_budget_scope()
 
         # Every inner LLM call funnels through here, so this is the one place
         # the sandbox subagent's spend can be seen at all. Reserving (rather
@@ -1074,7 +1123,6 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         # delegating instead of continuing to spend invisibly.
         messages = normalized if isinstance(normalized, list) else []
         estimated_input = chat_budget.estimate_tokens(self._model, "", messages, [])
-        phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
         # Was `CHAT_LLM_MAX_TOKENS`, which defaults to 0 (= "derive it from the
         # model") -- so the run's *largest* spender reserved no output at all
         # while the outer path reserved a full 32,768 it would never use. Both
@@ -1121,23 +1169,41 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # unreported call still moves the ledger.
             input_tokens, output_tokens = estimated_input, 0
         settled = True
+        # The sub-agent loop is where cached input dominates: it re-sends a
+        # growing prefix on every call, and the provider serves nearly all of it
+        # from cache after the first.
+        cost_usd = chat_budget.usage_cost_usd(
+            self._model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        )
         await controller.commit(
             reservation,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            # The sub-agent loop is where cached input dominates: it re-sends a
-            # growing prefix on every call, and the provider serves nearly all
-            # of it from cache after the first.
-            cost_usd=chat_budget.usage_cost_usd(
-                self._model,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_creation_tokens=usage.cache_creation_tokens,
-            ),
+            cost_usd=cost_usd,
             usage_estimated=estimated,
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
+        )
+        from reporting.services.chat_graph import _chunk_reasoning_delta
+
+        telemetry.set_attributes(
+            current,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            # The thinking itself. The sub-agent does not stream, so this reads
+            # the finished message rather than accumulating deltas as the outer
+            # path does. Content, so opt-in (AGT-026, AGT-033).
+            reasoning=telemetry.content(_chunk_reasoning_delta(response) or "", 4000),
+            cost_usd=cost_usd,
+            cache_read_tokens=usage.cache_read_tokens,
+            usage_estimated=estimated,
+            finish_reason=str((getattr(response, "response_metadata", None) or {}).get("finish_reason") or ""),
+            response=telemetry.content(message_text(getattr(response, "content", ""))),
         )
         return response
 
@@ -1240,13 +1306,23 @@ def _wrap_with_detail_events(
             if children is not None:
                 children.append(child)
             _emit_section("running")
-            try:
-                out = await _orig(**kwargs)
-            except Exception as exc:
-                child["status"] = "error"
-                child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
-                _emit_section("running")
-                raise
+            # Every tool a sub-agent calls passes here, including the sandbox's
+            # own five, which never reach mcp_runtime's span (AGT-029).
+            with telemetry.span(f"sandbox tool {_name}", tool=_name) as current:
+                try:
+                    out = await _orig(**kwargs)
+                except Exception as exc:
+                    telemetry.set_attributes(
+                        current,
+                        outcome="error",
+                        error_type=exc.__class__.__name__,
+                        error_text=telemetry.content(str(exc), 400),
+                    )
+                    child["status"] = "error"
+                    child["body"] = _truncate(str(exc), _CHILD_BODY_MAX)
+                    _emit_section("running")
+                    raise
+                telemetry.set_attributes(current, outcome="ok")
             child["status"] = "completed"
             child["body"] = _truncate(str(out) if out is not None else "", _CHILD_BODY_MAX)
             _emit_section("running")
@@ -1618,25 +1694,225 @@ def _sandbox_enabled() -> bool:
     return settings.SANDBOX_ENABLED
 
 
+def _sandbox_direct_enabled() -> bool:
+    from reporting import settings
+
+    return settings.SANDBOX_ENABLED and settings.SANDBOX_DIRECT_TOOLS_ENABLED
+
+
+async def _direct_backend() -> tuple[Any, str]:
+    """The conversation's sandbox, for a tool the *outer* agent called.
+
+    Returns ``(backend, "")`` or ``(None, reason)``. There is no private
+    fallback: a sandbox nobody holds the id of would take the file with it when
+    the call ended, which is the opposite of what these tools are for.
+    """
+    session = sandbox_session.current_sandbox_session()
+    if session is None:
+        return None, "The sandbox is only available inside a chat conversation."
+    try:
+        return await session.backend(), ""
+    except Exception as exc:
+        # A step that attaches rather than owns cannot open one (SBX-015); so
+        # can a provider outage. Either way the caller gets a reason, not a
+        # traceback.
+        logger.warning("sandbox: could not open the conversation sandbox for a direct call", exc_info=True)
+        return None, f"Could not open the conversation's sandbox: {_safe_error(exc)}"
+
+
+def _capped(text: str) -> str:
+    from reporting import settings
+
+    return _truncate_bytes(text, settings.SANDBOX_MAX_OUTPUT_BYTES)
+
+
+async def _handle_write_file(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    path, content = str(args.get("path") or ""), str(args.get("content") or "")
+    if not path:
+        return {"error": "path is required"}
+    try:
+        message = await backend.write_file(path, content)
+    except Exception as exc:
+        return {"error": f"Could not write {path}: {_safe_error(exc)}"}
+    # A receipt, so every later delegation is told the file is there without the
+    # caller having to name it in each task. This is what makes priming a file
+    # useful to sub-agents that have not been written yet (SBX-008, SBX-016).
+    _record_receipt(path, "sandbox__write_file", str(args.get("purpose") or f"written to {path}"), backend, None)
+    return {"result": message, "path": path}
+
+
+async def _handle_read_file(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    path = str(args.get("path") or "")
+    if not path:
+        return {"error": "path is required"}
+    try:
+        return {"result": _capped(await backend.read_file(path))}
+    except Exception as exc:
+        return {"error": f"Could not read {path}: {_safe_error(exc)}"}
+
+
+async def _handle_list_files(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    try:
+        return {"result": _capped(await backend.list_files(str(args.get("path") or _RESULT_DIR)))}
+    except Exception as exc:
+        return {"error": f"Could not list files: {_safe_error(exc)}"}
+
+
+async def _handle_run_python(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    code = str(args.get("code") or "")
+    if not code.strip():
+        return {"error": "code is required"}
+    try:
+        return {"result": _capped(await backend.run_python(code))}
+    except Exception as exc:
+        return {"error": f"Could not run the code: {_safe_error(exc)}"}
+
+
+def _safe_error(exc: Exception) -> str:
+    return f"{exc.__class__.__name__}: {exc}"[:400]
+
+
+def _direct_tools() -> list[BuiltinTool]:
+    """The conversation's sandbox, reachable without spawning a sub-agent.
+
+    ``sandbox__delegate`` runs a whole agent loop inside one tool call, which is
+    right for exploration and wasteful for one operation: a measured turn spent
+    569 seconds across 43 sub-agent calls, where reading a file is one round
+    trip. These four are prime, inspect and compute; shell work stays
+    delegation-only because it is the exploratory shape delegation exists for.
+
+    They grant nothing ``sandbox__delegate`` does not already grant -- it can run
+    arbitrary code in the same sandbox -- so they share its permission and its
+    reasoning about confirmation (SBX-009, SBX-016).
+    """
+    shared: dict[str, Any] = {
+        "group": GROUP,
+        "required_permissions": [Permission.SANDBOX_DELEGATE.value],
+        "enabled": _sandbox_direct_enabled,
+        "chat_only": True,
+        "chat_safe_without_confirmation": True,
+        "always_disclosed": True,
+    }
+    return [
+        BuiltinTool(
+            name="sandbox__write_file",
+            description=(
+                "Write a file into the conversation's sandbox. Use this to put data where code can "
+                "work on it -- query results to reshape, a document to process -- instead of passing "
+                "it through a prompt. The file persists for the conversation, and any later "
+                "sandbox__delegate is told it is there, so you can prepare data for work you have "
+                "not delegated yet. Give `purpose` so that notice says what the file holds."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path, under /home/user."},
+                    "content": {"type": "string", "description": "File contents."},
+                    "purpose": {"type": "string", "description": "What the file holds, for later readers."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=_handle_write_file,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__read_file",
+            description=(
+                "Read a file from the conversation's sandbox. Bounded output: for a large file, "
+                "process it with sandbox__run_python rather than reading it whole."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Absolute path to read."}},
+                "required": ["path"],
+            },
+            handler=_handle_read_file,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__list_files",
+            description=(
+                "List a directory in the conversation's sandbox. Defaults to the directory where "
+                "saved tool results are kept, which is where earlier work leaves its data."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Directory to list."}},
+            },
+            handler=_handle_list_files,
+            **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__run_python",
+            description=(
+                "Run Python in the conversation's sandbox and return its output. For one computation "
+                "over data already there -- reshaping, aggregating, checking. Use sandbox__delegate "
+                "instead when the work needs several steps decided as it goes."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"code": {"type": "string", "description": "Python source to run."}},
+                "required": ["code"],
+            },
+            handler=_handle_run_python,
+            **shared,
+        ),
+    ]
+
+
+def _delegate_description() -> str:
+    """What the delegation tool is, including what the sub-agent can already reach.
+
+    The core tools are named because leaving them out read as their absence: a
+    planner reasoning about this listing concluded "no graph tool listed... all
+    graph tools are only accessible via skills" and planned skill-mediated routes
+    to data one delegation would have answered directly. The
+    surrounding text pointed the same way, saying only what a delegation is *not*
+    for (AGT-035).
+
+    Built from the setting rather than written out, because the set is
+    configurable and a description that drifts from it is worse than none.
+    """
+    from reporting import settings as _s
+
+    text = (
+        "Delegate a task requiring code execution or file operations to an isolated sandbox agent. The agent can "
+        "run Python, execute shell commands, and read/write files. Returns a summary of what was done and any "
+        "outputs. Use this when the task involves iterative computation, data transformation, chart or file "
+        "generation, or scripting that cannot be expressed as a single MCP tool call. Direct the sub-agent: say what "
+        "to produce, name the tools the task needs in `tools`, and name any already-saved file it should read rather "
+        "than re-fetching. It plans its own steps, so the less it has to infer, the less it spends."
+    )
+    core = [name for name in (_s.SANDBOX_CORE_TOOLS or ()) if name]
+    if core:
+        text += (
+            " The sub-agent is always given these tools without any skill having to unlock them: "
+            f"{', '.join(core)}. So a task needing graph data can be delegated directly; it does not need a skill "
+            "to reach the graph. Prefer a single graph tool call over a delegation when one call answers the "
+            "question."
+        )
+    return text
+
+
 GROUP_DEF = BuiltinGroup(
     name=GROUP,
     tools=[
         BuiltinTool(
             name="sandbox__delegate",
             group=GROUP,
-            description=(
-                "Delegate a task requiring code execution or file operations to an "
-                "isolated sandbox agent. The agent can run Python, execute shell "
-                "commands, and read/write files. Returns a summary of what was done "
-                "and any outputs. Use this when the task involves iterative "
-                "computation, data transformation, chart or file generation, or "
-                "scripting that cannot be expressed as a Cypher query or a single "
-                "MCP tool call. Do not use for tasks a graph query or existing tool "
-                "can answer directly — prefer those first. Direct the sub-agent: say "
-                "what to produce, name the tools the task needs in `tools`, and name "
-                "any already-saved file it should read rather than re-fetching. It "
-                "plans its own steps, so the less it has to infer, the less it spends."
-            ),
+            description=_delegate_description(),
             input_schema=_INPUT_SCHEMA,
             required_permissions=[Permission.SANDBOX_DELEGATE.value],
             handler=_handle_delegate,
@@ -1657,5 +1933,6 @@ GROUP_DEF = BuiltinGroup(
             # execution tools (bash, text_editor) work in other agent harnesses.
             always_disclosed=True,
         ),
+        *_direct_tools(),
     ],
 )

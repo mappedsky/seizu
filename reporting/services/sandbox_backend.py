@@ -149,13 +149,45 @@ class _E2BSandboxBackend:
         return "\n".join(parts) if parts else "(no output)"
 
     async def run_bash(self, cmd: str) -> str:
-        result = await self._sandbox.commands.run(cmd)
-        parts: list[str] = []
-        if result.stdout:
-            parts.append(result.stdout)
-        if result.stderr:
-            parts.append(f"stderr: {result.stderr}")
-        return "\n".join(parts) if parts else "(no output)"
+        """Run a shell command, reporting a non-zero exit rather than raising.
+
+        A non-zero exit is an ordinary shell outcome, not a fault: ``grep``
+        exits 1 when it matches nothing and ``curl`` exits 2 on a bad flag. E2B
+        raises for all of them, and letting that propagate ended the *entire*
+        delegation -- the sub-agent lost every result it had gathered because one
+        command reported "no match". Two delegations died this way in one
+        measured turn.
+
+        So the exit code, stdout and stderr come back as text, the same shape a
+        success returns, and the sub-agent decides what a failure means.
+
+        A command that outruns E2B's deadline is the same kind of event and gets
+        the same treatment: "that took too long" is something a sub-agent can act
+        on by running something cheaper, and it arrived as a *different*
+        exception, so a first fix covering only the exit code left delegations
+        still dying on it.
+
+        Its streaming sibling deliberately still raises: its caller
+        (:mod:`reporting.services.sandbox_remediation`) runs builds and tests,
+        where a non-zero exit is the phase failing and must not read as output.
+        """
+        from e2b import CommandExitException
+        from e2b.exceptions import TimeoutException
+
+        try:
+            result = await self._sandbox.commands.run(cmd)
+        except CommandExitException as exc:
+            return _bash_output(
+                getattr(exc, "stdout", ""), getattr(exc, "stderr", ""), int(getattr(exc, "exit_code", 1) or 1)
+            )
+        except TimeoutException:
+            # No output to hand back: E2B raises this instead of returning what
+            # the command had produced, so saying what happened is all there is.
+            return (
+                "The command was stopped for running too long. Nothing it may have printed was kept. "
+                "Try a narrower command, or run it in the background and read its output from a file."
+            )
+        return _bash_output(result.stdout, result.stderr, int(getattr(result, "exit_code", 0) or 0))
 
     async def read_file(self, path: str) -> str:
         content = await self._sandbox.files.read(path)
@@ -210,6 +242,24 @@ class _E2BSandboxBackend:
     @property
     def sandbox_id(self) -> str:
         return str(getattr(self._sandbox, "sandbox_id", "") or "")
+
+
+def _bash_output(stdout: str, stderr: str, exit_code: int) -> str:
+    """One rendering for a shell command, whichever way it ended.
+
+    The exit code is stated only when it is non-zero: on the success path it
+    would be noise in every result, and on the failure path it is the whole
+    finding -- a sub-agent told "exit 1" and nothing else knows its grep found
+    nothing, where "(no output)" alone reads as a broken tool.
+    """
+    parts: list[str] = []
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append(f"stderr: {stderr}")
+    if exit_code:
+        parts.append(f"exit code: {exit_code}")
+    return "\n".join(parts) if parts else "(no output)"
 
 
 def _api_params(api_key: str, domain: str) -> dict[str, Any]:

@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from reporting import settings
 from reporting.authnz import CurrentUser
+from reporting.authnz.permissions import Permission
 from reporting.services import (
     chat_budget,
     chat_context,
@@ -54,6 +55,7 @@ from reporting.services import (
     episodic_memory,
     mcp_builtins,
     mcp_runtime,
+    reporting_neo4j,
     sandbox_session,
     telemetry,
 )
@@ -174,10 +176,19 @@ class _PlannedStep(BaseModel):
     map_over: str = Field(
         default="",
         description=(
-            "Set this to the id of a dependency when the step must be carried out separately for"
-            " each item that dependency discovers. The step is expanded into one step per item"
-            " once that dependency finishes, and the copies run in parallel. Leave empty for a"
-            " step that is done once."
+            "Set this to the id of a dependency ONLY when each item that dependency discovers"
+            " needs its own investigation -- different tools per item, or a decision that depends"
+            " on what the item turns out to be. The step is then expanded into one step per item,"
+            " and each copy runs its own sub-agent, which starts knowing nothing. Leave it empty"
+            " when the per-item work is the same query or call with a different argument: that is"
+            " one step fetching every item at once, and it is both cheaper and faster."
+        ),
+    )
+    map_reason: str = Field(
+        default="",
+        description=(
+            "Required when map_over is set: what differs between items, such that they cannot be"
+            " done in one call. If the answer is 'only the identifier', do not set map_over."
         ),
     )
     suggested_tools: list[str] = Field(default_factory=list)
@@ -240,19 +251,38 @@ _PLANNER_PROMPT = (
     " known static arguments and must OMIT any value that has to be derived from"
     " a dependency result (do not put a placeholder like '<from s2>' — leave the"
     " argument out and the sub-agent will fill it). Put the same exact name in"
-    " suggested_tools. Keep steps"
+    " suggested_tools."
+    " **A step is not limited to one skill.** required_action names the one it must"
+    " run; the sub-agent running it can load any other skill it needs. So work that"
+    " would be two skills in sequence on the same subject is one step, not two"
+    " chained ones -- a step that depends on another waits for it and runs in a"
+    " later wave, so splitting work that need not be split costs wall-clock"
+    " parallelism for nothing. Keep steps"
     " independent unless a real data dependency exists, so they can run in"
     " parallel. Mark each step priority as required, supporting, or optional,"
     " and complexity as small, medium, or large. Do not invent tools or mark a"
     " live-data step as answer.\n"
-    "**When the same work must be done for each of several things an earlier step"
-    " finds, write ONE step and set map_over to that step's id.** It is expanded"
-    " into one step per item as soon as that step finishes, and the copies run in"
-    " parallel. Write its goal for a single item ('investigate the CVE', not"
-    " 'investigate each CVE'), and never write a step that loops over a"
-    " collection internally -- a loop inside one step cannot be parallelised and"
-    " is the slowest way to do the work. A step's map_over must also be one of"
-    " its depends_on.\n"
+    "**Fetching many things is one step; investigating each of them is a mapped"
+    " step. Decide which before you write either.**\n"
+    "- When the per-item work is the same query or tool call with a different"
+    " argument, write ONE step that gets them all in a single call -- one query"
+    " with a list of ids, one call with a list argument -- and say so in the"
+    " goal. Looking a property up per CVE, per repository or per package is"
+    " almost always this. Do not set map_over for it, and do not write a step"
+    " that loops internally either: one call, not N.\n"
+    "- Set map_over to a dependency's id only when each item needs its own"
+    " investigation: different tools per item, a decision that depends on what"
+    " the item turns out to be, or exploration whose shape is not known in"
+    " advance. Give map_reason saying what differs. The step is expanded into"
+    " one step per item as soon as that dependency finishes and the copies run"
+    " in parallel, so write its goal for a single item ('investigate the CVE',"
+    " not 'investigate each CVE'). A step's map_over must also be one of its"
+    " depends_on.\n"
+    "Every mapped item pays for its own sub-agent, which starts knowing nothing"
+    " and has to rediscover the ground the last one covered. A fan-out of eight"
+    " over work that one query would have done costs several times the query and"
+    " answers nothing sooner. When several steps need the same data, plan one"
+    " step to fetch it and write the later goals to read what it saved.\n"
     "**The plan is a directed acyclic graph**, and depends_on is its edges."
     " Every step id must be unique; every depends_on entry must be the id of a"
     " different step in this same plan; a step must never list its own id; and"
@@ -692,6 +722,10 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
         skills,
         capability_tools,
         available_tools=available_tools_for_capability,
+        # The planner names capabilities; it cannot call them. Given the
+        # executor's wording it spends its reasoning deciding whether to emit a
+        # plan or a tool call it has no way to make (AGT-034).
+        for_planner=True,
     )
     planner_system = f"{_PLANNER_PROMPT}\n\n{capability}" if capability else _PLANNER_PROMPT
     # The planner is where a re-fetch becomes a step, so it is the earliest
@@ -933,6 +967,31 @@ async def _replan_invalid_graph(
     return retried, [f"{first}. It was replanned.", *notes]
 
 
+def _closing_summary_ids(ids: list[str], planned: list["_PlannedStep"], edges: dict[str, list[str]]) -> set[str]:
+    """Answer steps that only restate what the plan already gathered.
+
+    The turn's answer is written by the synthesizer from every step's output, so
+    a plan ending in "summarize the findings" produces that summary twice: the
+    step writes one, the synthesizer writes another from it, and detail is lost
+    at the extra hop. Told not to, the planner still wrote one in three of four
+    measured samples, so this removes it rather than asking again (AGT-037).
+
+    Narrow on purpose. A step qualifies only if it is an ``answer`` step, waits
+    on other steps, and **nothing waits on it** -- so a mid-plan decision that
+    later steps consume is kept, and a plan that is a single answer step (the
+    request needing no live action, or reporting that nothing can obtain the
+    evidence) is left exactly as written.
+    """
+    if len(ids) < 2:
+        return set()
+    depended_on = {dep for deps in edges.values() for dep in deps}
+    return {
+        step_id
+        for step_id, step in zip(ids, planned, strict=True)
+        if step.action_kind == "answer" and edges[step_id] and step_id not in depended_on
+    }
+
+
 def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
     """Materialize the plan, forcing it into a DAG whatever it arrived as.
 
@@ -954,15 +1013,19 @@ def _init_plan(planned: list[_PlannedStep]) -> list[dict[str, Any]]:
             deps.append(source)
         edges[step_id] = deps
     edges = _break_cycles(edges, ids)
+    dropped = _closing_summary_ids(ids, planned, edges)
 
     plan: list[dict[str, Any]] = []
     for step_id, step in zip(ids, planned, strict=True):
+        if step_id in dropped:
+            continue
         plan.append(
             {
                 "id": step_id,
                 "goal": step.goal,
                 "depends_on": edges[step_id],
                 "map_over": str(step.map_over or "").strip() if str(step.map_over or "").strip() in known else "",
+                "map_reason": str(step.map_reason or "").strip(),
                 "suggested_tools": list(step.suggested_tools),
                 "action_kind": step.action_kind,
                 "required_action": step.required_action,
@@ -1091,6 +1154,50 @@ async def _persist_step_record(
     return path
 
 
+#: Token overlap above which two rejections are the same complaint reworded.
+#: Jaccard, so a longer restatement of the same point counts against itself
+#: rather than for itself. Rationale and the measured separation: AGT-028.
+_SAME_REJECTION_SIMILARITY = 0.4
+#: Content words a rejection needs before overlap says anything about it. Below
+#: this, one shared word moves the ratio further than a whole shared complaint
+#: does in a real verdict, so short reasons are compared exactly instead.
+_SAME_REJECTION_MIN_TOKENS = 8
+
+#: Words carrying no complaint. Small and closed on purpose: this is a
+#: similarity floor between two sentences about the same step, not a search
+#: index, and every word left in is one both rejections have to share.
+_REJECTION_STOPWORDS = frozenset(
+    "a an the and or but if of to in on for with without that this it its is are was were be been"
+    " being as by from at not no only each every some their there they them then than so which what"
+    " when whose result step".split()
+)
+
+
+def _rejection_tokens(text: str) -> frozenset[str]:
+    return frozenset(
+        word for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in _REJECTION_STOPWORDS and len(word) > 2
+    )
+
+
+def _same_rejection(reason: str, previous: str) -> bool:
+    """Whether a rejection repeats one this step has already been given.
+
+    Exact equality does not answer this. A verifier writes its verdict fresh
+    every time, so the same complaint comes back in different words and a string
+    comparison passes it through as new -- a step was observed being failed three
+    times for the one thing its dependency could not supply, each rejection
+    worded differently. Compared on content-word overlap instead.
+    """
+    if not reason or not previous:
+        return False
+    if reason == previous:
+        return True
+    first, second = _rejection_tokens(reason), _rejection_tokens(previous)
+    if min(len(first), len(second)) < _SAME_REJECTION_MIN_TOKENS:
+        return False
+    return len(first & second) / len(first | second) >= _SAME_REJECTION_SIMILARITY
+
+
 def _prepare_retries(
     plan: list[dict[str, Any]],
     results: list[dict[str, Any]],
@@ -1147,7 +1254,7 @@ def _prepare_retries(
         if step["status"] != "failed" or step.get("no_retry"):
             continue
         reason = str((results_by_id.get(step["id"], {}) or {}).get("verify_reason") or "").strip()
-        if reason and reason == str(step.get("retry_guidance") or "").strip():
+        if _same_rejection(reason, str(step.get("retry_guidance") or "").strip()):
             step["no_retry"] = True
             logger.info("chat dispatcher: step %s rejected twice for the same reason; not retrying", step["id"])
 
@@ -1297,6 +1404,10 @@ async def _expand_mapped_steps(
             source_step=source_id,
             items=len(items),
             limit=limit,
+            # Planner-authored, so it is content and off unless recording is on
+            # (AGT-026). It is what tells a wide trace whether the fan-out was
+            # divergent work or a query that should have been one call.
+            reason=telemetry.content(str(parent.get("map_reason") or ""), 200),
         ):
             _materialize(plan, by_id, parent, [(item, []) for item in items], source_id)
         _emit_plan(writer, plan)
@@ -1704,6 +1815,12 @@ def _grant_for(
     # running beside it (AGT-020).
     divisor = _budget_divisor(plan, batch_size)
     cost_share = _dimension_share(ledger, "cost_limit_usd", "cost_usd", divisor, "reserve_cost_usd")
+    # Calls follow the token rule, not the cost one: a backstop divided by the
+    # schedule stops being a backstop (AGT-025). Where cost or tokens bound the
+    # run, the call grant keeps only the batch-width bound that makes concurrent
+    # grants disjoint; where neither does, calls *are* the bound and are shared
+    # out by schedule like any binding dimension (AGT-030).
+    call_divisor = divisor if _calls_are_primary(controller) else max(1, batch_size)
     return _StepGrant(
         soft_tokens=soft,
         tokens=max(soft, hard),
@@ -1713,8 +1830,22 @@ def _grant_for(
         # The step's own reserve on the dimension that binds it, so it can still
         # say what it found (AGT-012).
         soft_cost_usd=max(0.0, cost_share - cost_share * reserve_ratio),
-        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", divisor, "reserve_llm_calls")),
+        llm_calls=int(_dimension_share(ledger, "max_llm_calls", "llm_calls", call_divisor, "reserve_llm_calls")),
     )
+
+
+def _calls_are_primary(controller: BudgetController | None) -> bool:
+    """Whether the call ceiling is the only thing bounding this run.
+
+    True only when neither cost nor tokens is budgeted. Then the loop guard is
+    also the spend guard by default, and fair-sharing it between steps is the
+    right thing; otherwise it is a backstop and slicing it by the schedule is
+    what made a 176-call ceiling into 6 calls for a step that needed 20.
+    """
+    if controller is None:
+        return False
+    ledger = controller.snapshot()
+    return float(ledger.get("cost_limit_usd") or 0.0) <= 0 and int(ledger.get("token_limit") or 0) <= 0
 
 
 def _cost_is_primary(controller: BudgetController | None) -> bool:
@@ -1810,6 +1941,71 @@ def _dependency_payload(step: dict[str, Any], results: list[dict[str, Any]]) -> 
     ]
 
 
+#: The turn's one copy of the graph schema. A fixed name, unlike an ordinary
+#: spilled result: the point is that every step of a batch is told about the
+#: same file.
+_SHARED_SCHEMA_NAME = "graph_schema.json"
+
+
+async def _seed_shared_schema(current_user: CurrentUser | None, batch_size: int) -> None:
+    """Put the graph schema on the batch's shared disk before the batch starts.
+
+    The receipt mechanism (SBX-008) carries a fetched file to whatever runs
+    *after* it. It cannot help the steps of one batch, which start together: a
+    receipt written by one of them only reaches its siblings once the batch it
+    was written in has returned. So each of eight concurrent children fetched
+    the same 52,846-byte schema, wrote it to its own file on the disk they were
+    already sharing, and read it back -- two of the four calls each could afford,
+    before any of them reached the question it was asked.
+
+    Fetching it once here closes that. It is the only thing every sub-agent
+    wants, it is identical for all of them, and it is the largest single result
+    the graph returns.
+
+    Best effort throughout. A batch runs fine without it -- the sub-agents fetch
+    it themselves, exactly as they did before -- so nothing here is a reason to
+    fail one.
+    """
+    if batch_size < 2 or not settings.SANDBOX_ENABLED:
+        # One step has no sibling to share with, and its own delegations already
+        # carry the file to each other through the episode log.
+        return
+    if current_user is None or Permission.QUERY_EXECUTE.value not in current_user.permissions:
+        # Seeding must not hand a caller data they could not have asked for.
+        return
+    session = sandbox_session.current_sandbox_session()
+    ledger = episodic_memory.current_session_ledger()
+    if session is None or ledger is None or not session.opened:
+        # Never opened just for this: SBX-015 weighed opening a sandbox for a
+        # batch that may not delegate and accepted it only where a distributed
+        # step cannot open its own.
+        return
+    sandbox_id = session.sandbox_id
+    path = f"{mcp_builtins.sandbox_result_dir()}/{_SHARED_SCHEMA_NAME}"
+    if any(receipt.path == path and receipt.sandbox_id == sandbox_id for receipt in ledger.receipts):
+        return  # already on this disk, from an earlier batch of the same turn
+    try:
+        backend = await session.backend()
+        schema = await reporting_neo4j.fetch_graph_schema()
+        await backend.write_file(path, json.dumps(schema, default=str))
+    except Exception:
+        logger.warning("chat dispatcher: could not seed the graph schema for a batch", exc_info=True)
+        return
+    ledger.record_receipt(
+        path=path,
+        source="graph__schema",
+        purpose="the graph's labels, relationship types, property keys and indexes",
+        sandbox_id=sandbox_id,
+        columns=sorted(schema)[:_SCHEMA_RECEIPT_KEYS] if isinstance(schema, dict) else None,
+    )
+    logger.info("chat dispatcher: seeded the graph schema for a batch of %d", batch_size)
+
+
+#: Top-level schema keys named in the receipt, so a sub-agent knows what is in
+#: the file without opening it.
+_SCHEMA_RECEIPT_KEYS = 8
+
+
 async def _shared_sandbox_id(config: RunnableConfig) -> str:
     """Open the conversation's sandbox now, so distributed steps can attach to it.
 
@@ -1890,9 +2086,13 @@ async def _dispatch_batch_distributed(
         raise _FanoutUnavailable("a distributed batch needs a resolved user")
     turn_id = chat_graph.turn_id_from_config(config)
     thread_id = _client_thread_id_from_config(config) or ""
+    sandbox_id = await _shared_sandbox_id(config)
+    # After the sandbox is open and before the ledger is serialized: the seeded
+    # receipt has to travel to the workers with the rest of the session memory,
+    # or the batch it was fetched for is exactly the batch that cannot see it.
+    await _seed_shared_schema(current_user, len(batch))
     ledger = episodic_memory.current_session_ledger()
     session_memory_json = json.dumps(ledger.to_state()) if ledger is not None else ""
-    sandbox_id = await _shared_sandbox_id(config)
     trimmed_plan = json.dumps(_trimmed_plan(plan))
     # Resolved here, once, and carried: every step of the batch runs on the
     # model this turn resolved rather than on whatever each worker's settings
@@ -3064,13 +3264,21 @@ async def _run_worker_step(
         # protocol. A persistent nonzero count means the sentinel is not landing
         # with this provider and the fallback is carrying the step.
         step_result["finalize_violations"] = finalize_violations
-    if tool_details and (budget_capped or budget_exhausted or execution_error):
-        # An attempt that ended early is the one a retry has to build on, and
-        # what it established is far larger than any digest carried through a
-        # prompt. Put the whole trace on the sandbox's disk and let the retry
-        # read it there. Best-effort and only into a sandbox that is already
-        # open: this is a convenience for the next attempt, never a reason to
-        # open one or to fail a step that has otherwise finished.
+    if tool_details:
+        # Any attempt is one a retry may have to build on, and what it
+        # established is far larger than any digest carried through a prompt.
+        # Put the whole trace on the sandbox's disk and let the retry read it
+        # there. Best-effort and only into a sandbox that is already open: this
+        # is a convenience for the next attempt, never a reason to open one or
+        # to fail a step that has otherwise finished.
+        #
+        # Not just the attempts that ended early. A step that *finished* and was
+        # then failed by the verifier is the commonest retry there is, and it is
+        # the one whose previous attempt produced the most -- a whole result,
+        # judged incomplete. One measured step wrote a seven-CVE assessment, was
+        # rejected for covering six of them, and its retry was handed the 4,000
+        # character digest instead of the file: 307 seconds to re-derive what was
+        # already on disk (AGT-032).
         record_path = await _persist_step_record(step["id"], step_result, tool_details)
         if record_path:
             step_result["record_path"] = record_path
@@ -3532,6 +3740,31 @@ async def confirmation_pause_node(state: ChatState, config: RunnableConfig) -> d
 _MIN_EVIDENCE_CHARS_PER_CALL = 400
 
 
+def _keep_ends(text: str, budget: int) -> str:
+    """Bound a step's output for synthesis without removing its conclusion.
+
+    Truncating from the front takes the tail, and a step's tail is where its
+    answer is: the reachability skill tells its sub-agent to state the verdict
+    last, so a head-first cut removed exactly the verdict and left the working.
+    One measured turn lost a 4,383-character finding's conclusion that way while
+    its two siblings, being shorter, kept theirs.
+
+    So keep both ends and drop the middle, which is the working. This is a guard
+    against one enormous step crowding the rest, not the real bound -- the
+    request is fitted to the model's window afterwards (CTX-001), which is the
+    thing that actually has to hold.
+    """
+    if budget <= 0 or len(text) <= budget:
+        return text
+    marker = "\n\n[… middle of this step's output omitted …]\n\n"
+    room = budget - len(marker)
+    if room <= 0:
+        return text[:budget]
+    # Weighted to the tail: the conclusion is worth more than the preamble.
+    head = room // 3
+    return f"{text[:head]}{marker}{text[-(room - head) :]}"
+
+
 def _synthesis_context(plan: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     """Render the executed plan for the synthesizer: each step's summary + evidence.
 
@@ -3683,7 +3916,7 @@ def _step_summaries_for_display(plan: list[dict[str, Any]], results: list[dict[s
     for step in plan:
         result = results_by_id.get(step["id"], {}) or {}
         status = _rendered_step_status(step, result)
-        output = _truncate_text(result.get("output") or "", 4000).strip()
+        output = _keep_ends(result.get("output") or "", settings.CHAT_ORCHESTRATOR_SYNTHESIS_STEP_MAX_CHARS).strip()
         if not output:
             evidence = _step_evidence(result, max_chars=per_step)
             output = (

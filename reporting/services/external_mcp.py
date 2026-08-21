@@ -1,5 +1,6 @@
 """Per-user clients for MCP servers behind configurable identity proxies."""
 
+import asyncio
 import json
 import logging
 import os
@@ -410,7 +411,68 @@ def authentication_payload(exc: ExternalMCPAuthenticationRequired) -> dict[str, 
     return payload
 
 
+#: An upstream refusing a call for rate reasons, in the words servers use.
+_RATE_LIMITED_RE = re.compile(r"rate limit (?:exceeded|reached)|too many requests|\b429\b", re.I)
+#: The delay such a refusal names, when it names one ("Retry after 44s").
+_RETRY_AFTER_RE = re.compile(r"retry[- ]after[:\s]+(\d+)", re.I)
+
+
+def _rate_limit_delay(text: str) -> float | None:
+    """Seconds to wait before retrying, or ``None`` when this is not a rate limit.
+
+    Read from the refusal rather than backed off blindly: the upstream knows
+    when its window resets and says so, and guessing either wastes the wait or
+    spends the next attempt on the same refusal. A rate limit that names no
+    delay gets the configured default.
+    """
+    if not _RATE_LIMITED_RE.search(text):
+        return None
+    match = _RETRY_AFTER_RE.search(text)
+    if match:
+        return float(match.group(1))
+    return float(max(0, settings.MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS))
+
+
 async def call_tool(
+    proxy: ExternalMCPProxy,
+    remote_name: str,
+    arguments: dict[str, Any],
+    current_user: CurrentUser,
+    *,
+    max_bytes: int | None = None,
+) -> ExternalToolResult:
+    """Call one external tool, waiting out a rate limit the upstream names.
+
+    A refusal is an ordinary result on the wire, so without this it reaches the
+    agent as tool output and the agent does the only thing it can: call again,
+    immediately, into the same closed window. Measured on one turn: 13 of 34
+    code searches refused, and the sub-agent spent calls working around results
+    it could have had by waiting (AGT-029).
+    """
+    attempts = max(0, settings.MCP_EXTERNAL_RATE_LIMIT_RETRIES) + 1
+    cap = float(max(0, settings.MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS))
+    for attempt in range(attempts):
+        result = await _call_tool_once(proxy, remote_name, arguments, current_user, max_bytes=max_bytes)
+        if not result.is_error or attempt == attempts - 1:
+            return result
+        delay = _rate_limit_delay(result.text)
+        if delay is None or delay > cap:
+            # Not a rate limit, or a window longer than one call may wait out.
+            # Either way the agent gets the refusal and decides for itself.
+            return result
+        logger.info(
+            "external MCP %s/%s rate-limited; waiting %.0fs before retry %d of %d",
+            proxy.name,
+            remote_name,
+            delay,
+            attempt + 1,
+            attempts - 1,
+        )
+        await asyncio.sleep(delay)
+    return result
+
+
+async def _call_tool_once(
     proxy: ExternalMCPProxy,
     remote_name: str,
     arguments: dict[str, Any],

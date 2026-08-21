@@ -23,6 +23,25 @@ services:
       - METRICS_PREFIX=seizu
     networks:
       stats:
+  # ── OTLP trace sink (opt-in: `docker compose --profile tracing up -d`) ──
+  # A turn spans the web service and several worker activities, so its spans are
+  # only one tree if something collects them (AGT-026). This writes them to
+  # .compose/otel/spans.jsonl rather than to a UI, which is what makes a run's
+  # step and model-call spans aggregatable. Set
+  # TELEMETRY_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces to export here.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    profiles:
+      - tracing
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./.config/dev/otel/collector.yaml:/etc/otel/collector.yaml:ro
+      - ./.compose/otel:/traces
+    networks:
+      # Reachable from both sides of a turn: `seizu` admits it on proxy, the
+      # worker runs it on stats.
+      stats:
+      proxy:
   # ── PostgreSQL (application records + independently named chat database) ──
   postgres:
     image: postgres:18-alpine
@@ -279,6 +298,21 @@ services:
       - .config/dev/github-mcp/Caddyfile:/etc/caddy/Caddyfile:ro
     networks:
       database:
+  # deps.dev package metadata, reached the way every other third party is: an
+  # external MCP proxy, so the egress is here rather than in the Seizu backend.
+  external-mcp-deps:
+    image: ghcr.io/mappedsky/depsdevmcp:0.3.0
+    command: ["-transport", "http"]
+    profiles:
+      - external-mcp
+    environment:
+      # Its default binds loopback, which nothing outside the container can
+      # reach; the path is what MCP_EXTERNAL_PROXIES points at.
+      - DEPSDEVMCP_HTTP_ADDRESS=0.0.0.0:8080
+      - DEPSDEVMCP_HTTP_PATH=/mcp
+      - DEPSDEVMCP_CACHE_CAPACITY
+    networks:
+      database:
   external-mcp-github:
     image: ghcr.io/github/github-mcp-server:latest
     command: ["http"]
@@ -403,6 +437,7 @@ services:
       - CHAT_LLM_VERIFIER_REASONING_EFFORT
       - CHAT_LLM_SYNTHESIZER_REASONING_EFFORT
       - CHAT_RUN_LLM_CALLS_PER_STEP
+      - CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP
       - CHAT_RUN_UNPRICED_TOKEN_BUDGET
       - CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS
       - CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY
@@ -420,6 +455,9 @@ services:
       - MCP_EXTERNAL_ENABLED
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
+      - MCP_EXTERNAL_RATE_LIMIT_RETRIES
+      - MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS
+      - MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS
       - MCP_EXTERNAL_PROXY_TOKEN
       - CHAT_CHECKPOINT_DATABASE_URL=${CHAT_CHECKPOINT_DATABASE_URL:-postgresql://postgres:5432/seizu-chat-checkpoints}
       - CHAT_CHECKPOINT_DATABASE_USER=${CHAT_CHECKPOINT_DATABASE_USER:-seizu}
@@ -436,6 +474,7 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
       # Chat feature flags. The worker reads these for scheduled-chat schedule
       # reconciliation; without them it treats chat as disabled and reconciles
@@ -651,6 +690,7 @@ services:
       - CHAT_LLM_VERIFIER_REASONING_EFFORT
       - CHAT_LLM_SYNTHESIZER_REASONING_EFFORT
       - CHAT_RUN_LLM_CALLS_PER_STEP
+      - CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP
       - CHAT_RUN_UNPRICED_TOKEN_BUDGET
       - CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS
       - CHAT_BUDGET_OUTPUT_ESTIMATE_SAFETY
@@ -686,6 +726,9 @@ services:
       - MCP_EXTERNAL_ENABLED
       - MCP_EXTERNAL_PROXIES
       - MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS
+      - MCP_EXTERNAL_RATE_LIMIT_RETRIES
+      - MCP_EXTERNAL_RATE_LIMIT_MAX_WAIT_SECONDS
+      - MCP_EXTERNAL_RATE_LIMIT_DEFAULT_WAIT_SECONDS
       - MCP_EXTERNAL_PROXY_TOKEN
       # Sandbox delegation — set SANDBOX_ENABLED=true + SANDBOX_API_KEY to enable
       # the sandbox__delegate chat tool (E2B cloud or OpenKruise Agents).
@@ -696,6 +739,7 @@ services:
       - SANDBOX_TIMEOUT_SECONDS
       - SANDBOX_SESSION_TIMEOUT_SECONDS
       - SANDBOX_MAX_OUTPUT_BYTES
+      - SANDBOX_DIRECT_TOOLS_ENABLED
       - SANDBOX_LLM_MODEL
       # Interactive chat creates the sandboxes the worker later reaps, and the
       # deployment id is stamped at creation — so it has to match here or the

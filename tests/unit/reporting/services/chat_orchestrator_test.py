@@ -172,7 +172,9 @@ def test_init_plan_drops_dangling_and_self_dependencies():
                 required_action="investigation__triage",
                 required_arguments={"org": "mappedsky"},
             ),
-            _PlannedStep(id="s2", goal="b", depends_on=["s1"], action_kind="answer"),
+            # Not an answer step: a terminal one is dropped as a closing summary
+            # (AGT-037), and this case is about edge repair.
+            _PlannedStep(id="s2", goal="b", depends_on=["s1"], action_kind="tool"),
         ]
     )
     assert plan[0]["depends_on"] == []
@@ -180,7 +182,7 @@ def test_init_plan_drops_dangling_and_self_dependencies():
     assert plan[0]["action_kind"] == "skill"
     assert plan[0]["required_action"] == "investigation__triage"
     assert plan[0]["required_arguments"] == {"org": "mappedsky"}
-    assert plan[1]["action_kind"] == "answer"
+    assert plan[1]["action_kind"] == "tool"
     assert all(step["status"] == "pending" for step in plan)
 
 
@@ -3930,3 +3932,258 @@ async def test_a_child_without_inherited_criteria_still_gets_scoped_ones(mocker)
 
     child = next(step for step in plan if step.get("map_parent") == "s2")
     assert child["success_criteria"] == "The result accomplishes this step's goal for repo-a alone."
+
+
+def _seed_session(mocker, *, opened: bool = True, sandbox_id: str = "sbx-1") -> Any:
+    session = mocker.MagicMock()
+    session.opened = opened
+    session.sandbox_id = sandbox_id
+    backend = mocker.MagicMock()
+    backend.write_file = AsyncMock()
+    session.backend = AsyncMock(return_value=backend)
+    mocker.patch.object(chat_orchestrator.sandbox_session, "current_sandbox_session", return_value=session)
+    return session
+
+
+def _seed_user(*permissions: str) -> CurrentUser:
+    return CurrentUser(
+        user=User(user_id="user-1", sub="sub", iss="iss", created_at=_NOW, last_login=_NOW),
+        jwt_claims={},
+        permissions=frozenset(permissions or {Permission.QUERY_EXECUTE.value}),
+    )
+
+
+async def test_the_graph_schema_is_fetched_once_for_a_batch(mocker):
+    ledger = chat_orchestrator.episodic_memory.start_session_ledger()
+    session = _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(
+        chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock(return_value={"labels": ["CVE"]})
+    )
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        # A second batch of the same turn reuses the file rather than re-fetching.
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+    assert fetch.await_count == 1
+    written = (await session.backend()).write_file
+    assert written.await_count == 1
+    path = written.await_args.args[0]
+    assert path.endswith("/graph_schema.json")
+    # And the receipt is what carries it to every step of the batch.
+    assert [(r.path, r.sandbox_id) for r in ledger.receipts] == [(path, "sbx-1")]
+
+
+async def test_a_single_step_batch_is_not_seeded(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock())
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 1)
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+    fetch.assert_not_awaited()
+
+
+async def test_seeding_needs_an_open_sandbox_and_the_query_permission(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    fetch = mocker.patch.object(chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock())
+    try:
+        _seed_session(mocker, opened=False)
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        fetch.assert_not_awaited()
+
+        _seed_session(mocker, opened=True)
+        await chat_orchestrator._seed_shared_schema(_seed_user(Permission.CHAT_USE.value), 3)
+        fetch.assert_not_awaited()
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+
+async def test_a_failed_seed_never_fails_the_batch(mocker):
+    chat_orchestrator.episodic_memory.start_session_ledger()
+    _seed_session(mocker)
+    mocker.patch.object(chat_orchestrator.settings, "SANDBOX_ENABLED", True)
+    mocker.patch.object(
+        chat_orchestrator.reporting_neo4j, "fetch_graph_schema", AsyncMock(side_effect=RuntimeError("neo4j down"))
+    )
+    try:
+        await chat_orchestrator._seed_shared_schema(_seed_user(), 3)
+        # No receipt, no exception: the sub-agents fetch it themselves as before.
+        assert chat_orchestrator.episodic_memory.current_session_ledger().receipts == []
+    finally:
+        chat_orchestrator.episodic_memory.clear_session_ledger()
+
+
+# The two verdicts one measured step actually received, in order, for the one
+# thing its dependency could not supply. Kept verbatim: the guard exists for
+# this shape, and paraphrasing them would stop testing it.
+_REJECTION_FIRST = (
+    "Success criteria require each selected CVE to record the vulnerable package and installed"
+    " version. The result provides only patch targets (e.g., PyJWT 2.13.0, urllib3 2.7.0) and"
+    " explicitly states exact installed versions are not present, leaving that required field"
+    " unresolved."
+)
+_REJECTION_REWORDED = (
+    "The result fails to provide a concrete vulnerable installed version for each selected package."
+    " It explicitly states 'installed version: not present in s1 output' and only supplies"
+    " fixed/patch versions (e.g., pyjwt < 2.13.0, urllib3 < 2.7.0, react-router < 6.30.4). The"
+    " success criteria require a 'vulnerable installed version' for each CVE."
+)
+_REJECTION_DIFFERENT = (
+    "The result only lists 8 of 19 open findings (top-8 cutoff), so the CVE list is incomplete."
+    " Additionally, CVSS vectors are not provided (only scores), though the data source lacks them;"
+    " completeness is the primary failure."
+)
+
+
+def test_a_reworded_repeat_of_a_rejection_counts_as_the_same_one():
+    assert chat_orchestrator._same_rejection(_REJECTION_REWORDED, _REJECTION_FIRST)
+    assert chat_orchestrator._same_rejection(_REJECTION_FIRST, _REJECTION_FIRST)
+
+
+def test_a_different_rejection_is_not_treated_as_a_repeat():
+    assert not chat_orchestrator._same_rejection(_REJECTION_DIFFERENT, _REJECTION_FIRST)
+    assert not chat_orchestrator._same_rejection("", _REJECTION_FIRST)
+    assert not chat_orchestrator._same_rejection(_REJECTION_FIRST, "")
+
+
+def test_a_step_rejected_twice_in_different_words_is_not_retried_again():
+    plan = [_step("s1", "failed", retry_guidance=_REJECTION_FIRST)]
+    results = [{"step_id": "s1", "verify_reason": _REJECTION_REWORDED, "output": "partial"}]
+
+    plan, iteration = chat_orchestrator._prepare_retries(plan, results, iteration=1)
+
+    assert plan[0]["no_retry"] is True
+    # Nothing left to retry, so the cycle does not advance.
+    assert iteration == 1
+
+
+def test_short_rejections_are_compared_exactly_not_by_overlap():
+    # Three or four content words apiece: one shared word moves the ratio
+    # further than a whole shared complaint does in a real verdict.
+    assert not chat_orchestrator._same_rejection("Now missing evidence for CVE-2", "Missing a verdict for CVE-1")
+    assert chat_orchestrator._same_rejection("Missing a verdict for CVE-1", "Missing a verdict for CVE-1")
+
+
+def _call_grant_plan() -> list[dict[str, Any]]:
+    """Three ready steps with one more waiting behind them: two schedule waves."""
+    return [
+        _step("a", "pending"),
+        _step("b", "pending"),
+        _step("c", "pending"),
+        _step("d", "pending", depends_on=["a", "b", "c"]),
+    ]
+
+
+def _controller_with(**ledger: Any) -> BudgetController:
+    return BudgetController({**initial_budget_ledger(), **ledger})
+
+
+def test_a_call_grant_is_not_sliced_by_the_schedule_when_cost_binds():
+    """A backstop divided by the schedule stops being a backstop: this is what
+    cut a step to 6 calls out of a 176-call ceiling (AGT-030)."""
+    plan = _call_grant_plan()
+    controller = _controller_with(token_limit=0, cost_limit_usd=1.0, max_llm_calls=176, reserve_llm_calls=2)
+
+    grant = chat_orchestrator._grant_for(plan[0], plan, controller, 3)
+
+    # Batch width only: (176 - 2) / 3, not / (2 waves x 3).
+    assert grant.llm_calls == (176 - 2) // 3
+
+
+def test_a_call_grant_is_shared_by_schedule_when_calls_are_the_only_bound():
+    plan = _call_grant_plan()
+    controller = _controller_with(token_limit=0, cost_limit_usd=0.0, max_llm_calls=176, reserve_llm_calls=2)
+
+    grant = chat_orchestrator._grant_for(plan[0], plan, controller, 3)
+
+    # Nothing else bounds the run, so the loop guard is the budget and is
+    # fair-shared like one: two waves of three.
+    assert grant.llm_calls == (176 - 2) // 6
+
+
+async def test_a_step_that_finished_still_records_its_trace(mocker):
+    """A step failed by the verifier is the commonest retry there is, and its
+    attempt produced the most: a whole result, judged incomplete. It used to be
+    the one case that wrote no trace file, so the retry got the 4,000-character
+    digest instead (AGT-032)."""
+    persist = mocker.patch.object(
+        chat_orchestrator, "_persist_step_record", AsyncMock(return_value="/home/user/seizu_results/step_s1.json")
+    )
+
+    result, _calls = await _run_protocol_step(
+        mocker,
+        _ProtocolModel(
+            [AIMessage(content="", tool_calls=[{"name": "t__one", "args": {}, "id": "c1"}]), _submit("a full answer")]
+        ),
+    )
+
+    # It neither ran out of budget nor errored: it simply finished.
+    assert result["output"] == "a full answer"
+    assert not result.get("budget_capped") and not result.get("execution_error")
+    persist.assert_awaited_once()
+    assert result["record_path"] == "/home/user/seizu_results/step_s1.json"
+
+
+def test_a_steps_conclusion_survives_the_synthesis_bound():
+    """A step's verdict is at its end -- the reachability skill tells its
+    sub-agent to put it there -- so a head-first cut removed exactly the
+    conclusion and kept the working (AGT-037)."""
+    body = "PREAMBLE " + ("working " * 400) + "VERDICT: not reachable."
+
+    kept = chat_orchestrator._keep_ends(body, 300)
+
+    assert "VERDICT: not reachable." in kept
+    assert kept.startswith("PREAMBLE")
+    assert "omitted" in kept
+    assert len(kept) <= 300
+
+
+def test_output_within_the_bound_is_untouched():
+    assert chat_orchestrator._keep_ends("short", 300) == "short"
+    assert chat_orchestrator._keep_ends("unbounded", 0) == "unbounded"
+
+
+def _planned(step_id: str, kind: str, deps: list[str]) -> _PlannedStep:
+    return _PlannedStep(id=step_id, goal=f"goal {step_id}", depends_on=deps, action_kind=kind)
+
+
+def test_a_closing_summary_step_is_dropped():
+    """The synthesizer writes the answer from every step's output, so a plan
+    ending in "summarize the findings" summarizes twice (AGT-037)."""
+    plan = chat_orchestrator._init_plan(
+        [
+            _planned("s1", "skill", []),
+            _planned("s2", "skill", ["s1"]),
+            _planned("s3", "answer", ["s1", "s2"]),
+        ]
+    )
+
+    assert [s["id"] for s in plan] == ["s1", "s2"]
+
+
+def test_an_answer_step_others_depend_on_is_kept():
+    # Selecting the three highest-risk CVEs is an answer step, and the steps
+    # that investigate them consume it.
+    plan = chat_orchestrator._init_plan(
+        [
+            _planned("s1", "skill", []),
+            _planned("s2", "answer", ["s1"]),
+            _planned("s3", "skill", ["s2"]),
+        ]
+    )
+
+    assert [s["id"] for s in plan] == ["s1", "s2", "s3"]
+
+
+def test_an_answer_only_plan_is_left_alone():
+    # Nothing needs fetching, or nothing can obtain the evidence: the answer
+    # step is the whole plan and dropping it would leave none.
+    plan = chat_orchestrator._init_plan([_planned("s1", "answer", [])])
+
+    assert [s["id"] for s in plan] == ["s1"]

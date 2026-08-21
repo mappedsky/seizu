@@ -241,6 +241,11 @@ class LLMTurnResult:
     leaked_tool_names: tuple[str, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    # Part of output_tokens: what the model spent thinking (AGT-033).
+    reasoning_tokens: int = 0
+    # The thinking itself, bounded. Diagnosis only; never replayed as context --
+    # _strip_reasoning_context governs what a model is shown again.
+    reasoning_text: str = ""
     cost_usd: float = 0.0
     usage_estimated: bool = False
 
@@ -1546,6 +1551,16 @@ async def _run_llm_tool_turn(
             current,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+            # Both, because a stage that is slow for its output size is usually
+            # thinking rather than writing, and the two are billed as one number
+            # (AGT-033). The effort is read off the model, so it says what the
+            # provider was told rather than what was configured.
+            reasoning_tokens=result.reasoning_tokens,
+            reasoning_effort=chat_models.applied_reasoning_effort(model),
+            # The thinking itself, for reading back when the question is what a
+            # stage deliberated over. Content, so opt-in like every other
+            # (AGT-026).
+            reasoning=telemetry.content(result.reasoning_text, 4000),
             cost_usd=result.cost_usd,
             finish_reason=result.finish_reason or "",
             provider_finish_reason=result.provider_finish_reason or "",
@@ -1634,8 +1649,14 @@ async def _run_llm_tool_turn_inner(
         ):
             finish_reason = _chunk_finish_reason(chunk) or finish_reason
             reasoning_delta = _chunk_reasoning_delta(chunk)
-            if reasoning_delta and writer is not None:
+            if reasoning_delta:
+                # Accumulated whether or not anyone is streaming it. A structured
+                # call passes no writer, so the planner's and verifier's thinking
+                # -- the stages that spend the most of it -- used to be parsed and
+                # dropped, which is the reasoning you most want to read when
+                # asking why a stage is slow (AGT-033).
                 reasoning_text = _truncate_text(f"{reasoning_text}{reasoning_delta}", 6000)
+            if reasoning_delta and writer is not None:
                 reasoning_detail_data = {
                     "kind": "thinking",
                     "title": "Thinking",
@@ -1765,6 +1786,8 @@ async def _run_llm_tool_turn_inner(
             leaked_tool_names=leaked_tool_names,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            reasoning_text=reasoning_text,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
         )
@@ -1789,6 +1812,8 @@ async def _run_llm_tool_turn_inner(
         leaked_tool_names=leaked_tool_names,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+        reasoning_text=reasoning_text,
         cost_usd=cost_usd,
         usage_estimated=usage_estimated,
     )
@@ -3269,6 +3294,8 @@ def build_capability_context(
     skills: list[Prompt],
     tools: list[Tool] | None,
     available_tools: list[Tool] | None = None,
+    *,
+    for_planner: bool = False,
 ) -> str:
     """Build the capability section of the system prompt from already-listed data.
 
@@ -3277,31 +3304,42 @@ def build_capability_context(
     of re-listing once per consumer (capability context, skill specs, tool
     specs). Pass ``tools=None`` to render the progressive-disclosure variant
     (skills + always-disclosed tools only).
+
+    ``for_planner`` keeps the catalogue and replaces the instruction. The
+    planner cannot call anything -- it names what its steps will use -- and the
+    executor's wording tells it to call a skill *now*, which is a contradiction
+    it has to resolve rather than an instruction it can follow (AGT-034).
     """
     if tools is None:
-        return _progressive_capability_context(skills, available_tools or [])
-    return _full_capability_context(skills, tools)
+        return _progressive_capability_context(skills, available_tools or [], for_planner=for_planner)
+    return _full_capability_context(skills, tools, for_planner=for_planner)
 
 
 def _progressive_capability_context(
     skills: list[Prompt],
     available_tools: list[Tool] | None = None,
+    *,
+    for_planner: bool = False,
 ) -> str:
     if not skills and not available_tools:
         return ""
     header = (
-        "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
-        "tools. When the task needs a workflow, call the relevant skill tool with every required argument. Seizu will "
-        "execute it internally and return the rendered skill to you. Rendered skills describe which tools to use and "
-        "how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools that the "
-        "skill declares as required. Do not rely on tools that have not been disclosed by a rendered skill, by prior "
-        "conversation context, or listed below as available now. Skill descriptions can include trigger phrases; "
-        "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
-        "trigger it."
+        _PLANNER_CAPABILITY_HEADER
+        if for_planner
+        else (
+            "Capability discovery mode: progressive disclosure is enabled. You are initially given structured skill "
+            "tools. When the task needs a workflow, call the relevant skill tool with every required argument. Seizu "
+            "will execute it internally and return the rendered skill to you. Rendered skills describe which tools to "
+            "use and how to use them; after a skill is rendered, Seizu will expose only the chat-safe structured tools "
+            "that the skill declares as required. Do not rely on tools that have not been disclosed by a rendered "
+            "skill, by prior conversation context, or listed below as available now. Skill descriptions can include "
+            "trigger phrases; if the current user request matches a trigger phrase, call that skill now instead of "
+            "describing how to trigger it."
+        )
     )
     sections: list[str] = [header]
     if skills:
-        sections.append(f"Available skills:\n{_format_skills(skills)}")
+        sections.append(f"Available skills:\n{_format_skills(skills, with_tools=for_planner)}")
     if available_tools:
         # "available now" rather than "always available": the list is the
         # always-on tools plus anything a skill unlocked earlier in this
@@ -3310,22 +3348,39 @@ def _progressive_capability_context(
     return "\n\n".join(sections)
 
 
-def _full_capability_context(skills: list[Prompt], tools: list[Tool]) -> str:
+#: What the planner is told about the same catalogue. The executor's wording is
+#: an instruction to act now; the planner's is a description of what its steps
+#: may name, because naming is all it can do (AGT-034).
+_PLANNER_CAPABILITY_HEADER = (
+    "These are the skills and tools the sub-agents running your plan can use. You are writing the plan, not "
+    "executing it: never call any of them, and do not describe how to trigger one. Put the exact name in a step's "
+    "required_action, and the same name in suggested_tools. A skill's trigger phrases tell you which request it is "
+    "meant for, so a request matching one is a step naming that skill. A rendered skill discloses further tools to "
+    "the sub-agent that runs it, so a step may rely on a skill it names to reach tools not listed here; nothing "
+    "outside this listing is available to a step that names no skill."
+)
+
+
+def _full_capability_context(skills: list[Prompt], tools: list[Tool], *, for_planner: bool = False) -> str:
     sections: list[str] = [
-        "Capability discovery mode: progressive disclosure is disabled. You are given both chat-safe tools and "
-        "skills up front, similar to a normal MCP listing. Use native structured tool calls and include every "
-        "required argument shown for the selected skill or tool. Skill descriptions can include trigger phrases; "
-        "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
-        "trigger it."
+        _PLANNER_CAPABILITY_HEADER
+        if for_planner
+        else (
+            "Capability discovery mode: progressive disclosure is disabled. You are given both chat-safe tools and "
+            "skills up front, similar to a normal MCP listing. Use native structured tool calls and include every "
+            "required argument shown for the selected skill or tool. Skill descriptions can include trigger phrases; "
+            "if the current user request matches a trigger phrase, call that skill now instead of describing how to "
+            "trigger it."
+        )
     ]
     if skills:
-        sections.append(f"Available skills:\n{_format_skills(skills)}")
+        sections.append(f"Available skills:\n{_format_skills(skills, with_tools=for_planner)}")
     if tools:
         sections.append(f"Available tools:\n{_format_tools(tools)}")
     return "\n\n".join(sections) if len(sections) > 1 else ""
 
 
-def _format_skills(skills: list[Prompt]) -> str:
+def _format_skills(skills: list[Prompt], *, with_tools: bool = False) -> str:
     lines: list[str] = []
     for skill in skills[:30]:
         args = _prompt_arguments(skill)
@@ -3333,10 +3388,32 @@ def _format_skills(skills: list[Prompt]) -> str:
         line = f"- {skill.name}: {description}"
         if args:
             line = f"{line} Args: {args}"
+        if with_tools:
+            required = _skill_required_tool_names(skill)
+            if required:
+                line = f"{line} Uses: {', '.join(required)}"
         lines.append(line)
     if len(skills) > 30:
         lines.append(f"- ...and {len(skills) - 30} more")
     return "\n".join(lines)
+
+
+def _skill_required_tool_names(skill: Prompt) -> list[str]:
+    """The tools a skill will disclose to whoever runs it.
+
+    Already fetched with the listing and, until now, dropped. Names only: they
+    are the mapping the planner lacks -- what a skill can actually reach -- and
+    they carry it, where the full descriptions cost three times as much for
+    little the names do not already say. One measured plan set a step's success
+    criteria to an installed package version and gave it a dependency whose
+    skill has no tool that returns one, then failed the step three times for the
+    gap (AGT-034).
+    """
+    from reporting.services.mcp_runtime import SKILL_TOOLS_META_KEY
+
+    meta = getattr(skill, "meta", None)
+    required = meta.get(SKILL_TOOLS_META_KEY) if isinstance(meta, dict) else None
+    return [str(name) for name in required or () if name]
 
 
 def _format_tools(tools: list[Tool]) -> str:

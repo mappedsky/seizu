@@ -20,6 +20,7 @@ from reporting.services.mcp_builtins import spaces as _spaces
 from reporting.services.mcp_builtins import toolsets as _toolsets
 from reporting.services.mcp_builtins import workflows as _workflows
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
+from reporting.services.mcp_builtins.sandbox import sandbox_result_dir
 
 # Ordered so ``list_tools`` renders a consistent layout; ``graph`` first
 # because it's the ad-hoc catch-all (schema + query), then everything
@@ -140,4 +141,5 @@ __all__ = [
     "find_builtin",
     "list_builtin_groups",
     "list_builtin_tools",
+    "sandbox_result_dir",
 ]

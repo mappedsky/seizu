@@ -17,7 +17,7 @@ from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
 from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
 from reporting.schema.mcp_config import render_skill_prompt
-from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j
+from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j, telemetry
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
@@ -476,14 +476,28 @@ async def _guarded(
     ran and reported "not found" or "permission denied" returns an ordinary
     result, because it *did* answer.
     """
-    try:
-        content, blocked = await call
+    # Traced here because this is where every tool call's outcome is known --
+    # built-in, user-defined and external alike. ``outcome`` is a string rather
+    # than a flag for the same reason ``stopped_by`` is on a step span: "it
+    # failed" and "it was refused" are different questions (AGT-026, AGT-029).
+    with telemetry.span(f"tool {name}", tool=name) as current:
+        try:
+            content, blocked = await call
+        except _ToolFailure as failure:
+            telemetry.set_attributes(
+                current,
+                outcome="error",
+                # A tool's own error text: the rate limit, the quota, the
+                # upstream message. Content, so opt-in.
+                error_text=telemetry.content(json.dumps(failure.payload, default=str), 400),
+            )
+            return text_response(failure.payload), None, True
+        except Exception as exc:
+            logger.exception("Unhandled error calling MCP tool %s", name)
+            telemetry.set_attributes(current, outcome="error", error_type=exc.__class__.__name__)
+            return text_response({"error": f"Failed to execute tool '{name}'"}), None, True
+        telemetry.set_attributes(current, outcome=blocked.value if blocked is not None else "ok")
         return content, blocked, False
-    except _ToolFailure as failure:
-        return text_response(failure.payload), None, True
-    except Exception:
-        logger.exception("Unhandled error calling MCP tool %s", name)
-        return text_response({"error": f"Failed to execute tool '{name}'"}), None, True
 
 
 async def _call_tool_core(
