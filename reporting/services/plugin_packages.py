@@ -29,6 +29,7 @@ from reporting.schema.plugins import (
 PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 EXTENSION_NAMESPACE = "com.mappedsky.seizu"
+LEGACY_PROJECTION_EXTENSION_KEY = "legacySkillsetProjection"
 
 MAX_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_UNPACKED_BYTES = 25 * 1024 * 1024
@@ -587,6 +588,7 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
         "description": skillset.description or skillset.name,
         "extensions": {
             EXTENSION_NAMESPACE: {
+                LEGACY_PROJECTION_EXTENSION_KEY: True,
                 "skillsetId": skillset.skillset_id,
                 "skills": {},
             }
@@ -627,3 +629,9 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
         )
     )
     return parse_package(files)
+
+
+def is_legacy_skillset_projection(manifest: dict[str, Any]) -> bool:
+    """Whether a plugin package is owned by the legacy compatibility projection."""
+    extension = manifest.get("extensions", {}).get(EXTENSION_NAMESPACE, {})
+    return isinstance(extension, dict) and extension.get(LEGACY_PROJECTION_EXTENSION_KEY) is True

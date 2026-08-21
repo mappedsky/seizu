@@ -41,6 +41,23 @@
               "required": true
             }
           ]
+        },
+        "verify-packaged-assets": {
+          "skillId": "verify_packaged_assets",
+          "title": "Verify packaged assets",
+          "enabled": true,
+          "triggers": [
+            "verify live Agent Plugin resources and scripts",
+            "test packaged skill references and scripts"
+          ],
+          "parameters": [
+            {
+              "name": "message",
+              "type": "string",
+              "description": "Message the packaged script must echo.",
+              "required": true
+            }
+          ]
         }
       }
     }

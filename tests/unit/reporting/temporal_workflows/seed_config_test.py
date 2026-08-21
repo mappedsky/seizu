@@ -21,7 +21,8 @@ def test_portable_plugin_dependencies_match_development_proxy_aliases(mocker) ->
 
     assert parsed.valid
     assert parsed.plugin_id == "portable_security_review"
-    assert len(parsed.skills) == 1
+    assert len(parsed.skills) == 2
+    dependency_review = next(skill for skill in parsed.skills if skill.skill_id == "review_source_dependencies")
 
     example_line = next(
         line
@@ -32,16 +33,72 @@ def test_portable_plugin_dependencies_match_development_proxy_aliases(mocker) ->
     proxies_by_upstream = {upstream: proxy for proxy in proxies for upstream in proxy.upstream_urls}
 
     available: set[str] = set()
-    for dependency in parsed.skills[0].allowed_tools:
+    for dependency in dependency_review.allowed_tools:
         logical = logical_mcp_ref(dependency)
         assert logical is not None
         server_name, tool_name = logical
-        upstream = parsed.skills[0].mcp_servers[server_name]["url"]
+        upstream = dependency_review.mcp_servers[server_name]["url"]
         assert proxies_by_upstream[upstream].name == server_name
         available.add(external_mcp.namespaced_tool_name(server_name, tool_name))
 
     mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", proxies)
-    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(parsed.skills[0], available)  # noqa: SLF001
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(dependency_review, available)  # noqa: SLF001
+
+    assert set(resolved) == available
+    assert missing == []
+
+    asset_check = next(skill for skill in parsed.skills if skill.skill_id == "verify_packaged_assets")
+    assert asset_check.has_scripts is True
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        asset_check,
+        {"sandbox__read_file", "sandbox__run_script"},
+    )
+    assert resolved == ["sandbox__run_script", "sandbox__read_file"]
+    assert missing == []
+
+
+def test_production_security_plugin_is_seeded_independently_of_legacy_skillsets(mocker) -> None:
+    root = Path(__file__).parents[4]
+    config_path = root / ".config/dev/seizu/reporting-dashboard.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    plugin_config = config["plugins"]["github_security_investigations"]
+    package_root = config_path.parent / plugin_config["source"]
+    parsed = parse_package(files_from_directory(package_root))
+
+    assert parsed.valid
+    assert parsed.plugin_id == "github_security_investigations"
+    assert parsed.manifest["version"] == "1.0.0"
+    assert {skill.skill_id for skill in parsed.skills if skill.enabled} == {
+        "github_org_security_overview",
+        "repo_cve_findings",
+        "repo_cve_reachability",
+    }
+
+    reachability = next(skill for skill in parsed.skills if skill.skill_id == "repo_cve_reachability")
+    assert "mcp:github/get_file_contents" in reachability.allowed_tools
+    assert "mcp:deps/depsdev_find_dependency_path" in reachability.allowed_tools
+    assert "sandbox__delegate" in reachability.allowed_tools
+
+    example_line = next(
+        line
+        for line in (root / ".env.example").read_text().splitlines()
+        if line.startswith("# MCP_EXTERNAL_PROXIES=") and '"upstream_urls"' in line
+    )
+    proxies = parse_external_mcp_proxies(example_line.removeprefix("# MCP_EXTERNAL_PROXIES="))
+    available = {
+        "sandbox__delegate",
+        "github_security__repo_dependencies",
+        "ext__github__list_branches",
+        "ext__github__get_file_contents",
+        "ext__github__search_code",
+        "ext__github__list_commits",
+        "ext__github__get_commit",
+        "ext__deps__depsdev_find_dependency_path",
+        "ext__deps__depsdev_get_requirements",
+    }
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", proxies)
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(reachability, available)  # noqa: SLF001
 
     assert set(resolved) == available
     assert missing == []

@@ -1046,6 +1046,52 @@ async def test_chat_skill_listing_includes_triggers_in_description(mocker):
     assert "Investigate a specific GitHub repository" in prompts[0].description
 
 
+async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mocker):
+    proxy = _external_proxy()
+    proxy.upstream_urls = ["https://github.example/mcp"]
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    plugin_skill = _plugin_skill().model_copy(
+        update={
+            "template": "Plugin summary {% $topic %}.",
+            "parameters": [ToolParamDef(name="topic", type="string", required=True)],
+        }
+    )
+    legacy_skill = _skill().model_copy(update={"template": "Legacy summary {% $topic %}."})
+    available_tools = [
+        mcp_runtime.Tool(name="reports__list", description="List reports", input_schema={"type": "object"}),
+        mcp_runtime.Tool(name="ext__drive__search", description="Search GitHub", input_schema={"type": "object"}),
+    ]
+    mocker.patch.object(report_store, "is_initialized", return_value=True)
+    mocker.patch.object(report_store, "list_enabled_plugin_skills", return_value=[plugin_skill])
+    mocker.patch.object(report_store, "list_enabled_skills", return_value=[legacy_skill])
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=available_tools)
+    mocker.patch.object(report_store, "get_enabled_plugin_skill", return_value=plugin_skill)
+    get_legacy = mocker.patch.object(report_store, "get_enabled_skill")
+    materialize = mocker.patch(
+        "reporting.services.mcp_builtins.sandbox.materialize_plugin_skill",
+        return_value="/home/user/seizu_plugins/security/3-abc/skills/summarize",
+    )
+    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+
+    prompts = await mcp_runtime.list_prompts_for_user(current, gate_permission=Permission.CHAT_SKILLS_CALL)
+    outcome = await mcp_runtime.render_prompt_for_chat(
+        current,
+        "security__summarize",
+        {"topic": "alerts"},
+        gate_permission=Permission.CHAT_SKILLS_CALL,
+    )
+
+    assert [prompt.name for prompt in prompts] == ["security__summarize"]
+    assert outcome.blocked is None
+    assert "Plugin summary alerts." in outcome.text
+    assert "Legacy summary" not in outcome.text
+    assert "Supporting plugin files are available" in outcome.text
+    assert "/home/user/seizu_plugins/security/3-abc/skills/summarize" in outcome.text
+    assert outcome.tools_required == ("reports__list", "ext__drive__search")
+    get_legacy.assert_not_awaited()
+    materialize.assert_awaited_once_with(plugin_skill)
+
+
 def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
     proxy = _external_proxy()
     proxy.upstream_urls = ["https://github.example/mcp"]

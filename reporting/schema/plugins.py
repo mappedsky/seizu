@@ -146,6 +146,7 @@ class SeizuPluginExtension(BaseModel):
 
     skillset_id: str
     skills: dict[str, SeizuSkillExtension] = Field(default_factory=dict)
+    legacy_skillset_projection: bool = Field(default=False, alias="legacySkillsetProjection")
 
     @field_validator("skillset_id")
     @classmethod

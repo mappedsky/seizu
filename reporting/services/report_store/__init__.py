@@ -655,9 +655,12 @@ async def update_skillset(
 
 
 async def delete_skillset(skillset_id: str) -> bool:
-    deleted = await get_store().delete_skillset(skillset_id)
+    store = get_store()
+    deleted = await store.delete_skillset(skillset_id)
     if deleted:
-        await get_store().delete_plugin(skillset_id)
+        plugin = await store.get_plugin(skillset_id)
+        if plugin and await _is_projection_owned_plugin(store, plugin):
+            await store.delete_plugin(skillset_id)
     return deleted
 
 
@@ -809,6 +812,9 @@ async def _sync_legacy_skillset(skillset_id: str, user_id: str, comment: str) ->
     from reporting.services.plugin_packages import legacy_skillset_package
 
     store = get_store()
+    existing = await store.get_plugin(skillset_id)
+    if existing and not await _is_projection_owned_plugin(store, existing):
+        return
     skillset = await store.get_skillset(skillset_id)
     if not skillset:
         return
@@ -816,7 +822,6 @@ async def _sync_legacy_skillset(skillset_id: str, user_id: str, comment: str) ->
     if not parsed.valid:
         logger.error("Legacy skillset %s no longer forms a valid plugin package", skillset_id)
         return
-    existing = await store.get_plugin(skillset_id)
     if existing and existing.package_digest == parsed.package_digest:
         return
     await store.publish_plugin(
@@ -829,6 +834,15 @@ async def _sync_legacy_skillset(skillset_id: str, user_id: str, comment: str) ->
         user_id,
         comment,
     )
+
+
+async def _is_projection_owned_plugin(store: ReportStore, plugin: PluginListItem) -> bool:
+    """Return whether the current package revision belongs to the legacy projection."""
+    from reporting.services.plugin_packages import is_legacy_skillset_projection
+
+    versions = await store.list_plugin_versions(plugin.plugin_id)
+    current = next((version for version in versions if version.revision == plugin.current_revision), None)
+    return bool(current and is_legacy_skillset_projection(current.manifest))
 
 
 async def _plugin_skill_version(

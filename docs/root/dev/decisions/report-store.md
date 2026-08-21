@@ -102,3 +102,20 @@ startup check, but only one may execute its check-and-create sequence at once.
 follows it. Two fresh workers can both observe a missing plugin and attempt the
 same primary-key insert, turning an otherwise healthy multi-worker startup into
 a worker boot failure.
+
+## STO-009 — Production skillsets cut over through an explicit same-ID package
+
+**Applies to:** `ReportingConfig.plugins`, `mcp_runtime.list_prompts_for_user`
+
+A production skillset moves off the compatibility projection by seeding an
+explicit Agent Plugin with the same skillset and skill IDs. Plugin prompts take
+precedence while the legacy rows remain installed, so the packaged workflow can
+be exercised in ordinary turns before the compatibility source is removed.
+Legacy compatibility writes and deletion only update a package carrying the
+projection ownership marker; after an explicit package takes over that ID, the
+legacy surface cannot overwrite or delete it.
+
+**Why:** validating a differently named example package proves package mechanics
+but not behavioral equivalence or fresh-install reconstruction. Same-ID shadowing
+tests the real selection path while keeping the legacy definition as a rollback
+until a package-only seed and end-to-end turn have both passed.

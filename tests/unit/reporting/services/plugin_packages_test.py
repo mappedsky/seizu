@@ -9,6 +9,7 @@ from reporting.services.plugin_packages import (
     MCP_SCHEMA,
     PLUGIN_SCHEMA,
     files_from_zip,
+    is_legacy_skillset_projection,
     legacy_skillset_package,
     parse_package,
 )
@@ -125,5 +126,6 @@ def test_legacy_projection_preserves_namespaced_identity_and_tools():
     parsed = legacy_skillset_package(skillset, [skill])
     assert parsed.valid
     assert parsed.plugin_id == "incident_response"
+    assert is_legacy_skillset_projection(parsed.manifest)
     assert parsed.skills[0].skill_id == "review_alert"
     assert parsed.skills[0].allowed_tools == ["graph__query"]

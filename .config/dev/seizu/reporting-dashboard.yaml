@@ -3027,6 +3027,9 @@ workflows:
             parameters: {}
 
 plugins:
+  github_security_investigations:
+    source: plugins/github-security-investigations
+    enabled: true
   portable_security_review:
     source: plugins/portable-security-review
     enabled: true
