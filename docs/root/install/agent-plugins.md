@@ -9,6 +9,21 @@ seizu plugins validate ./my-plugin
 seizu plugins install ./my-plugin
 ```
 
+Packages can also be installed by the bulk YAML seeder. The source may be a
+directory or ZIP and is resolved relative to the YAML file:
+
+```yaml
+plugins:
+  security_investigations:
+    source: plugins/security-investigations
+    enabled: true
+```
+
+The mapping key must equal `skillsetId`. Seeding validates the package before
+installing it and compares its content digest, so an unchanged package does not
+create another revision. Export preserves existing source declarations but
+does not invent filesystem paths for plugins installed through another client.
+
 The package must contain `plugin.json` at its root. Skills are discovered only
 from immediate child directories under `skills/`, as required by 1.0.0; nested
 namespaced discovery proposed for later versions is not enabled.
@@ -93,6 +108,13 @@ A proxy may also advertise aliases in its MCP initialize result under
 `capabilities.extensions.com.mappedsky.seizu.upstreamUrls`. Operator-configured
 `upstream_urls` always wins; advertised aliases are used only when exactly one
 enabled proxy claims the package endpoint.
+
+By default, an unmatched endpoint falls back to an enabled proxy whose name is
+the same as the `mcp.json` server name, but only when that user's discovery
+result contains the exact remote tool. This makes an ordinary `github` proxy
+usable without custom initialize metadata. Set
+`MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT=true` to require a configured or
+advertised URL alias and disable the name-and-tool fallback.
 
 ## Files and scripts
 

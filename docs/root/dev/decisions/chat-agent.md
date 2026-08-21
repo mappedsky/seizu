@@ -2343,4 +2343,13 @@ to drift. Treating the standard field as permission instead would conflict with
 remain the only execution boundary.
 
 Logical `mcp:<server>/<tool>` names resolve through operator-configured proxy
-aliases. The package endpoint is identity only; Seizu never connects to it.
+aliases. The package endpoint is identity only; Seizu never connects to it. URL
+matching is non-strict by default: when no alias matches, an equally named proxy
+may satisfy the dependency only if the user's discovered inventory contains the
+exact remote tool. Strict mode disables that fallback.
+
+**Why:** many hosted identity proxies cannot add MCP initialize extensions, and
+operators should not need control of the proxy implementation to use a package.
+The fallback remains narrower than matching a tool leaf globally: both the
+plugin server name and remote tool name must match, while RBAC still determines
+whether the discovered tool is present.

@@ -24,6 +24,7 @@ from mcp.types import (
 )
 from pydantic import ValidationError
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
@@ -977,6 +978,8 @@ def _resolve_plugin_allowed_tools(skill: Any, available: set[str]) -> tuple[list
             server = skill.mcp_servers.get(server_name)
             proxy = external_mcp.proxy_for_upstream_url(server.get("url", "")) if server else None
             name = external_mcp.namespaced_tool_name(proxy.name, remote_tool) if proxy else None
+            if name is None and server is not None and not settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT:
+                name = external_mcp.namespaced_tool_name(server_name, remote_tool)
             if name and name in available:
                 resolved.append(name)
             else:

@@ -75,3 +75,30 @@ sandbox execution throughout a turn, while references and assets often repeat
 unchanged between versions. Mutable filesystem paths would make a revision URI
 lie after an edit, and copying every file into every revision would pay the full
 package size for small metadata changes.
+
+## STO-007 — Plugin seeds reference packages beside the YAML configuration
+
+**Applies to:** `ReportingConfig.plugins`, `seed._seed_plugins`
+
+Each plugin seed names a directory or ZIP relative to the YAML file, keyed by
+its expected Seizu plugin ID. The seeder validates and installs it through the
+ordinary package API, and content digests make repeat runs idempotent. Export
+preserves declared sources but does not synthesize paths for other installs.
+
+**Why:** binary references, executable scripts, and the package hierarchy do
+not have a faithful or reviewable inline YAML representation. A relative source
+keeps the package and configuration relocatable as one deployment artifact,
+while the expected-ID key catches a package swapped into the wrong slot.
+
+## STO-008 — Legacy skillset projection is single-writer at startup
+
+**Applies to:** `SQLModelReportStore._migrate_legacy_skillsets`
+
+PostgreSQL serializes the legacy-skillset-to-plugin projection with a
+transaction advisory lock. Every Gunicorn worker still runs the idempotent
+startup check, but only one may execute its check-and-create sequence at once.
+
+**Why:** schema migration locking does not cover the data projection that
+follows it. Two fresh workers can both observe a missing plugin and attempt the
+same primary-key insert, turning an otherwise healthy multi-worker startup into
+a worker boot failure.

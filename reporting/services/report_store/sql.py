@@ -900,7 +900,19 @@ class SQLModelReportStore(ReportStore):
         logger.info("SQL report store tables initialised")
 
     async def _migrate_legacy_skillsets(self) -> None:
-        """Create the canonical package for skillsets predating plugins."""
+        """Serialize and create canonical packages for skillsets predating plugins."""
+        engine = _get_engine()
+        if engine.dialect.name != "postgresql":
+            await self._migrate_legacy_skillsets_unlocked()
+            return
+        async with engine.begin() as connection:
+            # Every web worker runs startup. Keep the projection single-writer
+            # so its check-and-create sequence cannot race another worker.
+            await connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('seizu-plugin-legacy-migration'))"))
+            await self._migrate_legacy_skillsets_unlocked()
+
+    async def _migrate_legacy_skillsets_unlocked(self) -> None:
+        """Create missing canonical packages while the startup lock is held."""
         from reporting.services.plugin_packages import legacy_skillset_package
 
         for skillset in await self.list_skillsets():

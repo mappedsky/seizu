@@ -1060,6 +1060,45 @@ def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
     assert missing == []
 
 
+def test_plugin_allowed_tools_fall_back_to_matching_proxy_name(mocker):
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [_external_proxy()])
+    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        _plugin_skill(),
+        {"reports__list", "ext__github__search"},
+    )
+
+    assert resolved == ["reports__list", "ext__github__search"]
+    assert missing == []
+
+
+def test_plugin_allowed_tools_strict_mode_requires_url_alias(mocker):
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [_external_proxy()])
+    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", True)
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        _plugin_skill(),
+        {"reports__list", "ext__github__search"},
+    )
+
+    assert resolved == ["reports__list"]
+    assert missing == ["mcp:github/search"]
+
+
+def test_plugin_allowed_tools_fallback_still_requires_declared_server(mocker):
+    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
+    skill = _plugin_skill().model_copy(update={"mcp_servers": {}})
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        skill,
+        {"reports__list", "ext__github__search"},
+    )
+
+    assert resolved == ["reports__list"]
+    assert missing == ["mcp:github/search"]
+
+
 async def test_plugin_resources_expose_published_text_files(mocker):
     mocker.patch("reporting.services.mcp_runtime.report_store.list_plugins", return_value=[_plugin()])
     mocker.patch(

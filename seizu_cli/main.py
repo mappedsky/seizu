@@ -160,7 +160,7 @@ def seed_cmd(
         help="Preview what would be created or updated without writing anything.",
     ),
 ) -> None:
-    """Seed reports, workflows, tools, and skills from YAML via the API."""
+    """Seed reports, workflows, tools, skills, and plugin packages via the API."""
     resolved_config = config or state.seed_file or cli_config.default_seed_file()
     seed.seed_cmd(config=resolved_config, force=force, dry_run=dry_run)
 
@@ -181,6 +181,6 @@ def export_cmd(
         help="Print the resulting YAML without overwriting the config file.",
     ),
 ) -> None:
-    """Export reports, workflows, tools, and skills back into a YAML config file."""
+    """Export API state while preserving declared plugin package sources."""
     resolved_config = config or state.seed_file or cli_config.default_seed_file()
     seed.export_cmd(config=resolved_config, dry_run=dry_run)

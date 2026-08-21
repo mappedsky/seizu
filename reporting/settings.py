@@ -1118,6 +1118,9 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
+# When false, a logical plugin server name may fall back to an equally named
+# proxy if that user's discovery result contains the requested remote tool.
+MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT = bool_env("MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.

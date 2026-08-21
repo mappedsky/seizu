@@ -3025,3 +3025,8 @@ workflows:
             input: vulnerable_dependencies
             output: remediation_results
             parameters: {}
+
+plugins:
+  portable_security_review:
+    source: plugins/portable-security-review
+    enabled: true

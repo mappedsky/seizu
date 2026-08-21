@@ -3332,3 +3332,22 @@ async def test_plugin_publish_is_versioned_and_content_addressed(store):
     assert await store.create_plugin_draft(parsed.plugin_id, "u2") is True
     assert (await store.read_plugin_draft_file(parsed.plugin_id, "notes.txt")).content == b"unsaved"
     assert await store.get_plugin_draft_base_revision(parsed.plugin_id) == 2
+
+
+async def test_legacy_plugin_projection_takes_postgres_startup_lock(mocker):
+    store = SQLModelReportStore()
+    connection = mocker.AsyncMock()
+    transaction = mocker.AsyncMock()
+    transaction.__aenter__.return_value = connection
+    engine = mocker.MagicMock()
+    engine.dialect.name = "postgresql"
+    engine.begin.return_value = transaction
+    mocker.patch.object(sql_module, "_get_engine", return_value=engine)
+    migrate = mocker.patch.object(store, "_migrate_legacy_skillsets_unlocked", new=mocker.AsyncMock())
+
+    await store._migrate_legacy_skillsets()  # noqa: SLF001
+
+    lock_sql = str(connection.execute.await_args.args[0])
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert "seizu-plugin-legacy-migration" in lock_sql
+    migrate.assert_awaited_once_with()

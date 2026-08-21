@@ -71,3 +71,55 @@ reports:
 
     mock_client.post.assert_not_called()
     mock_client.put.assert_called_once_with("/api/v1/reports/r1/pin", json={"pinned": True})
+
+
+def test_seed_plugins_resolves_relative_source_and_installs_package(
+    mock_client: MagicMock,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "plugins" / "security"
+    package.mkdir(parents=True)
+    (package / "plugin.json").write_text("{}")
+    config_path = tmp_path / "reporting.yaml"
+    config_path.write_text("plugins: {}\n")
+    config = seed.schema.ReportingConfig(
+        plugins={"security": seed.schema.PluginDef(source="plugins/security", enabled=False)}
+    )
+    validation = {
+        "valid": True,
+        "plugin_id": "security",
+        "package_digest": "digest-1",
+        "diagnostics": [],
+    }
+    installed = {"plugin_id": "security", "package_digest": "digest-1", "enabled": True}
+    disabled = {**installed, "enabled": False}
+    mock_client.get.return_value = {"plugins": []}
+    mock_client.post.side_effect = [validation, installed]
+    mock_client.put.return_value = disabled
+
+    seed._seed_plugins(config, config_path=config_path, force=False, dry_run=False)
+
+    assert [call.args[0] for call in mock_client.post.call_args_list] == [
+        "/api/v1/plugins/validate",
+        "/api/v1/plugins/install",
+    ]
+    mock_client.put.assert_called_once_with("/api/v1/plugins/security", json={"enabled": False})
+
+
+def test_seed_plugins_skips_unchanged_digest(mock_client: MagicMock, tmp_path: Path) -> None:
+    package = tmp_path / "security.zip"
+    package.write_bytes(b"package")
+    config = seed.schema.ReportingConfig(plugins={"security": seed.schema.PluginDef(source=str(package), enabled=True)})
+    existing = {"plugin_id": "security", "package_digest": "digest-1", "enabled": True}
+    mock_client.get.return_value = {"plugins": [existing]}
+    mock_client.post.return_value = {
+        "valid": True,
+        "plugin_id": "security",
+        "package_digest": "digest-1",
+        "diagnostics": [],
+    }
+
+    seed._seed_plugins(config, config_path=tmp_path / "reporting.yaml", force=True, dry_run=False)
+
+    assert [call.args[0] for call in mock_client.post.call_args_list] == ["/api/v1/plugins/validate"]
+    mock_client.put.assert_not_called()

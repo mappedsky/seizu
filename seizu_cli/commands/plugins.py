@@ -1,34 +1,21 @@
 """Agent Plugin package commands."""
 
-import io
 import json
-import zipfile
 from pathlib import Path
 
 import typer
 
+from seizu_cli.plugin_package import build_plugin_package
 from seizu_cli.state import get_client
 
 app = typer.Typer(help="Manage Agent Plugins 1.0.0 packages.", no_args_is_help=True)
 
 
-def _package(source: Path) -> tuple[str, bytes]:
-    if source.is_file():
-        return source.name, source.read_bytes()
-    if not source.is_dir():
-        raise typer.BadParameter("SOURCE must be a plugin directory or ZIP file")
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(source.rglob("*")):
-            if path.is_symlink():
-                raise typer.BadParameter(f"Symbolic links are unsupported: {path}")
-            if path.is_file():
-                archive.write(path, path.relative_to(source).as_posix())
-    return f"{source.name}.zip", output.getvalue()
-
-
 def _upload(endpoint: str, source: Path) -> dict:
-    name, content = _package(source)
+    try:
+        name, content = build_plugin_package(source)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     return get_client().post(endpoint, files={"package": (name, content, "application/zip")})
 
 

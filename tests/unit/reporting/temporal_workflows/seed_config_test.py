@@ -2,9 +2,49 @@ from pathlib import Path
 
 import yaml
 
+from reporting.schema.external_mcp import parse_external_mcp_proxies
+from reporting.services import external_mcp, mcp_runtime
+from reporting.services.plugin_packages import files_from_directory, logical_mcp_ref, parse_package
+
 
 def _activity(workflow: dict, stage: int, position: int = 0) -> dict:
     return workflow["stages"][stage]["activities"][position]
+
+
+def test_portable_plugin_dependencies_match_development_proxy_aliases(mocker) -> None:
+    root = Path(__file__).parents[4]
+    config_path = root / ".config/dev/seizu/reporting-dashboard.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    plugin_config = config["plugins"]["portable_security_review"]
+    package_root = config_path.parent / plugin_config["source"]
+    parsed = parse_package(files_from_directory(package_root))
+
+    assert parsed.valid
+    assert parsed.plugin_id == "portable_security_review"
+    assert len(parsed.skills) == 1
+
+    example_line = next(
+        line
+        for line in (root / ".env.example").read_text().splitlines()
+        if line.startswith("# MCP_EXTERNAL_PROXIES=") and '"upstream_urls"' in line
+    )
+    proxies = parse_external_mcp_proxies(example_line.removeprefix("# MCP_EXTERNAL_PROXIES="))
+    proxies_by_upstream = {upstream: proxy for proxy in proxies for upstream in proxy.upstream_urls}
+
+    available: set[str] = set()
+    for dependency in parsed.skills[0].allowed_tools:
+        logical = logical_mcp_ref(dependency)
+        assert logical is not None
+        server_name, tool_name = logical
+        upstream = parsed.skills[0].mcp_servers[server_name]["url"]
+        assert proxies_by_upstream[upstream].name == server_name
+        available.add(external_mcp.namespaced_tool_name(server_name, tool_name))
+
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", proxies)
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(parsed.skills[0], available)  # noqa: SLF001
+
+    assert set(resolved) == available
+    assert missing == []
 
 
 def test_cve_repo_workflow_uses_new_security_issue_observation() -> None:
