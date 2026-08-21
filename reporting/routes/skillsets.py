@@ -1,6 +1,8 @@
+import json
 import logging
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -26,11 +28,123 @@ from reporting.schema.mcp_config import (
     render_skill_prompt,
     validate_skill_template,
 )
-from reporting.services import external_mcp, report_store
+from reporting.schema.plugins import PluginFile
+from reporting.services import external_mcp, plugin_packages, report_store
 from reporting.services.mcp_builtins import find_builtin
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+async def _find_skill(skillset_id: str, skill_id: str) -> SkillItem | None:
+    skill = await report_store.get_skill(skill_id)
+    if skill and skill.skillset_id == skillset_id:
+        return skill
+    return next((item for item in await report_store.list_skills(skillset_id) if item.skill_id == skill_id), None)
+
+
+async def _plugin_files(plugin_id: str) -> list[PluginFile] | None:
+    plugin = await report_store.get_plugin(plugin_id)
+    if not plugin:
+        return None
+    files = [
+        await report_store.read_plugin_file(plugin_id, info.path, plugin.current_revision)
+        for info in await report_store.list_plugin_files(plugin_id, plugin.current_revision)
+    ]
+    return [file for file in files if file is not None]
+
+
+async def _publish_legacy_edit(
+    plugin_id: str,
+    files: list[PluginFile],
+    current: CurrentUser,
+    comment: str | None,
+) -> bool:
+    parsed = plugin_packages.parse_package(files)
+    if not parsed.valid or parsed.plugin_id != plugin_id:
+        return False
+    await report_store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        parsed.skills,
+        [diagnostic.model_dump() for diagnostic in parsed.diagnostics],
+        parsed.package_digest,
+        current.user.user_id,
+        comment,
+    )
+    return True
+
+
+def _legacy_skill_markdown(
+    portable_name: str,
+    description: str,
+    template: str,
+    tools_required: list[str],
+) -> bytes:
+    metadata: dict[str, Any] = {"name": portable_name, "description": description}
+    if tools_required:
+        metadata["allowed-tools"] = " ".join(tools_required)
+    frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=True).strip()
+    return f"---\n{frontmatter}\n---\n{template}".encode()
+
+
+async def _edit_plugin_skill(
+    plugin_id: str,
+    skill_id: str,
+    body: CreateSkillRequest | UpdateSkillRequest | None,
+    current: CurrentUser,
+    *,
+    delete: bool = False,
+) -> SkillItem | None:
+    files = await _plugin_files(plugin_id)
+    plugin = await report_store.get_plugin(plugin_id)
+    if files is None or plugin is None:
+        return None
+    indexed = await report_store.get_plugin_skill(plugin_id, skill_id)
+    portable_name = indexed.portable_name if indexed else skill_id.replace("_", "-")
+    by_path = {file.path: file for file in files}
+    manifest_file = by_path.get("plugin.json")
+    if manifest_file is None:
+        return None
+    manifest = json.loads(manifest_file.content)
+    extension = manifest["extensions"][plugin_packages.EXTENSION_NAMESPACE]
+    extension_skills = extension.setdefault("skills", {})
+    if delete:
+        if indexed is None:
+            return None
+        extension_skills.pop(portable_name, None)
+        by_path = {path: file for path, file in by_path.items() if not path.startswith(f"{indexed.source_path}/")}
+    elif body is not None:
+        extension_skills[portable_name] = {
+            "skillId": skill_id,
+            "title": body.name,
+            "enabled": body.enabled,
+            "triggers": body.triggers,
+            "parameters": [parameter.model_dump() for parameter in body.parameters],
+            "aliases": [f"{plugin_id}__{skill_id}"],
+        }
+        path = f"skills/{portable_name}/SKILL.md"
+        by_path[path] = PluginFile(
+            path=path,
+            content=_legacy_skill_markdown(
+                portable_name,
+                body.description or body.name,
+                body.template,
+                body.tools_required,
+            ),
+            media_type="text/markdown",
+        )
+    by_path["plugin.json"] = PluginFile(
+        path="plugin.json",
+        content=json.dumps(manifest, indent=2, sort_keys=True).encode(),
+        media_type="application/json",
+    )
+    comment = getattr(body, "comment", None) if body is not None else "Legacy skill delete"
+    if not await _publish_legacy_edit(plugin_id, list(by_path.values()), current, comment):
+        return None
+    skills = await report_store.list_skills(plugin_id)
+    return next((skill for skill in skills if skill.skill_id == skill_id), None) if not delete else None
 
 
 def _with_effective_skill_state(skill: SkillItem, skillset: SkillsetListItem) -> SkillItem:
@@ -132,6 +246,24 @@ async def update_skillset(
         comment=body.comment,
     )
     if not item:
+        files = await _plugin_files(skillset_id)
+        if files is not None:
+            by_path = {file.path: file for file in files}
+            manifest_file = by_path.get("plugin.json")
+            if manifest_file is not None:
+                manifest = json.loads(manifest_file.content)
+                manifest["description"] = body.description
+                by_path["plugin.json"] = PluginFile(
+                    path="plugin.json",
+                    content=json.dumps(manifest, indent=2, sort_keys=True).encode(),
+                    media_type="application/json",
+                )
+                if await _publish_legacy_edit(skillset_id, list(by_path.values()), current, body.comment):
+                    enabled_plugin = await report_store.set_plugin_enabled(
+                        skillset_id, body.enabled, current.user.user_id
+                    )
+                    item = await report_store.get_skillset(skillset_id) if enabled_plugin else None
+    if not item:
         raise HTTPException(status_code=404, detail="Skillset not found")
     return item
 
@@ -142,6 +274,8 @@ async def delete_skillset(
     current: CurrentUser = Depends(require_permission(Permission.SKILLSETS_DELETE)),
 ) -> SkillsetIdResponse:
     ok = await report_store.delete_skillset(skillset_id)
+    if not ok:
+        ok = await report_store.delete_plugin(skillset_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Skillset not found")
     return SkillsetIdResponse(skillset_id=skillset_id)
@@ -201,7 +335,7 @@ async def create_skill(
     body: CreateSkillRequest,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_WRITE)),
 ) -> Any:
-    if await report_store.get_skill(body.skill_id):
+    if await report_store.get_skill(body.skill_id) or await report_store.get_plugin_skill(skillset_id, body.skill_id):
         raise HTTPException(status_code=409, detail="Skill already exists")
     errors = validate_skill_template(body.parameters, body.template)
     if errors:
@@ -222,6 +356,13 @@ async def create_skill(
         created_by=current.user.user_id,
     )
     if not skill:
+        skill = await _edit_plugin_skill(
+            skillset_id,
+            body.skill_id,
+            body.model_copy(update={"tools_required": valid_tools}),
+            current,
+        )
+    if not skill:
         raise HTTPException(status_code=404, detail="Skillset not found")
     skillset = await report_store.get_skillset(skillset_id)
     if not skillset:
@@ -238,8 +379,8 @@ async def get_skill(
     skill_id: str,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_READ)),
 ) -> SkillItem:
-    skill = await report_store.get_skill(skill_id)
-    if not skill or skill.skillset_id != skillset_id:
+    skill = await _find_skill(skillset_id, skill_id)
+    if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     skillset = await report_store.get_skillset(skillset_id)
     if not skillset:
@@ -257,8 +398,8 @@ async def update_skill(
     body: UpdateSkillRequest,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_WRITE)),
 ) -> Any:
-    existing = await report_store.get_skill(skill_id)
-    if not existing or existing.skillset_id != skillset_id:
+    existing = await _find_skill(skillset_id, skill_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Skill not found")
     errors = validate_skill_template(body.parameters, body.template)
     if errors:
@@ -279,6 +420,13 @@ async def update_skill(
         comment=body.comment,
     )
     if not skill:
+        skill = await _edit_plugin_skill(
+            skillset_id,
+            skill_id,
+            body.model_copy(update={"tools_required": valid_tools}),
+            current,
+        )
+    if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     skillset = await report_store.get_skillset(skillset_id)
     if not skillset:
@@ -295,10 +443,15 @@ async def delete_skill(
     skill_id: str,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_DELETE)),
 ) -> SkillIdResponse:
-    existing = await report_store.get_skill(skill_id)
-    if not existing or existing.skillset_id != skillset_id:
+    existing = await _find_skill(skillset_id, skill_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Skill not found")
     ok = await report_store.delete_skill(skill_id)
+    if not ok:
+        plugin_skill = await report_store.get_plugin_skill(skillset_id, skill_id)
+        if plugin_skill:
+            await _edit_plugin_skill(skillset_id, skill_id, None, current, delete=True)
+            ok = await report_store.get_plugin_skill(skillset_id, skill_id) is None
     if not ok:
         raise HTTPException(status_code=404, detail="Skill not found")
     return SkillIdResponse(skill_id=skill_id)
@@ -314,8 +467,8 @@ async def render_skill(
     body: RenderSkillRequest,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_RENDER)),
 ) -> Any:
-    skill = await report_store.get_skill(skill_id)
-    if not skill or skill.skillset_id != skillset_id:
+    skill = await _find_skill(skillset_id, skill_id)
+    if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
     skillset = await report_store.get_skillset(skillset_id)
     if not skillset:
@@ -345,10 +498,10 @@ async def list_skill_versions(
     skill_id: str,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_READ)),
 ) -> SkillVersionListResponse:
-    skill = await report_store.get_skill(skill_id)
-    if not skill or skill.skillset_id != skillset_id:
+    skill = await _find_skill(skillset_id, skill_id)
+    if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return SkillVersionListResponse(versions=await report_store.list_skill_versions(skill_id))
+    return SkillVersionListResponse(versions=await report_store.list_skill_versions(skill_id, skillset_id))
 
 
 @router.get(
@@ -361,7 +514,7 @@ async def get_skill_version(
     version: int,
     current: CurrentUser = Depends(require_permission(Permission.SKILLS_READ)),
 ) -> SkillVersion:
-    v = await report_store.get_skill_version(skill_id, version)
+    v = await report_store.get_skill_version(skill_id, version, skillset_id)
     if not v or v.skillset_id != skillset_id:
         raise HTTPException(status_code=404, detail="Skill version not found")
     return v

@@ -2326,3 +2326,21 @@ the end — 33 recorded calls, 25 distinct, on the run above.
 **Don't:** treat "the budget ended the run" as "the run found nothing". The
 terminal status is `budget_exhausted` and the answer must be the partial one the
 evidence supports, with the limit stated.
+
+## AGT-036 — Agent Skill `allowed-tools` is a dependency declaration in Seizu
+
+**Applies to:** `plugin_packages.py`, `mcp_runtime._resolve_plugin_allowed_tools`
+
+For tool names Seizu recognizes, `allowed-tools` means the skill requires and
+discloses that tool. The skill is hidden for a user whose ordinary tool listing
+does not contain it. Unknown portable tokens are retained and ignored.
+
+**Why:** the existing `tools_required` field already meant that the workflow
+could not run without those tools. Keeping a second Seizu-only field would make
+portable packages declare the same dependency twice and allow the declarations
+to drift. Treating the standard field as permission instead would conflict with
+[AGT-002](#agt-002): disclosure is not authorization, and RBAC plus confirmation
+remain the only execution boundary.
+
+Logical `mcp:<server>/<tool>` names resolve through operator-configured proxy
+aliases. The package endpoint is identity only; Seizu never connects to it.

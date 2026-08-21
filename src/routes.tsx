@@ -30,6 +30,8 @@ import LoggedOut from 'src/pages/LoggedOut';
 import Workflows from 'src/pages/Workflows';
 import WorkflowView from 'src/pages/WorkflowView';
 import WorkflowHistory from 'src/pages/WorkflowHistory';
+import Plugins from 'src/pages/Plugins';
+import PluginEditor from 'src/pages/PluginEditor';
 
 function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
   const { id } = useParams();
@@ -89,6 +91,8 @@ const routes = [
         element: <ToolHistory />,
       },
       { path: 'skillsets', element: <Skillsets /> },
+      { path: 'plugins', element: <Plugins /> },
+      { path: 'plugins/:pluginId/edit', element: <PluginEditor /> },
       { path: 'skillsets/:skillsetId/skills', element: <SkillsetSkills /> },
       { path: 'skillsets/:skillsetId/history', element: <SkillsetHistory /> },
       {

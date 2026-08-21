@@ -669,3 +669,17 @@ back into a worker-local loop; the Schedule is the singleton mechanism.
 **Don't:** delete the session record before its checkpoint, or let a schedule
 failure propagate out of worker startup — both were review findings, and both
 trade a housekeeping sweep for something much larger.
+
+## SBX-017 — Plugin code runs only from an immutable sandbox materialization
+
+**Applies to:** `materialize_plugin_skill`, `sandbox__run_script`
+
+A selected plugin skill is materialized beneath `/home/user/seizu_plugins` at a
+path containing its revision and package digest. The digest marker is written
+last. Scripts execute there through an argv-array subprocess launched inside the
+sandbox; the Seizu web and Temporal worker processes never execute package code.
+
+**Why:** package scripts are untrusted code. Reusing the conversation sandbox
+keeps their files available to the rest of the skill while preserving SBX-009's
+isolation boundary. Revision-addressed paths prevent a draft or later publish
+from changing the code midway through a turn.

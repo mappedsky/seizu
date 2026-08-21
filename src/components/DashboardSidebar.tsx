@@ -117,9 +117,9 @@ function DashboardSidebar({
       title: 'MCP Toolsets',
     },
     {
-      href: '/app/skillsets',
+      href: '/app/plugins',
       icon: Psychology,
-      title: 'MCP Skillsets',
+      title: 'Agent Plugins',
     },
     ...(hasPermission('roles:read')
       ? [

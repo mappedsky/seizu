@@ -20,9 +20,12 @@ from reporting import settings
 from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
+from reporting.schema.plugins import PluginFile
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
+from reporting.services.plugin_packages import legacy_skillset_package
 from reporting.services.report_store import sql as sql_module
+from reporting.services.report_store.base import PluginRevisionConflict
 from reporting.services.report_store.sql import SQLModelReportStore
 
 # ---------------------------------------------------------------------------
@@ -3251,3 +3254,81 @@ async def test_delete_space_never_deletes_a_report(store):
     assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
     # The report survives; only the space is gone.
     assert await store.get_report_metadata(report.report_id) is not None
+
+
+async def test_plugin_publish_is_versioned_and_content_addressed(store):
+    skillset = SkillsetListItem(
+        skillset_id="incident_response",
+        name="Incident response",
+        current_version=1,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        created_by="u1",
+    )
+    skill = SkillItem(
+        skill_id="review_alert",
+        skillset_id=skillset.skillset_id,
+        name="Review alert",
+        description="Review one alert",
+        template="Review it.",
+        current_version=1,
+        created_at=skillset.created_at,
+        updated_at=skillset.updated_at,
+        created_by="u1",
+    )
+    parsed = legacy_skillset_package(skillset, [skill])
+    indexed_skills = [parsed.skills[0].model_copy(update={"has_scripts": True})]
+    first = await store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        indexed_skills,
+        [],
+        parsed.package_digest,
+        "u1",
+    )
+    second = await store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        indexed_skills,
+        [],
+        parsed.package_digest,
+        "u1",
+    )
+    assert first.current_revision == 1
+    assert second.current_revision == 2
+    assert len(await store.list_plugin_versions(parsed.plugin_id)) == 2
+    assert len(await store.list_plugin_files(parsed.plugin_id, 1)) == len(parsed.files)
+    stored_skill = await store.get_enabled_plugin_skill(parsed.plugin_id, "review_alert")
+    assert stored_skill.portable_name == "review-alert"
+    assert stored_skill.has_scripts is True
+    assert (await store.set_plugin_enabled(parsed.plugin_id, False, "u2")).enabled is False
+    assert await store.get_enabled_plugin_skill(parsed.plugin_id, "review_alert") is None
+    await store.set_plugin_enabled(parsed.plugin_id, True, "u2")
+
+    with pytest.raises(PluginRevisionConflict):
+        await store.publish_plugin(
+            parsed.plugin_id,
+            parsed.manifest,
+            parsed.files,
+            indexed_skills,
+            [],
+            parsed.package_digest,
+            "u1",
+            expected_revision=1,
+        )
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        blobs = (await session.execute(select(sql_module.PluginBlobRecord))).scalars().all()
+    assert len(blobs) == len(parsed.files)
+
+    assert await store.create_plugin_draft(parsed.plugin_id, "u1") is True
+    await store.write_plugin_draft_file(
+        parsed.plugin_id,
+        PluginFile(path="notes.txt", content=b"unsaved"),
+        "u1",
+    )
+    assert await store.create_plugin_draft(parsed.plugin_id, "u2") is True
+    assert (await store.read_plugin_draft_file(parsed.plugin_id, "notes.txt")).content == b"unsaved"
+    assert await store.get_plugin_draft_base_revision(parsed.plugin_id) == 2

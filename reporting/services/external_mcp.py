@@ -35,6 +35,8 @@ AUTHENTICATE_TOOL_NAME = "seizu_authenticate"
 EXTERNAL_TOOLSET_PREFIX = "__external_"
 _SYNTHETIC_SUFFIX = "__"
 _EPOCH = "1970-01-01T00:00:00+00:00"
+_PLUGIN_EXTENSION_NAMESPACE = "com.mappedsky.seizu"
+_advertised_upstream_urls: dict[str, frozenset[str]] = {}
 _RESOURCE_METADATA_RE = re.compile(r"(?:^|[,\s])resource_metadata\s*=\s*(?:\"([^\"]+)\"|([^,\s]+))", re.I)
 
 
@@ -130,6 +132,42 @@ def parse_namespaced_tool_name(name: str) -> tuple[ExternalMCPProxy, str] | None
         return None
     proxy = next((item for item in settings.MCP_EXTERNAL_PROXIES if item.enabled and item.name == proxy_name), None)
     return (proxy, remote_name) if proxy is not None else None
+
+
+def proxy_for_upstream_url(url: str) -> ExternalMCPProxy | None:
+    """Return the configured identity proxy for a portable MCP endpoint."""
+    configured = [proxy for proxy in settings.MCP_EXTERNAL_PROXIES if proxy.enabled and url in proxy.upstream_urls]
+    if configured:
+        return configured[0] if len(configured) == 1 else None
+    advertised = [
+        proxy
+        for proxy in settings.MCP_EXTERNAL_PROXIES
+        if proxy.enabled and url in _advertised_upstream_urls.get(proxy.name, frozenset())
+    ]
+    return advertised[0] if len(advertised) == 1 else None
+
+
+def _record_upstream_metadata(proxy: ExternalMCPProxy, initialize_result: Any) -> None:
+    """Record portable endpoint aliases advertised during MCP initialize."""
+    containers: list[Any] = []
+    capabilities = getattr(initialize_result, "capabilities", None)
+    extensions = getattr(capabilities, "extensions", None)
+    if isinstance(extensions, dict):
+        containers.append(extensions.get(_PLUGIN_EXTENSION_NAMESPACE))
+    meta = getattr(initialize_result, "meta", None)
+    if isinstance(meta, dict):
+        containers.append(meta.get(_PLUGIN_EXTENSION_NAMESPACE))
+    urls: set[str] = set()
+    for value in containers:
+        if not isinstance(value, dict):
+            continue
+        raw_urls = value.get("upstreamUrls")
+        if isinstance(raw_urls, list):
+            urls.update(url for url in raw_urls if isinstance(url, str) and url.startswith(("http://", "https://")))
+    if urls:
+        _advertised_upstream_urls[proxy.name] = frozenset(urls)
+    else:
+        _advertised_upstream_urls.pop(proxy.name, None)
 
 
 def tool_requires_confirmation(
@@ -262,7 +300,8 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     try:
         async with _transport(proxy, headers, oauth_challenges) as streams:
             async with ClientSession(*streams, read_timeout_seconds=proxy.read_timeout_seconds) as session:
-                await session.initialize()
+                initialize_result = await session.initialize()
+                _record_upstream_metadata(proxy, initialize_result)
                 yield session
     except ExternalMCPAuthenticationRequired:
         raise

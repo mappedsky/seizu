@@ -14,9 +14,12 @@ from reporting.services.report_store.sql import SQLModelReportStore
 def reset_store():
     """Reset the module-level store singleton between tests."""
     original = report_store._store
+    original_initialized = report_store._initialized
     report_store._store = None
+    report_store._initialized = False
     yield
     report_store._store = original
+    report_store._initialized = original_initialized
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +131,11 @@ def mock_store():
         "get_skill_version": None,
         "list_enabled_skills": [],
         "get_enabled_skill": None,
+        "list_plugins": [],
+        "get_plugin": None,
+        "delete_plugin": False,
+        "list_plugin_skills": [],
+        "get_plugin_draft_base_revision": None,
         "save_query_history": None,
         "list_query_history": ([], 0),
         "list_roles": [],

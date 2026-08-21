@@ -30,6 +30,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
     QueryHistoryItem,
@@ -47,6 +48,10 @@ from reporting.schema.space_config import (
     SpaceListItem,
     SubspaceItem,
 )
+
+
+class PluginRevisionConflict(RuntimeError):
+    """A plugin draft was based on a revision that is no longer current."""
 
 
 def require_public_space_member(access: ReportAccess, space_id: str | None) -> None:
@@ -802,6 +807,101 @@ class ReportStore(ABC):
     @abstractmethod
     async def get_enabled_skill(self, skillset_id: str, skill_id: str) -> SkillItem | None:
         """Return an enabled skill in an enabled skillset, or None if not found."""
+
+    # ------------------------------------------------------------------
+    # Agent plugins
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_plugins(self) -> list[PluginListItem]:
+        """Return installed Agent Plugins."""
+
+    @abstractmethod
+    async def get_plugin(self, plugin_id: str) -> PluginListItem | None:
+        """Return an installed Agent Plugin."""
+
+    @abstractmethod
+    async def publish_plugin(
+        self,
+        plugin_id: str,
+        manifest: dict[str, Any],
+        files: list[PluginFile],
+        skills: list[PluginSkillItem],
+        diagnostics: list[dict[str, Any]],
+        package_digest: str,
+        created_by: str,
+        comment: str | None = None,
+        expected_revision: int | None = None,
+    ) -> PluginListItem:
+        """Atomically publish a complete immutable plugin package revision."""
+
+    @abstractmethod
+    async def set_plugin_enabled(self, plugin_id: str, enabled: bool, updated_by: str) -> PluginListItem | None:
+        """Set plugin activation without changing package contents."""
+
+    @abstractmethod
+    async def delete_plugin(self, plugin_id: str) -> bool:
+        """Delete an installed plugin, its drafts, revisions, and indexes."""
+
+    @abstractmethod
+    async def list_plugin_versions(self, plugin_id: str) -> list[PluginVersion]:
+        """Return immutable plugin revisions newest first."""
+
+    @abstractmethod
+    async def list_plugin_files(self, plugin_id: str, revision: int | None = None) -> list[PluginFileInfo]:
+        """Return a plugin revision's file manifest."""
+
+    @abstractmethod
+    async def read_plugin_file(self, plugin_id: str, path: str, revision: int | None = None) -> PluginFile | None:
+        """Read one file from a published plugin revision."""
+
+    @abstractmethod
+    async def list_enabled_plugin_skills(self) -> list[PluginSkillItem]:
+        """Return enabled skills indexed from enabled plugins."""
+
+    @abstractmethod
+    async def list_plugin_skills(self, plugin_id: str) -> list[PluginSkillItem]:
+        """Return all indexed skills for one plugin, including disabled skills."""
+
+    @abstractmethod
+    async def get_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        """Return one indexed plugin skill regardless of activation state."""
+
+    @abstractmethod
+    async def get_enabled_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        """Return an enabled plugin skill by its namespaced identity."""
+
+    @abstractmethod
+    async def create_plugin_draft(self, plugin_id: str, user_id: str) -> bool:
+        """Create the plugin's single draft, or preserve the existing draft."""
+
+    @abstractmethod
+    async def get_plugin_draft_base_revision(self, plugin_id: str) -> int | None:
+        """Return the revision from which the current draft was created."""
+
+    @abstractmethod
+    async def list_plugin_draft_files(self, plugin_id: str) -> list[PluginFileInfo]:
+        """Return the current draft file manifest."""
+
+    @abstractmethod
+    async def read_plugin_draft_file(self, plugin_id: str, path: str) -> PluginFile | None:
+        """Read a draft file."""
+
+    @abstractmethod
+    async def write_plugin_draft_file(
+        self, plugin_id: str, file: PluginFile, user_id: str, expected_etag: str | None = None
+    ) -> PluginFileInfo | None:
+        """Write a draft file, returning None on an ETag conflict or missing draft."""
+
+    @abstractmethod
+    async def delete_plugin_draft_file(
+        self, plugin_id: str, path: str, user_id: str, expected_etag: str | None = None
+    ) -> bool:
+        """Delete a draft file with optional optimistic concurrency."""
+
+    @abstractmethod
+    async def delete_plugin_draft(self, plugin_id: str) -> bool:
+        """Discard a plugin draft."""
 
     # ------------------------------------------------------------------
     # Query history

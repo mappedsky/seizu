@@ -10,6 +10,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.external_mcp import ExternalMCPProxy
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
+from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.services import action_confirmations, external_mcp, mcp_runtime, report_store
 
@@ -82,6 +83,35 @@ def _skill() -> SkillItem:
         parameters=[ToolParamDef(name="topic", type="string", required=True)],
         enabled=True,
         current_version=1,
+        created_at=_NOW,
+        updated_at=_NOW,
+        created_by="user-1",
+    )
+
+
+def _plugin_skill() -> PluginSkillItem:
+    return PluginSkillItem(
+        plugin_id="security",
+        skill_id="summarize",
+        portable_name="summarize",
+        title="Summarize",
+        description="Summarize a topic",
+        template="Summarize the topic.",
+        allowed_tools=["reports__list", "mcp:github/search", "portable-tool"],
+        source_path="skills/summarize",
+        mcp_servers={"github": {"type": "streamable-http", "url": "https://github.example/mcp"}},
+        revision=3,
+        package_digest="abc",
+    )
+
+
+def _plugin() -> PluginListItem:
+    return PluginListItem(
+        plugin_id="security",
+        name="security",
+        enabled=True,
+        current_revision=3,
+        package_digest="abc",
         created_at=_NOW,
         updated_at=_NOW,
         created_by="user-1",
@@ -1014,6 +1044,57 @@ async def test_chat_skill_listing_includes_triggers_in_description(mocker):
     assert "trigger phrases" in prompts[0].description
     assert "Investigate a GitHub organization" in prompts[0].description
     assert "Investigate a specific GitHub repository" in prompts[0].description
+
+
+def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
+    proxy = _external_proxy()
+    proxy.upstream_urls = ["https://github.example/mcp"]
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        _plugin_skill(),
+        {"reports__list", "ext__drive__search"},
+    )
+
+    assert resolved == ["reports__list", "ext__drive__search"]
+    assert missing == []
+
+
+async def test_plugin_resources_expose_published_text_files(mocker):
+    mocker.patch("reporting.services.mcp_runtime.report_store.list_plugins", return_value=[_plugin()])
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.list_plugin_files",
+        return_value=[
+            PluginFileInfo(
+                path="skills/summarize/references/guide.md",
+                media_type="text/markdown",
+                size=5,
+                sha256="abc",
+                etag='"abc"',
+            )
+        ],
+    )
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.get_plugin",
+        return_value=_plugin(),
+    )
+    read_file = mocker.patch(
+        "reporting.services.mcp_runtime.report_store.read_plugin_file",
+        return_value=PluginFile(
+            path="skills/summarize/references/guide.md",
+            media_type="text/markdown",
+            content=b"hello",
+        ),
+    )
+    current = _user(frozenset({Permission.SKILLS_RENDER.value}))
+
+    resources = await mcp_runtime.list_plugin_resources_for_user(current)
+    resource = await mcp_runtime.read_plugin_resource_for_user(current, str(resources[0].uri))
+
+    assert resources[0].name == "skills/summarize/references/guide.md"
+    assert resource is not None
+    assert resource.text == "hello"
+    read_file.assert_awaited_once_with("security", "skills/summarize/references/guide.md", 3)
 
 
 async def test_skill_render_still_requires_underlying_mcp_permission(mocker):

@@ -1107,7 +1107,7 @@ MCP_ENABLED = bool_env("MCP_ENABLED", True)
 # Unset or empty → all groups enabled (default).
 # "none"         → all built-in groups disabled (user-defined toolsets unaffected).
 # Comma-separated list (e.g. "graph,reports") → only those groups.
-# Known groups: graph, reports, roles, sandbox, scheduled_queries, skillsets, spaces, toolsets.
+# Known groups: graph, plugins, reports, roles, sandbox, scheduled_queries, skillsets, spaces, toolsets.
 # Note: the sandbox group is chat-only (never exposed via the MCP server endpoint
 # regardless of this setting) and also requires SANDBOX_ENABLED=true.
 MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])

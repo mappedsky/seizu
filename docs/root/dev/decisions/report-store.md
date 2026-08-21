@@ -60,3 +60,18 @@ SQLite engines remain only as a fast unit-test seam.
 The release boundary and backup/rollback procedure are documented under
 "Migrating from DynamoDB to PostgreSQL" in the upgrade guide. Legacy checkpoint
 history is explicitly disposable and is not copied into PostgreSQL.
+
+## STO-006 — Plugin packages are immutable revisions over content-addressed blobs
+
+**Applies to:** `PluginRecord`, `PluginVersionRecord`, `PluginBlobRecord`,
+`PluginFileRecord`, `PluginDraftRecord`
+
+PostgreSQL stores package manifests, indexed skills, file manifests, and SHA-256
+addressed file bytes. Publishing creates one immutable revision atomically;
+authoring mutates a separate single draft.
+
+**Why:** package files must remain byte-identical for MCP resource reads and
+sandbox execution throughout a turn, while references and assets often repeat
+unchanged between versions. Mutable filesystem paths would make a revision URI
+lie after an edit, and copying every file into every revision would pay the full
+package size for small metadata changes.

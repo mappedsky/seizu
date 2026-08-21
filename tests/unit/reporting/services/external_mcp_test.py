@@ -370,3 +370,35 @@ async def test_retries_are_bounded(mocker) -> None:
 
     assert result.is_error is True
     assert session.call_tool.await_count == 3  # the call plus two retries
+
+
+def test_plugin_mcp_url_prefers_operator_config_over_advertised_metadata(mocker):
+    configured = ExternalMCPProxy(
+        name="configured",
+        url="https://proxy.example/configured",
+        upstream_urls=["https://upstream.example/mcp"],
+    )
+    advertised = ExternalMCPProxy(name="advertised", url="https://proxy.example/advertised")
+    mocker.patch("reporting.services.external_mcp.settings.MCP_EXTERNAL_PROXIES", [configured, advertised])
+    mocker.patch.dict(
+        external_mcp._advertised_upstream_urls,
+        {"advertised": frozenset({"https://upstream.example/mcp"})},
+        clear=True,
+    )
+    assert external_mcp.proxy_for_upstream_url("https://upstream.example/mcp") == configured
+
+
+def test_plugin_mcp_url_can_be_advertised_during_initialize(mocker):
+    proxy = _proxy()
+    mocker.patch("reporting.services.external_mcp.settings.MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch.dict(external_mcp._advertised_upstream_urls, {}, clear=True)
+    result = SimpleNamespace(
+        capabilities=SimpleNamespace(
+            extensions={"com.mappedsky.seizu": {"upstreamUrls": ["https://upstream.example/mcp"]}}
+        ),
+        meta=None,
+    )
+
+    external_mcp._record_upstream_metadata(proxy, result)
+
+    assert external_mcp.proxy_for_upstream_url("https://upstream.example/mcp") == proxy

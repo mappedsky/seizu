@@ -1,9 +1,24 @@
+import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from snowflake import SnowflakeGenerator
-from sqlalchemy import JSON, Column, Index, Text, UniqueConstraint, and_, delete, func, null, nullslast, text, update
+from sqlalchemy import (
+    JSON,
+    Column,
+    Index,
+    LargeBinary,
+    Text,
+    UniqueConstraint,
+    and_,
+    delete,
+    func,
+    null,
+    nullslast,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -32,6 +47,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
     QueryHistoryItem,
@@ -51,6 +67,7 @@ from reporting.schema.space_config import (
     SubspaceItem,
 )
 from reporting.services.report_store.base import (
+    PluginRevisionConflict,
     ReportStore,
     chat_turn_lease_expiry,
     initial_report_config,
@@ -327,6 +344,93 @@ class SkillVersionRecord(SQLModel, table=True):  # type: ignore
     created_at: str
     created_by: str
     comment: str | None = None
+
+
+class PluginRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugins"
+    plugin_id: str = Field(primary_key=True)
+    name: str
+    package_version: str | None = None
+    description: str = ""
+    manifest: dict[str, Any] = Field(default={}, sa_column=Column(JSON, nullable=False))
+    diagnostics: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    enabled: bool = True
+    current_revision: int = 0
+    package_digest: str = ""
+    created_at: str
+    updated_at: str
+    created_by: str
+    updated_by: str | None = None
+
+
+class PluginVersionRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_versions"
+    __table_args__ = (UniqueConstraint("plugin_id", "revision"),)
+    id: int | None = Field(default=None, primary_key=True)
+    plugin_id: str = Field(index=True)
+    revision: int
+    manifest: dict[str, Any] = Field(default={}, sa_column=Column(JSON, nullable=False))
+    diagnostics: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    package_digest: str
+    created_at: str
+    created_by: str
+    comment: str | None = None
+
+
+class PluginBlobRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_blobs"
+    sha256: str = Field(primary_key=True)
+    content: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    size: int
+
+
+class PluginFileRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_files"
+    plugin_id: str = Field(primary_key=True)
+    revision: int = Field(primary_key=True)
+    path: str = Field(primary_key=True)
+    blob_sha256: str = Field(index=True)
+    media_type: str
+    executable: bool = False
+
+
+class PluginSkillRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_skills"
+    plugin_id: str = Field(primary_key=True)
+    skill_id: str = Field(primary_key=True)
+    portable_name: str
+    title: str
+    description: str = ""
+    template: str
+    parameters: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    triggers: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    allowed_tools: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    enabled: bool = True
+    source_path: str
+    aliases: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    mcp_servers: dict[str, dict[str, Any]] = Field(default={}, sa_column=Column(JSON, nullable=False))
+    revision: int
+    package_digest: str
+    has_scripts: bool = False
+
+
+class PluginDraftRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_drafts"
+    plugin_id: str = Field(primary_key=True)
+    base_revision: int
+    created_at: str
+    updated_at: str
+    created_by: str
+    updated_by: str
+
+
+class PluginDraftFileRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "plugin_draft_files"
+    plugin_id: str = Field(primary_key=True)
+    path: str = Field(primary_key=True)
+    blob_sha256: str = Field(index=True)
+    media_type: str
+    executable: bool = False
 
 
 class QueryHistoryRecord(SQLModel, table=True):  # type: ignore
@@ -792,7 +896,31 @@ class SQLModelReportStore(ReportStore):
         from reporting.services.report_store.migrations import run_schema_migrations
 
         await run_schema_migrations(_get_engine())
+        await self._migrate_legacy_skillsets()
         logger.info("SQL report store tables initialised")
+
+    async def _migrate_legacy_skillsets(self) -> None:
+        """Create the canonical package for skillsets predating plugins."""
+        from reporting.services.plugin_packages import legacy_skillset_package
+
+        for skillset in await self.list_skillsets():
+            existing = await self.get_plugin(skillset.skillset_id)
+            if existing is not None:
+                continue
+            parsed = legacy_skillset_package(skillset, await self.list_skills(skillset.skillset_id))
+            if not parsed.valid:
+                logger.error("Could not migrate legacy skillset %s to a plugin", skillset.skillset_id)
+                continue
+            await self.publish_plugin(
+                parsed.plugin_id,
+                parsed.manifest,
+                parsed.files,
+                parsed.skills,
+                [item.model_dump() for item in parsed.diagnostics],
+                parsed.package_digest,
+                skillset.updated_by or skillset.created_by,
+                "Migrated from legacy skillset",
+            )
 
     async def list_reports(self, user_id: str | None = None) -> list[ReportListItem]:
         async with AsyncSession(_get_engine()) as session:
@@ -2937,6 +3065,468 @@ class SQLModelReportStore(ReportStore):
             result = await session.execute(stmt)
             record = result.scalars().first()
             return self._skill_item_from_record(record) if record else None
+
+    # ------------------------------------------------------------------
+    # Agent plugins
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _plugin_item(record: PluginRecord) -> PluginListItem:
+        return PluginListItem(
+            plugin_id=record.plugin_id,
+            name=record.name,
+            package_version=record.package_version,
+            description=record.description or "",
+            enabled=record.enabled,
+            current_revision=record.current_revision,
+            package_digest=record.package_digest,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            created_by=record.created_by,
+            updated_by=record.updated_by,
+            diagnostics=record.diagnostics or [],
+        )
+
+    @staticmethod
+    def _plugin_skill(record: PluginSkillRecord) -> PluginSkillItem:
+        return PluginSkillItem(
+            plugin_id=record.plugin_id,
+            skill_id=record.skill_id,
+            portable_name=record.portable_name,
+            title=record.title,
+            description=record.description or "",
+            template=record.template,
+            parameters=record.parameters or [],
+            triggers=record.triggers or [],
+            allowed_tools=record.allowed_tools or [],
+            enabled=record.enabled,
+            source_path=record.source_path,
+            aliases=record.aliases or [],
+            mcp_servers=record.mcp_servers or {},
+            revision=record.revision,
+            package_digest=record.package_digest,
+            has_scripts=record.has_scripts,
+        )
+
+    @staticmethod
+    def _file_info(record: PluginFileRecord | PluginDraftFileRecord, size: int) -> PluginFileInfo:
+        return PluginFileInfo(
+            path=record.path,
+            media_type=record.media_type,
+            size=size,
+            sha256=record.blob_sha256,
+            executable=record.executable,
+            etag=f'"{record.blob_sha256}"',
+        )
+
+    async def list_plugins(self) -> list[PluginListItem]:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(select(PluginRecord).order_by(col(PluginRecord.plugin_id)))
+            return [self._plugin_item(record) for record in result.scalars().all()]
+
+    async def get_plugin(self, plugin_id: str) -> PluginListItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginRecord, plugin_id)
+            return self._plugin_item(record) if record else None
+
+    async def publish_plugin(
+        self,
+        plugin_id: str,
+        manifest: dict[str, Any],
+        files: list[PluginFile],
+        skills: list[PluginSkillItem],
+        diagnostics: list[dict[str, Any]],
+        package_digest: str,
+        created_by: str,
+        comment: str | None = None,
+        expected_revision: int | None = None,
+    ) -> PluginListItem:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                (
+                    await session.execute(
+                        select(PluginRecord).where(PluginRecord.plugin_id == plugin_id).with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if expected_revision is not None and (record is None or record.current_revision != expected_revision):
+                raise PluginRevisionConflict(plugin_id)
+            if record:
+                revision = record.current_revision + 1
+                original_created_at = record.created_at
+                original_created_by = record.created_by
+                enabled = record.enabled
+                record.name = manifest["name"]
+                record.package_version = manifest.get("version")
+                record.description = manifest.get("description", "")
+                record.manifest = manifest
+                record.diagnostics = diagnostics
+                record.current_revision = revision
+                record.package_digest = package_digest
+                record.updated_at = now
+                record.updated_by = created_by
+            else:
+                revision = 1
+                original_created_at = now
+                original_created_by = created_by
+                enabled = True
+                record = PluginRecord(
+                    plugin_id=plugin_id,
+                    name=manifest["name"],
+                    package_version=manifest.get("version"),
+                    description=manifest.get("description", ""),
+                    manifest=manifest,
+                    diagnostics=diagnostics,
+                    enabled=enabled,
+                    current_revision=revision,
+                    package_digest=package_digest,
+                    created_at=now,
+                    updated_at=now,
+                    created_by=created_by,
+                    updated_by=created_by,
+                )
+            session.add(record)
+            session.add(
+                PluginVersionRecord(
+                    plugin_id=plugin_id,
+                    revision=revision,
+                    manifest=manifest,
+                    diagnostics=diagnostics,
+                    package_digest=package_digest,
+                    created_at=now,
+                    created_by=created_by,
+                    comment=comment,
+                )
+            )
+            for file in files:
+                sha256 = hashlib.sha256(file.content).hexdigest()
+                if await session.get(PluginBlobRecord, sha256) is None:
+                    session.add(PluginBlobRecord(sha256=sha256, content=file.content, size=len(file.content)))
+                session.add(
+                    PluginFileRecord(
+                        plugin_id=plugin_id,
+                        revision=revision,
+                        path=file.path,
+                        blob_sha256=sha256,
+                        media_type=file.media_type,
+                        executable=file.executable,
+                    )
+                )
+            old_skills = await session.execute(
+                select(PluginSkillRecord).where(PluginSkillRecord.plugin_id == plugin_id)
+            )
+            for old_skill in old_skills.scalars().all():
+                await session.delete(old_skill)
+            for skill in skills:
+                session.add(
+                    PluginSkillRecord(
+                        plugin_id=plugin_id,
+                        skill_id=skill.skill_id,
+                        portable_name=skill.portable_name,
+                        title=skill.title,
+                        description=skill.description,
+                        template=skill.template,
+                        parameters=[item.model_dump() for item in skill.parameters],
+                        triggers=skill.triggers,
+                        allowed_tools=skill.allowed_tools,
+                        enabled=skill.enabled,
+                        source_path=skill.source_path,
+                        aliases=skill.aliases,
+                        mcp_servers=skill.mcp_servers,
+                        revision=revision,
+                        package_digest=package_digest,
+                        has_scripts=skill.has_scripts,
+                    )
+                )
+            await session.commit()
+        return PluginListItem(
+            plugin_id=plugin_id,
+            name=manifest["name"],
+            package_version=manifest.get("version"),
+            description=manifest.get("description", ""),
+            enabled=enabled,
+            current_revision=revision,
+            package_digest=package_digest,
+            created_at=original_created_at,
+            updated_at=now,
+            created_by=original_created_by,
+            updated_by=created_by,
+            diagnostics=diagnostics,
+        )
+
+    async def set_plugin_enabled(self, plugin_id: str, enabled: bool, updated_by: str) -> PluginListItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginRecord, plugin_id)
+            if not record:
+                return None
+            record.enabled = enabled
+            record.updated_at = datetime.now(tz=UTC).isoformat()
+            record.updated_by = updated_by
+            session.add(record)
+            result = self._plugin_item(record)
+            await session.commit()
+            return result
+
+    async def delete_plugin(self, plugin_id: str) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginRecord, plugin_id)
+            if not record:
+                return False
+            models: tuple[Any, ...] = (
+                PluginSkillRecord,
+                PluginDraftFileRecord,
+                PluginFileRecord,
+                PluginVersionRecord,
+            )
+            for model in models:
+                result = await session.execute(select(model).where(model.plugin_id == plugin_id))
+                for item in result.scalars().all():
+                    await session.delete(item)
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            if draft:
+                await session.delete(draft)
+            await session.delete(record)
+            await session.commit()
+            return True
+
+    async def list_plugin_versions(self, plugin_id: str) -> list[PluginVersion]:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(PluginVersionRecord)
+                .where(PluginVersionRecord.plugin_id == plugin_id)
+                .order_by(col(PluginVersionRecord.revision).desc())
+            )
+            return [
+                PluginVersion(
+                    plugin_id=row.plugin_id,
+                    revision=row.revision,
+                    manifest=row.manifest,
+                    package_digest=row.package_digest,
+                    created_at=row.created_at,
+                    created_by=row.created_by,
+                    comment=row.comment,
+                    diagnostics=row.diagnostics or [],
+                )
+                for row in result.scalars().all()
+            ]
+
+    async def _plugin_revision(self, session: AsyncSession, plugin_id: str, revision: int | None) -> int | None:
+        if revision is not None:
+            return revision
+        plugin = await session.get(PluginRecord, plugin_id)
+        return plugin.current_revision if plugin else None
+
+    async def list_plugin_files(self, plugin_id: str, revision: int | None = None) -> list[PluginFileInfo]:
+        async with AsyncSession(_get_engine()) as session:
+            resolved = await self._plugin_revision(session, plugin_id, revision)
+            if resolved is None:
+                return []
+            result = await session.execute(
+                select(PluginFileRecord, PluginBlobRecord.size)
+                .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .where(PluginFileRecord.plugin_id == plugin_id)
+                .where(PluginFileRecord.revision == resolved)
+                .order_by(col(PluginFileRecord.path))
+            )
+            return [self._file_info(record, size) for record, size in result.all()]
+
+    async def read_plugin_file(self, plugin_id: str, path: str, revision: int | None = None) -> PluginFile | None:
+        async with AsyncSession(_get_engine()) as session:
+            resolved = await self._plugin_revision(session, plugin_id, revision)
+            if resolved is None:
+                return None
+            statement = (
+                select(PluginFileRecord, PluginBlobRecord)
+                .join(PluginBlobRecord, PluginFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .where(PluginFileRecord.plugin_id == plugin_id)
+                .where(PluginFileRecord.revision == resolved)
+                .where(PluginFileRecord.path == path)
+            )
+            result = (await session.execute(statement)).first()
+            if not result:
+                return None
+            record, blob = result
+            return PluginFile(
+                path=path, content=blob.content, media_type=record.media_type, executable=record.executable
+            )
+
+    async def list_enabled_plugin_skills(self) -> list[PluginSkillItem]:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(PluginSkillRecord)
+                .join(PluginRecord, PluginSkillRecord.plugin_id == PluginRecord.plugin_id)
+                .where(PluginSkillRecord.enabled == True)  # noqa: E712
+                .where(PluginRecord.enabled == True)  # noqa: E712
+            )
+            return [self._plugin_skill(record) for record in result.scalars().all()]
+
+    async def list_plugin_skills(self, plugin_id: str) -> list[PluginSkillItem]:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(PluginSkillRecord)
+                .where(PluginSkillRecord.plugin_id == plugin_id)
+                .order_by(col(PluginSkillRecord.skill_id))
+            )
+            return [self._plugin_skill(record) for record in result.scalars().all()]
+
+    async def get_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginSkillRecord, (plugin_id, skill_id))
+            return self._plugin_skill(record) if record else None
+
+    async def get_enabled_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(PluginSkillRecord)
+                .join(PluginRecord, PluginSkillRecord.plugin_id == PluginRecord.plugin_id)
+                .where(PluginSkillRecord.plugin_id == plugin_id)
+                .where(PluginSkillRecord.skill_id == skill_id)
+                .where(PluginSkillRecord.enabled == True)  # noqa: E712
+                .where(PluginRecord.enabled == True)  # noqa: E712
+            )
+            record = result.scalars().first()
+            return self._plugin_skill(record) if record else None
+
+    async def create_plugin_draft(self, plugin_id: str, user_id: str) -> bool:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            plugin = await session.get(PluginRecord, plugin_id)
+            if not plugin:
+                return False
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            if draft:
+                return True
+            old_files = await session.execute(
+                select(PluginDraftFileRecord).where(PluginDraftFileRecord.plugin_id == plugin_id)
+            )
+            for old_file in old_files.scalars().all():
+                await session.delete(old_file)
+            session.add(
+                PluginDraftRecord(
+                    plugin_id=plugin_id,
+                    base_revision=plugin.current_revision,
+                    created_at=now,
+                    updated_at=now,
+                    created_by=user_id,
+                    updated_by=user_id,
+                )
+            )
+            current_files = await session.execute(
+                select(PluginFileRecord)
+                .where(PluginFileRecord.plugin_id == plugin_id)
+                .where(PluginFileRecord.revision == plugin.current_revision)
+            )
+            for file in current_files.scalars().all():
+                session.add(
+                    PluginDraftFileRecord(
+                        plugin_id=plugin_id,
+                        path=file.path,
+                        blob_sha256=file.blob_sha256,
+                        media_type=file.media_type,
+                        executable=file.executable,
+                    )
+                )
+            await session.commit()
+            return True
+
+    async def get_plugin_draft_base_revision(self, plugin_id: str) -> int | None:
+        async with AsyncSession(_get_engine()) as session:
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            return draft.base_revision if draft else None
+
+    async def list_plugin_draft_files(self, plugin_id: str) -> list[PluginFileInfo]:
+        async with AsyncSession(_get_engine()) as session:
+            result = await session.execute(
+                select(PluginDraftFileRecord, PluginBlobRecord.size)
+                .join(PluginBlobRecord, PluginDraftFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                .where(PluginDraftFileRecord.plugin_id == plugin_id)
+                .order_by(col(PluginDraftFileRecord.path))
+            )
+            return [self._file_info(record, size) for record, size in result.all()]
+
+    async def read_plugin_draft_file(self, plugin_id: str, path: str) -> PluginFile | None:
+        async with AsyncSession(_get_engine()) as session:
+            result = (
+                await session.execute(
+                    select(PluginDraftFileRecord, PluginBlobRecord)
+                    .join(PluginBlobRecord, PluginDraftFileRecord.blob_sha256 == PluginBlobRecord.sha256)
+                    .where(PluginDraftFileRecord.plugin_id == plugin_id)
+                    .where(PluginDraftFileRecord.path == path)
+                )
+            ).first()
+            if not result:
+                return None
+            record, blob = result
+            return PluginFile(
+                path=path, content=blob.content, media_type=record.media_type, executable=record.executable
+            )
+
+    async def write_plugin_draft_file(
+        self, plugin_id: str, file: PluginFile, user_id: str, expected_etag: str | None = None
+    ) -> PluginFileInfo | None:
+        now = datetime.now(tz=UTC).isoformat()
+        sha256 = hashlib.sha256(file.content).hexdigest()
+        async with AsyncSession(_get_engine()) as session:
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            if not draft:
+                return None
+            record = await session.get(PluginDraftFileRecord, (plugin_id, file.path))
+            if expected_etag is not None and (record is None or expected_etag != f'"{record.blob_sha256}"'):
+                return None
+            if await session.get(PluginBlobRecord, sha256) is None:
+                session.add(PluginBlobRecord(sha256=sha256, content=file.content, size=len(file.content)))
+            if record:
+                record.blob_sha256 = sha256
+                record.media_type = file.media_type
+                record.executable = file.executable
+            else:
+                record = PluginDraftFileRecord(
+                    plugin_id=plugin_id,
+                    path=file.path,
+                    blob_sha256=sha256,
+                    media_type=file.media_type,
+                    executable=file.executable,
+                )
+            draft.updated_at = now
+            draft.updated_by = user_id
+            session.add(record)
+            session.add(draft)
+            result = self._file_info(record, len(file.content))
+            await session.commit()
+            return result
+
+    async def delete_plugin_draft_file(
+        self, plugin_id: str, path: str, user_id: str, expected_etag: str | None = None
+    ) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginDraftFileRecord, (plugin_id, path))
+            if not record or (expected_etag is not None and expected_etag != f'"{record.blob_sha256}"'):
+                return False
+            await session.delete(record)
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            if draft:
+                draft.updated_at = datetime.now(tz=UTC).isoformat()
+                draft.updated_by = user_id
+                session.add(draft)
+            await session.commit()
+            return True
+
+    async def delete_plugin_draft(self, plugin_id: str) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            draft = await session.get(PluginDraftRecord, plugin_id)
+            if not draft:
+                return False
+            result = await session.execute(
+                select(PluginDraftFileRecord).where(PluginDraftFileRecord.plugin_id == plugin_id)
+            )
+            for file in result.scalars().all():
+                await session.delete(file)
+            await session.delete(draft)
+            await session.commit()
+            return True
 
     # ------------------------------------------------------------------
     # Query history
