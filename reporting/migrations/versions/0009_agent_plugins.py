@@ -1,4 +1,4 @@
-"""Add content-addressed Agent Plugins packages and drafts.
+"""Add content-addressed Agent Plugins packages.
 
 Every operation is inspector-guarded because the baseline creates the current
 SQLModel metadata on a fresh database (STO-004).
@@ -89,33 +89,11 @@ def upgrade() -> None:
             sa.Column("package_digest", sa.String(), nullable=False),
             sa.Column("has_scripts", sa.Boolean(), nullable=False),
         )
-    if "plugin_drafts" not in tables:
-        op.create_table(
-            "plugin_drafts",
-            sa.Column("plugin_id", sa.String(), primary_key=True),
-            sa.Column("base_revision", sa.Integer(), nullable=False),
-            sa.Column("created_at", sa.String(), nullable=False),
-            sa.Column("updated_at", sa.String(), nullable=False),
-            sa.Column("created_by", sa.String(), nullable=False),
-            sa.Column("updated_by", sa.String(), nullable=False),
-        )
-    if "plugin_draft_files" not in tables:
-        op.create_table(
-            "plugin_draft_files",
-            sa.Column("plugin_id", sa.String(), primary_key=True),
-            sa.Column("path", sa.String(), primary_key=True),
-            sa.Column("blob_sha256", sa.String(), nullable=False),
-            sa.Column("media_type", sa.String(), nullable=False),
-            sa.Column("executable", sa.Boolean(), nullable=False),
-        )
-        op.create_index("ix_plugin_draft_files_blob_sha256", "plugin_draft_files", ["blob_sha256"])
 
 
 def downgrade() -> None:
     tables = _tables()
     for table in (
-        "plugin_draft_files",
-        "plugin_drafts",
         "plugin_skills",
         "plugin_files",
         "plugin_versions",
