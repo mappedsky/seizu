@@ -5,7 +5,9 @@ sessions within a test share the same underlying connection.
 """
 
 import asyncio
+import hashlib
 import itertools
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -20,9 +22,12 @@ from reporting import settings
 from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
+from reporting.schema.plugins import PluginFile
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
+from reporting.services.plugin_packages import legacy_skillset_package
 from reporting.services.report_store import sql as sql_module
+from reporting.services.report_store.base import PluginRevisionConflict
 from reporting.services.report_store.sql import SQLModelReportStore
 
 # ---------------------------------------------------------------------------
@@ -3251,3 +3256,152 @@ async def test_delete_space_never_deletes_a_report(store):
     assert await store.delete_space(space.space_id) == SpaceDeleteResult.DELETED
     # The report survives; only the space is gone.
     assert await store.get_report_metadata(report.report_id) is not None
+
+
+async def test_plugin_publish_is_versioned_and_content_addressed(store):
+    skillset = SkillsetListItem(
+        skillset_id="incident_response",
+        name="Incident response",
+        current_version=1,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        created_by="u1",
+    )
+    skill = SkillItem(
+        skill_id="review_alert",
+        skillset_id=skillset.skillset_id,
+        name="Review alert",
+        description="Review one alert",
+        template="Review it.",
+        current_version=1,
+        created_at=skillset.created_at,
+        updated_at=skillset.updated_at,
+        created_by="u1",
+    )
+    parsed = legacy_skillset_package(skillset, [skill])
+    indexed_skills = [parsed.skills[0].model_copy(update={"has_scripts": True})]
+    first = await store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        indexed_skills,
+        [],
+        parsed.package_digest,
+        "u1",
+    )
+    second = await store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        indexed_skills,
+        [],
+        parsed.package_digest,
+        "u1",
+    )
+    assert first.current_revision == 1
+    assert second.current_revision == 2
+    assert len(await store.list_plugin_versions(parsed.plugin_id)) == 2
+    assert len(await store.list_plugin_files(parsed.plugin_id, 1)) == len(parsed.files)
+    stored_skill = await store.get_enabled_plugin_skill(parsed.plugin_id, "review_alert")
+    assert stored_skill.portable_name == "review-alert"
+    assert stored_skill.has_scripts is True
+    assert (await store.set_plugin_enabled(parsed.plugin_id, False, "u2")).enabled is False
+    assert await store.get_enabled_plugin_skill(parsed.plugin_id, "review_alert") is None
+    await store.set_plugin_enabled(parsed.plugin_id, True, "u2")
+
+    with pytest.raises(PluginRevisionConflict):
+        await store.publish_plugin(
+            parsed.plugin_id,
+            parsed.manifest,
+            parsed.files,
+            indexed_skills,
+            [],
+            parsed.package_digest,
+            "u1",
+            expected_revision=1,
+        )
+
+    async with AsyncSession(sql_module._get_engine()) as session:
+        blobs = (await session.execute(select(sql_module.PluginBlobRecord))).scalars().all()
+    assert len(blobs) == len(parsed.files)
+
+    manifest_file = next(item for item in parsed.files if item.path == "plugin.json")
+    digest = hashlib.sha256(manifest_file.content).hexdigest()
+    retained = await store.read_plugin_blob(parsed.plugin_id, digest)
+    assert retained.content == manifest_file.content
+    assert await store.read_plugin_blob(parsed.plugin_id, "0" * 64) is None
+    assert await store.read_plugin_blob("other_plugin", digest) is None
+
+
+async def test_legacy_plugin_projection_takes_postgres_startup_lock(mocker):
+    store = SQLModelReportStore()
+    connection = mocker.AsyncMock()
+    transaction = mocker.AsyncMock()
+    transaction.__aenter__.return_value = connection
+    engine = mocker.MagicMock()
+    engine.dialect.name = "postgresql"
+    engine.begin.return_value = transaction
+    mocker.patch.object(sql_module, "_get_engine", return_value=engine)
+    mocker.patch.object(store, "list_skillsets", new=mocker.AsyncMock(return_value=[object()]))
+    migrate = mocker.patch.object(store, "_migrate_legacy_skillsets_unlocked", new=mocker.AsyncMock())
+
+    await store._migrate_legacy_skillsets()  # noqa: SLF001
+
+    lock_sql = str(connection.execute.await_args.args[0])
+    assert "pg_advisory_xact_lock" in lock_sql
+    assert "seizu-plugin-legacy-migration" in lock_sql
+    migrate.assert_awaited_once_with()
+
+
+async def test_legacy_plugin_projection_skips_the_lock_with_no_legacy_skillsets(mocker):
+    """Every worker runs startup on every boot; the settled case costs one query."""
+    store = SQLModelReportStore()
+    engine = mocker.MagicMock()
+    engine.dialect.name = "postgresql"
+    mocker.patch.object(sql_module, "_get_engine", return_value=engine)
+    mocker.patch.object(store, "list_skillsets", new=mocker.AsyncMock(return_value=[]))
+    migrate = mocker.patch.object(store, "_migrate_legacy_skillsets_unlocked", new=mocker.AsyncMock())
+
+    await store._migrate_legacy_skillsets()  # noqa: SLF001
+
+    engine.begin.assert_not_called()
+    migrate.assert_not_awaited()
+
+
+async def test_deleting_a_plugin_collects_its_orphaned_blobs(store):
+    """Content-addressed blobs are shared, so they are collected, not cascaded."""
+    from reporting.services.plugin_packages import parse_package
+
+    def package(plugin_id: str, body: str) -> object:
+        manifest = {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": plugin_id.replace("_", "-"),
+            "extensions": {"com.mappedsky.seizu": {"skillsetId": plugin_id}},
+        }
+        return parse_package(
+            [
+                PluginFile(path="plugin.json", content=json.dumps(manifest, sort_keys=True).encode()),
+                PluginFile(
+                    path="skills/review/SKILL.md",
+                    content=f"---\nname: review\ndescription: Review it\n---\n{body}".encode(),
+                ),
+                PluginFile(path="shared.txt", content=b"shared between both plugins"),
+            ]
+        )
+
+    for plugin_id, body in (("alpha_tools", "Alpha."), ("beta_tools", "Beta.")):
+        parsed = package(plugin_id, body)
+        await store.publish_plugin(parsed.plugin_id, parsed.manifest, parsed.files, [], [], parsed.package_digest, "u1")
+
+    async def blob_count() -> int:
+        async with AsyncSession(sql_module._get_engine()) as session:
+            return len((await session.execute(select(sql_module.PluginBlobRecord))).scalars().all())
+
+    # Five distinct blobs: two manifests, two SKILL.md bodies, one shared file.
+    assert await blob_count() == 5
+    assert await store.delete_plugin("alpha_tools") is True
+    # Its own two blobs go; the file both plugins share stays.
+    assert await blob_count() == 3
+    assert await store.read_plugin_blob("beta_tools", hashlib.sha256(b"shared between both plugins").hexdigest())
+    assert await store.delete_plugin("beta_tools") is True
+    assert await blob_count() == 0

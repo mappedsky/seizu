@@ -64,6 +64,7 @@ Documentation
     install/cartography-sync
     install/sandbox
     install/mcp-toolsets
+    install/agent-plugins
     install/mcp-skillsets
     install/external-mcp
 

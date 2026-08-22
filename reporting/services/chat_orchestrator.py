@@ -53,6 +53,7 @@ from reporting.services import (
     chat_graph,
     chat_models,
     episodic_memory,
+    external_mcp,
     mcp_builtins,
     mcp_runtime,
     reporting_neo4j,
@@ -1492,6 +1493,9 @@ async def dispatcher_node(state: ChatState, config: RunnableConfig) -> dict[str,
     suspends and resumes between cycles rather than holding a sandbox open
     across a model round-trip it is not using it for.
     """
+    # The planner's capability listing and each step's are the same external
+    # inventory; discover it once for the batch (AGT-038).
+    external_mcp.begin_discovery_scope()
     ledger = episodic_memory.start_session_ledger(
         state.get("session_memory"), turn=episodic_memory.turn_number(state["messages"])
     )

@@ -63,6 +63,12 @@ class Permission(StrEnum):
     SKILLS_DELETE = "skills:delete"
     SKILLS_RENDER = "skills:render"
 
+    # Agent Plugins are the canonical skill package surface. Skillset/skill
+    # permissions remain bidirectional aliases for one compatibility release.
+    PLUGINS_READ = "plugins:read"
+    PLUGINS_WRITE = "plugins:write"
+    PLUGINS_DELETE = "plugins:delete"
+
     # Scheduled queries
     SCHEDULED_QUERIES_READ = "scheduled_queries:read"
     SCHEDULED_QUERIES_WRITE = "scheduled_queries:write"
@@ -100,6 +106,7 @@ VIEWER_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLSETS_READ,
         Permission.SKILLS_READ,
         Permission.SKILLS_RENDER,
+        Permission.PLUGINS_READ,
         Permission.SCHEDULED_QUERIES_READ,
         Permission.WORKFLOWS_READ,
         Permission.CHAT_USE,
@@ -145,6 +152,8 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.SKILLSETS_DELETE,
         Permission.SKILLS_WRITE,
         Permission.SKILLS_DELETE,
+        Permission.PLUGINS_WRITE,
+        Permission.PLUGINS_DELETE,
         Permission.CHAT_SCHEDULE_READ_ALL,
         Permission.ROLES_WRITE,
         Permission.ROLES_DELETE,
@@ -184,11 +193,33 @@ async def resolve_permissions(jwt_claims: dict[str, Any]) -> frozenset[str]:
         return frozenset()
 
     if role_name in BUILTIN_ROLES:
-        return _expand_workflow_permission_aliases(frozenset(p.value for p in BUILTIN_ROLES[role_name]))
+        return _expand_permission_aliases(frozenset(p.value for p in BUILTIN_ROLES[role_name]))
 
     # User-defined role: single lookup by name.
     role = await report_store.get_role_by_name(role_name)
-    return _expand_workflow_permission_aliases(frozenset(role.permissions) if role else frozenset())
+    return _expand_permission_aliases(frozenset(role.permissions) if role else frozenset())
+
+
+# Agent Plugins replaced skillsets and skills, so one plugin permission covers
+# what two legacy permissions used to. Holding the canonical one therefore
+# implies both legacy ones -- but the reverse needs *both*, because a role
+# scoped to writing skills inside an existing skillset never had the authority
+# to install a package, and must not acquire it by being renamed.
+_PLUGIN_PERMISSION_ALIASES: dict[str, tuple[str, ...]] = {
+    "plugins:read": ("skillsets:read", "skills:read"),
+    "plugins:write": ("skillsets:write", "skills:write"),
+    "plugins:delete": ("skillsets:delete", "skills:delete"),
+}
+
+
+def _expand_permission_aliases(permissions: frozenset[str]) -> frozenset[str]:
+    expanded = set(_expand_workflow_permission_aliases(permissions))
+    for canonical, legacy_values in _PLUGIN_PERMISSION_ALIASES.items():
+        if canonical in expanded:
+            expanded.update(legacy_values)
+        elif all(value in expanded for value in legacy_values):
+            expanded.add(canonical)
+    return frozenset(expanded)
 
 
 def _expand_workflow_permission_aliases(permissions: frozenset[str]) -> frozenset[str]:

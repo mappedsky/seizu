@@ -669,3 +669,38 @@ back into a worker-local loop; the Schedule is the singleton mechanism.
 **Don't:** delete the session record before its checkpoint, or let a schedule
 failure propagate out of worker startup — both were review findings, and both
 trade a housekeeping sweep for something much larger.
+
+## SBX-017 — Plugin code runs only from an immutable sandbox materialization
+
+**Applies to:** `materialize_plugin_skill`, `sandbox__run_script`
+
+A selected plugin skill is materialized beneath `/home/user/seizu_plugins` at a
+path containing its revision and package digest. The digest marker is written
+last. Scripts execute there through an argv-array subprocess launched inside the
+sandbox; the Seizu web and Temporal worker processes never execute package code.
+
+**Why:** package scripts are untrusted code. Reusing the conversation sandbox
+keeps their files available to the rest of the skill while preserving SBX-009's
+isolation boundary. Revision-addressed paths prevent a draft or later publish
+from changing the code midway through a turn.
+
+## SBX-018 — Rendering a skill never provisions a sandbox
+
+**Applies to:** `mcp_runtime._get_prompt_core`, `materialize_plugin_skill`
+
+Rendering an Agent Skill substitutes arguments into its template. It may attach
+the package's files to the answer, but only when all three hold: the skill ships
+`scripts/`, the caller holds `sandbox:delegate`, and the conversation already has
+an open sandbox. `materialize_plugin_skill(..., only_if_open=True)` is how the
+render path asks; `sandbox__run_script`, which is about to execute code, omits it
+and opens one.
+
+**Why:** `chat_agent_node` makes a sandbox session ambient for every turn, and the
+session opens its sandbox lazily on first use — so materializing during a render
+made *rendering* the trigger. A user with `chat:skills:call` and no
+`sandbox:delegate` could provision a billable sandbox by loading a skill, which
+inverts the permission and pays for a VM to hold a template nobody will run.
+
+**Don't:** move the materialization earlier "so the files are ready". A skill
+without scripts has nothing to run, and a sandbox that a delegation would have
+opened anyway costs nothing extra to open then.

@@ -7,7 +7,7 @@ import typer
 from seizu_cli import auth, state
 from seizu_cli import config as cli_config
 from seizu_cli.commands import auth as auth_commands
-from seizu_cli.commands import reports, scheduled_queries, seed, skillsets, spaces, toolsets, workflows
+from seizu_cli.commands import plugins, reports, scheduled_queries, seed, skillsets, spaces, toolsets, workflows
 
 app = typer.Typer(
     help="Seizu CLI — manage reports, workflows, and toolsets via the Seizu API.",
@@ -19,6 +19,7 @@ app.add_typer(scheduled_queries.app, name="scheduled-queries")
 app.add_typer(workflows.app, name="workflows")
 app.add_typer(toolsets.app, name="toolsets")
 app.add_typer(skillsets.app, name="skillsets")
+app.add_typer(plugins.app, name="plugins")
 app.add_typer(auth_commands.app, name="auth")
 
 
@@ -159,7 +160,7 @@ def seed_cmd(
         help="Preview what would be created or updated without writing anything.",
     ),
 ) -> None:
-    """Seed reports, workflows, tools, and skills from YAML via the API."""
+    """Seed reports, workflows, tools, skills, and plugin packages via the API."""
     resolved_config = config or state.seed_file or cli_config.default_seed_file()
     seed.seed_cmd(config=resolved_config, force=force, dry_run=dry_run)
 
@@ -180,6 +181,6 @@ def export_cmd(
         help="Print the resulting YAML without overwriting the config file.",
     ),
 ) -> None:
-    """Export reports, workflows, tools, and skills back into a YAML config file."""
+    """Export API state while preserving declared plugin package sources."""
     resolved_config = config or state.seed_file or cli_config.default_seed_file()
     seed.export_cmd(config=resolved_config, dry_run=dry_run)

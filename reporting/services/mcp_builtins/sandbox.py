@@ -28,9 +28,11 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 """
 
 import asyncio
+import base64
 import itertools
 import json
 import logging
+import posixpath
 import uuid
 from typing import Any
 
@@ -43,7 +45,7 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_context, episodic_memory, sandbox_session, telemetry
+from reporting.services import chat_budget, chat_context, episodic_memory, report_store, sandbox_session, telemetry
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -1780,6 +1782,110 @@ async def _handle_run_python(args: dict[str, Any], current_user: CurrentUser | N
         return {"error": f"Could not run the code: {_safe_error(exc)}"}
 
 
+def _plugin_skill_root(skill: Any) -> str:
+    digest = skill.package_digest[:12]
+    return f"/home/user/seizu_plugins/{skill.plugin_id}/{skill.revision}-{digest}/skills/{skill.portable_name}"
+
+
+async def materialize_plugin_skill(skill: Any, *, only_if_open: bool = False) -> str | None:
+    """Materialize one immutable plugin skill in the conversation sandbox.
+
+    ``only_if_open`` refuses to be the thing that provisions a sandbox: a caller
+    that merely wants the files *if they are cheap* (rendering a skill) passes
+    it, and a caller that is about to run code (``sandbox__run_script``) does
+    not. See SBX-018.
+    """
+    session = sandbox_session.current_sandbox_session()
+    if session is None or (only_if_open and not session.opened):
+        return None
+    backend = await session.backend()
+    root = _plugin_skill_root(skill)
+    marker = f"{root}/.seizu-package-digest"
+    try:
+        if (await backend.read_file(marker)).strip() == skill.package_digest:
+            return root
+    except Exception:
+        pass
+    files = await report_store.list_plugin_files(skill.plugin_id, skill.revision)
+    prefix = f"{skill.source_path}/"
+    entries: list[tuple[str, str, int]] = []
+    for info in files:
+        if not info.path.startswith(prefix):
+            continue
+        relative = info.path.removeprefix(prefix)
+        if not relative or posixpath.normpath(relative).startswith("../"):
+            continue
+        file = await report_store.read_plugin_file(skill.plugin_id, info.path, skill.revision)
+        if file is None:
+            continue
+        mode = 0o755 if file.executable or relative.startswith("scripts/") else 0o644
+        entries.append((f"{root}/{relative}", base64.b64encode(file.content).decode(), mode))
+    if entries:
+        # One round trip for the whole tree. Per-file `run_python` calls inlined
+        # each file's base64 into its own program, so a package with large
+        # assets built a program many times the size of the asset, N times over.
+        payload = json.dumps(entries)
+        code = (
+            "import base64, json, os\n"
+            f"for path, blob, mode in json.loads({payload!r}):\n"
+            "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+            "    open(path, 'wb').write(base64.b64decode(blob))\n"
+            "    os.chmod(path, mode)\n"
+            "print('SEIZU_PLUGIN_FILES_WRITTEN')\n"
+        )
+        if "SEIZU_PLUGIN_FILES_WRITTEN" not in await backend.run_python(code):
+            return None
+    await backend.write_file(marker, skill.package_digest)
+    try:
+        return root if (await backend.read_file(marker)).strip() == skill.package_digest else None
+    except Exception:
+        return None
+
+
+async def _handle_run_script(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
+    plugin_id = str(args.get("plugin_id") or "")
+    skill_id = str(args.get("skill_id") or "")
+    script = str(args.get("script") or "")
+    arguments = args.get("arguments") or []
+    if not isinstance(arguments, list) or not all(isinstance(item, str) for item in arguments):
+        return {"error": "arguments must be an array of strings"}
+    normalized = posixpath.normpath(script)
+    if not script or script.startswith("/") or normalized.startswith("../") or normalized == "..":
+        return {"error": "script must be relative to the skill's scripts directory"}
+    skill = await report_store.get_enabled_plugin_skill(plugin_id, skill_id)
+    if skill is None or not skill.has_scripts:
+        return {"error": "Plugin skill or scripts not found"}
+    package_path = f"{skill.source_path}/scripts/{normalized}"
+    if await report_store.read_plugin_file(plugin_id, package_path, skill.revision) is None:
+        return {"error": "Script not found in the published plugin revision"}
+    backend, reason = await _direct_backend()
+    if backend is None:
+        return {"error": reason}
+    root = await materialize_plugin_skill(skill)
+    if root is None:
+        return {"error": "Could not materialize the plugin skill"}
+    path = f"{root}/scripts/{normalized}"
+    argv_json = json.dumps([path, *arguments])
+    env_json = json.dumps({"HOME": "/home/user", "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"})
+    code = (
+        "import json, os, subprocess\n"
+        f"argv=json.loads({argv_json!r})\n"
+        f"env=json.loads({env_json!r})\n"
+        f"result=subprocess.run(argv, cwd={root!r}, env=env, capture_output=True, text=True,"
+        f" timeout={settings.SANDBOX_SCRIPT_TIMEOUT_SECONDS})\n"
+        "print(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}))\n"
+    )
+    try:
+        output = await backend.run_python(code)
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError:
+            return {"error": _capped(output), "script": script}
+        return {**result, "script": script}
+    except Exception as exc:
+        return {"error": f"Could not run plugin script: {_safe_error(exc)}"}
+
+
 def _safe_error(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {exc}"[:400]
 
@@ -1805,6 +1911,7 @@ def _direct_tools() -> list[BuiltinTool]:
         "chat_safe_without_confirmation": True,
         "always_disclosed": True,
     }
+    script_shared: dict[str, Any] = {**shared, "always_disclosed": False, "enabled": _sandbox_enabled}
     return [
         BuiltinTool(
             name="sandbox__write_file",
@@ -1853,6 +1960,25 @@ def _direct_tools() -> list[BuiltinTool]:
             },
             handler=_handle_list_files,
             **shared,
+        ),
+        BuiltinTool(
+            name="sandbox__run_script",
+            description=(
+                "Run a script from an installed Agent Plugin skill in the isolated conversation sandbox. "
+                "The published package selects the executable; arguments are passed as an argv array without a shell."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "plugin_id": {"type": "string"},
+                    "skill_id": {"type": "string"},
+                    "script": {"type": "string", "description": "Path relative to the skill's scripts directory."},
+                    "arguments": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["plugin_id", "skill_id", "script"],
+            },
+            handler=_handle_run_script,
+            **script_shared,
         ),
         BuiltinTool(
             name="sandbox__run_python",

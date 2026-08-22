@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -14,6 +15,8 @@ from reporting.schema.chat import (
 )
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
+    EXTERNAL_MCP_TOOL_NAME_RE,
+    MCP_TOOL_NAME_RE,
     SkillItem,
     SkillsetListItem,
     SkillsetVersion,
@@ -23,6 +26,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
     QueryHistoryItem,
@@ -39,6 +43,7 @@ from reporting.services.report_store.base import ReportStore
 logger = logging.getLogger(__name__)
 
 _store: ReportStore | None = None
+_initialized = False
 
 
 def get_store() -> ReportStore:
@@ -58,7 +63,14 @@ def get_store() -> ReportStore:
 
 
 async def initialize() -> None:
+    global _initialized
     await get_store().initialize()
+    _initialized = True
+
+
+def is_initialized() -> bool:
+    """Whether the application store completed its startup migrations."""
+    return _initialized
 
 
 def generate_id() -> str:
@@ -574,11 +586,34 @@ async def get_enabled_tool(toolset_id: str, tool_id: str) -> ToolItem | None:
 
 
 async def list_skillsets() -> list[SkillsetListItem]:
-    return await get_store().list_skillsets()
+    store = get_store()
+    legacy = await store.list_skillsets()
+    known = {item.skillset_id for item in legacy}
+    projected = [_plugin_skillset(item) for item in await store.list_plugins() if item.plugin_id not in known]
+    return [*legacy, *projected]
 
 
 async def get_skillset(skillset_id: str) -> SkillsetListItem | None:
-    return await get_store().get_skillset(skillset_id)
+    store = get_store()
+    legacy = await store.get_skillset(skillset_id)
+    if legacy:
+        return legacy
+    plugin = await store.get_plugin(skillset_id)
+    return _plugin_skillset(plugin) if plugin else None
+
+
+def _plugin_skillset(plugin: PluginListItem) -> SkillsetListItem:
+    return SkillsetListItem(
+        skillset_id=plugin.plugin_id,
+        name=plugin.name,
+        description=plugin.description,
+        enabled=plugin.enabled,
+        current_version=plugin.current_revision,
+        created_at=plugin.created_at,
+        updated_at=plugin.updated_at,
+        created_by=plugin.created_by,
+        updated_by=plugin.updated_by,
+    )
 
 
 async def create_skillset(
@@ -588,13 +623,15 @@ async def create_skillset(
     enabled: bool,
     created_by: str,
 ) -> SkillsetListItem:
-    return await get_store().create_skillset(
+    item = await get_store().create_skillset(
         skillset_id=skillset_id,
         name=name,
         description=description,
         enabled=enabled,
         created_by=created_by,
     )
+    await _sync_legacy_skillset(skillset_id, created_by, "Legacy skillset create")
+    return item
 
 
 async def update_skillset(
@@ -605,7 +642,7 @@ async def update_skillset(
     updated_by: str,
     comment: str | None = None,
 ) -> SkillsetListItem | None:
-    return await get_store().update_skillset(
+    item = await get_store().update_skillset(
         skillset_id=skillset_id,
         name=name,
         description=description,
@@ -613,22 +650,90 @@ async def update_skillset(
         updated_by=updated_by,
         comment=comment,
     )
+    if item:
+        await _sync_legacy_skillset(skillset_id, updated_by, comment or "Legacy skillset update")
+    return item
 
 
 async def delete_skillset(skillset_id: str) -> bool:
-    return await get_store().delete_skillset(skillset_id)
+    store = get_store()
+    deleted = await store.delete_skillset(skillset_id)
+    if deleted:
+        plugin = await store.get_plugin(skillset_id)
+        if plugin and await _is_projection_owned_plugin(store, plugin):
+            await store.delete_plugin(skillset_id)
+    return deleted
 
 
 async def list_skillset_versions(skillset_id: str) -> list[SkillsetVersion]:
-    return await get_store().list_skillset_versions(skillset_id)
+    store = get_store()
+    legacy = await store.list_skillset_versions(skillset_id)
+    if legacy:
+        return legacy
+    plugin = await store.get_plugin(skillset_id)
+    if not plugin:
+        return []
+    return [
+        SkillsetVersion(
+            skillset_id=skillset_id,
+            name=version.manifest.get("name", plugin.name),
+            description=version.manifest.get("description", ""),
+            enabled=plugin.enabled,
+            version=version.revision,
+            created_at=version.created_at,
+            created_by=version.created_by,
+            comment=version.comment,
+        )
+        for version in await store.list_plugin_versions(skillset_id)
+    ]
 
 
 async def get_skillset_version(skillset_id: str, version: int) -> SkillsetVersion | None:
-    return await get_store().get_skillset_version(skillset_id, version)
+    store = get_store()
+    legacy = await store.get_skillset_version(skillset_id, version)
+    if legacy:
+        return legacy
+    return next(
+        (item for item in await list_skillset_versions(skillset_id) if item.version == version),
+        None,
+    )
 
 
 async def list_skills(skillset_id: str) -> list[SkillItem]:
-    return await get_store().list_skills(skillset_id)
+    store = get_store()
+    legacy = await store.list_skills(skillset_id)
+    if legacy or await store.get_skillset(skillset_id):
+        return legacy
+    plugin = await store.get_plugin(skillset_id)
+    if not plugin:
+        return []
+    return [_plugin_skill(item, plugin) for item in await store.list_plugin_skills(skillset_id)]
+
+
+def _plugin_skill(skill: PluginSkillItem, plugin: PluginListItem) -> SkillItem:
+    direct_tools = [
+        name
+        for name in skill.allowed_tools
+        if MCP_TOOL_NAME_RE.fullmatch(name) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(name)
+    ]
+    return SkillItem(
+        skill_id=skill.skill_id,
+        skillset_id=skill.plugin_id,
+        name=skill.title,
+        description=skill.description,
+        template=skill.template,
+        parameters=skill.parameters,
+        triggers=skill.triggers,
+        tools_required=direct_tools,
+        enabled=skill.enabled,
+        current_version=skill.revision,
+        created_at=plugin.created_at,
+        updated_at=plugin.updated_at,
+        created_by=plugin.created_by,
+        updated_by=plugin.updated_by,
+        effective_enabled=skill.enabled and plugin.enabled,
+        disabled_reason=("plugin_disabled" if not plugin.enabled else "skill_disabled" if not skill.enabled else None),
+    )
 
 
 async def get_skill(skill_id: str) -> SkillItem | None:
@@ -647,7 +752,7 @@ async def create_skill(
     enabled: bool,
     created_by: str,
 ) -> SkillItem | None:
-    return await get_store().create_skill(
+    item = await get_store().create_skill(
         skillset_id=skillset_id,
         skill_id=skill_id,
         name=name,
@@ -659,6 +764,9 @@ async def create_skill(
         enabled=enabled,
         created_by=created_by,
     )
+    if item:
+        await _sync_legacy_skillset(skillset_id, created_by, "Legacy skill create")
+    return item
 
 
 async def update_skill(
@@ -673,7 +781,7 @@ async def update_skill(
     updated_by: str,
     comment: str | None = None,
 ) -> SkillItem | None:
-    return await get_store().update_skill(
+    item = await get_store().update_skill(
         skill_id=skill_id,
         name=name,
         description=description,
@@ -685,18 +793,133 @@ async def update_skill(
         updated_by=updated_by,
         comment=comment,
     )
+    if item:
+        await _sync_legacy_skillset(item.skillset_id, updated_by, comment or "Legacy skill update")
+    return item
 
 
 async def delete_skill(skill_id: str) -> bool:
-    return await get_store().delete_skill(skill_id)
+    existing = await get_store().get_skill(skill_id)
+    deleted = await get_store().delete_skill(skill_id)
+    if deleted and existing:
+        await _sync_legacy_skillset(
+            existing.skillset_id, existing.updated_by or existing.created_by, "Legacy skill delete"
+        )
+    return deleted
 
 
-async def list_skill_versions(skill_id: str) -> list[SkillVersion]:
-    return await get_store().list_skill_versions(skill_id)
+async def _sync_legacy_skillset(skillset_id: str, user_id: str, comment: str) -> None:
+    """Publish the package projection after a legacy compatibility write."""
+    from reporting.services.plugin_packages import legacy_skillset_package
+
+    store = get_store()
+    existing = await store.get_plugin(skillset_id)
+    if existing and not await _is_projection_owned_plugin(store, existing):
+        return
+    skillset = await store.get_skillset(skillset_id)
+    if not skillset:
+        return
+    parsed = legacy_skillset_package(skillset, await store.list_skills(skillset_id))
+    if not parsed.valid:
+        logger.error("Legacy skillset %s no longer forms a valid plugin package", skillset_id)
+        return
+    if existing and existing.package_digest == parsed.package_digest:
+        return
+    await store.publish_plugin(
+        parsed.plugin_id,
+        parsed.manifest,
+        parsed.files,
+        parsed.skills,
+        [diagnostic.model_dump() for diagnostic in parsed.diagnostics],
+        parsed.package_digest,
+        user_id,
+        comment,
+    )
 
 
-async def get_skill_version(skill_id: str, version: int) -> SkillVersion | None:
-    return await get_store().get_skill_version(skill_id, version)
+async def _is_projection_owned_plugin(store: ReportStore, plugin: PluginListItem) -> bool:
+    """Return whether the current package revision belongs to the legacy projection."""
+    from reporting.services.plugin_packages import is_legacy_skillset_projection
+
+    versions = await store.list_plugin_versions(plugin.plugin_id)
+    current = next((version for version in versions if version.revision == plugin.current_revision), None)
+    return bool(current and is_legacy_skillset_projection(current.manifest))
+
+
+# A package's skills are determined by plugin.json, mcp.json and the SKILL.md
+# files; supporting files only set `has_scripts`, which the legacy skill
+# projection does not carry. Reading just these keeps a version listing from
+# pulling every asset of every revision through the database.
+_SKILL_DEFINING_FILES = re.compile(r"^(plugin\.json|mcp\.json|skills/[^/]+/SKILL\.md)$")
+
+
+async def _plugin_skill_version(
+    skillset_id: str,
+    skill_id: str,
+    version: PluginVersion,
+) -> SkillVersion | None:
+    from reporting.services.plugin_packages import parse_package
+
+    store = get_store()
+    paths = [
+        info.path
+        for info in await store.list_plugin_files(skillset_id, version.revision)
+        if _SKILL_DEFINING_FILES.fullmatch(info.path)
+    ]
+    parsed = parse_package(await store.read_plugin_files(skillset_id, version.revision, paths))
+    skill = next((item for item in parsed.skills if item.skill_id == skill_id), None)
+    if not skill:
+        return None
+    direct_tools = [
+        name
+        for name in skill.allowed_tools
+        if MCP_TOOL_NAME_RE.fullmatch(name) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(name)
+    ]
+    return SkillVersion(
+        skill_id=skill.skill_id,
+        skillset_id=skill.plugin_id,
+        name=skill.title,
+        description=skill.description,
+        template=skill.template,
+        parameters=skill.parameters,
+        triggers=skill.triggers,
+        tools_required=direct_tools,
+        enabled=skill.enabled,
+        version=version.revision,
+        created_at=version.created_at,
+        created_by=version.created_by,
+        comment=version.comment,
+    )
+
+
+async def list_skill_versions(skill_id: str, skillset_id: str | None = None) -> list[SkillVersion]:
+    store = get_store()
+    if skillset_id is None:
+        return await store.list_skill_versions(skill_id)
+    legacy_skill = await store.get_skill(skill_id)
+    if legacy_skill and legacy_skill.skillset_id == skillset_id:
+        return await store.list_skill_versions(skill_id)
+    results: list[SkillVersion] = []
+    if await store.get_plugin_skill(skillset_id, skill_id) is None:
+        return results
+    for version in await store.list_plugin_versions(skillset_id):
+        projected = await _plugin_skill_version(skillset_id, skill_id, version)
+        if projected:
+            results.append(projected)
+    return sorted(results, key=lambda item: item.version, reverse=True)
+
+
+async def get_skill_version(
+    skill_id: str,
+    version: int,
+    skillset_id: str | None = None,
+) -> SkillVersion | None:
+    if skillset_id is None:
+        return await get_store().get_skill_version(skill_id, version)
+    return next(
+        (item for item in await list_skill_versions(skill_id, skillset_id) if item.version == version),
+        None,
+    )
 
 
 async def list_enabled_skills() -> list[SkillItem]:
@@ -705,6 +928,89 @@ async def list_enabled_skills() -> list[SkillItem]:
 
 async def get_enabled_skill(skillset_id: str, skill_id: str) -> SkillItem | None:
     return await get_store().get_enabled_skill(skillset_id, skill_id)
+
+
+# ---------------------------------------------------------------------------
+# Agent plugin convenience functions
+# ---------------------------------------------------------------------------
+
+
+async def list_plugins() -> list[PluginListItem]:
+    return await get_store().list_plugins()
+
+
+async def get_plugin(plugin_id: str) -> PluginListItem | None:
+    return await get_store().get_plugin(plugin_id)
+
+
+async def publish_plugin(
+    plugin_id: str,
+    manifest: dict[str, Any],
+    files: list[PluginFile],
+    skills: list[PluginSkillItem],
+    diagnostics: list[dict[str, Any]],
+    package_digest: str,
+    created_by: str,
+    comment: str | None = None,
+    expected_revision: int | None = None,
+) -> PluginListItem:
+    return await get_store().publish_plugin(
+        plugin_id,
+        manifest,
+        files,
+        skills,
+        diagnostics,
+        package_digest,
+        created_by,
+        comment,
+        expected_revision,
+    )
+
+
+async def set_plugin_enabled(plugin_id: str, enabled: bool, updated_by: str) -> PluginListItem | None:
+    return await get_store().set_plugin_enabled(plugin_id, enabled, updated_by)
+
+
+async def delete_plugin(plugin_id: str) -> bool:
+    return await get_store().delete_plugin(plugin_id)
+
+
+async def list_plugin_versions(plugin_id: str) -> list[PluginVersion]:
+    return await get_store().list_plugin_versions(plugin_id)
+
+
+async def list_plugin_files(plugin_id: str, revision: int | None = None) -> list[PluginFileInfo]:
+    return await get_store().list_plugin_files(plugin_id, revision)
+
+
+async def read_plugin_file(plugin_id: str, path: str, revision: int | None = None) -> PluginFile | None:
+    return await get_store().read_plugin_file(plugin_id, path, revision)
+
+
+async def read_plugin_files(
+    plugin_id: str, revision: int | None = None, paths: list[str] | None = None
+) -> list[PluginFile]:
+    return await get_store().read_plugin_files(plugin_id, revision, paths)
+
+
+async def list_enabled_plugin_skills() -> list[PluginSkillItem]:
+    return await get_store().list_enabled_plugin_skills()
+
+
+async def list_plugin_skills(plugin_id: str) -> list[PluginSkillItem]:
+    return await get_store().list_plugin_skills(plugin_id)
+
+
+async def get_plugin_skill(plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+    return await get_store().get_plugin_skill(plugin_id, skill_id)
+
+
+async def get_enabled_plugin_skill(plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+    return await get_store().get_enabled_plugin_skill(plugin_id, skill_id)
+
+
+async def read_plugin_blob(plugin_id: str, sha256: str) -> PluginFile | None:
+    return await get_store().read_plugin_blob(plugin_id, sha256)
 
 
 # ---------------------------------------------------------------------------

@@ -34,7 +34,15 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.headless import resolve_stored_user
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_models, chat_turns, episodic_memory, report_store, sandbox_session
+from reporting.services import (
+    chat_budget,
+    chat_models,
+    chat_turns,
+    episodic_memory,
+    external_mcp,
+    report_store,
+    sandbox_session,
+)
 from reporting.services.chat_budget import BudgetController, grant_ledger
 from reporting.temporal_workflows.shared import ChatWorkerStepInvocation, ChatWorkerStepOutcome
 
@@ -162,6 +170,9 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
         # episodes as "established earlier in this conversation".
         turn=max(1, int(session_memory.get("turn") or 1)),
     )
+    # A distributed step runs in its own activity, so it discovers the external
+    # inventory for itself; scope it so the step pays for that once (AGT-038).
+    external_mcp.begin_discovery_scope()
     if invocation.sandbox_id:
         # Attach, never open: the coordinating turn owns the conversation's
         # sandbox and is the only thing that may suspend it (SBX-015).

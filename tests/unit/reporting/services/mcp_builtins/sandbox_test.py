@@ -2658,6 +2658,7 @@ def test_the_direct_tools_grant_no_more_than_delegate_already_does():
         "sandbox__read_file",
         "sandbox__list_files",
         "sandbox__run_python",
+        "sandbox__run_script",
     }
     for tool in direct:
         assert tool.required_permissions == [Permission.SANDBOX_DELEGATE.value]
@@ -2665,3 +2666,85 @@ def test_the_direct_tools_grant_no_more_than_delegate_already_does():
         # MCP server endpoint.
         assert tool.chat_only is True
         assert tool.chat_safe_without_confirmation is True
+
+
+async def test_plugin_skill_materializes_immutable_files_and_marker_last(mocker):
+    from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginSkillItem
+
+    skill = PluginSkillItem(
+        plugin_id="security",
+        skill_id="review",
+        portable_name="review",
+        title="Review",
+        description="Review things",
+        template="Review.",
+        source_path="skills/review",
+        revision=2,
+        package_digest="abc123" * 10,
+        has_scripts=True,
+    )
+    backend = MagicMock()
+    backend.read_file = AsyncMock(side_effect=[FileNotFoundError(), skill.package_digest])
+    backend.run_python = AsyncMock(return_value="SEIZU_PLUGIN_FILES_WRITTEN")
+    backend.write_file = AsyncMock(return_value="ok")
+    _direct_session(mocker, backend)
+    mocker.patch.object(
+        sandbox_module.report_store,
+        "list_plugin_files",
+        new=AsyncMock(
+            return_value=[
+                PluginFileInfo(
+                    path="skills/review/scripts/check.sh",
+                    media_type="text/x-shellscript",
+                    size=10,
+                    sha256="a" * 64,
+                    etag='"a"',
+                )
+            ]
+        ),
+    )
+    mocker.patch.object(
+        sandbox_module.report_store,
+        "read_plugin_file",
+        new=AsyncMock(
+            return_value=PluginFile(
+                path="skills/review/scripts/check.sh",
+                content=b"#!/bin/sh\n",
+            )
+        ),
+    )
+
+    root = await sandbox_module.materialize_plugin_skill(skill)
+
+    assert root == "/home/user/seizu_plugins/security/2-abc123abc123/skills/review"
+    # One program writes the whole tree, so a package of large assets does not
+    # build a program per file (SBX-017).
+    assert backend.run_python.await_count == 1
+    assert "check.sh" in backend.run_python.await_args.args[0]
+    assert backend.write_file.await_args.args[0].endswith("/.seizu-package-digest")
+    assert backend.write_file.await_args.args[1] == skill.package_digest
+
+
+async def test_plugin_skill_materialization_will_not_open_a_sandbox(mocker):
+    """SBX-018: the render path asks for files, it does not provision a VM."""
+    from reporting.schema.plugins import PluginSkillItem
+
+    skill = PluginSkillItem(
+        plugin_id="security",
+        skill_id="review",
+        portable_name="review",
+        title="Review",
+        description="Review things",
+        template="Review.",
+        source_path="skills/review",
+        revision=2,
+        package_digest="abc123" * 10,
+        has_scripts=True,
+    )
+    session = MagicMock()
+    session.opened = False
+    session.backend = AsyncMock()
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=session)
+
+    assert await sandbox_module.materialize_plugin_skill(skill, only_if_open=True) is None
+    session.backend.assert_not_awaited()

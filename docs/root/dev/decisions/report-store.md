@@ -60,3 +60,94 @@ SQLite engines remain only as a fast unit-test seam.
 The release boundary and backup/rollback procedure are documented under
 "Migrating from DynamoDB to PostgreSQL" in the upgrade guide. Legacy checkpoint
 history is explicitly disposable and is not copied into PostgreSQL.
+
+## STO-006 — Plugin packages are immutable revisions over content-addressed blobs
+
+**Applies to:** `PluginRecord`, `PluginVersionRecord`, `PluginBlobRecord`,
+`PluginFileRecord`
+
+PostgreSQL stores package manifests, indexed skills, file manifests, and SHA-256
+addressed file bytes. Publishing creates one immutable revision atomically.
+Blobs are shared between revisions and between plugins, so `delete_plugin`
+collects the ones its deletion orphaned rather than cascading them.
+
+**Why:** package files must remain byte-identical for MCP resource reads and
+sandbox execution throughout a turn, while references and assets often repeat
+unchanged between versions. Mutable filesystem paths would make a revision URI
+lie after an edit, and copying every file into every revision would pay the full
+package size for small metadata changes.
+
+## STO-007 — Plugin seeds reference packages beside the YAML configuration
+
+**Applies to:** `ReportingConfig.plugins`, `seed._seed_plugins`
+
+Each plugin seed names a directory or ZIP relative to the YAML file, keyed by
+its expected Seizu plugin ID. The seeder validates and installs it through the
+ordinary package API, and content digests make repeat runs idempotent. Export
+preserves declared sources but does not synthesize paths for other installs.
+
+**Why:** binary references, executable scripts, and the package hierarchy do
+not have a faithful or reviewable inline YAML representation. A relative source
+keeps the package and configuration relocatable as one deployment artifact,
+while the expected-ID key catches a package swapped into the wrong slot.
+
+## STO-008 — Legacy skillset projection is single-writer at startup
+
+**Applies to:** `SQLModelReportStore._migrate_legacy_skillsets`
+
+PostgreSQL serializes the legacy-skillset-to-plugin projection with a
+transaction advisory lock. Every Gunicorn worker still runs the idempotent
+startup check, but only one may execute its check-and-create sequence at once.
+
+**Why:** schema migration locking does not cover the data projection that
+follows it. Two fresh workers can both observe a missing plugin and attempt the
+same primary-key insert, turning an otherwise healthy multi-worker startup into
+a worker boot failure.
+
+## STO-009 — Production skillsets cut over through an explicit same-ID package
+
+**Applies to:** `ReportingConfig.plugins`, `mcp_runtime.list_prompts_for_user`
+
+A production skillset moves off the compatibility projection by seeding an
+explicit Agent Plugin with the same skillset and skill IDs. Plugin prompts take
+precedence while the legacy rows remain installed, so the packaged workflow can
+be exercised in ordinary turns before the compatibility source is removed.
+Legacy compatibility writes and deletion only update a package carrying the
+projection ownership marker; after an explicit package takes over that ID, the
+legacy surface cannot overwrite or delete it.
+
+The plugin reserves its namespaced prompt before tool-dependency filtering. An
+unavailable plugin skill is therefore absent rather than falling through to a
+same-named legacy definition; listing and rendering always select the same
+source.
+
+**Why:** validating a differently named example package proves package mechanics
+but not behavioral equivalence or fresh-install reconstruction. Same-ID shadowing
+tests the real selection path while keeping the legacy definition as a rollback
+until a package-only seed and end-to-end turn have both passed.
+
+## STO-010 — Plugin edits are staged in the client and published as one package
+
+**Applies to:** `POST /api/v1/plugins/{id}/publish`, `PluginPublishRequest`,
+`read_plugin_blob`, `PluginEditor.tsx`
+
+The editor loads a published revision, holds every edit in the browser, and
+submits the complete package in one request. A file it did not change is sent as
+its SHA-256 digest and resolved against blobs that plugin already stores; a
+`base_revision` rides along and a stale one is refused with `409`.
+
+**Why:** the server-side draft this replaced was written only when the author
+pressed "Save to draft", so field edits were lost by ordinary back navigation,
+and the draft was keyed by plugin ID alone — two authors editing one plugin
+silently shared and clobbered it. Staging removes both: there is one submit, it
+is atomic, and concurrency is one comparison rather than a second mutable copy
+of the package. Digest retention is what makes it affordable — without it,
+publishing a one-line edit would round-trip every asset through the browser.
+
+Server-held drafts are not ruled out for the future; they are simply not part
+of this shape. Anything that stores a partial package again has to answer what
+this one answers: which identity owns the draft, and what happens to it when
+the plugin is published from somewhere else in the meantime.
+
+**Don't:** resolve a retained digest against any blob in the table — scope it to
+the plugin, or a caller could attach content from a package it is not editing.

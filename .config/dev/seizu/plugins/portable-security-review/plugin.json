@@ -1,0 +1,65 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "portable-security-review",
+  "version": "1.0.0",
+  "description": "Development plugin exercising logical MCP dependencies through Seizu proxies.",
+  "extensions": {
+    "com.mappedsky.seizu": {
+      "skillsetId": "portable_security_review",
+      "skills": {
+        "review-source-dependencies": {
+          "skillId": "review_source_dependencies",
+          "title": "Review source dependencies",
+          "enabled": true,
+          "triggers": [
+            "review source dependencies with portable MCP tools",
+            "test Agent Plugin MCP proxy mapping"
+          ],
+          "parameters": [
+            {
+              "name": "repository",
+              "type": "string",
+              "description": "GitHub repository as owner/name.",
+              "required": true
+            },
+            {
+              "name": "package",
+              "type": "string",
+              "description": "Package whose dependency path should be checked.",
+              "required": true
+            },
+            {
+              "name": "version",
+              "type": "string",
+              "description": "Package version to inspect.",
+              "required": true
+            },
+            {
+              "name": "target",
+              "type": "string",
+              "description": "Potential transitive dependency to locate.",
+              "required": true
+            }
+          ]
+        },
+        "verify-packaged-assets": {
+          "skillId": "verify_packaged_assets",
+          "title": "Verify packaged assets",
+          "enabled": true,
+          "triggers": [
+            "verify live Agent Plugin resources and scripts",
+            "test packaged skill references and scripts"
+          ],
+          "parameters": [
+            {
+              "name": "message",
+              "type": "string",
+              "description": "Message the packaged script must echo.",
+              "required": true
+            }
+          ]
+        }
+      }
+    }
+  }
+}

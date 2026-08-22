@@ -1,26 +1,42 @@
 """In-process MCP runtime helpers shared by MCP transport and chat agents."""
 
+import base64
 import json
 import logging
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from urllib.parse import quote, unquote
 
 import jsonschema
 import neo4j.exceptions
-from mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent, Tool, ToolAnnotations
+from mcp.types import (
+    BlobResourceContents,
+    GetPromptResult,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+    TextResourceContents,
+    Tool,
+    ToolAnnotations,
+)
 from pydantic import ValidationError
 
+from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
 from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
-from reporting.schema.mcp_config import render_skill_prompt
+from reporting.schema.mcp_config import EXTERNAL_MCP_TOOL_NAME_RE, MCP_TOOL_NAME_RE, render_skill_prompt
 from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j, telemetry
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
+from reporting.services.plugin_packages import logical_mcp_ref
 from reporting.services.result_limits import (
     ResultLimits,
     Truncation,
@@ -110,6 +126,7 @@ _CHAT_SAFE_PERMISSIONS: frozenset[str] = frozenset(
         Permission.SKILLSETS_READ.value,
         Permission.SKILLS_READ.value,
         Permission.SKILLS_RENDER.value,
+        Permission.PLUGINS_READ.value,
         Permission.SCHEDULED_QUERIES_READ.value,
         Permission.SPACES_READ.value,
         Permission.WORKFLOWS_READ.value,
@@ -881,24 +898,67 @@ async def list_prompts_for_user(
 
     prompts: list[Prompt] = []
     try:
-        enabled_skills = await report_store.list_enabled_skills()
-        for skill in enabled_skills:
+        plugin_skills = await report_store.list_enabled_plugin_skills() if report_store.is_initialized() else []
+        tool_names: set[str] = set()
+        # Only a skill that declares a dependency needs the caller's inventory,
+        # and building it fans out to every external MCP proxy over the network.
+        # A listing of skills that declare nothing must not pay for that.
+        if any(skill.allowed_tools or skill.has_scripts for skill in plugin_skills):
+            available_tools = await list_tools_for_user(
+                current_user,
+                permissions=perms,
+                chat_safe_only=gate_permission == Permission.CHAT_SKILLS_CALL,
+                include_chat_only=gate_permission == Permission.CHAT_SKILLS_CALL,
+            )
+            tool_names = {tool.name for tool in available_tools}
+        # A plugin owns its namespaced prompt even when one of its declared
+        # dependencies is unavailable. Rendering resolves plugins before the
+        # legacy projection, so exposing the legacy prompt here would advertise
+        # a prompt that cannot be rendered with the same name.
+        plugin_prompt_names = {
+            f"{plugin_skill_item.plugin_id}__{plugin_skill_item.skill_id}" for plugin_skill_item in plugin_skills
+        }
+        for plugin_skill_item in plugin_skills:
+            tools_required, missing = _resolve_plugin_allowed_tools(plugin_skill_item, tool_names)
+            if missing:
+                continue
+            prompt_name = f"{plugin_skill_item.plugin_id}__{plugin_skill_item.skill_id}"
             prompts.append(
                 Prompt(
-                    name=f"{skill.skillset_id}__{skill.skill_id}",
-                    title=skill.name,
-                    description=_skill_prompt_description(skill),
+                    name=prompt_name,
+                    title=plugin_skill_item.title,
+                    description=_skill_prompt_description(plugin_skill_item),
+                    meta={SKILL_TOOLS_META_KEY: tools_required},
+                    arguments=[
+                        PromptArgument(
+                            name=parameter.name,
+                            description=parameter.description or None,
+                            required=parameter.required and parameter.default is None,
+                        )
+                        for parameter in plugin_skill_item.parameters
+                    ],
+                )
+            )
+        enabled_skills = await report_store.list_enabled_skills()
+        for legacy_skill in enabled_skills:
+            if f"{legacy_skill.skillset_id}__{legacy_skill.skill_id}" in plugin_prompt_names:
+                continue
+            prompts.append(
+                Prompt(
+                    name=f"{legacy_skill.skillset_id}__{legacy_skill.skill_id}",
+                    title=legacy_skill.name,
+                    description=_skill_prompt_description(legacy_skill),
                     # Carried on the listing so a caller can honour the author's
                     # declaration without a second store read. The attribute is
                     # `meta`, aliased to the wire's `_meta`.
-                    meta={SKILL_TOOLS_META_KEY: list(skill.tools_required or ())},
+                    meta={SKILL_TOOLS_META_KEY: list(legacy_skill.tools_required or ())},
                     arguments=[
                         PromptArgument(
                             name=p.name,
                             description=p.description or None,
                             required=p.required and p.default is None,
                         )
-                        for p in skill.parameters
+                        for p in legacy_skill.parameters
                     ],
                 )
             )
@@ -907,8 +967,53 @@ async def list_prompts_for_user(
     return prompts
 
 
+def _resolve_plugin_allowed_tools(skill: Any, available: set[str]) -> tuple[list[str], list[str]]:
+    """Resolve Seizu-recognized allowed-tools entries as required dependencies.
+
+    Unknown Agent Skills tokens remain portable metadata and do not become an
+    authorization decision. Recognized names must exist in the caller's normal
+    RBAC-filtered tool inventory (AGT-002).
+    """
+    resolved: list[str] = []
+    missing: list[str] = []
+    if skill.has_scripts:
+        if "sandbox__run_script" in available:
+            resolved.append("sandbox__run_script")
+        else:
+            missing.append("sandbox__run_script")
+    for entry in skill.allowed_tools:
+        logical = logical_mcp_ref(entry)
+        if logical is not None:
+            server_name, remote_tool = logical
+            server = skill.mcp_servers.get(server_name)
+            match_mode = settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
+            proxy = (
+                external_mcp.proxy_for_upstream_url(server.get("url", ""))
+                if server and match_mode != settings.ExternalPluginURLMatchMode.NONE
+                else None
+            )
+            name = external_mcp.namespaced_tool_name(proxy.name, remote_tool) if proxy else None
+            if name is None and server is not None and match_mode != settings.ExternalPluginURLMatchMode.STRICT:
+                name = external_mcp.namespaced_tool_name(server_name, remote_tool)
+            if name and name in available:
+                resolved.append(name)
+            else:
+                missing.append(entry)
+            continue
+        if entry.startswith("mcp:"):
+            missing.append(entry)
+            continue
+        if MCP_TOOL_NAME_RE.fullmatch(entry) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(entry):
+            if entry in available:
+                resolved.append(entry)
+            else:
+                missing.append(entry)
+    return resolved, missing
+
+
 def _skill_prompt_description(skill: Any) -> str:
-    description = skill.description or f"{skill.name} skill"
+    title = getattr(skill, "title", None) or getattr(skill, "name", "Skill")
+    description = skill.description or f"{title} skill"
     triggers = [trigger for trigger in getattr(skill, "triggers", []) if isinstance(trigger, str) and trigger]
     if not triggers:
         return description
@@ -974,7 +1079,44 @@ async def _get_prompt_core(
 
     try:
         parsed_name = parse_user_defined_name(name)
-        target_skill = await report_store.get_enabled_skill(parsed_name[0], parsed_name[1]) if parsed_name else None
+        plugin_skill = (
+            await report_store.get_enabled_plugin_skill(parsed_name[0], parsed_name[1])
+            if parsed_name and report_store.is_initialized()
+            else None
+        )
+        target_skill: Any = None
+        tools_required: list[str] = []
+        if plugin_skill is not None:
+            available_tools = await list_tools_for_user(
+                current_user,
+                permissions=perms,
+                chat_safe_only=gate_permission == Permission.CHAT_SKILLS_CALL,
+                include_chat_only=gate_permission == Permission.CHAT_SKILLS_CALL,
+            )
+            tools_required, missing = _resolve_plugin_allowed_tools(
+                plugin_skill, {tool.name for tool in available_tools}
+            )
+            if missing:
+                return (
+                    GetPromptResult(
+                        description="Skill dependencies unavailable",
+                        messages=[
+                            PromptMessage(
+                                role="user",
+                                content=TextContent(
+                                    type="text",
+                                    text=f"Skill '{name}' is unavailable because required tools are missing",
+                                ),
+                            )
+                        ],
+                    ),
+                    ChatBlockReason.NOT_AVAILABLE,
+                    (),
+                )
+            target_skill = plugin_skill
+        if target_skill is None:
+            target_skill = await report_store.get_enabled_skill(parsed_name[0], parsed_name[1]) if parsed_name else None
+            tools_required = list(target_skill.tools_required) if target_skill else []
         if target_skill is None:
             return (
                 GetPromptResult(
@@ -994,16 +1136,36 @@ async def _get_prompt_core(
             target_skill.template,
             arguments or {},
             target_skill.triggers,
-            target_skill.tools_required,
+            tools_required,
         )
         text = rendered if rendered is not None else json.dumps({"errors": errors}, indent=2)
+        if plugin_skill is not None and rendered is not None:
+            root_uri = (
+                f"seizu://plugins/{plugin_skill.plugin_id}/versions/{plugin_skill.revision}/files/"
+                f"skills/{plugin_skill.portable_name}/"
+            )
+            text = f"{text}\n\nSupporting plugin files are available as MCP resources under `{root_uri}`."
+            # Rendering is template substitution, not execution: it must never
+            # be what provisions a sandbox. Files are materialized only for a
+            # skill that ships scripts, only for a caller who could run them,
+            # and only into a sandbox the conversation already opened (SBX-018).
+            if (
+                gate_permission == Permission.CHAT_SKILLS_CALL
+                and plugin_skill.has_scripts
+                and Permission.SANDBOX_DELEGATE.value in perms
+            ):
+                from reporting.services.mcp_builtins.sandbox import materialize_plugin_skill
+
+                local_path = await materialize_plugin_skill(plugin_skill, only_if_open=True)
+                if local_path:
+                    text = f"{text}\nThe skill package is materialized in the conversation sandbox at `{local_path}`."
         return (
             GetPromptResult(
                 description=target_skill.description or target_skill.name,
                 messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))],
             ),
             None,
-            tuple(target_skill.tools_required),
+            tuple(tools_required),
         )
     except Exception:
         logger.exception("Failed to render MCP prompt %s", name)
@@ -1037,6 +1199,115 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
             )
         ],
     )
+
+
+# The URI shape every plugin file is readable at. Advertised as a template so a
+# client knows how to reach `references/`, `scripts/` and `assets/` without the
+# listing having to enumerate them.
+PLUGIN_RESOURCE_URI_TEMPLATE = "seizu://plugins/{plugin_id}/versions/{revision}/files/{path}"
+
+
+def _plugin_resource_uri(plugin_id: str, revision: int, path: str) -> str:
+    encoded = "/".join(quote(part, safe="") for part in path.split("/"))
+    return f"seizu://plugins/{plugin_id}/versions/{revision}/files/{encoded}"
+
+
+async def list_plugin_resources_for_user(
+    current_user: CurrentUser | None,
+    *,
+    permissions: frozenset[str] | None = None,
+) -> list[Resource]:
+    """One resource per enabled plugin skill, not one per packaged file.
+
+    A listing is a catalogue: what is here, and is it relevant. That is the
+    skill's identity, description and declared dependencies -- a skill's
+    `references/` and `assets/` are named by its own instructions and read by
+    URI, so enumerating them here would put every file of every plugin in front
+    of a caller interested in one. It also keeps this a single query with no
+    pagination to get wrong, since the listing is bounded by skills rather than
+    by files (AGT-037).
+    """
+    perms = _permissions(current_user, permissions)
+    if Permission.PLUGINS_READ.value not in perms and Permission.SKILLS_RENDER.value not in perms:
+        return []
+    skills = await report_store.list_enabled_plugin_skills()
+    # Same rule as the prompt listing: a skill whose recognized dependencies the
+    # caller cannot reach is not offered, so a catalogue never advertises
+    # something whose render would refuse. Discovery is memoized per request, so
+    # this resolves against the same inventory the rest of the request used.
+    tool_names: set[str] = set()
+    if any(skill.allowed_tools or skill.has_scripts for skill in skills):
+        tool_names = {tool.name for tool in await list_tools_for_user(current_user, permissions=perms)}
+    resources: list[Resource] = []
+    for skill in skills:
+        tools_required, missing = _resolve_plugin_allowed_tools(skill, tool_names)
+        if missing:
+            continue
+        resources.append(
+            Resource(
+                name=skill.title,
+                title=f"{skill.plugin_id}: {skill.title}",
+                uri=_plugin_resource_uri(skill.plugin_id, skill.revision, f"{skill.source_path}/SKILL.md"),
+                description=_skill_prompt_description(skill),
+                mimeType="text/markdown",
+                meta={SKILL_TOOLS_META_KEY: tools_required},
+            )
+        )
+    return resources
+
+
+async def list_plugin_resource_templates_for_user(
+    current_user: CurrentUser | None,
+    *,
+    permissions: frozenset[str] | None = None,
+) -> list[ResourceTemplate]:
+    """How to reach any file in a published revision, without enumerating them."""
+    perms = _permissions(current_user, permissions)
+    if Permission.PLUGINS_READ.value not in perms and Permission.SKILLS_RENDER.value not in perms:
+        return []
+    return [
+        ResourceTemplate(
+            uriTemplate=PLUGIN_RESOURCE_URI_TEMPLATE,
+            name="Agent Plugin package file",
+            description=(
+                "Any file in a published Agent Plugin revision, including a skill's "
+                "references/, scripts/ and assets/ directories."
+            ),
+        )
+    ]
+
+
+async def read_plugin_resource_for_user(
+    current_user: CurrentUser | None,
+    uri: str,
+    *,
+    permissions: frozenset[str] | None = None,
+) -> TextResourceContents | BlobResourceContents | None:
+    perms = _permissions(current_user, permissions)
+    if Permission.PLUGINS_READ.value not in perms and Permission.SKILLS_RENDER.value not in perms:
+        return None
+    prefix = "seizu://plugins/"
+    if not uri.startswith(prefix):
+        return None
+    remainder = uri.removeprefix(prefix)
+    plugin_id, separator, remainder = remainder.partition("/versions/")
+    revision_text, separator_two, path = remainder.partition("/files/")
+    if not separator or not separator_two or not revision_text.isdigit() or not path:
+        return None
+    plugin = await report_store.get_plugin(plugin_id)
+    if not plugin or not plugin.enabled:
+        return None
+    decoded_path = "/".join(unquote(part) for part in path.split("/"))
+    if any(part in {"", ".", ".."} for part in decoded_path.split("/")):
+        return None
+    file = await report_store.read_plugin_file(plugin_id, decoded_path, int(revision_text))
+    if file is None:
+        return None
+    try:
+        text = file.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return BlobResourceContents(uri=uri, mimeType=file.media_type, blob=base64.b64encode(file.content).decode())
+    return TextResourceContents(uri=uri, mimeType=file.media_type, text=text)
 
 
 # Keys under which a tool result carries its rows. ``graph__query`` returns

@@ -137,7 +137,7 @@ Run `seizu --help` or `seizu <group> --help` for the full command list.
 
 ## Seed and Export
 
-The CLI can seed spaces, reports, scheduled queries, toolsets, and skillsets from the same YAML configuration format used by the quickstart:
+The CLI can seed spaces, reports, scheduled queries, toolsets, skillsets, and Agent Plugin package sources from the same YAML configuration format used by the quickstart:
 
 ```bash
 seizu seed --config path/to/reporting-dashboard.yaml
@@ -154,6 +154,9 @@ Export writes the latest API state back into the YAML file:
 seizu export --config path/to/reporting-dashboard.yaml
 seizu export --dry-run
 ```
+
+Plugin source declarations are preserved during export. Plugins installed by
+another client are not assigned invented local filesystem paths.
 
 **Built-in MCP toolsets are skipped on export.** They ship with the application, the write path rejects
 their ids, and those ids are not valid YAML keys — so they have no place in a config describing

@@ -2326,3 +2326,94 @@ the end — 33 recorded calls, 25 distinct, on the run above.
 **Don't:** treat "the budget ended the run" as "the run found nothing". The
 terminal status is `budget_exhausted` and the answer must be the partial one the
 evidence supports, with the limit stated.
+
+## AGT-036 — Agent Skill `allowed-tools` is a dependency declaration in Seizu
+
+**Applies to:** `plugin_packages.py`, `mcp_runtime._resolve_plugin_allowed_tools`
+
+For tool names Seizu recognizes, `allowed-tools` means the skill requires and
+discloses that tool. The skill is hidden for a user whose ordinary tool listing
+does not contain it. Unknown portable tokens are retained and ignored.
+
+**Why:** the existing `tools_required` field already meant that the workflow
+could not run without those tools. Keeping a second Seizu-only field would make
+portable packages declare the same dependency twice and allow the declarations
+to drift. Treating the standard field as permission instead would conflict with
+[AGT-002](#agt-002): disclosure is not authorization, and RBAC plus confirmation
+remain the only execution boundary.
+
+Logical `mcp:<server>/<tool>` names resolve only to operator-configured proxies;
+the package endpoint is never contacted. URL matching has three modes. `none`,
+the default, ignores the package URL and binds an equally named proxy. `lax`
+prefers a configured or advertised URL alias and then falls back to the proxy
+name. `strict` requires exactly one URL alias match. Every mode also requires
+the user's discovered inventory to contain the exact remote tool.
+
+**Why:** in a server-side agent the operator-controlled proxy configuration is
+the execution boundary, while the package URL is deployment-specific metadata
+and neither grants authorization nor selects a network destination. URL matching
+still offers optional provenance and configuration checking. Name fallback
+remains narrower than matching a tool leaf globally: both the plugin server name
+and remote tool name must match, while RBAC determines whether the discovered
+tool is present.
+
+## AGT-037 — A resource listing is a catalogue of skills, not of files
+
+**Applies to:** `mcp_runtime.list_plugin_resources_for_user`,
+`list_plugin_resource_templates_for_user`, `mcp_server._handle_list_resources`
+
+`resources/list` returns one resource per *enabled plugin skill* — its SKILL.md
+URI, title, description and declared `allowed-tools` — not one per packaged
+file. `resources/templates/list` advertises
+`seizu://plugins/{plugin_id}/versions/{revision}/files/{path}`, and
+`resources/read` still accepts any file in a published revision.
+
+**Why:** a listing exists so a caller can decide what is relevant, and that
+decision is made from a skill's identity and description. A skill's
+`references/`, `scripts/` and `assets/` are named by its own instructions and
+fetched by URI, so enumerating them made every file of every installed plugin
+the price of asking what was available — a listing bounded by
+`plugins x files` rather than by skills. It was also a query per plugin, and it
+was the one surface here that would have needed cursor pagination to stay
+bounded. Narrowing it removed all three at once.
+
+**Don't:** resolve `allowed-tools` against the caller's inventory to build this
+listing. Resolution fans out to every configured external MCP proxy, and a
+catalogue read must not pay for that; the names are carried as *declared*, and
+availability is still decided at render time (AGT-002, AGT-036). **Don't:**
+re-add file enumeration "for discoverability" — the template is the
+discoverability mechanism, and the render already hands over the skill's prefix.
+
+## AGT-038 — External discovery is memoized per turn, cached across turns only on request
+
+**Applies to:** `external_mcp.discovery_scope` / `begin_discovery_scope` /
+`discover_proxy_tools` / `invalidate_discovery_cache`,
+`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`
+
+Discovering one proxy's tools costs a transport, an MCP `initialize` and a
+paginated `tools/list`. A single turn asks for that answer from the system
+prompt's capability listing, the planner's, and every skill render that resolves
+dependencies — five to ten identical fan-outs. Two layers now sit in front of it:
+
+- A **scope memo**, opened by `chat_agent_node`, `dispatcher_node`, the
+  distributed step worker and the MCP ASGI middleware. Valid by construction:
+  one identity, one turn, seconds wide, removing only duplicate work. Always on.
+- A **TTL cache** (`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`, default `0` = off) that
+  makes a *cold* turn cheap. Bounded to 512 entries, LRU-evicted, and dropped
+  for a user whenever an upstream refuses their identity.
+
+**Why the split:** the memo cannot be wrong; the TTL cache can. A tool the user
+just lost stays listed and one they just gained stays hidden until it expires.
+Neither is an authorization decision — the call is still checked by RBAC and by
+the upstream, and disclosure was never a boundary (AGT-002) — but both are
+visible, which is why the cross-turn layer is opt-in rather than a default.
+
+**Both key on the user.** A proxy's listing is what *that* delegated identity is
+authorized to see, so a cache keyed by proxy alone would hand one user another's
+view. This is AGT-010's rule against pooling the transport, applied to what the
+transport returned. **Don't** widen the key to make the hit rate look better.
+
+This is also what made resolving `allowed-tools` affordable in
+`resources/list` (AGT-037): the catalogue now resolves against the same
+inventory the rest of the request already discovered, and omits a skill whose
+dependencies are unreachable, exactly as the prompt listing does.

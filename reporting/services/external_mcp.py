@@ -5,8 +5,11 @@ import json
 import logging
 import os
 import re
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import time
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -26,6 +29,7 @@ from reporting.schema.external_mcp import (
     ExternalMCPTransport,
 )
 from reporting.schema.mcp_config import ToolItem, ToolsetListItem
+from reporting.services import telemetry
 from reporting.services.mcp_builtins.synthetic import params_from_input_schema
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,8 @@ AUTHENTICATE_TOOL_NAME = "seizu_authenticate"
 EXTERNAL_TOOLSET_PREFIX = "__external_"
 _SYNTHETIC_SUFFIX = "__"
 _EPOCH = "1970-01-01T00:00:00+00:00"
+_PLUGIN_EXTENSION_NAMESPACE = "com.mappedsky.seizu"
+_advertised_upstream_urls: dict[str, frozenset[str]] = {}
 _RESOURCE_METADATA_RE = re.compile(r"(?:^|[,\s])resource_metadata\s*=\s*(?:\"([^\"]+)\"|([^,\s]+))", re.I)
 
 
@@ -130,6 +136,52 @@ def parse_namespaced_tool_name(name: str) -> tuple[ExternalMCPProxy, str] | None
         return None
     proxy = next((item for item in settings.MCP_EXTERNAL_PROXIES if item.enabled and item.name == proxy_name), None)
     return (proxy, remote_name) if proxy is not None else None
+
+
+def proxy_for_upstream_url(url: str) -> ExternalMCPProxy | None:
+    """Return the configured identity proxy for a portable MCP endpoint."""
+    configured = [proxy for proxy in settings.MCP_EXTERNAL_PROXIES if proxy.enabled and url in proxy.upstream_urls]
+    if configured:
+        return configured[0] if len(configured) == 1 else None
+    advertised = [
+        proxy
+        for proxy in settings.MCP_EXTERNAL_PROXIES
+        if proxy.enabled and url in _advertised_upstream_urls.get(proxy.name, frozenset())
+    ]
+    return advertised[0] if len(advertised) == 1 else None
+
+
+# What a remote server may claim about itself. The aliases below come off the
+# wire, so they are bounded and only consulted when a mode actually matches on
+# URL -- under the default `none` the package URL is documentation and nothing
+# an upstream says can influence which proxy a dependency binds to.
+_MAX_ADVERTISED_UPSTREAM_URLS = 32
+
+
+def _record_upstream_metadata(proxy: ExternalMCPProxy, initialize_result: Any) -> None:
+    """Record portable endpoint aliases advertised during MCP initialize."""
+    if settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE == settings.ExternalPluginURLMatchMode.NONE:
+        _advertised_upstream_urls.pop(proxy.name, None)
+        return
+    containers: list[Any] = []
+    capabilities = getattr(initialize_result, "capabilities", None)
+    extensions = getattr(capabilities, "extensions", None)
+    if isinstance(extensions, dict):
+        containers.append(extensions.get(_PLUGIN_EXTENSION_NAMESPACE))
+    meta = getattr(initialize_result, "meta", None)
+    if isinstance(meta, dict):
+        containers.append(meta.get(_PLUGIN_EXTENSION_NAMESPACE))
+    urls: set[str] = set()
+    for value in containers:
+        if not isinstance(value, dict):
+            continue
+        raw_urls = value.get("upstreamUrls")
+        if isinstance(raw_urls, list):
+            urls.update(url for url in raw_urls if isinstance(url, str) and url.startswith(("http://", "https://")))
+    if urls:
+        _advertised_upstream_urls[proxy.name] = frozenset(sorted(urls)[:_MAX_ADVERTISED_UPSTREAM_URLS])
+    else:
+        _advertised_upstream_urls.pop(proxy.name, None)
 
 
 def tool_requires_confirmation(
@@ -262,7 +314,8 @@ async def _session(proxy: ExternalMCPProxy, current_user: CurrentUser) -> AsyncI
     try:
         async with _transport(proxy, headers, oauth_challenges) as streams:
             async with ClientSession(*streams, read_timeout_seconds=proxy.read_timeout_seconds) as session:
-                await session.initialize()
+                initialize_result = await session.initialize()
+                _record_upstream_metadata(proxy, initialize_result)
                 yield session
     except ExternalMCPAuthenticationRequired:
         raise
@@ -309,6 +362,144 @@ def _oauth_challenge(exc: BaseException, proxy_name: str) -> OAuthChallenge | No
     return None
 
 
+# ---------------------------------------------------------------------------
+# Discovery caching
+# ---------------------------------------------------------------------------
+#
+# Discovering a proxy's tools costs a transport, an MCP initialize and a
+# paginated tools/list. One chat turn asks for the same answer repeatedly --
+# the system prompt's capability listing, the planner's, each render's
+# dependency resolution -- so without this the same fan-out happens five to ten
+# times per turn for one unchanging result.
+#
+# Two layers, because they carry different risk. The scope memo is valid by
+# construction: one identity, one turn, seconds wide, and it only ever removes
+# duplicate work. The TTL cache is what makes a *cold* turn cheap, and it can
+# be stale, so it is opt-in and off by default.
+#
+# Both key on the user. A proxy's tool listing is what *that* identity is
+# authorized to see -- the delegated headers say so -- and a cache keyed by
+# proxy alone would hand one user another's view. This is the same rule that
+# forbids pooling the transport itself, applied to what the transport returned.
+
+_discovery_scope: ContextVar[dict[tuple[str, str], list[Tool]] | None] = ContextVar(
+    "_external_mcp_discovery_scope", default=None
+)
+
+# Bounded so a long-lived worker serving many users cannot grow without limit.
+_DISCOVERY_TTL_MAX_ENTRIES = 512
+_discovery_ttl_cache: OrderedDict[tuple[str, str], tuple[float, list[Tool]]] = OrderedDict()
+
+
+def begin_discovery_scope() -> None:
+    """Start a memo scope for the rest of this task's context.
+
+    The imperative form, for graph nodes that already set their ambient state
+    this way and have no single block to wrap. The scope dies with the task, so
+    a turn is its natural extent.
+    """
+    _discovery_scope.set({})
+
+
+@contextmanager
+def discovery_scope() -> Iterator[None]:
+    """Memoize proxy discovery for the duration of one turn or request.
+
+    Outside a scope nothing is memoized, so a caller that has not opted in --
+    a background path, a test -- keeps today's live behaviour.
+    """
+    token = _discovery_scope.set({})
+    try:
+        yield
+    finally:
+        _discovery_scope.reset(token)
+
+
+def _cache_key(proxy: ExternalMCPProxy, current_user: CurrentUser) -> tuple[str, str]:
+    return (current_user.user.user_id, proxy.name)
+
+
+def _cached_proxy_tools(key: tuple[str, str]) -> list[Tool] | None:
+    scope = _discovery_scope.get()
+    if scope is not None and key in scope:
+        return scope[key]
+    ttl = settings.MCP_EXTERNAL_DISCOVERY_TTL_SECONDS
+    if ttl <= 0:
+        return None
+    entry = _discovery_ttl_cache.get(key)
+    if entry is None:
+        return None
+    expires_at, tools = entry
+    if expires_at <= time.monotonic():
+        del _discovery_ttl_cache[key]
+        return None
+    _discovery_ttl_cache.move_to_end(key)
+    if scope is not None:
+        scope[key] = tools
+    return tools
+
+
+def _store_proxy_tools(key: tuple[str, str], tools: list[Tool]) -> None:
+    scope = _discovery_scope.get()
+    if scope is not None:
+        scope[key] = tools
+    ttl = settings.MCP_EXTERNAL_DISCOVERY_TTL_SECONDS
+    if ttl <= 0:
+        return
+    _discovery_ttl_cache[key] = (time.monotonic() + ttl, tools)
+    _discovery_ttl_cache.move_to_end(key)
+    while len(_discovery_ttl_cache) > _DISCOVERY_TTL_MAX_ENTRIES:
+        _discovery_ttl_cache.popitem(last=False)
+
+
+def invalidate_discovery_cache(current_user: CurrentUser | None = None) -> None:
+    """Drop cached discovery, for one user or entirely.
+
+    Called when an upstream stops accepting the identity we discovered under:
+    a cached listing is then describing access the user no longer has, and the
+    next call would fail against a stale picture rather than re-authenticate.
+    """
+    scope = _discovery_scope.get()
+    if current_user is None:
+        _discovery_ttl_cache.clear()
+        if scope is not None:
+            scope.clear()
+        return
+    user_id = current_user.user.user_id
+    for key in [key for key in _discovery_ttl_cache if key[0] == user_id]:
+        del _discovery_ttl_cache[key]
+    if scope is not None:
+        for key in [key for key in scope if key[0] == user_id]:
+            del scope[key]
+
+
+async def discover_proxy_tools(proxy: ExternalMCPProxy, current_user: CurrentUser) -> list[Tool]:
+    """``list_proxy_tools`` through the scope memo and the optional TTL cache.
+
+    Traced with the layer that answered, because "how often does a turn discover"
+    is not visible anywhere else: a served call and a live one look identical to
+    every caller above this (AGT-038).
+    """
+    key = _cache_key(proxy, current_user)
+    scope = _discovery_scope.get()
+    # Read before the lookup: a TTL hit populates the scope on its way out, so
+    # asking afterwards would report every TTL hit as a scope hit.
+    from_scope = scope is not None and key in scope
+    with telemetry.span("mcp discovery", proxy=proxy.name) as current:
+        cached = _cached_proxy_tools(key)
+        if cached is not None:
+            telemetry.set_attributes(
+                current,
+                discovery_source="scope" if from_scope else "ttl",
+                tools=len(cached),
+            )
+            return cached
+        tools = await list_proxy_tools(proxy, current_user)
+        _store_proxy_tools(key, tools)
+        telemetry.set_attributes(current, discovery_source="live", tools=len(tools))
+        return tools
+
+
 async def list_proxy_tools(proxy: ExternalMCPProxy, current_user: CurrentUser) -> list[Tool]:
     tools: list[Tool] = []
     cursor: str | None = None
@@ -343,7 +534,7 @@ async def list_tools_for_user(
         if not proxy.enabled:
             continue
         try:
-            proxy_tools = await list_proxy_tools(proxy, current_user)
+            proxy_tools = await discover_proxy_tools(proxy, current_user)
             if exclude_confirmation_gated:
                 proxy_tools = [
                     tool
@@ -356,6 +547,9 @@ async def list_tools_for_user(
                 ]
             tools.extend(proxy_tools)
         except ExternalMCPAuthenticationRequired as exc:
+            # What we hold for this user describes access the upstream just
+            # refused, so it must not answer the next call.
+            invalidate_discovery_cache(current_user)
             metadata = exc.challenge.resource_metadata
             detail = f" Authentication metadata: {metadata}" if metadata else ""
             tools.append(

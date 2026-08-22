@@ -22,8 +22,12 @@ from mcp.types import (
     GetPromptRequestParams,
     GetPromptResult,
     ListPromptsResult,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
     ListToolsResult,
     PaginatedRequestParams,
+    ReadResourceRequestParams,
+    ReadResourceResult,
 )
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -114,6 +118,36 @@ async def _handle_get_prompt(ctx: ServerRequestContext[Any], params: GetPromptRe
     )
 
 
+async def _handle_list_resources(
+    ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+) -> ListResourcesResult:
+    del ctx, params
+    resources = await mcp_runtime.list_plugin_resources_for_user(
+        _mcp_current_user.get(), permissions=_mcp_permissions.get()
+    )
+    return ListResourcesResult(resources=resources)
+
+
+async def _handle_read_resource(
+    ctx: ServerRequestContext[Any], params: ReadResourceRequestParams
+) -> ReadResourceResult:
+    del ctx
+    content = await mcp_runtime.read_plugin_resource_for_user(
+        _mcp_current_user.get(), params.uri, permissions=_mcp_permissions.get()
+    )
+    return ReadResourceResult(contents=[content] if content is not None else [])
+
+
+async def _handle_list_resource_templates(
+    ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+) -> ListResourceTemplatesResult:
+    del ctx, params
+    templates = await mcp_runtime.list_plugin_resource_templates_for_user(
+        _mcp_current_user.get(), permissions=_mcp_permissions.get()
+    )
+    return ListResourceTemplatesResult(resourceTemplates=templates)
+
+
 def _build_mcp_server() -> Server[Any]:
     # No version: there is no single product version to report today --
     # pyproject says 0.1.0, the tags say v4.2.0, and the changelog says 4.0.0 --
@@ -127,6 +161,9 @@ def _build_mcp_server() -> Server[Any]:
         on_call_tool=_handle_call_tool,
         on_list_prompts=_handle_list_prompts,
         on_get_prompt=_handle_get_prompt,
+        on_list_resources=_handle_list_resources,
+        on_list_resource_templates=_handle_list_resource_templates,
+        on_read_resource=_handle_read_resource,
     )
 
 
