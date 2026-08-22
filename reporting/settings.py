@@ -1,4 +1,5 @@
 import os
+from enum import StrEnum
 from importlib import resources
 
 from cartography_sync.registry import parse_enabled_modules
@@ -6,6 +7,23 @@ from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 _DEFAULT_SANDBOX_CORE_TOOLS = ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"]
+
+
+class ExternalPluginURLMatchMode(StrEnum):
+    """How Agent Plugin MCP declarations bind to external MCP proxies."""
+
+    STRICT = "strict"
+    LAX = "lax"
+    NONE = "none"
+
+
+def _external_plugin_url_match_mode_from_env() -> ExternalPluginURLMatchMode:
+    raw = str_env("MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE", ExternalPluginURLMatchMode.NONE.value)
+    try:
+        return ExternalPluginURLMatchMode(raw)
+    except ValueError as exc:
+        choices = ", ".join(mode.value for mode in ExternalPluginURLMatchMode)
+        raise RuntimeError(f"MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE must be one of: {choices}") from exc
 
 
 def _core_tools_from_env() -> list[str]:
@@ -1118,9 +1136,10 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
-# When false, a logical plugin server name may fall back to an equally named
-# proxy if that user's discovery result contains the requested remote tool.
-MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT = bool_env("MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
+# How logical Agent Plugin MCP dependencies bind to configured proxies:
+# strict requires an upstream URL alias, lax prefers one then uses an equally
+# named proxy, and none ignores the package URL and uses an equally named proxy.
+MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE = _external_plugin_url_match_mode_from_env()
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.

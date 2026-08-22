@@ -2342,14 +2342,17 @@ to drift. Treating the standard field as permission instead would conflict with
 [AGT-002](#agt-002): disclosure is not authorization, and RBAC plus confirmation
 remain the only execution boundary.
 
-Logical `mcp:<server>/<tool>` names resolve through operator-configured proxy
-aliases. The package endpoint is identity only; Seizu never connects to it. URL
-matching is non-strict by default: when no alias matches, an equally named proxy
-may satisfy the dependency only if the user's discovered inventory contains the
-exact remote tool. Strict mode disables that fallback.
+Logical `mcp:<server>/<tool>` names resolve only to operator-configured proxies;
+the package endpoint is never contacted. URL matching has three modes. `none`,
+the default, ignores the package URL and binds an equally named proxy. `lax`
+prefers a configured or advertised URL alias and then falls back to the proxy
+name. `strict` requires exactly one URL alias match. Every mode also requires
+the user's discovered inventory to contain the exact remote tool.
 
-**Why:** many hosted identity proxies cannot add MCP initialize extensions, and
-operators should not need control of the proxy implementation to use a package.
-The fallback remains narrower than matching a tool leaf globally: both the
-plugin server name and remote tool name must match, while RBAC still determines
-whether the discovered tool is present.
+**Why:** in a server-side agent the operator-controlled proxy configuration is
+the execution boundary, while the package URL is deployment-specific metadata
+and neither grants authorization nor selects a network destination. URL matching
+still offers optional provenance and configuration checking. Name fallback
+remains narrower than matching a tool leaf globally: both the plugin server name
+and remote tool name must match, while RBAC determines whether the discovered
+tool is present.

@@ -976,9 +976,14 @@ def _resolve_plugin_allowed_tools(skill: Any, available: set[str]) -> tuple[list
         if logical is not None:
             server_name, remote_tool = logical
             server = skill.mcp_servers.get(server_name)
-            proxy = external_mcp.proxy_for_upstream_url(server.get("url", "")) if server else None
+            match_mode = settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
+            proxy = (
+                external_mcp.proxy_for_upstream_url(server.get("url", ""))
+                if server and match_mode != settings.ExternalPluginURLMatchMode.NONE
+                else None
+            )
             name = external_mcp.namespaced_tool_name(proxy.name, remote_tool) if proxy else None
-            if name is None and server is not None and not settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT:
+            if name is None and server is not None and match_mode != settings.ExternalPluginURLMatchMode.STRICT:
                 name = external_mcp.namespaced_tool_name(server_name, remote_tool)
             if name and name in available:
                 resolved.append(name)

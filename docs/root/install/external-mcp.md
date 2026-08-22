@@ -21,17 +21,17 @@ Temporal worker.
 ```text
 MCP_EXTERNAL_ENABLED=true
 MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","email":"X-Target-Email"}}]
-MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT=false
+MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE=none
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=ext__drive__delete_file,ext__drive__share_file
 MCP_EXTERNAL_PROXY_TOKEN=<short-lived-service-jwt>
 ```
 
-Agent Plugin `mcp:<server>/<tool>` dependencies first resolve through a proxy's
-configured or advertised upstream URL aliases. With the default
-`MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT=false`, an unmatched URL may instead use
-an equally named proxy when the current user's discovered inventory contains
-that exact remote tool. Set it to `true` when endpoint identity must match even
-if the tool name is available.
+Agent Plugin `mcp:<server>/<tool>` dependencies use the matching proxy name by
+default; the package URL is ignored. Set `MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE`
+to `lax` to prefer configured or advertised upstream URL aliases before the
+same-name fallback, or `strict` to require exactly one URL alias match. Every
+mode also requires the current user's discovered inventory to contain the exact
+remote tool.
 
 Each object accepts:
 

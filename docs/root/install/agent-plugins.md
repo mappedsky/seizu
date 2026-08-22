@@ -109,12 +109,12 @@ A proxy may also advertise aliases in its MCP initialize result under
 `upstream_urls` always wins; advertised aliases are used only when exactly one
 enabled proxy claims the package endpoint.
 
-By default, an unmatched endpoint falls back to an enabled proxy whose name is
-the same as the `mcp.json` server name, but only when that user's discovery
-result contains the exact remote tool. This makes an ordinary `github` proxy
-usable without custom initialize metadata. Set
-`MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT=true` to require a configured or
-advertised URL alias and disable the name-and-tool fallback.
+`MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE` controls how the declaration binds to a
+proxy. The default, `none`, ignores the package URL and uses an enabled proxy
+whose name is the same as the `mcp.json` server name. `lax` prefers a configured
+or advertised URL alias and falls back to that same-name lookup. `strict`
+requires exactly one URL alias match. Every mode still requires the user's
+discovered inventory to contain the exact remote tool.
 
 ## Files and scripts
 

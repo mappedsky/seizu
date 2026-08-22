@@ -1050,6 +1050,11 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
     proxy = _external_proxy()
     proxy.upstream_urls = ["https://github.example/mcp"]
     mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.STRICT,
+    )
     plugin_skill = _plugin_skill().model_copy(
         update={
             "template": "Plugin summary {% $topic %}.",
@@ -1096,6 +1101,11 @@ def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
     proxy = _external_proxy()
     proxy.upstream_urls = ["https://github.example/mcp"]
     mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.STRICT,
+    )
 
     resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
         _plugin_skill(),
@@ -1107,8 +1117,13 @@ def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
 
 
 def test_plugin_allowed_tools_fall_back_to_matching_proxy_name(mocker):
-    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [_external_proxy()])
-    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
+    proxy = _external_proxy().model_copy(update={"name": "github"})
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.LAX,
+    )
 
     resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
         _plugin_skill(),
@@ -1120,8 +1135,13 @@ def test_plugin_allowed_tools_fall_back_to_matching_proxy_name(mocker):
 
 
 def test_plugin_allowed_tools_strict_mode_requires_url_alias(mocker):
-    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [_external_proxy()])
-    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", True)
+    proxy = _external_proxy().model_copy(update={"name": "github"})
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.STRICT,
+    )
 
     resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
         _plugin_skill(),
@@ -1132,8 +1152,32 @@ def test_plugin_allowed_tools_strict_mode_requires_url_alias(mocker):
     assert missing == ["mcp:github/search"]
 
 
+def test_plugin_allowed_tools_none_mode_ignores_url_alias(mocker):
+    url_proxy = _external_proxy()
+    url_proxy.upstream_urls = ["https://github.example/mcp"]
+    named_proxy = _external_proxy().model_copy(update={"name": "github"})
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [url_proxy, named_proxy])
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.NONE,
+    )
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
+        _plugin_skill(),
+        {"reports__list", "ext__drive__search", "ext__github__search"},
+    )
+
+    assert resolved == ["reports__list", "ext__github__search"]
+    assert missing == []
+
+
 def test_plugin_allowed_tools_fallback_still_requires_declared_server(mocker):
-    mocker.patch.object(mcp_runtime.settings, "MCP_EXTERNAL_PLUGIN_URL_MATCH_STRICT", False)
+    mocker.patch.object(
+        mcp_runtime.settings,
+        "MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        mcp_runtime.settings.ExternalPluginURLMatchMode.NONE,
+    )
     skill = _plugin_skill().model_copy(update={"mcp_servers": {}})
 
     resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(  # noqa: SLF001
