@@ -126,7 +126,7 @@ but not behavioral equivalence or fresh-install reconstruction. Same-ID shadowin
 tests the real selection path while keeping the legacy definition as a rollback
 until a package-only seed and end-to-end turn have both passed.
 
-## STO-008 — Plugin edits are staged in the client, not in a server-side draft
+## STO-010 — Plugin edits are staged in the client and published as one package
 
 **Applies to:** `POST /api/v1/plugins/{id}/publish`, `PluginPublishRequest`,
 `read_plugin_blob`, `PluginEditor.tsx`
@@ -134,19 +134,20 @@ until a package-only seed and end-to-end turn have both passed.
 The editor loads a published revision, holds every edit in the browser, and
 submits the complete package in one request. A file it did not change is sent as
 its SHA-256 digest and resolved against blobs that plugin already stores; a
-`base_revision` rides along and a stale one is refused with `409`. There are no
-`plugin_drafts` tables and no per-file write endpoints.
+`base_revision` rides along and a stale one is refused with `409`.
 
-**Why:** the draft this replaced was written only when the author pressed "Save
-to draft", so field edits were lost by ordinary back navigation, and the draft
-was keyed by plugin ID alone — two authors editing one plugin silently shared
-and clobbered it. Staging removes both: there is one submit, it is atomic, and
-concurrency is one comparison rather than a second mutable copy of the package.
-Digest retention is what makes it affordable — without it, publishing a
-one-line edit would round-trip every asset through the browser.
+**Why:** the server-side draft this replaced was written only when the author
+pressed "Save to draft", so field edits were lost by ordinary back navigation,
+and the draft was keyed by plugin ID alone — two authors editing one plugin
+silently shared and clobbered it. Staging removes both: there is one submit, it
+is atomic, and concurrency is one comparison rather than a second mutable copy
+of the package. Digest retention is what makes it affordable — without it,
+publishing a one-line edit would round-trip every asset through the browser.
 
-**Don't:** reintroduce a partial-save endpoint to "avoid losing work". The
-guard against loss is the leave prompt plus `beforeunload`; a half-written
-package on the server is the state this decision exists to remove. **Don't:**
-resolve a retained digest against any blob in the table — scope it to the
-plugin, or a caller could attach content from a package it is not editing.
+Server-held drafts are not ruled out for the future; they are simply not part
+of this shape. Anything that stores a partial package again has to answer what
+this one answers: which identity owns the draft, and what happens to it when
+the plugin is published from somewhere else in the meantime.
+
+**Don't:** resolve a retained digest against any blob in the table — scope it to
+the plugin, or a caller could attach content from a package it is not editing.

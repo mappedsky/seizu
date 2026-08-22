@@ -250,8 +250,8 @@ diagnostics rather than raising. Package bounds live at the top of that module.
   /api/v1/plugins/{id}/publish` takes the complete package; an unchanged file is
   carried by `sha256` and resolved against that plugin's own blobs, and a
   required `base_revision` makes a stale publish a `409` rather than a silent
-  revert. There is no server-side draft — **read
-  [`STO-008`](docs/root/dev/decisions/report-store.md) before adding one back.**
+  revert. Nothing partial is stored server-side
+  ([`STO-010`](docs/root/dev/decisions/report-store.md)).
 - **Permissions** are `plugins:read` (Viewer) / `plugins:write` / `plugins:delete`
   (Admin). `plugins:X` implies the legacy `skillsets:X` + `skills:X`; the reverse
   needs **both** legacy permissions, so a role scoped to writing skills cannot
