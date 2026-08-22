@@ -18,7 +18,18 @@ export interface PluginListItem {
   enabled: boolean;
   current_revision: number;
   package_digest: string;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  updated_by?: string | null;
   diagnostics: PluginDiagnostic[];
+}
+
+export interface CreatePluginRequest {
+  plugin_id: string;
+  name: string;
+  version: string;
+  description: string;
 }
 
 export interface PluginFileInfo {
@@ -95,6 +106,16 @@ export function usePluginMutations() {
   }, []);
 
   return {
+    create: async (body: CreatePluginRequest): Promise<PluginListItem> =>
+      (
+        await checked(
+          await fetch('/api/v1/plugins', {
+            method: 'POST',
+            headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }),
+        )
+      ).json(),
     install: async (file: File): Promise<PluginListItem> => {
       const body = new FormData();
       body.append('package', file);

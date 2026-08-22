@@ -115,6 +115,11 @@ Legacy compatibility writes and deletion only update a package carrying the
 projection ownership marker; after an explicit package takes over that ID, the
 legacy surface cannot overwrite or delete it.
 
+The plugin reserves its namespaced prompt before tool-dependency filtering. An
+unavailable plugin skill is therefore absent rather than falling through to a
+same-named legacy definition; listing and rendering always select the same
+source.
+
 **Why:** validating a differently named example package proves package mechanics
 but not behavioral equivalence or fresh-install reconstruction. Same-ID shadowing
 tests the real selection path while keeping the legacy definition as a rollback

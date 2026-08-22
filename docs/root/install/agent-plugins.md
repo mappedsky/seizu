@@ -1,8 +1,8 @@
 # Agent Plugins
 
 Seizu supports server-side installation of packages targeting Agent Plugins
-1.0.0. One plugin is one Seizu skill namespace. Install a ZIP in the web UI at
-`/app/plugins`, or use the CLI:
+1.0.0. One plugin is one Seizu skill namespace. Create and author a plugin in
+the web UI at `/app/plugins`, install an existing ZIP there, or use the CLI:
 
 ```bash
 seizu plugins validate ./my-plugin
@@ -130,10 +130,14 @@ conversation sandbox under `/home/user/seizu_plugins/`. Scripts run only with
 `sandbox__run_script`; arguments are passed as an argv array without a shell.
 Seizu web and worker processes never execute package code.
 
-The authoring UI maintains one draft per plugin. File writes use ETags, and
-publish validates the complete draft before atomically creating an immutable
-revision. Default package bounds are 10 MiB compressed, 25 MiB unpacked, 500
-files, 10 MiB per file, and 512 KiB per `SKILL.md`.
+The authoring UI maintains one draft per plugin. It provides structured fields
+for the known `plugin.json` metadata and each skill's `SKILL.md` front matter,
+instructions, tools, triggers, aliases, and template variables. Supporting
+files can be created or uploaded into that skill's `references/`, `scripts/`,
+or `assets/` directory; scripts are marked executable. File writes use ETags,
+and publish validates the complete draft before atomically creating an
+immutable revision. Default package bounds are 10 MiB compressed, 25 MiB
+unpacked, 500 files, 10 MiB per file, and 512 KiB per `SKILL.md`.
 
 ## Compatibility
 

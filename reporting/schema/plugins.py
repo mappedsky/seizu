@@ -116,6 +116,18 @@ class PluginUpdateRequest(BaseModel):
     enabled: bool
 
 
+class PluginCreateRequest(BaseModel):
+    plugin_id: str
+    name: str
+    version: str = "1.0.0"
+    description: str = ""
+
+    @field_validator("plugin_id")
+    @classmethod
+    def valid_plugin_id(cls, value: str) -> str:
+        return validate_mcp_slug_component(value)
+
+
 class PluginPublishRequest(BaseModel):
     comment: str | None = None
 

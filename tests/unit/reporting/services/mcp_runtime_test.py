@@ -1097,6 +1097,21 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
     materialize.assert_awaited_once_with(plugin_skill)
 
 
+async def test_unavailable_plugin_still_shadows_same_named_legacy_skill(mocker):
+    plugin_skill = _plugin_skill().model_copy(update={"allowed_tools": ["reports__missing"]})
+    legacy_skill = _skill()
+    other_legacy_skill = _skill().model_copy(update={"skill_id": "other"})
+    mocker.patch.object(report_store, "is_initialized", return_value=True)
+    mocker.patch.object(report_store, "list_enabled_plugin_skills", return_value=[plugin_skill])
+    mocker.patch.object(report_store, "list_enabled_skills", return_value=[legacy_skill, other_legacy_skill])
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=[])
+    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+
+    prompts = await mcp_runtime.list_prompts_for_user(current, gate_permission=Permission.CHAT_SKILLS_CALL)
+
+    assert [prompt.name for prompt in prompts] == ["security__other"]
+
+
 def test_plugin_allowed_tools_resolve_through_configured_proxy(mocker):
     proxy = _external_proxy()
     proxy.upstream_urls = ["https://github.example/mcp"]

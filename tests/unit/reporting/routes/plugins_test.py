@@ -76,3 +76,49 @@ async def test_install_publishes_validated_package(mocker):
     assert response.status_code == 201
     assert response.json()["plugin_id"] == "review_tools"
     assert publish.await_args.kwargs["created_by"] == "user"
+
+
+async def test_create_plugin_publishes_minimal_portable_package(mocker):
+    item = PluginListItem(
+        plugin_id="review_tools",
+        name="review-tools",
+        package_version="1.0.0",
+        current_revision=1,
+        package_digest="a" * 64,
+        created_at=_NOW,
+        updated_at=_NOW,
+        created_by="user",
+    )
+    mocker.patch("reporting.routes.plugins.report_store.get_plugin", new=AsyncMock(return_value=None))
+    publish = mocker.patch("reporting.routes.plugins.report_store.publish_plugin", new=AsyncMock(return_value=item))
+
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/plugins",
+            json={
+                "plugin_id": "review_tools",
+                "name": "review-tools",
+                "version": "1.0.0",
+                "description": "Review security findings",
+            },
+        )
+
+    assert response.status_code == 201
+    files = publish.await_args.kwargs["files"]
+    manifest = json.loads(files[0].content)
+    assert manifest["$schema"] == PLUGIN_SCHEMA
+    assert manifest["extensions"]["com.mappedsky.seizu"]["skillsetId"] == "review_tools"
+    assert manifest["extensions"]["com.mappedsky.seizu"]["skills"] == {}
+
+
+async def test_create_plugin_rejects_existing_id(mocker):
+    mocker.patch(
+        "reporting.routes.plugins.report_store.get_plugin",
+        new=AsyncMock(return_value=object()),
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/plugins",
+            json={"plugin_id": "review_tools", "name": "review-tools"},
+        )
+    assert response.status_code == 409

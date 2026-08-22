@@ -906,13 +906,18 @@ async def list_prompts_for_user(
                 include_chat_only=gate_permission == Permission.CHAT_SKILLS_CALL,
             )
             tool_names = {tool.name for tool in available_tools}
-        plugin_prompt_names: set[str] = set()
+        # A plugin owns its namespaced prompt even when one of its declared
+        # dependencies is unavailable. Rendering resolves plugins before the
+        # legacy projection, so exposing the legacy prompt here would advertise
+        # a prompt that cannot be rendered with the same name.
+        plugin_prompt_names = {
+            f"{plugin_skill_item.plugin_id}__{plugin_skill_item.skill_id}" for plugin_skill_item in plugin_skills
+        }
         for plugin_skill_item in plugin_skills:
             tools_required, missing = _resolve_plugin_allowed_tools(plugin_skill_item, tool_names)
             if missing:
                 continue
             prompt_name = f"{plugin_skill_item.plugin_id}__{plugin_skill_item.skill_id}"
-            plugin_prompt_names.add(prompt_name)
             prompts.append(
                 Prompt(
                     name=prompt_name,

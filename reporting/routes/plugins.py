@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import zipfile
 from pathlib import PurePosixPath
 
@@ -13,6 +14,7 @@ from fastapi.responses import Response
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
 from reporting.schema.plugins import (
+    PluginCreateRequest,
     PluginFile,
     PluginFileContent,
     PluginFileInfo,
@@ -96,6 +98,35 @@ async def list_plugins(
 ) -> PluginListResponse:
     del current
     return PluginListResponse(plugins=await report_store.list_plugins())
+
+
+@router.post("/api/v1/plugins", response_model=PluginListItem, status_code=201)
+async def create_plugin(
+    body: PluginCreateRequest,
+    current: CurrentUser = Depends(require_permission(Permission.PLUGINS_WRITE)),
+) -> PluginListItem:
+    if await report_store.get_plugin(body.plugin_id):
+        raise HTTPException(status_code=409, detail="Plugin already exists")
+    manifest = {
+        "$schema": plugin_packages.PLUGIN_SCHEMA,
+        "name": body.name,
+        "version": body.version,
+        "description": body.description,
+        "extensions": {
+            plugin_packages.EXTENSION_NAMESPACE: {
+                "skillsetId": body.plugin_id,
+                "skills": {},
+            }
+        },
+    }
+    files = [
+        PluginFile(
+            path="plugin.json",
+            content=json.dumps(manifest, indent=2).encode(),
+            media_type="application/json",
+        )
+    ]
+    return await _publish(files, current, "Created plugin")
 
 
 @router.get("/api/v1/plugins/{plugin_id}", response_model=PluginListItem)
