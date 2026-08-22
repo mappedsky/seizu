@@ -47,11 +47,7 @@ async def _plugin_files(plugin_id: str) -> list[PluginFile] | None:
     plugin = await report_store.get_plugin(plugin_id)
     if not plugin:
         return None
-    files = [
-        await report_store.read_plugin_file(plugin_id, info.path, plugin.current_revision)
-        for info in await report_store.list_plugin_files(plugin_id, plugin.current_revision)
-    ]
-    return [file for file in files if file is not None]
+    return await report_store.read_plugin_files(plugin_id, plugin.current_revision)
 
 
 async def _publish_legacy_edit(

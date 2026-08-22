@@ -1,5 +1,6 @@
 """In-process MCP runtime helpers shared by MCP transport and chat agents."""
 
+import base64
 import json
 import logging
 from collections.abc import Coroutine
@@ -17,6 +18,7 @@ from mcp.types import (
     PromptArgument,
     PromptMessage,
     Resource,
+    ResourceTemplate,
     TextContent,
     TextResourceContents,
     Tool,
@@ -898,7 +900,10 @@ async def list_prompts_for_user(
     try:
         plugin_skills = await report_store.list_enabled_plugin_skills() if report_store.is_initialized() else []
         tool_names: set[str] = set()
-        if plugin_skills:
+        # Only a skill that declares a dependency needs the caller's inventory,
+        # and building it fans out to every external MCP proxy over the network.
+        # A listing of skills that declare nothing must not pay for that.
+        if any(skill.allowed_tools or skill.has_scripts for skill in plugin_skills):
             available_tools = await list_tools_for_user(
                 current_user,
                 permissions=perms,
@@ -1140,10 +1145,18 @@ async def _get_prompt_core(
                 f"skills/{plugin_skill.portable_name}/"
             )
             text = f"{text}\n\nSupporting plugin files are available as MCP resources under `{root_uri}`."
-            if gate_permission == Permission.CHAT_SKILLS_CALL:
+            # Rendering is template substitution, not execution: it must never
+            # be what provisions a sandbox. Files are materialized only for a
+            # skill that ships scripts, only for a caller who could run them,
+            # and only into a sandbox the conversation already opened (SBX-018).
+            if (
+                gate_permission == Permission.CHAT_SKILLS_CALL
+                and plugin_skill.has_scripts
+                and Permission.SANDBOX_DELEGATE.value in perms
+            ):
                 from reporting.services.mcp_builtins.sandbox import materialize_plugin_skill
 
-                local_path = await materialize_plugin_skill(plugin_skill)
+                local_path = await materialize_plugin_skill(plugin_skill, only_if_open=True)
                 if local_path:
                     text = f"{text}\nThe skill package is materialized in the conversation sandbox at `{local_path}`."
         return (
@@ -1188,31 +1201,80 @@ def _permission_denied_prompt(permission: str) -> GetPromptResult:
     )
 
 
+# The URI shape every plugin file is readable at. Advertised as a template so a
+# client knows how to reach `references/`, `scripts/` and `assets/` without the
+# listing having to enumerate them.
+PLUGIN_RESOURCE_URI_TEMPLATE = "seizu://plugins/{plugin_id}/versions/{revision}/files/{path}"
+
+
+def _plugin_resource_uri(plugin_id: str, revision: int, path: str) -> str:
+    encoded = "/".join(quote(part, safe="") for part in path.split("/"))
+    return f"seizu://plugins/{plugin_id}/versions/{revision}/files/{encoded}"
+
+
 async def list_plugin_resources_for_user(
     current_user: CurrentUser | None,
     *,
     permissions: frozenset[str] | None = None,
 ) -> list[Resource]:
+    """One resource per enabled plugin skill, not one per packaged file.
+
+    A listing is a catalogue: what is here, and is it relevant. That is the
+    skill's identity, description and declared dependencies -- a skill's
+    `references/` and `assets/` are named by its own instructions and read by
+    URI, so enumerating them here would put every file of every plugin in front
+    of a caller interested in one. It also keeps this a single query with no
+    pagination to get wrong, since the listing is bounded by skills rather than
+    by files (AGT-037).
+    """
     perms = _permissions(current_user, permissions)
     if Permission.PLUGINS_READ.value not in perms and Permission.SKILLS_RENDER.value not in perms:
         return []
+    skills = await report_store.list_enabled_plugin_skills()
+    # Same rule as the prompt listing: a skill whose recognized dependencies the
+    # caller cannot reach is not offered, so a catalogue never advertises
+    # something whose render would refuse. Discovery is memoized per request, so
+    # this resolves against the same inventory the rest of the request used.
+    tool_names: set[str] = set()
+    if any(skill.allowed_tools or skill.has_scripts for skill in skills):
+        tool_names = {tool.name for tool in await list_tools_for_user(current_user, permissions=perms)}
     resources: list[Resource] = []
-    for plugin in await report_store.list_plugins():
-        if not plugin.enabled:
+    for skill in skills:
+        tools_required, missing = _resolve_plugin_allowed_tools(skill, tool_names)
+        if missing:
             continue
-        for file in await report_store.list_plugin_files(plugin.plugin_id, plugin.current_revision):
-            encoded_path = "/".join(quote(part, safe="") for part in file.path.split("/"))
-            uri = f"seizu://plugins/{plugin.plugin_id}/versions/{plugin.current_revision}/files/{encoded_path}"
-            resources.append(
-                Resource(
-                    name=file.path,
-                    title=f"{plugin.plugin_id}: {file.path}",
-                    uri=uri,
-                    mimeType=file.media_type,
-                    size=file.size,
-                )
+        resources.append(
+            Resource(
+                name=skill.title,
+                title=f"{skill.plugin_id}: {skill.title}",
+                uri=_plugin_resource_uri(skill.plugin_id, skill.revision, f"{skill.source_path}/SKILL.md"),
+                description=_skill_prompt_description(skill),
+                mimeType="text/markdown",
+                meta={SKILL_TOOLS_META_KEY: tools_required},
             )
+        )
     return resources
+
+
+async def list_plugin_resource_templates_for_user(
+    current_user: CurrentUser | None,
+    *,
+    permissions: frozenset[str] | None = None,
+) -> list[ResourceTemplate]:
+    """How to reach any file in a published revision, without enumerating them."""
+    perms = _permissions(current_user, permissions)
+    if Permission.PLUGINS_READ.value not in perms and Permission.SKILLS_RENDER.value not in perms:
+        return []
+    return [
+        ResourceTemplate(
+            uriTemplate=PLUGIN_RESOURCE_URI_TEMPLATE,
+            name="Agent Plugin package file",
+            description=(
+                "Any file in a published Agent Plugin revision, including a skill's "
+                "references/, scripts/ and assets/ directories."
+            ),
+        )
+    ]
 
 
 async def read_plugin_resource_for_user(
@@ -1244,8 +1306,6 @@ async def read_plugin_resource_for_user(
     try:
         text = file.content.decode("utf-8")
     except UnicodeDecodeError:
-        import base64
-
         return BlobResourceContents(uri=uri, mimeType=file.media_type, blob=base64.b64encode(file.content).decode())
     return TextResourceContents(uri=uri, mimeType=file.media_type, text=text)
 

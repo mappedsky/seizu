@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { Helmet } from 'react-helmet';
 import {
   Alert,
   Box,
@@ -19,16 +20,17 @@ import {
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircle';
-import DeleteIcon from '@mui/icons-material/Delete';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import PublishIcon from '@mui/icons-material/Publish';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import ConfirmDeleteDialog from 'src/components/ConfirmDeleteDialog';
+import FieldWithHelp from 'src/components/FieldWithHelp';
 import PluginSkillEditor from 'src/components/PluginSkillEditor';
+import { DASHBOARD_NAVBAR_HEIGHT } from 'src/components/dashboardLayoutConstants';
 import {
   PluginDiagnostic,
-  PluginFileInfo,
+  StagedFilePayload,
   usePluginMutations,
 } from 'src/hooks/usePluginsApi';
 import { useToolCatalog } from 'src/hooks/useToolsetsApi';
@@ -45,9 +47,37 @@ import {
   serializeSkillDocument,
 } from 'src/pluginAuthoring';
 
-interface LoadedSkill {
+// The rail is a fixed 260px, so its rows must ellipsize: a long skill title or
+// a long `plugin__skill` name would otherwise scroll the whole panel sideways.
+const railRowSx = { minWidth: 0, my: 0.25 };
+const railRowSlotProps = {
+  primary: { noWrap: true },
+  secondary: { noWrap: true, sx: { fontFamily: 'monospace', fontSize: 12 } },
+} as const;
+
+const MANIFEST_PATH = 'plugin.json';
+const SKILL_FILE_RE = /^skills\/[^/]+\/SKILL\.md$/;
+
+type SupportingDirectory = 'references' | 'scripts' | 'assets';
+
+/**
+ * A supporting file in the staged package.
+ *
+ * `bytes` is set for a file this session added; `sha256` for one carried over
+ * from the published revision, which publish retains by digest rather than
+ * round-tripping through the browser.
+ */
+interface StagedFile {
   path: string;
-  file: PluginFileInfo;
+  mediaType: string;
+  executable: boolean;
+  size: number;
+  bytes?: Uint8Array;
+  sha256?: string;
+}
+
+interface StagedSkill {
+  path: string;
   document: SkillDocument;
   extension: PluginSkillExtension;
 }
@@ -56,25 +86,61 @@ function cloneManifest(manifest: PluginManifest): PluginManifest {
   return JSON.parse(JSON.stringify(manifest)) as PluginManifest;
 }
 
-function FieldWithHelp({
-  label,
-  tooltip,
-  children,
-}: {
-  label: string;
-  tooltip: string;
-  children: React.ReactNode;
-}) {
+function effectiveSkillId(skill: StagedSkill): string {
   return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, flex: 1 }}>
-      <Box sx={{ flex: 1, minWidth: 0 }}>{children}</Box>
-      <Tooltip title={tooltip} placement="top" arrow describeChild>
-        <IconButton aria-label={`Help for ${label}`} size="small">
-          <HelpOutlineIcon fontSize="small" />
-        </IconButton>
-      </Tooltip>
-    </Box>
+    skill.extension.skillId || skill.document.portableName.replaceAll('-', '_')
   );
+}
+
+/** The whole package as the publish/validate endpoints take it. */
+function packagePayload(
+  manifest: PluginManifest,
+  skills: StagedSkill[],
+  supporting: StagedFile[],
+): StagedFilePayload[] {
+  const encoder = new TextEncoder();
+  const encode = (bytes: Uint8Array) => {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+    }
+    return btoa(binary);
+  };
+  return [
+    {
+      path: MANIFEST_PATH,
+      media_type: 'application/json',
+      content_base64: encode(encoder.encode(serializeManifest(manifest))),
+    },
+    ...skills.map((skill) => ({
+      path: skill.path,
+      media_type: 'text/markdown',
+      content_base64: encode(
+        encoder.encode(serializeSkillDocument(skill.document)),
+      ),
+    })),
+    ...supporting.map((file) =>
+      file.bytes
+        ? {
+            path: file.path,
+            media_type: file.mediaType,
+            executable: file.executable,
+            content_base64: encode(file.bytes),
+          }
+        : {
+            path: file.path,
+            media_type: file.mediaType,
+            executable: file.executable,
+            sha256: file.sha256 as string,
+          },
+    ),
+  ];
+}
+
+/** A cheap identity for the staged package, for unsaved-change detection. */
+function packageFingerprint(payload: StagedFilePayload[]): string {
+  return JSON.stringify(payload);
 }
 
 function NewSkillDialog({
@@ -163,7 +229,6 @@ function NewSkillDialog({
               onChange={(event) => updatePortableName(event.target.value)}
               required
               fullWidth
-              size="small"
             />
           </FieldWithHelp>
           <FieldWithHelp
@@ -176,7 +241,6 @@ function NewSkillDialog({
               onChange={(event) => setSkillId(event.target.value)}
               required
               fullWidth
-              size="small"
             />
           </FieldWithHelp>
           <TextField
@@ -184,7 +248,6 @@ function NewSkillDialog({
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             fullWidth
-            size="small"
           />
           <TextField
             label="Description"
@@ -194,7 +257,6 @@ function NewSkillDialog({
             minRows={2}
             required
             fullWidth
-            size="small"
           />
         </Stack>
       </DialogContent>
@@ -216,73 +278,29 @@ function NewSkillDialog({
 
 function PluginManifestEditor({
   manifest,
-  onSave,
+  onChange,
 }: {
   manifest: PluginManifest;
-  onSave: (manifest: PluginManifest) => Promise<void>;
+  onChange: (manifest: PluginManifest) => void;
 }) {
   const extension = seizuExtension(manifest);
-  const [name, setName] = useState(manifest.name ?? '');
-  const [version, setVersion] = useState(manifest.version ?? '');
-  const [description, setDescription] = useState(manifest.description ?? '');
-  const [authorName, setAuthorName] = useState(manifest.author?.name ?? '');
-  const [authorEmail, setAuthorEmail] = useState(manifest.author?.email ?? '');
-  const [authorUrl, setAuthorUrl] = useState(manifest.author?.url ?? '');
-  const [homepage, setHomepage] = useState(manifest.homepage ?? '');
-  const [repository, setRepository] = useState(manifest.repository ?? '');
-  const [license, setLicense] = useState(manifest.license ?? '');
-  const [keywords, setKeywords] = useState(
-    (manifest.keywords ?? []).join(', '),
-  );
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = async () => {
-    if (!name.trim()) {
-      setError('Package name is required.');
-      return;
-    }
-    if (!version.trim()) {
-      setError('Version is required.');
-      return;
-    }
+  const update = (patch: Partial<PluginManifest>) => {
     const next = cloneManifest(manifest);
-    next.name = name.trim();
-    next.version = version.trim();
-    next.description = description.trim();
-    next.homepage = homepage.trim();
-    next.repository = repository.trim();
-    next.license = license.trim();
-    next.keywords = keywords
-      .split(',')
-      .map((keyword) => keyword.trim())
-      .filter(Boolean);
-    const author = {
-      name: authorName.trim(),
-      email: authorEmail.trim(),
-      url: authorUrl.trim(),
-    };
-    next.author = Object.fromEntries(
-      Object.entries(author).filter(([, value]) => value),
-    );
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-    try {
-      await onSave(next);
-      setMessage('Plugin details saved to the draft.');
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setSaving(false);
-    }
+    Object.assign(next, patch);
+    onChange(next);
+  };
+  const author = manifest.author ?? {};
+  const updateAuthor = (patch: Record<string, string>) => {
+    const merged: Record<string, string> = { ...author, ...patch };
+    update({
+      author: Object.fromEntries(
+        Object.entries(merged).filter(([, value]) => value),
+      ),
+    });
   };
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
-      {message && <Alert severity="success">{message}</Alert>}
       <Box>
         <Typography variant="h2">Plugin details</Typography>
         <Typography color="text.secondary">
@@ -302,23 +320,27 @@ function PluginManifestEditor({
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <TextField
           label="Package name"
-          value={name}
-          onChange={(event) => setName(event.target.value)}
+          value={manifest.name ?? ''}
+          onChange={(event) => update({ name: event.target.value })}
+          error={!manifest.name?.trim()}
+          helperText={!manifest.name?.trim() ? 'Package name is required.' : ''}
           required
           fullWidth
         />
         <TextField
           label="Version"
-          value={version}
-          onChange={(event) => setVersion(event.target.value)}
+          value={manifest.version ?? ''}
+          onChange={(event) => update({ version: event.target.value })}
+          error={!manifest.version?.trim()}
+          helperText={!manifest.version?.trim() ? 'Version is required.' : ''}
           required
           fullWidth
         />
       </Stack>
       <TextField
         label="Description"
-        value={description}
-        onChange={(event) => setDescription(event.target.value)}
+        value={manifest.description ?? ''}
+        onChange={(event) => update({ description: event.target.value })}
         multiline
         minRows={2}
         fullWidth
@@ -328,20 +350,20 @@ function PluginManifestEditor({
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <TextField
           label="Name"
-          value={authorName}
-          onChange={(event) => setAuthorName(event.target.value)}
+          value={author.name ?? ''}
+          onChange={(event) => updateAuthor({ name: event.target.value })}
           fullWidth
         />
         <TextField
           label="Email"
-          value={authorEmail}
-          onChange={(event) => setAuthorEmail(event.target.value)}
+          value={author.email ?? ''}
+          onChange={(event) => updateAuthor({ email: event.target.value })}
           fullWidth
         />
         <TextField
           label="URL"
-          value={authorUrl}
-          onChange={(event) => setAuthorUrl(event.target.value)}
+          value={author.url ?? ''}
+          onChange={(event) => updateAuthor({ url: event.target.value })}
           fullWidth
         />
       </Stack>
@@ -349,20 +371,20 @@ function PluginManifestEditor({
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <TextField
           label="Homepage"
-          value={homepage}
-          onChange={(event) => setHomepage(event.target.value)}
+          value={manifest.homepage ?? ''}
+          onChange={(event) => update({ homepage: event.target.value })}
           fullWidth
         />
         <TextField
           label="Repository"
-          value={repository}
-          onChange={(event) => setRepository(event.target.value)}
+          value={manifest.repository ?? ''}
+          onChange={(event) => update({ repository: event.target.value })}
           fullWidth
         />
         <TextField
           label="License"
-          value={license}
-          onChange={(event) => setLicense(event.target.value)}
+          value={manifest.license ?? ''}
+          onChange={(event) => update({ license: event.target.value })}
           fullWidth
         />
       </Stack>
@@ -372,20 +394,18 @@ function PluginManifestEditor({
       >
         <TextField
           label="Keywords"
-          value={keywords}
-          onChange={(event) => setKeywords(event.target.value)}
+          value={(manifest.keywords ?? []).join(', ')}
+          onChange={(event) =>
+            update({
+              keywords: event.target.value
+                .split(',')
+                .map((keyword) => keyword.trim())
+                .filter(Boolean),
+            })
+          }
           fullWidth
         />
       </FieldWithHelp>
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <Button
-          variant="contained"
-          onClick={() => void save()}
-          disabled={saving}
-        >
-          Save to draft
-        </Button>
-      </Box>
     </Stack>
   );
 }
@@ -395,141 +415,149 @@ export default function PluginEditor() {
   const navigate = useNavigate();
   const api = usePluginMutations();
   const { tools: catalog, error: catalogError } = useToolCatalog();
-  const [files, setFiles] = useState<PluginFileInfo[]>([]);
+
+  const [baseRevision, setBaseRevision] = useState<number | null>(null);
   const [manifest, setManifest] = useState<PluginManifest | null>(null);
-  const [skills, setSkills] = useState<LoadedSkill[]>([]);
-  const [selectedPath, setSelectedPath] = useState<string>('plugin.json');
+  const [skills, setSkills] = useState<StagedSkill[]>([]);
+  const [supporting, setSupporting] = useState<StagedFile[]>([]);
+  const [baseline, setBaseline] = useState('');
+  const [selectedPath, setSelectedPath] = useState<string>(MANIFEST_PATH);
   const [diagnostics, setDiagnostics] = useState<PluginDiagnostic[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<'validate' | 'publish' | null>(null);
   const [newSkillOpen, setNewSkillOpen] = useState(false);
-  const [discardOpen, setDiscardOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const [deleteSkillTarget, setDeleteSkillTarget] =
-    useState<LoadedSkill | null>(null);
-  const [deleteFileTarget, setDeleteFileTarget] =
-    useState<PluginFileInfo | null>(null);
+    useState<StagedSkill | null>(null);
+  const [deleteFileTarget, setDeleteFileTarget] = useState<StagedFile | null>(
+    null,
+  );
+  const busy = pending !== null;
 
-  const load = async (preferredPath?: string) => {
+  const payload = manifest ? packagePayload(manifest, skills, supporting) : [];
+  const dirty = manifest !== null && packageFingerprint(payload) !== baseline;
+
+  const duplicateSkillId = (() => {
+    const seen = new Set<string>();
+    for (const skill of skills) {
+      const id = effectiveSkillId(skill);
+      if (seen.has(id)) return id;
+      seen.add(id);
+    }
+    return null;
+  })();
+
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const nextFiles = await api.listDraftFiles(pluginId);
-      const manifestInfo = nextFiles.find(
-        (file) => file.path === 'plugin.json',
+      const plugin = await api.get(pluginId);
+      const infos = await api.listFiles(pluginId, plugin.current_revision);
+      const manifestInfo = infos.find((file) => file.path === MANIFEST_PATH);
+      if (!manifestInfo) throw new Error('Package is missing plugin.json.');
+      const manifestBody = await api.readFile(
+        pluginId,
+        plugin.current_revision,
+        MANIFEST_PATH,
       );
-      if (!manifestInfo) throw new Error('Draft is missing plugin.json.');
-      const manifestBody = await api.readDraftFile(pluginId, 'plugin.json');
       const nextManifest = parseManifest(
         new TextDecoder().decode(manifestBody.bytes),
       );
       const extension = seizuExtension(nextManifest);
-      const skillFiles = nextFiles.filter((file) =>
-        /^skills\/[^/]+\/SKILL\.md$/.test(file.path),
-      );
       const nextSkills = await Promise.all(
-        skillFiles.map(async (file): Promise<LoadedSkill> => {
-          const body = await api.readDraftFile(pluginId, file.path);
-          const document = parseSkillDocument(
-            new TextDecoder().decode(body.bytes),
-          );
-          return {
-            path: file.path,
-            file,
-            document,
-            extension: extension.skills[document.portableName] ?? {},
-          };
-        }),
+        infos
+          .filter((file) => SKILL_FILE_RE.test(file.path))
+          .map(async (file): Promise<StagedSkill> => {
+            const body = await api.readFile(
+              pluginId,
+              plugin.current_revision,
+              file.path,
+            );
+            const document = parseSkillDocument(
+              new TextDecoder().decode(body.bytes),
+            );
+            return {
+              path: file.path,
+              document,
+              extension: extension.skills[document.portableName] ?? {},
+            };
+          }),
       );
-      setFiles(nextFiles);
+      // Supporting files are carried by digest: their bytes never enter the
+      // browser, so a package with large assets stays cheap to edit.
+      const nextSupporting = infos
+        .filter(
+          (file) =>
+            file.path !== MANIFEST_PATH && !SKILL_FILE_RE.test(file.path),
+        )
+        .map((file) => ({
+          path: file.path,
+          mediaType: file.media_type,
+          executable: file.executable,
+          size: file.size,
+          sha256: file.sha256,
+        }));
+      setBaseRevision(plugin.current_revision);
       setManifest(nextManifest);
       setSkills(nextSkills);
-      const desired = preferredPath ?? selectedPath;
-      setSelectedPath(
-        desired === 'plugin.json' ||
-          nextSkills.some((skill) => skill.path === desired)
-          ? desired
-          : (nextSkills[0]?.path ?? 'plugin.json'),
+      setSupporting(nextSupporting);
+      setBaseline(
+        packageFingerprint(
+          packagePayload(nextManifest, nextSkills, nextSupporting),
+        ),
       );
+      setSelectedPath(MANIFEST_PATH);
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void load('plugin.json');
-    // The mutation helper is intentionally not a dependency: it is recreated
-    // with render state, while the draft is keyed only by the route parameter.
+    // The mutation helper is recreated with render state; the package is keyed
+    // only by the route parameter.
   }, [pluginId]);
 
-  const replaceFileInfo = (updated: PluginFileInfo) => {
-    setFiles((items) =>
-      [...items.filter((item) => item.path !== updated.path), updated].sort(
-        (left, right) => left.path.localeCompare(right.path),
-      ),
-    );
-  };
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-  const writeBytes = async (
+  // Edits live only in this tab until Publish, so closing it loses them.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!dirtyRef.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, []);
+
+  const selectedSkill = skills.find((skill) => skill.path === selectedPath);
+  const skillSupportingFiles = selectedSkill
+    ? supporting.filter((file) =>
+        file.path.startsWith(`skills/${selectedSkill.document.portableName}/`),
+      )
+    : [];
+
+  const updateSkill = (
     path: string,
-    bytes: Uint8Array,
-    mediaType: string,
-    executable = false,
-  ) => {
-    const existing = files.find((file) => file.path === path);
-    const updated = await api.writeDraftFile(
-      pluginId,
-      path,
-      bytes,
-      mediaType,
-      existing?.etag,
-      executable,
-    );
-    replaceFileInfo(updated);
-    return updated;
-  };
-
-  const writeManifest = async (next: PluginManifest) => {
-    await writeBytes(
-      'plugin.json',
-      new TextEncoder().encode(serializeManifest(next)),
-      'application/json',
-    );
-    setManifest(next);
-  };
-
-  const saveSkill = async (
-    skill: LoadedSkill,
     document: SkillDocument,
     extension: PluginSkillExtension,
   ) => {
-    if (!manifest) return;
-    const nextManifest = cloneManifest(manifest);
-    const extensionConfig = seizuExtension(nextManifest);
-    if (
-      Object.entries(extensionConfig.skills).some(
-        ([portableName, item]) =>
-          portableName !== document.portableName &&
-          item.skillId === extension.skillId,
-      )
-    ) {
-      throw new Error('A skill with that Seizu skill ID already exists.');
-    }
-    extensionConfig.skills[document.portableName] = extension;
-    await writeBytes(
-      skill.path,
-      new TextEncoder().encode(serializeSkillDocument(document)),
-      'text/markdown',
-    );
-    await writeManifest(nextManifest);
     setSkills((items) =>
       items.map((item) =>
-        item.path === skill.path ? { ...item, document, extension } : item,
+        item.path === path ? { ...item, document, extension } : item,
       ),
     );
+    setManifest((current) => {
+      if (!current) return current;
+      const next = cloneManifest(current);
+      seizuExtension(next).skills[document.portableName] = extension;
+      return next;
+    });
   };
 
   const createSkill = async (
@@ -538,396 +566,424 @@ export default function PluginEditor() {
   ) => {
     if (!manifest) return;
     const path = `skills/${document.portableName}/SKILL.md`;
-    if (files.some((file) => file.path === path)) {
+    if (skills.some((skill) => skill.path === path)) {
       throw new Error('A skill with that portable name already exists.');
     }
-    if (
-      Object.values(seizuExtension(manifest).skills).some(
-        (item) => item.skillId === extension.skillId,
-      )
-    ) {
+    if (skills.some((skill) => effectiveSkillId(skill) === extension.skillId)) {
       throw new Error('A skill with that Seizu skill ID already exists.');
     }
-    const nextManifest = cloneManifest(manifest);
-    seizuExtension(nextManifest).skills[document.portableName] = extension;
-    await writeBytes(
-      path,
-      new TextEncoder().encode(serializeSkillDocument(document)),
-      'text/markdown',
-    );
-    await writeManifest(nextManifest);
-    await load(path);
+    const next = cloneManifest(manifest);
+    seizuExtension(next).skills[document.portableName] = extension;
+    setManifest(next);
+    setSkills((items) => [...items, { path, document, extension }]);
+    setSelectedPath(path);
   };
 
-  const selectedSkill = skills.find((skill) => skill.path === selectedPath);
-  const supportingFiles = selectedSkill
-    ? files.filter(
-        (file) =>
-          file.path.startsWith(
-            `skills/${selectedSkill.document.portableName}/`,
-          ) && file.path !== selectedSkill.path,
-      )
-    : [];
-
-  const uploadSupportingFile = async (
-    directory: 'references' | 'scripts' | 'assets',
-    file: File,
-  ) => {
-    if (!selectedSkill) return;
-    const path = `skills/${selectedSkill.document.portableName}/${directory}/${file.name}`;
-    await writeBytes(
-      path,
-      new Uint8Array(await file.arrayBuffer()),
-      file.type || 'application/octet-stream',
-      directory === 'scripts',
-    );
-    setMessage(`Saved ${path} to the draft.`);
-  };
-
-  const createSupportingTextFile = async (
-    directory: 'references' | 'scripts' | 'assets',
+  const addSupportingFile = (
+    directory: SupportingDirectory,
     filename: string,
-    content: string,
+    bytes: Uint8Array,
+    mediaType: string,
   ) => {
     if (!selectedSkill) return;
     const path = `skills/${selectedSkill.document.portableName}/${directory}/${filename}`;
-    if (files.some((file) => file.path === path)) {
+    if (supporting.some((file) => file.path === path)) {
       throw new Error('A supporting file with that name already exists.');
     }
-    await writeBytes(
-      path,
-      new TextEncoder().encode(content),
-      'text/plain',
-      directory === 'scripts',
-    );
-    setMessage(`Saved ${path} to the draft.`);
+    setSupporting((items) => [
+      ...items,
+      {
+        path,
+        mediaType,
+        executable: directory === 'scripts',
+        size: bytes.length,
+        bytes,
+      },
+    ]);
+    setMessage(`Staged ${path}. Publish to apply it.`);
   };
 
-  const confirmDeleteFile = async () => {
+  const confirmDeleteFile = () => {
     if (!deleteFileTarget) return;
-    await api.deleteDraftFile(
-      pluginId,
-      deleteFileTarget.path,
-      deleteFileTarget.etag,
-    );
-    setFiles((items) =>
+    setSupporting((items) =>
       items.filter((item) => item.path !== deleteFileTarget.path),
     );
     setDeleteFileTarget(null);
   };
 
-  const confirmDeleteSkill = async () => {
+  const confirmDeleteSkill = () => {
     if (!deleteSkillTarget || !manifest) return;
-    setBusy(true);
-    try {
-      const prefix = `skills/${deleteSkillTarget.document.portableName}/`;
-      for (const file of files.filter((item) => item.path.startsWith(prefix))) {
-        await api.deleteDraftFile(pluginId, file.path, file.etag);
-      }
-      const nextManifest = cloneManifest(manifest);
-      delete seizuExtension(nextManifest).skills[
-        deleteSkillTarget.document.portableName
-      ];
-      await writeManifest(nextManifest);
-      setDeleteSkillTarget(null);
-      await load('plugin.json');
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    const prefix = `skills/${deleteSkillTarget.document.portableName}/`;
+    const next = cloneManifest(manifest);
+    delete seizuExtension(next).skills[deleteSkillTarget.document.portableName];
+    setManifest(next);
+    setSkills((items) =>
+      items.filter((item) => item.path !== deleteSkillTarget.path),
+    );
+    setSupporting((items) =>
+      items.filter((item) => !item.path.startsWith(prefix)),
+    );
+    setDeleteSkillTarget(null);
+    setSelectedPath(MANIFEST_PATH);
   };
 
   const validate = async () => {
-    setBusy(true);
+    setPending('validate');
     setMessage(null);
     setError(null);
     try {
-      const result = await api.validateDraft(pluginId);
+      const result = await api.validatePackage(pluginId, payload);
       setDiagnostics(result.diagnostics);
       setMessage(
-        result.valid ? 'Draft is valid.' : 'Draft has blocking errors.',
+        result.valid
+          ? 'Package is valid. Publish to apply it.'
+          : 'Package has blocking errors.',
       );
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   };
 
   const publish = async () => {
-    setBusy(true);
+    if (baseRevision === null) return;
+    setPending('publish');
     setMessage(null);
     setError(null);
     try {
-      const result = await api.validateDraft(pluginId);
+      const result = await api.validatePackage(pluginId, payload);
       setDiagnostics(result.diagnostics);
       if (!result.valid) {
-        setMessage('Draft has blocking errors.');
+        setMessage('Package has blocking errors.');
         return;
       }
-      await api.publishDraft(pluginId);
+      await api.publishPackage(pluginId, payload, baseRevision);
       navigate('/app/plugins');
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
-      setBusy(false);
+      setPending(null);
     }
   };
 
-  const discard = async () => {
-    setBusy(true);
-    try {
-      await api.discardDraft(pluginId);
-      navigate('/app/plugins');
-    } catch (reason) {
-      setError((reason as Error).message);
-      setDiscardOpen(false);
-    } finally {
-      setBusy(false);
+  const leave = () => {
+    if (dirty) {
+      setLeaveOpen(true);
+      return;
     }
+    navigate('/app/plugins');
   };
 
   return (
-    <Box
-      sx={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: 'calc(100vh - 64px)',
-        overflow: 'hidden',
-      }}
-    >
+    <>
+      <Helmet>
+        <title>{`Edit ${pluginId} | Seizu`}</title>
+      </Helmet>
       <Box
         sx={{
-          alignItems: { xs: 'stretch', md: 'center' },
-          bgcolor: 'background.default',
-          borderBottom: 1,
-          borderColor: 'divider',
           display: 'flex',
-          flexDirection: { xs: 'column', md: 'row' },
-          flexShrink: 0,
-          gap: 1.5,
-          justifyContent: 'space-between',
-          px: { xs: 2, md: 3 },
-          py: 1.5,
-          position: 'sticky',
-          top: 0,
-          zIndex: 10,
+          flexDirection: 'column',
+          height: `calc(100vh - ${DASHBOARD_NAVBAR_HEIGHT}px)`,
+          overflow: 'hidden',
         }}
       >
-        <Box>
-          <Typography variant="h1">Edit {pluginId}</Typography>
-          <Typography color="text.secondary" variant="body2">
-            Field edits stay in this browser until saved to the server-side
-            draft. Publish validates and promotes the complete package.
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
-          <Button
-            variant="outlined"
-            startIcon={<CheckCircleOutlineIcon />}
-            onClick={() => void validate()}
-            disabled={busy || loading}
-          >
-            Validate
-          </Button>
-          <Button
-            color="error"
-            startIcon={<DeleteIcon />}
-            onClick={() => setDiscardOpen(true)}
-            disabled={busy || loading}
-          >
-            Discard draft
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<PublishIcon />}
-            onClick={() => void publish()}
-            disabled={busy || loading}
-          >
-            Publish
-          </Button>
-        </Stack>
-      </Box>
-
-      <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <Box
           sx={{
-            borderRight: 1,
+            alignItems: { xs: 'stretch', md: 'center' },
+            bgcolor: 'background.default',
+            borderBottom: 1,
             borderColor: 'divider',
             display: 'flex',
-            flexDirection: 'column',
+            flexDirection: { xs: 'column', md: 'row' },
             flexShrink: 0,
-            overflow: 'hidden',
-            width: 260,
+            gap: 1.5,
+            justifyContent: 'space-between',
+            px: { xs: 2, md: 3 },
+            py: 1.5,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
           }}
+        >
+          <Box>
+            <Button
+              size="small"
+              startIcon={<ArrowBackIcon />}
+              onClick={leave}
+              sx={{ mb: 0.5, ml: -1 }}
+            >
+              Back to Agent Plugins
+            </Button>
+            <Typography variant="h1">Edit {pluginId}</Typography>
+            <Typography color="text.secondary" variant="body2">
+              {dirty
+                ? 'Unpublished changes are held in this tab. Publish applies the whole package at once.'
+                : `Published revision v${baseRevision ?? '—'}. Edits apply only when you publish.`}
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+            <Button
+              variant="outlined"
+              startIcon={<CheckCircleOutlineIcon />}
+              onClick={() => void validate()}
+              disabled={busy || loading}
+            >
+              {pending === 'validate' ? (
+                <ConstellationSpinner size={20} />
+              ) : (
+                'Validate'
+              )}
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<PublishIcon />}
+              onClick={() => void publish()}
+              disabled={busy || loading || !dirty || !!duplicateSkillId}
+            >
+              {pending === 'publish' ? (
+                <ConstellationSpinner size={20} />
+              ) : (
+                'Publish'
+              )}
+            </Button>
+          </Stack>
+        </Box>
+
+        <Box
+          sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}
         >
           <Box
             sx={{
-              alignItems: 'center',
-              borderBottom: 1,
+              borderRight: 1,
               borderColor: 'divider',
               display: 'flex',
+              flexDirection: 'column',
               flexShrink: 0,
-              justifyContent: 'space-between',
-              minHeight: 40,
-              px: 1.5,
+              overflow: 'hidden',
+              width: 260,
             }}
           >
-            <Typography
-              variant="caption"
+            <Box
               sx={{
-                color: 'text.secondary',
-                fontWeight: 700,
-                letterSpacing: 0.8,
+                alignItems: 'center',
+                borderBottom: 1,
+                borderColor: 'divider',
+                display: 'flex',
+                flexShrink: 0,
+                justifyContent: 'space-between',
+                minHeight: 40,
+                px: 1.5,
               }}
             >
-              PACKAGE CONTENT
-            </Typography>
-            <Tooltip title="Add skill" placement="right">
-              <span>
-                <IconButton
-                  size="small"
-                  aria-label="Add skill"
-                  onClick={() => setNewSkillOpen(true)}
-                  disabled={busy || loading}
-                >
-                  <AddIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-          </Box>
-          <List disablePadding sx={{ flex: 1, overflowY: 'auto' }}>
-            <ListItemButton
-              selected={selectedPath === 'plugin.json'}
-              onClick={() => setSelectedPath('plugin.json')}
+              <Typography
+                variant="caption"
+                sx={{
+                  color: 'text.secondary',
+                  fontWeight: 700,
+                  letterSpacing: 0.8,
+                }}
+              >
+                PACKAGE CONTENT
+              </Typography>
+              <Tooltip title="Add skill" placement="right">
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="Add skill"
+                    onClick={() => setNewSkillOpen(true)}
+                    disabled={busy || loading}
+                  >
+                    <AddIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </Box>
+            <List
+              disablePadding
+              sx={{ flex: 1, overflowX: 'hidden', overflowY: 'auto' }}
             >
-              <ListItemText primary="Plugin details" secondary="plugin.json" />
-            </ListItemButton>
-            {skills.map((skill) => (
               <ListItemButton
-                key={skill.path}
-                selected={selectedPath === skill.path}
-                onClick={() => setSelectedPath(skill.path)}
+                selected={selectedPath === MANIFEST_PATH}
+                onClick={() => setSelectedPath(MANIFEST_PATH)}
               >
                 <ListItemText
-                  primary={skill.extension.title || skill.document.portableName}
-                  secondary={`${pluginId}__${skill.extension.skillId || skill.document.portableName.replaceAll('-', '_')}`}
+                  primary="Plugin details"
+                  secondary={MANIFEST_PATH}
+                  sx={railRowSx}
+                  slotProps={railRowSlotProps}
                 />
               </ListItemButton>
-            ))}
-          </List>
+              {skills.map((skill) => {
+                const label =
+                  skill.extension.title || skill.document.portableName;
+                const qualifiedName = `${pluginId}__${effectiveSkillId(skill)}`;
+                return (
+                  <Tooltip
+                    key={skill.path}
+                    title={`${label} — ${qualifiedName}`}
+                    placement="right"
+                    enterDelay={500}
+                  >
+                    <ListItemButton
+                      selected={selectedPath === skill.path}
+                      onClick={() => setSelectedPath(skill.path)}
+                    >
+                      <ListItemText
+                        primary={label}
+                        secondary={qualifiedName}
+                        sx={railRowSx}
+                        slotProps={railRowSlotProps}
+                      />
+                    </ListItemButton>
+                  </Tooltip>
+                );
+              })}
+            </List>
+          </Box>
+
+          <Box
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              overflowY: 'auto',
+              p: { xs: 2, md: 3 },
+            }}
+          >
+            <Stack spacing={2}>
+              {error && <Alert severity="error">{error}</Alert>}
+              {duplicateSkillId && (
+                <Alert severity="error">
+                  Two skills share the Seizu skill ID{' '}
+                  <strong>{duplicateSkillId}</strong>. Give each one a distinct
+                  ID before publishing.
+                </Alert>
+              )}
+              {catalogError && (
+                <Alert severity="warning">
+                  Tool catalog could not be loaded: {catalogError.message}
+                </Alert>
+              )}
+              {message && (
+                <Alert
+                  severity={
+                    diagnostics.some((item) => item.severity === 'error')
+                      ? 'error'
+                      : 'info'
+                  }
+                >
+                  {message}
+                </Alert>
+              )}
+              {diagnostics.map((item) => (
+                <Alert
+                  key={`${item.code}-${item.path || ''}-${item.skill || ''}-${item.message}`}
+                  severity={item.severity}
+                >
+                  {item.path ? `${item.path}: ` : ''}
+                  {item.message}
+                </Alert>
+              ))}
+
+              {loading ? (
+                <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+                  <ConstellationSpinner />
+                </Box>
+              ) : (
+                <>
+                  {selectedPath === MANIFEST_PATH && manifest && (
+                    <PluginManifestEditor
+                      manifest={manifest}
+                      onChange={setManifest}
+                    />
+                  )}
+                  {selectedSkill && (
+                    <PluginSkillEditor
+                      key={selectedSkill.path}
+                      document={selectedSkill.document}
+                      extension={selectedSkill.extension}
+                      catalog={catalog}
+                      supportingFiles={skillSupportingFiles.map((file) => ({
+                        path: file.path,
+                        media_type: file.mediaType,
+                        size: file.size,
+                        sha256: file.sha256 ?? '',
+                        executable: file.executable,
+                        etag: file.sha256 ?? '',
+                      }))}
+                      onChange={(document, extension) =>
+                        updateSkill(selectedSkill.path, document, extension)
+                      }
+                      onUpload={async (directory, file) =>
+                        addSupportingFile(
+                          directory,
+                          file.name,
+                          new Uint8Array(await file.arrayBuffer()),
+                          file.type || 'application/octet-stream',
+                        )
+                      }
+                      onCreateTextFile={async (directory, filename, content) =>
+                        addSupportingFile(
+                          directory,
+                          filename,
+                          new TextEncoder().encode(content),
+                          'text/plain',
+                        )
+                      }
+                      onDeleteFile={async (file) =>
+                        setDeleteFileTarget(
+                          supporting.find((item) => item.path === file.path) ??
+                            null,
+                        )
+                      }
+                      onDeleteSkill={async () =>
+                        setDeleteSkillTarget(selectedSkill)
+                      }
+                    />
+                  )}
+                </>
+              )}
+            </Stack>
+          </Box>
         </Box>
 
-        <Box
-          sx={{
-            flex: 1,
-            minWidth: 0,
-            overflowY: 'auto',
-            p: { xs: 2, md: 3 },
-          }}
+        <NewSkillDialog
+          key={newSkillOpen ? 'open' : 'closed'}
+          open={newSkillOpen}
+          onClose={() => setNewSkillOpen(false)}
+          onCreate={createSkill}
+        />
+        <ConfirmDeleteDialog
+          open={!!deleteFileTarget}
+          title="Remove supporting file?"
+          confirmLabel="Remove"
+          onClose={() => setDeleteFileTarget(null)}
+          onConfirm={confirmDeleteFile}
         >
-          <Stack spacing={2}>
-            {error && <Alert severity="error">{error}</Alert>}
-            {catalogError && (
-              <Alert severity="warning">
-                Tool catalog could not be loaded: {catalogError.message}
-              </Alert>
-            )}
-            {message && (
-              <Alert
-                severity={
-                  diagnostics.some((item) => item.severity === 'error')
-                    ? 'error'
-                    : 'info'
-                }
-              >
-                {message}
-              </Alert>
-            )}
-            {diagnostics.map((item) => (
-              <Alert
-                key={`${item.code}-${item.path || ''}-${item.skill || ''}-${item.message}`}
-                severity={item.severity}
-              >
-                {item.path ? `${item.path}: ` : ''}
-                {item.message}
-              </Alert>
-            ))}
-
-            {loading ? (
-              <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-                <ConstellationSpinner />
-              </Box>
-            ) : (
-              <>
-                {selectedPath === 'plugin.json' && manifest && (
-                  <PluginManifestEditor
-                    key={serializeManifest(manifest)}
-                    manifest={cloneManifest(manifest)}
-                    onSave={writeManifest}
-                  />
-                )}
-                {selectedSkill && (
-                  <PluginSkillEditor
-                    key={`${selectedSkill.path}:${selectedSkill.file.etag}`}
-                    document={selectedSkill.document}
-                    extension={selectedSkill.extension}
-                    catalog={catalog}
-                    supportingFiles={supportingFiles}
-                    onSave={(document, extension) =>
-                      saveSkill(selectedSkill, document, extension)
-                    }
-                    onUpload={uploadSupportingFile}
-                    onCreateTextFile={createSupportingTextFile}
-                    onDeleteFile={async (file) => setDeleteFileTarget(file)}
-                    onDeleteSkill={async () =>
-                      setDeleteSkillTarget(selectedSkill)
-                    }
-                  />
-                )}
-              </>
-            )}
-          </Stack>
-        </Box>
+          Remove <strong>{deleteFileTarget?.path}</strong> from this package? It
+          is removed when you publish.
+        </ConfirmDeleteDialog>
+        <ConfirmDeleteDialog
+          open={!!deleteSkillTarget}
+          title="Remove skill?"
+          confirmLabel="Remove"
+          onClose={() => setDeleteSkillTarget(null)}
+          onConfirm={confirmDeleteSkill}
+        >
+          Remove <strong>{deleteSkillTarget?.document.portableName}</strong> and
+          every file in its package directory? It is removed when you publish.
+        </ConfirmDeleteDialog>
+        <ConfirmDeleteDialog
+          open={leaveOpen}
+          title="Discard unpublished changes?"
+          confirmLabel="Discard"
+          onClose={() => setLeaveOpen(false)}
+          onConfirm={() => navigate('/app/plugins')}
+        >
+          Your edits to <strong>{pluginId}</strong> have not been published and
+          are held only in this tab. Leaving discards them.
+        </ConfirmDeleteDialog>
       </Box>
-
-      <NewSkillDialog
-        key={newSkillOpen ? 'open' : 'closed'}
-        open={newSkillOpen}
-        onClose={() => setNewSkillOpen(false)}
-        onCreate={createSkill}
-      />
-      <ConfirmDeleteDialog
-        open={!!deleteFileTarget}
-        title="Remove supporting file from draft?"
-        confirmLabel="Remove"
-        onClose={() => setDeleteFileTarget(null)}
-        onConfirm={() => void confirmDeleteFile()}
-      >
-        Remove <strong>{deleteFileTarget?.path}</strong> from this draft?
-      </ConfirmDeleteDialog>
-      <ConfirmDeleteDialog
-        open={!!deleteSkillTarget}
-        title="Remove skill from draft?"
-        confirmLabel="Remove"
-        deleting={busy}
-        onClose={() => setDeleteSkillTarget(null)}
-        onConfirm={() => void confirmDeleteSkill()}
-      >
-        Remove <strong>{deleteSkillTarget?.document.portableName}</strong> and
-        every file in its package directory from this draft?
-      </ConfirmDeleteDialog>
-      <ConfirmDeleteDialog
-        open={discardOpen}
-        title="Discard draft?"
-        confirmLabel="Discard"
-        deleting={busy}
-        onClose={() => setDiscardOpen(false)}
-        onConfirm={() => void discard()}
-      >
-        Discard every unpublished change to <strong>{pluginId}</strong>?
-      </ConfirmDeleteDialog>
-    </Box>
+    </>
   );
 }

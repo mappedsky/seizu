@@ -65,22 +65,3 @@ def remove(plugin_id: str, yes: bool = typer.Option(False, "--yes")) -> None:
 def download(plugin_id: str, output: Path = typer.Option(..., "--output", "-o")) -> None:
     output.write_bytes(get_client().get_bytes(f"/api/v1/plugins/{plugin_id}/download"))
     typer.echo(str(output))
-
-
-@app.command("draft-create")
-def draft_create(plugin_id: str) -> None:
-    typer.echo(json.dumps(get_client().post(f"/api/v1/plugins/{plugin_id}/draft"), indent=2))
-
-
-@app.command("draft-validate")
-def draft_validate(plugin_id: str) -> None:
-    result = get_client().post(f"/api/v1/plugins/{plugin_id}/draft/validate")
-    typer.echo(json.dumps(result, indent=2))
-    if not result.get("valid"):
-        raise typer.Exit(1)
-
-
-@app.command("draft-publish")
-def draft_publish(plugin_id: str, comment: str | None = None) -> None:
-    result = get_client().post(f"/api/v1/plugins/{plugin_id}/draft/publish", json={"comment": comment})
-    typer.echo(json.dumps(result, indent=2))

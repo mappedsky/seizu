@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Helmet } from 'react-helmet';
 import {
   Alert,
   Box,
@@ -11,12 +12,14 @@ import {
   DialogTitle,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import EditIcon from '@mui/icons-material/Edit';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
+import HistoryIcon from '@mui/icons-material/History';
 import ToggleOffIcon from '@mui/icons-material/ToggleOff';
 import ToggleOnIcon from '@mui/icons-material/ToggleOn';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
@@ -32,9 +35,11 @@ import ListTable, {
   listTableTruncateSx,
 } from 'src/components/ListTable';
 import ListViewState from 'src/components/ListViewState';
+import PluginDetailDialog from 'src/components/PluginDetailDialog';
 import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
+import type { BackState } from 'src/navigation';
 import {
   CreatePluginRequest,
   PluginListItem,
@@ -47,6 +52,60 @@ const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const PORTABLE_NAME =
   /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 const MAX_SLUG_LEN = 31;
+
+const descriptionColumnSx = { ...listTableSecondaryCellSx, width: '24%' };
+const statusColumnSx = { width: 136 };
+const versionColumnSx = { ...listTableSecondaryCellSx, width: 96 };
+const packageColumnSx = { ...listTableSecondaryCellSx, width: 140 };
+const diagnosticsColumnSx = { width: 120 };
+const updatedAtColumnSx = { ...listTableSecondaryCellSx, width: 180 };
+const updatedByColumnSx = { ...listTableSecondaryCellSx, width: 150 };
+
+// A count alone says something is wrong without saying what, and the messages
+// are short enough to read in place. More than this and the tooltip is taller
+// than the viewport, so the rest are left to the detail dialog.
+const MAX_TOOLTIP_DIAGNOSTICS = 8;
+
+function DiagnosticsCell({ plugin }: { plugin: PluginListItem }) {
+  const { diagnostics } = plugin;
+  if (diagnostics.length === 0) return <>—</>;
+  const shown = diagnostics.slice(0, MAX_TOOLTIP_DIAGNOSTICS);
+  const hidden = diagnostics.length - shown.length;
+  return (
+    <Tooltip
+      title={
+        <Stack spacing={0.5}>
+          {shown.map((diagnostic) => (
+            <Typography
+              key={`${diagnostic.code}-${diagnostic.path ?? ''}-${diagnostic.skill ?? ''}-${diagnostic.message}`}
+              variant="caption"
+              component="span"
+            >
+              {diagnostic.severity === 'error' ? '✕' : '!'}{' '}
+              {diagnostic.path ? `${diagnostic.path}: ` : ''}
+              {diagnostic.message}
+            </Typography>
+          ))}
+          {hidden > 0 && (
+            <Typography variant="caption" component="span">
+              and {hidden} more
+            </Typography>
+          )}
+        </Stack>
+      }
+    >
+      <Chip
+        label={diagnostics.length}
+        color={
+          diagnostics.some((diagnostic) => diagnostic.severity === 'error')
+            ? 'error'
+            : 'warning'
+        }
+        size="small"
+      />
+    </Tooltip>
+  );
+}
 
 function NewPluginDialog({
   open,
@@ -168,6 +227,7 @@ export default function Plugins() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [detailTarget, setDetailTarget] = useState<PluginListItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<PluginListItem | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -184,19 +244,12 @@ export default function Plugins() {
     }
   };
 
-  const edit = async (plugin: PluginListItem) => {
-    setFailure(null);
-    try {
-      await mutations.createDraft(plugin.plugin_id);
-      navigate(`/app/plugins/${plugin.plugin_id}/edit`);
-    } catch (reason) {
-      setFailure((reason as Error).message);
-    }
+  const edit = (plugin: PluginListItem) => {
+    navigate(`/app/plugins/${plugin.plugin_id}/edit`);
   };
 
   const create = async (request: CreatePluginRequest) => {
     const plugin = await mutations.create(request);
-    await mutations.createDraft(plugin.plugin_id);
     setCreateOpen(false);
     navigate(`/app/plugins/${plugin.plugin_id}/edit`);
   };
@@ -231,7 +284,7 @@ export default function Plugins() {
       key: 'edit',
       label: 'Edit',
       icon: <EditIcon fontSize="small" />,
-      onClick: () => void edit(plugin),
+      onClick: () => edit(plugin),
       disabled: !canWrite,
       tooltip: canWrite
         ? undefined
@@ -252,6 +305,15 @@ export default function Plugins() {
         : 'You do not have permission to edit plugins',
     },
     {
+      key: 'history',
+      label: 'View history',
+      icon: <HistoryIcon fontSize="small" />,
+      onClick: () =>
+        navigate(`/app/plugins/${plugin.plugin_id}/history`, {
+          state: { fromLabel: 'Agent Plugins' } satisfies BackState,
+        }),
+    },
+    {
       key: 'delete',
       label: 'Delete',
       icon: <DeleteIcon fontSize="small" />,
@@ -270,22 +332,29 @@ export default function Plugins() {
       key: 'name',
       label: 'Name',
       cellSx: listTablePrimaryCellSx,
+      // Opens the read-only detail dialog, as elsewhere in the app: editing a
+      // plugin creates a server-side draft, so it stays a deliberate action.
       render: (plugin) => (
         <Typography
           variant="body2"
           sx={[
-            { cursor: canWrite ? 'pointer' : 'default', fontWeight: 500 },
+            {
+              cursor: 'pointer',
+              fontWeight: 500,
+              '&:hover': { textDecoration: 'underline' },
+            },
             listTableTruncateSx,
           ]}
-          onClick={() => canWrite && void edit(plugin)}
+          onClick={() => setDetailTarget(plugin)}
         >
           {plugin.name}
         </Typography>
       ),
     },
     {
-      key: 'namespace',
-      label: 'Namespace',
+      key: 'slug',
+      label: 'Slug',
+      hideBelow: 'lg',
       cellSx: listTableMonoCellSx,
       render: (plugin) => plugin.plugin_id,
     },
@@ -293,12 +362,21 @@ export default function Plugins() {
       key: 'description',
       label: 'Description',
       hideBelow: 'md',
-      cellSx: { ...listTableSecondaryCellSx, width: '28%' },
-      render: (plugin) => plugin.description || '—',
+      cellSx: descriptionColumnSx,
+      render: (plugin) => (
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={listTableTruncateSx}
+        >
+          {plugin.description || '—'}
+        </Typography>
+      ),
     },
     {
       key: 'status',
       label: 'Status',
+      cellSx: statusColumnSx,
       render: (plugin) => (
         <Chip
           label={plugin.enabled ? 'Enabled' : 'Disabled'}
@@ -309,45 +387,37 @@ export default function Plugins() {
     },
     {
       key: 'version',
-      label: 'Package version',
+      label: 'Version',
       hideBelow: 'sm',
-      cellSx: listTableSecondaryCellSx,
-      render: (plugin) => plugin.package_version || '—',
+      cellSx: versionColumnSx,
+      render: (plugin) => `v${plugin.current_revision}`,
     },
     {
-      key: 'revision',
-      label: 'Revision',
+      key: 'package_version',
+      label: 'Package version',
       hideBelow: 'lg',
-      cellSx: listTableSecondaryCellSx,
-      render: (plugin) => plugin.current_revision,
+      cellSx: packageColumnSx,
+      render: (plugin) => plugin.package_version || '—',
     },
     {
       key: 'diagnostics',
       label: 'Diagnostics',
       hideBelow: 'lg',
-      render: (plugin) =>
-        plugin.diagnostics.length ? (
-          <Chip
-            label={plugin.diagnostics.length}
-            color="warning"
-            size="small"
-          />
-        ) : (
-          '—'
-        ),
+      cellSx: diagnosticsColumnSx,
+      render: (plugin) => <DiagnosticsCell plugin={plugin} />,
     },
     {
       key: 'updated_at',
       label: 'Last updated',
       hideBelow: 'xl',
-      cellSx: listTableSecondaryCellSx,
+      cellSx: updatedAtColumnSx,
       render: (plugin) => new Date(plugin.updated_at).toLocaleString(),
     },
     {
       key: 'updated_by',
       label: 'Updated by',
-      hideBelow: 'xl',
-      cellSx: listTableSecondaryCellSx,
+      hideBelow: 'lg',
+      cellSx: updatedByColumnSx,
       render: (plugin) => (
         <UserDisplay userId={plugin.updated_by || plugin.created_by} />
       ),
@@ -382,6 +452,9 @@ export default function Plugins() {
 
   return (
     <>
+      <Helmet>
+        <title>Agent Plugins | Seizu</title>
+      </Helmet>
       <Box sx={pageContentSx}>
         <ListPageHeader
           title="Agent Plugins"
@@ -438,6 +511,11 @@ export default function Plugins() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreate={create}
+      />
+      <PluginDetailDialog
+        open={!!detailTarget}
+        plugin={detailTarget}
+        onClose={() => setDetailTarget(null)}
       />
       <ConfirmDeleteDialog
         open={!!deleteTarget}

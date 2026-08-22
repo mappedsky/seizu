@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from reporting.schema.mcp_config import ToolParamDef, validate_mcp_slug_component
 
@@ -85,6 +85,10 @@ class PluginVersionListResponse(BaseModel):
     versions: list[PluginVersion]
 
 
+class PluginSkillListResponse(BaseModel):
+    skills: list[PluginSkillItem]
+
+
 class PluginFileInfo(BaseModel):
     path: str
     media_type: str
@@ -106,12 +110,6 @@ class PluginFileContent(BaseModel):
     etag: str
 
 
-class PluginFileWriteRequest(BaseModel):
-    content_base64: str
-    media_type: str | None = None
-    executable: bool = False
-
-
 class PluginUpdateRequest(BaseModel):
     enabled: bool
 
@@ -128,12 +126,51 @@ class PluginCreateRequest(BaseModel):
         return validate_mcp_slug_component(value)
 
 
-class PluginPublishRequest(BaseModel):
+class PluginFilePayload(BaseModel):
+    """One file in a staged package.
+
+    A file the client changed carries its bytes as ``content_base64``. A file it
+    left alone carries only ``sha256``, which the server resolves against the
+    blobs this plugin already stores -- so republishing a package whose only
+    edit is one line of Markdown does not re-upload its binary assets.
+    """
+
+    path: str
+    content_base64: str | None = None
+    sha256: str | None = None
+    media_type: str | None = None
+    executable: bool = False
+
+    @model_validator(mode="after")
+    def exactly_one_source(self) -> "PluginFilePayload":
+        if (self.content_base64 is None) == (self.sha256 is None):
+            raise ValueError("each file must carry either content_base64 or sha256")
+        return self
+
+
+class PluginPackageRequest(BaseModel):
+    """A complete package, staged in the client and submitted in one request."""
+
+    files: list[PluginFilePayload]
+
+
+class PluginPublishRequest(PluginPackageRequest):
+    """A staged package offered as the plugin's next revision.
+
+    ``base_revision`` is required, not optional: it is the revision the editor
+    loaded, and publishing against a stale one is refused with a 409 rather than
+    reverting whatever was published in the meantime.
+    """
+
+    base_revision: int = Field(ge=1)
     comment: str | None = None
 
 
 class PluginRestoreRequest(BaseModel):
     revision: int = Field(ge=1)
+    # The revision the caller believed was current. Restoring is a publish like
+    # any other, so it takes the same stale-base refusal.
+    base_revision: int = Field(ge=1)
     comment: str | None = None
 
 

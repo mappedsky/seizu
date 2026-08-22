@@ -200,17 +200,25 @@ async def resolve_permissions(jwt_claims: dict[str, Any]) -> frozenset[str]:
     return _expand_permission_aliases(frozenset(role.permissions) if role else frozenset())
 
 
+# Agent Plugins replaced skillsets and skills, so one plugin permission covers
+# what two legacy permissions used to. Holding the canonical one therefore
+# implies both legacy ones -- but the reverse needs *both*, because a role
+# scoped to writing skills inside an existing skillset never had the authority
+# to install a package, and must not acquire it by being renamed.
+_PLUGIN_PERMISSION_ALIASES: dict[str, tuple[str, ...]] = {
+    "plugins:read": ("skillsets:read", "skills:read"),
+    "plugins:write": ("skillsets:write", "skills:write"),
+    "plugins:delete": ("skillsets:delete", "skills:delete"),
+}
+
+
 def _expand_permission_aliases(permissions: frozenset[str]) -> frozenset[str]:
     expanded = set(_expand_workflow_permission_aliases(permissions))
-    mappings = {
-        "plugins:read": ("skillsets:read", "skills:read"),
-        "plugins:write": ("skillsets:write", "skills:write"),
-        "plugins:delete": ("skillsets:delete", "skills:delete"),
-    }
-    for canonical, legacy_values in mappings.items():
-        if canonical in expanded or any(value in expanded for value in legacy_values):
-            expanded.add(canonical)
+    for canonical, legacy_values in _PLUGIN_PERMISSION_ALIASES.items():
+        if canonical in expanded:
             expanded.update(legacy_values)
+        elif all(value in expanded for value in legacy_values):
+            expanded.add(canonical)
     return frozenset(expanded)
 
 

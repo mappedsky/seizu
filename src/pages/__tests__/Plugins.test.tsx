@@ -15,8 +15,12 @@ import * as permissionsModule from 'src/hooks/usePermissions';
 jest.mock('src/hooks/usePermissions', () => ({
   usePermissions: jest.fn(),
 }));
+// Exhaustive: a module-factory mock replaces this module for every test file
+// in the shared Bun process, so omitting an export breaks the other suites.
 jest.mock('src/hooks/usePluginsApi', () => ({
   usePluginsList: jest.fn(),
+  usePluginVersionsList: jest.fn(),
+  usePluginContents: jest.fn(),
   usePluginMutations: jest.fn(),
 }));
 jest.mock('src/components/UserDisplay', () => ({
@@ -26,6 +30,7 @@ jest.mock('src/components/UserDisplay', () => ({
 
 const usePermissions = permissionsModule.usePermissions as jest.Mock;
 const usePluginsList = pluginsApi.usePluginsList as jest.Mock;
+const usePluginContents = pluginsApi.usePluginContents as jest.Mock;
 const usePluginMutations = pluginsApi.usePluginMutations as jest.Mock;
 const theme = createTheme();
 
@@ -62,7 +67,6 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 
 describe('Plugins', () => {
   const create = jest.fn();
-  const createDraft = jest.fn();
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -76,11 +80,42 @@ describe('Plugins', () => {
       refresh: jest.fn(),
     });
     create.mockResolvedValue({ ...PLUGIN, plugin_id: 'repository_review' });
-    createDraft.mockResolvedValue(undefined);
+    usePluginContents.mockReturnValue({
+      skills: [
+        {
+          plugin_id: 'security_review',
+          skill_id: 'review_repo',
+          portable_name: 'review-repo',
+          title: 'Review repository',
+          description: 'Review a repository for security issues',
+          template: 'Review.',
+          parameters: [],
+          triggers: [],
+          allowed_tools: ['graph__query'],
+          enabled: true,
+          source_path: 'skills/review-repo',
+          aliases: [],
+          revision: 2,
+          package_digest: 'a'.repeat(64),
+          has_scripts: false,
+        },
+      ],
+      files: [
+        {
+          path: 'skills/review-repo/SKILL.md',
+          media_type: 'text/markdown',
+          size: 400,
+          sha256: 'b'.repeat(64),
+          executable: false,
+          etag: '"b"',
+        },
+      ],
+      loading: false,
+      error: null,
+    });
     usePluginMutations.mockReturnValue({
       create,
       install: jest.fn(),
-      createDraft,
       setEnabled: jest.fn(),
       remove: jest.fn(),
     });
@@ -95,9 +130,19 @@ describe('Plugins', () => {
       screen.getByRole('heading', { level: 1, name: 'Agent Plugins' }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole('columnheader', { name: 'Namespace' }),
+      screen.getByRole('columnheader', { name: 'Status' }),
     ).toBeInTheDocument();
     expect(screen.getByText('security-review')).toBeInTheDocument();
+    // The name opens the read-only detail dialog; editing stays a row action.
+    fireEvent.click(screen.getByText('security-review'));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('security_review');
+    // The detail view carries the package's skills and their structure.
+    expect(dialog).toHaveTextContent('security_review__review_repo');
+    expect(dialog).toHaveTextContent('Review a repository for security issues');
+    expect(dialog).toHaveTextContent('graph__query');
+    expect(dialog).toHaveTextContent('SKILL.md');
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.getByText('security_review')).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'New plugin' }),
@@ -112,11 +157,14 @@ describe('Plugins', () => {
       screen.getByRole('menuitem', { name: 'Disable' }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole('menuitem', { name: 'View history' }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole('menuitem', { name: 'Delete' }),
     ).toBeInTheDocument();
   });
 
-  it('creates a plugin from structured fields and opens its draft', async () => {
+  it('creates a plugin from structured fields and opens its editor', async () => {
     render(<Plugins />, { wrapper: Wrapper });
     fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
     const dialog = screen.getByRole('dialog', { name: 'New Agent Plugin' });
@@ -149,10 +197,35 @@ describe('Plugins', () => {
       });
     });
     await waitFor(() =>
-      expect(createDraft).toHaveBeenCalledWith('repository_review'),
-    );
-    await waitFor(() =>
       expect(screen.getByText('Plugin editor')).toBeInTheDocument(),
     );
+  });
+
+  it('names the diagnostics on hover instead of only counting them', async () => {
+    usePluginsList.mockReturnValue({
+      plugins: [
+        {
+          ...PLUGIN,
+          diagnostics: [
+            {
+              severity: 'warning',
+              code: 'unchanged_package_version',
+              message: 'Package contents changed but version is still 1.0.0.',
+              path: 'plugin.json',
+              skill: null,
+            },
+          ],
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+    render(<Plugins />, { wrapper: Wrapper });
+
+    fireEvent.mouseOver(screen.getByText('1'));
+    expect(
+      await screen.findByText(/Package contents changed but version is still/),
+    ).toBeInTheDocument();
   });
 });

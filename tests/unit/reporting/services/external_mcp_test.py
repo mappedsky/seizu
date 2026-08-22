@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
 from mcp.types import ListToolsResult, TextContent, Tool, ToolAnnotations
 
 from reporting.authnz import CurrentUser
@@ -391,6 +393,10 @@ def test_plugin_mcp_url_prefers_operator_config_over_advertised_metadata(mocker)
 def test_plugin_mcp_url_can_be_advertised_during_initialize(mocker):
     proxy = _proxy()
     mocker.patch("reporting.services.external_mcp.settings.MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch(
+        "reporting.services.external_mcp.settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        external_mcp.settings.ExternalPluginURLMatchMode.LAX,
+    )
     mocker.patch.dict(external_mcp._advertised_upstream_urls, {}, clear=True)
     result = SimpleNamespace(
         capabilities=SimpleNamespace(
@@ -402,3 +408,181 @@ def test_plugin_mcp_url_can_be_advertised_during_initialize(mocker):
     external_mcp._record_upstream_metadata(proxy, result)
 
     assert external_mcp.proxy_for_upstream_url("https://upstream.example/mcp") == proxy
+
+
+def test_advertised_upstream_urls_are_ignored_when_urls_do_not_bind(mocker):
+    """Under the default mode nothing an upstream claims can steer a binding."""
+    proxy = _proxy()
+    mocker.patch("reporting.services.external_mcp.settings.MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch(
+        "reporting.services.external_mcp.settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        external_mcp.settings.ExternalPluginURLMatchMode.NONE,
+    )
+    mocker.patch.dict(external_mcp._advertised_upstream_urls, {}, clear=True)
+    result = SimpleNamespace(
+        capabilities=SimpleNamespace(
+            extensions={"com.mappedsky.seizu": {"upstreamUrls": ["https://upstream.example/mcp"]}}
+        ),
+        meta=None,
+    )
+
+    external_mcp._record_upstream_metadata(proxy, result)
+
+    assert external_mcp._advertised_upstream_urls == {}
+
+
+def test_advertised_upstream_urls_are_bounded(mocker):
+    proxy = _proxy()
+    mocker.patch("reporting.services.external_mcp.settings.MCP_EXTERNAL_PROXIES", [proxy])
+    mocker.patch(
+        "reporting.services.external_mcp.settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE",
+        external_mcp.settings.ExternalPluginURLMatchMode.LAX,
+    )
+    mocker.patch.dict(external_mcp._advertised_upstream_urls, {}, clear=True)
+    result = SimpleNamespace(
+        capabilities=SimpleNamespace(
+            extensions={
+                "com.mappedsky.seizu": {"upstreamUrls": [f"https://upstream.example/{index}" for index in range(500)]}
+            }
+        ),
+        meta=None,
+    )
+
+    external_mcp._record_upstream_metadata(proxy, result)
+
+    assert len(external_mcp._advertised_upstream_urls[proxy.name]) == 32
+
+
+def _cache_user(user_id: str) -> CurrentUser:
+    return CurrentUser(
+        user=User(
+            user_id=user_id,
+            sub=user_id,
+            iss="issuer",
+            created_at="2026-01-01T00:00:00+00:00",
+            last_login="2026-01-01T00:00:00+00:00",
+        ),
+        jwt_claims={},
+        permissions=frozenset(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_discovery_cache():
+    external_mcp.invalidate_discovery_cache()
+    yield
+    external_mcp.invalidate_discovery_cache()
+
+
+async def test_a_scope_discovers_each_proxy_once(mocker):
+    """AGT-038: a turn asks several times for one unchanging answer."""
+    proxy = _proxy()
+    discover = mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    user = _cache_user("u1")
+
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, user)
+        await external_mcp.discover_proxy_tools(proxy, user)
+        await external_mcp.discover_proxy_tools(proxy, user)
+
+    assert discover.await_count == 1
+
+
+async def test_a_scope_never_shares_one_user_s_inventory_with_another(mocker):
+    """A listing is what that identity is authorized to see."""
+    proxy = _proxy()
+    discover = mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, _cache_user("u1"))
+        await external_mcp.discover_proxy_tools(proxy, _cache_user("u2"))
+
+    assert discover.await_count == 2
+
+
+async def test_without_a_scope_or_a_ttl_discovery_stays_live(mocker):
+    proxy = _proxy()
+    discover = mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 0)
+    user = _cache_user("u1")
+
+    await external_mcp.discover_proxy_tools(proxy, user)
+    await external_mcp.discover_proxy_tools(proxy, user)
+
+    assert discover.await_count == 2
+
+
+async def test_the_ttl_cache_survives_between_scopes(mocker):
+    proxy = _proxy()
+    discover = mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 300)
+    user = _cache_user("u1")
+
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, user)
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, user)
+
+    assert discover.await_count == 1
+
+
+async def test_an_expired_ttl_entry_is_rediscovered(mocker):
+    proxy = _proxy()
+    discover = mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 300)
+    clock = mocker.patch.object(external_mcp.time, "monotonic", return_value=1000.0)
+    user = _cache_user("u1")
+
+    await external_mcp.discover_proxy_tools(proxy, user)
+    clock.return_value = 1000.0 + 301
+    await external_mcp.discover_proxy_tools(proxy, user)
+
+    assert discover.await_count == 2
+
+
+async def test_the_ttl_cache_is_bounded(mocker):
+    proxy = _proxy()
+    mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 300)
+
+    for index in range(external_mcp._DISCOVERY_TTL_MAX_ENTRIES + 25):
+        await external_mcp.discover_proxy_tools(proxy, _cache_user(f"u{index}"))
+
+    assert len(external_mcp._discovery_ttl_cache) == external_mcp._DISCOVERY_TTL_MAX_ENTRIES
+
+
+async def test_a_refused_identity_drops_that_user_s_cached_inventory(mocker):
+    """A cached listing describes access the upstream just refused."""
+    proxy = _proxy()
+    mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 300)
+    kept = _cache_user("keeper")
+    refused = _cache_user("refused")
+
+    await external_mcp.discover_proxy_tools(proxy, kept)
+    await external_mcp.discover_proxy_tools(proxy, refused)
+    external_mcp.invalidate_discovery_cache(refused)
+
+    assert ("keeper", proxy.name) in external_mcp._discovery_ttl_cache
+    assert ("refused", proxy.name) not in external_mcp._discovery_ttl_cache
+
+
+async def test_discovery_traces_which_layer_answered(mocker):
+    """A served call and a live one look identical to every caller above this."""
+    proxy = _proxy()
+    mocker.patch.object(external_mcp, "list_proxy_tools", new=AsyncMock(return_value=[]))
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 300)
+    recorded: list[dict] = []
+    mocker.patch.object(external_mcp.telemetry, "set_attributes", side_effect=lambda _span, **kw: recorded.append(kw))
+    user = _cache_user("u1")
+
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, user)  # live
+        await external_mcp.discover_proxy_tools(proxy, user)  # scope
+    with external_mcp.discovery_scope():
+        await external_mcp.discover_proxy_tools(proxy, user)  # ttl, not scope
+
+    # Only the attribution calls: `telemetry.span` sets attributes through the
+    # same function, so this must not assume it owns every recorded call.
+    sources = [item["discovery_source"] for item in recorded if "discovery_source" in item]
+    assert sources == ["live", "scope", "ttl"]

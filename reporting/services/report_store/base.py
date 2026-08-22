@@ -51,7 +51,7 @@ from reporting.schema.space_config import (
 
 
 class PluginRevisionConflict(RuntimeError):
-    """A plugin draft was based on a revision that is no longer current."""
+    """A staged package was derived from a revision that is no longer current."""
 
 
 def require_public_space_member(access: ReportAccess, space_id: str | None) -> None:
@@ -841,7 +841,7 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def delete_plugin(self, plugin_id: str) -> bool:
-        """Delete an installed plugin, its drafts, revisions, and indexes."""
+        """Delete an installed plugin, its revisions, files, and indexes."""
 
     @abstractmethod
     async def list_plugin_versions(self, plugin_id: str) -> list[PluginVersion]:
@@ -854,6 +854,12 @@ class ReportStore(ABC):
     @abstractmethod
     async def read_plugin_file(self, plugin_id: str, path: str, revision: int | None = None) -> PluginFile | None:
         """Read one file from a published plugin revision."""
+
+    @abstractmethod
+    async def read_plugin_files(
+        self, plugin_id: str, revision: int | None = None, paths: list[str] | None = None
+    ) -> list[PluginFile]:
+        """Read a revision's files in one statement, optionally restricted to ``paths``."""
 
     @abstractmethod
     async def list_enabled_plugin_skills(self) -> list[PluginSkillItem]:
@@ -872,36 +878,8 @@ class ReportStore(ABC):
         """Return an enabled plugin skill by its namespaced identity."""
 
     @abstractmethod
-    async def create_plugin_draft(self, plugin_id: str, user_id: str) -> bool:
-        """Create the plugin's single draft, or preserve the existing draft."""
-
-    @abstractmethod
-    async def get_plugin_draft_base_revision(self, plugin_id: str) -> int | None:
-        """Return the revision from which the current draft was created."""
-
-    @abstractmethod
-    async def list_plugin_draft_files(self, plugin_id: str) -> list[PluginFileInfo]:
-        """Return the current draft file manifest."""
-
-    @abstractmethod
-    async def read_plugin_draft_file(self, plugin_id: str, path: str) -> PluginFile | None:
-        """Read a draft file."""
-
-    @abstractmethod
-    async def write_plugin_draft_file(
-        self, plugin_id: str, file: PluginFile, user_id: str, expected_etag: str | None = None
-    ) -> PluginFileInfo | None:
-        """Write a draft file, returning None on an ETag conflict or missing draft."""
-
-    @abstractmethod
-    async def delete_plugin_draft_file(
-        self, plugin_id: str, path: str, user_id: str, expected_etag: str | None = None
-    ) -> bool:
-        """Delete a draft file with optional optimistic concurrency."""
-
-    @abstractmethod
-    async def delete_plugin_draft(self, plugin_id: str) -> bool:
-        """Discard a plugin draft."""
+    async def read_plugin_blob(self, plugin_id: str, sha256: str) -> PluginFile | None:
+        """Read a blob already stored by one of this plugin's revisions, by digest."""
 
     # ------------------------------------------------------------------
     # Query history

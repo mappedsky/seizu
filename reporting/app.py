@@ -271,7 +271,13 @@ class _MCPMiddleware:
         if scope["type"] in ("http", "websocket"):
             path = scope.get("path", "")
             if path == "/api/v1/mcp" or path.startswith("/api/v1/mcp/") or path.startswith("/.well-known/oauth-"):
-                await self._mcp_app(scope, receive, send)
+                # One request may list tools, list prompts and resolve a
+                # skill's dependencies; external discovery answers all three
+                # identically, so it runs once (AGT-038).
+                from reporting.services import external_mcp
+
+                with external_mcp.discovery_scope():
+                    await self._mcp_app(scope, receive, send)
                 return
         await self._app(scope, receive, send)
 

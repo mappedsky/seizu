@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Autocomplete,
@@ -29,6 +29,8 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircle';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import ConstellationSpinner from 'src/components/ConstellationSpinner';
+import FieldWithHelp from 'src/components/FieldWithHelp';
 import MarkdownEditor from 'src/components/MarkdownEditor';
 import type { PluginFileInfo } from 'src/hooks/usePluginsApi';
 import type { ToolCatalogItem, ToolParamDef } from 'src/hooks/useToolsetsApi';
@@ -41,6 +43,9 @@ import {
 type SupportingDirectory = 'references' | 'scripts' | 'assets';
 
 interface ParamFormState {
+  // Stable across renames and reorders, so a row keeps its React identity while
+  // its name field is still empty or being typed into.
+  key: string;
   name: string;
   type: ToolParamDef['type'];
   description: string;
@@ -48,16 +53,24 @@ interface ParamFormState {
   defaultText: string;
 }
 
-const EMPTY_PARAM: ParamFormState = {
-  name: '',
-  type: 'string',
-  description: '',
-  required: true,
-  defaultText: '',
-};
+let parameterKeySeq = 0;
+
+function newParameter(): ParamFormState {
+  parameterKeySeq += 1;
+  return {
+    key: `parameter-${parameterKeySeq}`,
+    name: '',
+    type: 'string',
+    description: '',
+    required: true,
+    defaultText: '',
+  };
+}
 
 function toParamForm(parameter: ToolParamDef): ParamFormState {
+  parameterKeySeq += 1;
   return {
+    key: `parameter-${parameterKeySeq}`,
     name: parameter.name,
     type: parameter.type,
     description: parameter.description ?? '',
@@ -103,7 +116,7 @@ function StringListEditor({
   tooltip: string;
 }) {
   return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, flex: 1 }}>
+    <FieldWithHelp label={label} tooltip={tooltip}>
       <Autocomplete
         multiple
         freeSolo
@@ -119,33 +132,7 @@ function StringListEditor({
         )}
         sx={{ flex: 1, minWidth: 0 }}
       />
-      <Tooltip title={tooltip} placement="top" arrow describeChild>
-        <IconButton aria-label={`Help for ${label}`} size="small">
-          <HelpOutlineIcon fontSize="small" />
-        </IconButton>
-      </Tooltip>
-    </Box>
-  );
-}
-
-function FieldWithHelp({
-  tooltip,
-  label,
-  children,
-}: {
-  tooltip: string;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
-      <Box sx={{ flex: 1, minWidth: 0 }}>{children}</Box>
-      <Tooltip title={tooltip} placement="top" arrow describeChild>
-        <IconButton aria-label={`Help for ${label}`} size="small">
-          <HelpOutlineIcon fontSize="small" />
-        </IconButton>
-      </Tooltip>
-    </Box>
+    </FieldWithHelp>
   );
 }
 
@@ -411,7 +398,7 @@ function SupportingFileDialog({
           onClick={() => void save()}
           disabled={saving}
         >
-          Add to draft
+          {saving ? <ConstellationSpinner size={20} /> : 'Add file'}
         </Button>
       </DialogActions>
     </Dialog>
@@ -423,7 +410,7 @@ export default function PluginSkillEditor({
   extension,
   catalog,
   supportingFiles,
-  onSave,
+  onChange,
   onUpload,
   onCreateTextFile,
   onDeleteFile,
@@ -433,10 +420,8 @@ export default function PluginSkillEditor({
   extension: PluginSkillExtension;
   catalog: ToolCatalogItem[];
   supportingFiles: PluginFileInfo[];
-  onSave: (
-    document: SkillDocument,
-    extension: PluginSkillExtension,
-  ) => Promise<void>;
+  /** Called on every edit: this editor stages into the parent, never the server. */
+  onChange: (document: SkillDocument, extension: PluginSkillExtension) => void;
   onUpload: (directory: SupportingDirectory, file: File) => Promise<void>;
   onCreateTextFile: (
     directory: SupportingDirectory,
@@ -465,9 +450,6 @@ export default function PluginSkillEditor({
   const [parameters, setParameters] = useState<ParamFormState[]>(
     (extension.parameters ?? []).map(toParamForm),
   );
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [allowedToolsOpen, setAllowedToolsOpen] = useState(false);
 
@@ -501,42 +483,53 @@ export default function PluginSkillEditor({
       ),
     );
 
-  const save = async () => {
-    const nextDocument: SkillDocument = {
-      ...document,
-      description: description.trim(),
-      body,
-      allowedTools,
-    };
-    const typedParameters = parameters.map(fromParamForm);
-    const problem = validateSkillAuthoring(
-      nextDocument,
-      skillId.trim(),
-      typedParameters,
-    );
-    if (problem) {
-      setError(problem);
+  const stagedDocument: SkillDocument = {
+    ...document,
+    description,
+    body,
+    allowedTools,
+  };
+  const typedParameters = parameters.map(fromParamForm);
+  const problem = validateSkillAuthoring(
+    { ...stagedDocument, description: description.trim() },
+    skillId.trim(),
+    typedParameters,
+  );
+
+  // Every edit stages straight into the parent's in-memory package; nothing
+  // reaches the server until Publish. The ref keeps the mount-time push (which
+  // is identical to what the parent already holds) from being reported as an
+  // edit.
+  const stagedRef = useRef(onChange);
+  stagedRef.current = onChange;
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
       return;
     }
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-    try {
-      await onSave(nextDocument, {
+    stagedRef.current(
+      { ...document, description: description.trim(), body, allowedTools },
+      {
         skillId: skillId.trim(),
         title: title.trim() || undefined,
         enabled,
         triggers,
         aliases,
         parameters: typedParameters,
-      });
-      setMessage('Skill saved to the draft.');
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
+      },
+    );
+  }, [
+    description,
+    body,
+    allowedTools,
+    skillId,
+    title,
+    enabled,
+    triggers,
+    aliases,
+    JSON.stringify(typedParameters),
+  ]);
 
   const handleBodyChange = useCallback(
     (value: string | undefined) => setBody(value ?? ''),
@@ -545,8 +538,7 @@ export default function PluginSkillEditor({
 
   return (
     <Stack spacing={2.5}>
-      {error && <Alert severity="error">{error}</Alert>}
-      {message && <Alert severity="success">{message}</Alert>}
+      {problem && <Alert severity="error">{problem}</Alert>}
       <Box>
         <Typography variant="h2" sx={{ mb: 0.5 }}>
           {title || document.portableName}
@@ -556,7 +548,18 @@ export default function PluginSkillEditor({
         </Typography>
       </Box>
 
-      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+      {/* A grid, not a row Stack: the help affordance makes two of these three
+          controls wider than their input, and flex sizing then starved them. */}
+      <Box
+        sx={{
+          display: 'grid',
+          gap: 2,
+          gridTemplateColumns: {
+            xs: '1fr',
+            md: 'repeat(3, minmax(0, 1fr))',
+          },
+        }}
+      >
         <FieldWithHelp
           label="Portable name"
           tooltip="This is both the skill directory and front matter name. It cannot be changed after creation."
@@ -586,7 +589,7 @@ export default function PluginSkillEditor({
           onChange={(event) => setTitle(event.target.value)}
           fullWidth
         />
-      </Stack>
+      </Box>
       <FieldWithHelp
         label="Description"
         tooltip="This description is written to the SKILL.md front matter and used during skill discovery."
@@ -692,9 +695,7 @@ export default function PluginSkillEditor({
           <IconButton
             size="small"
             aria-label="Add template variable"
-            onClick={() =>
-              setParameters((items) => [...items, { ...EMPTY_PARAM }])
-            }
+            onClick={() => setParameters((items) => [...items, newParameter()])}
           >
             <AddCircleOutlineIcon fontSize="small" />
           </IconButton>
@@ -706,7 +707,7 @@ export default function PluginSkillEditor({
         )}
         {parameters.map((parameter, index) => (
           <Box
-            key={index}
+            key={parameter.key}
             sx={{
               border: 1,
               borderColor: 'divider',
@@ -859,20 +860,13 @@ export default function PluginSkillEditor({
       </Box>
 
       <Divider />
-      <Stack direction="row" sx={{ justifyContent: 'space-between' }}>
+      <Stack direction="row" sx={{ justifyContent: 'flex-start' }}>
         <Button
           color="error"
           startIcon={<DeleteIcon />}
           onClick={() => void onDeleteSkill()}
         >
-          Remove from draft
-        </Button>
-        <Button
-          variant="contained"
-          onClick={() => void save()}
-          disabled={saving}
-        >
-          Save to draft
+          Remove skill
         </Button>
       </Stack>
 

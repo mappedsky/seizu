@@ -64,11 +64,12 @@ history is explicitly disposable and is not copied into PostgreSQL.
 ## STO-006 — Plugin packages are immutable revisions over content-addressed blobs
 
 **Applies to:** `PluginRecord`, `PluginVersionRecord`, `PluginBlobRecord`,
-`PluginFileRecord`, `PluginDraftRecord`
+`PluginFileRecord`
 
 PostgreSQL stores package manifests, indexed skills, file manifests, and SHA-256
-addressed file bytes. Publishing creates one immutable revision atomically;
-authoring mutates a separate single draft.
+addressed file bytes. Publishing creates one immutable revision atomically.
+Blobs are shared between revisions and between plugins, so `delete_plugin`
+collects the ones its deletion orphaned rather than cascading them.
 
 **Why:** package files must remain byte-identical for MCP resource reads and
 sandbox execution throughout a turn, while references and assets often repeat
@@ -124,3 +125,28 @@ source.
 but not behavioral equivalence or fresh-install reconstruction. Same-ID shadowing
 tests the real selection path while keeping the legacy definition as a rollback
 until a package-only seed and end-to-end turn have both passed.
+
+## STO-008 — Plugin edits are staged in the client, not in a server-side draft
+
+**Applies to:** `POST /api/v1/plugins/{id}/publish`, `PluginPublishRequest`,
+`read_plugin_blob`, `PluginEditor.tsx`
+
+The editor loads a published revision, holds every edit in the browser, and
+submits the complete package in one request. A file it did not change is sent as
+its SHA-256 digest and resolved against blobs that plugin already stores; a
+`base_revision` rides along and a stale one is refused with `409`. There are no
+`plugin_drafts` tables and no per-file write endpoints.
+
+**Why:** the draft this replaced was written only when the author pressed "Save
+to draft", so field edits were lost by ordinary back navigation, and the draft
+was keyed by plugin ID alone — two authors editing one plugin silently shared
+and clobbered it. Staging removes both: there is one submit, it is atomic, and
+concurrency is one comparison rather than a second mutable copy of the package.
+Digest retention is what makes it affordable — without it, publishing a
+one-line edit would round-trip every asset through the browser.
+
+**Don't:** reintroduce a partial-save endpoint to "avoid losing work". The
+guard against loss is the leave prompt plus `beforeunload`; a half-written
+package on the server is the state this decision exists to remove. **Don't:**
+resolve a retained digest against any blob in the table — scope it to the
+plugin, or a caller could attach content from a package it is not editing.

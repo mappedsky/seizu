@@ -77,7 +77,7 @@ class ParsedPlugin:
         )
 
 
-def _diagnostic(
+def diagnostic(
     severity: str,
     code: str,
     message: str,
@@ -97,7 +97,7 @@ def _safe_path(raw: str) -> str | None:
     return path.as_posix()
 
 
-def _media_type(path: str) -> str:
+def media_type_for(path: str) -> str:
     guessed, _encoding = mimetypes.guess_type(path)
     if guessed:
         return guessed
@@ -146,7 +146,7 @@ def files_from_zip(data: bytes) -> list[PluginFile]:
             PluginFile(
                 path=path,
                 content=content,
-                media_type=_media_type(path),
+                media_type=media_type_for(path),
                 executable=bool(mode & 0o111),
             )
         )
@@ -178,7 +178,7 @@ def files_from_directory(root: Path) -> list[PluginFile]:
             PluginFile(
                 path=relative,
                 content=candidate.read_bytes(),
-                media_type=_media_type(relative),
+                media_type=media_type_for(relative),
                 executable=bool(candidate.stat().st_mode & 0o111),
             )
         )
@@ -217,34 +217,34 @@ def _validate_manifest(manifest: dict[str, Any], diagnostics: list[PluginDiagnos
     fatal = False
     if manifest.get("$schema") != PLUGIN_SCHEMA:
         diagnostics.append(
-            _diagnostic("error", "unsupported_plugin_schema", f"$schema must be {PLUGIN_SCHEMA}", path="plugin.json")
+            diagnostic("error", "unsupported_plugin_schema", f"$schema must be {PLUGIN_SCHEMA}", path="plugin.json")
         )
         fatal = True
     name = manifest.get("name")
     if not isinstance(name, str) or not _PLUGIN_NAME_RE.fullmatch(name):
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "error", "invalid_plugin_name", "name must satisfy the Agent Plugins 1.0.0 grammar", path="plugin.json"
             )
         )
         fatal = True
     for key in sorted(set(manifest) - _KNOWN_MANIFEST_FIELDS):
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "warning", "unknown_manifest_field", f"Ignoring unknown top-level field {key!r}", path="plugin.json"
             )
         )
     for key in ("version", "description", "homepage", "repository", "license"):
         if key in manifest and not isinstance(manifest[key], str):
             diagnostics.append(
-                _diagnostic("error", "invalid_manifest_field", f"{key} must be a string", path="plugin.json")
+                diagnostic("error", "invalid_manifest_field", f"{key} must be a string", path="plugin.json")
             )
             fatal = True
     if "keywords" in manifest and not (
         isinstance(manifest["keywords"], list) and all(isinstance(item, str) for item in manifest["keywords"])
     ):
         diagnostics.append(
-            _diagnostic("error", "invalid_manifest_field", "keywords must be an array of strings", path="plugin.json")
+            diagnostic("error", "invalid_manifest_field", "keywords must be an array of strings", path="plugin.json")
         )
         fatal = True
     author = manifest.get("author")
@@ -254,7 +254,7 @@ def _validate_manifest(manifest: dict[str, Any], diagnostics: list[PluginDiagnos
         and all(isinstance(value, str) for value in author.values())
     ):
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "error",
                 "invalid_manifest_field",
                 "author must contain only string name, email, and url fields",
@@ -265,13 +265,13 @@ def _validate_manifest(manifest: dict[str, Any], diagnostics: list[PluginDiagnos
     extensions = manifest.get("extensions")
     if extensions is not None and not isinstance(extensions, dict):
         diagnostics.append(
-            _diagnostic("warning", "invalid_extensions", "Ignoring non-object extensions field", path="plugin.json")
+            diagnostic("warning", "invalid_extensions", "Ignoring non-object extensions field", path="plugin.json")
         )
     elif isinstance(extensions, dict):
         for namespace, value in extensions.items():
             if not isinstance(value, dict):
                 diagnostics.append(
-                    _diagnostic(
+                    diagnostic(
                         "warning",
                         "invalid_extension",
                         f"Ignoring non-object extension {namespace!r}",
@@ -288,7 +288,7 @@ def _parse_seizu_extension(
     raw = extensions.get(EXTENSION_NAMESPACE) if isinstance(extensions, dict) else None
     if raw is None:
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "error",
                 "missing_seizu_extension",
                 f"extensions.{EXTENSION_NAMESPACE}.skillsetId is required",
@@ -298,7 +298,7 @@ def _parse_seizu_extension(
         return None
     if not isinstance(raw, dict):
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "error",
                 "invalid_seizu_extension",
                 f"extensions.{EXTENSION_NAMESPACE} must be an object",
@@ -320,7 +320,7 @@ def _parse_seizu_extension(
     try:
         return SeizuPluginExtension.model_validate(normalized)
     except ValidationError as exc:
-        diagnostics.append(_diagnostic("error", "invalid_seizu_extension", str(exc), path="plugin.json"))
+        diagnostics.append(diagnostic("error", "invalid_seizu_extension", str(exc), path="plugin.json"))
         return None
 
 
@@ -346,7 +346,7 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
         return {}
     config, error = _json_file(files, "mcp.json")
     if error or config is None:
-        diagnostics.append(_diagnostic("warning", "invalid_mcp_config", error or "invalid mcp.json", path="mcp.json"))
+        diagnostics.append(diagnostic("warning", "invalid_mcp_config", error or "invalid mcp.json", path="mcp.json"))
         return {}
     if (
         config.get("$schema") != MCP_SCHEMA
@@ -354,7 +354,7 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
         or not isinstance(config.get("mcpServers"), dict)
     ):
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "warning",
                 "invalid_mcp_config",
                 f"mcp.json must target {MCP_SCHEMA} and contain only mcpServers",
@@ -366,7 +366,7 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
     for name, server in config["mcpServers"].items():
         if not isinstance(name, str) or not name or not isinstance(server, dict):
             diagnostics.append(
-                _diagnostic("warning", "invalid_mcp_server", f"Skipping invalid MCP server {name!r}", path="mcp.json")
+                diagnostic("warning", "invalid_mcp_server", f"Skipping invalid MCP server {name!r}", path="mcp.json")
             )
             continue
         transport = server.get("type")
@@ -389,7 +389,7 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
             valid = isinstance(server.get("command"), str) and bool(server["command"])
             if valid:
                 diagnostics.append(
-                    _diagnostic(
+                    diagnostic(
                         "warning",
                         "unsupported_mcp_transport",
                         f"MCP server {name!r} uses unsupported stdio transport",
@@ -399,7 +399,7 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
                 continue
         if not valid:
             diagnostics.append(
-                _diagnostic("warning", "invalid_mcp_server", f"Skipping invalid MCP server {name!r}", path="mcp.json")
+                diagnostic("warning", "invalid_mcp_server", f"Skipping invalid MCP server {name!r}", path="mcp.json")
             )
             continue
         result[name] = server
@@ -433,7 +433,7 @@ def _frontmatter(content: bytes, path: str) -> tuple[dict[str, Any] | None, str 
 def parse_package(files: list[PluginFile]) -> ParsedPlugin:
     diagnostics: list[PluginDiagnostic] = []
     if len(files) > MAX_FILES:
-        diagnostics.append(_diagnostic("error", "package_too_large", f"Package contains more than {MAX_FILES} files"))
+        diagnostics.append(diagnostic("error", "package_too_large", f"Package contains more than {MAX_FILES} files"))
         return ParsedPlugin("", {}, [], [], diagnostics, "")
     total_size = sum(len(item.content) for item in files)
     oversized = next((item for item in files if len(item.content) > MAX_FILE_BYTES), None)
@@ -444,7 +444,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
             else f"Unpacked package exceeds {MAX_UNPACKED_BYTES} bytes"
         )
         diagnostics.append(
-            _diagnostic(
+            diagnostic(
                 "error",
                 "package_too_large",
                 message,
@@ -457,7 +457,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
         safe = _safe_path(item.path)
         if safe is None or safe != item.path or safe in by_path:
             diagnostics.append(
-                _diagnostic(
+                diagnostic(
                     "error", "unsafe_package_path", f"Invalid or duplicate package path {item.path!r}", path=item.path
                 )
             )
@@ -466,7 +466,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
     digest = package_digest(list(by_path.values()))
     manifest, error = _json_file(by_path, "plugin.json")
     if error or manifest is None:
-        diagnostics.append(_diagnostic("error", "invalid_manifest", error or "invalid plugin.json", path="plugin.json"))
+        diagnostics.append(diagnostic("error", "invalid_manifest", error or "invalid plugin.json", path="plugin.json"))
         return ParsedPlugin("", manifest or {}, list(by_path.values()), [], diagnostics, digest)
     if not _validate_manifest(manifest, diagnostics):
         return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
@@ -485,7 +485,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
         metadata, template, skill_error = _frontmatter(by_path[path].content, path)
         if skill_error or metadata is None or template is None:
             diagnostics.append(
-                _diagnostic("warning", "invalid_skill", skill_error or "invalid skill", path=path, skill=directory)
+                diagnostic("warning", "invalid_skill", skill_error or "invalid skill", path=path, skill=directory)
             )
             continue
         name = metadata.get("name")
@@ -500,7 +500,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
             or len(description) > 1024
         ):
             diagnostics.append(
-                _diagnostic(
+                diagnostic(
                     "warning",
                     "invalid_skill",
                     "Skill name must match its directory and description must be 1-1024 characters",
@@ -512,7 +512,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
         raw_allowed = metadata.get("allowed-tools", "")
         if not isinstance(raw_allowed, str):
             diagnostics.append(
-                _diagnostic(
+                diagnostic(
                     "warning",
                     "invalid_skill",
                     "allowed-tools must be a space-separated string",
@@ -529,11 +529,11 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
 
             validate_mcp_slug_component(skill_id)
         except ValueError as exc:
-            diagnostics.append(_diagnostic("warning", "invalid_skill_id", str(exc), path=path, skill=name))
+            diagnostics.append(diagnostic("warning", "invalid_skill_id", str(exc), path=path, skill=name))
             continue
         if skill_id in seen_ids:
             diagnostics.append(
-                _diagnostic(
+                diagnostic(
                     "warning", "duplicate_skill_id", f"Duplicate effective skill ID {skill_id!r}", path=path, skill=name
                 )
             )
@@ -543,7 +543,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
         template_errors = validate_skill_template(parameters, template)
         if template_errors:
             diagnostics.extend(
-                _diagnostic("warning", "invalid_skill_template", message, path=path, skill=name)
+                diagnostic("warning", "invalid_skill_template", message, path=path, skill=name)
                 for message in template_errors
             )
             continue

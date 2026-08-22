@@ -124,20 +124,51 @@ Published package files are immutable MCP resources with URIs of the form:
 seizu://plugins/<plugin>/versions/<revision>/files/<path>
 ```
 
+Each enabled skill is listed as one MCP resource carrying its title,
+description and declared `allowed-tools`; the packaged files beneath it are not
+enumerated. A resource template advertises
+`seizu://plugins/{plugin_id}/versions/{revision}/files/{path}`, and any file in a
+published revision can be read at that URI.
+
 References and assets enter model context only when the agent reads their
 resource. During chat, a selected skill is also materialized inside the
 conversation sandbox under `/home/user/seizu_plugins/`. Scripts run only with
 `sandbox__run_script`; arguments are passed as an argv array without a shell.
 Seizu web and worker processes never execute package code.
 
-The authoring UI maintains one draft per plugin. It provides structured fields
-for the known `plugin.json` metadata and each skill's `SKILL.md` front matter,
-instructions, tools, triggers, aliases, and template variables. Supporting
-files can be created or uploaded into that skill's `references/`, `scripts/`,
-or `assets/` directory; scripts are marked executable. File writes use ETags,
-and publish validates the complete draft before atomically creating an
-immutable revision. Default package bounds are 10 MiB compressed, 25 MiB
-unpacked, 500 files, 10 MiB per file, and 512 KiB per `SKILL.md`.
+The authoring UI stages the whole package in the browser. It provides structured
+fields for the known `plugin.json` metadata and each skill's `SKILL.md` front
+matter, instructions, tools, triggers, aliases, and template variables.
+Supporting files can be created or uploaded into that skill's `references/`,
+`scripts/`, or `assets/` directory; scripts are marked executable.
+
+Nothing reaches the server until **Publish**, which submits the complete package
+in one request and creates one immutable revision. Files the editor did not
+change are carried by their SHA-256 digest rather than re-uploaded, so a
+one-line edit to a skill does not push its assets back through the browser. The
+publish names the revision it was loaded from and is refused with `409` if the
+plugin has been published in the meantime, so concurrent edits cannot silently
+revert each other. Unpublished edits live only in that browser tab; leaving the
+editor prompts before discarding them. Default package bounds are 10 MiB
+compressed, 25 MiB unpacked, 500 files, 10 MiB per file, and 512 KiB per
+`SKILL.md`.
+
+## Revisions and package versions
+
+Seizu assigns every publish a **revision** (`v1`, `v2`, …) and a **package
+digest** over the package's contents. Those two are what identify a package
+inside Seizu: the version history, restore, MCP resource URIs, sandbox
+materialization paths, and seed idempotency all key on them, never on the
+manifest's `version` field.
+
+`version` in `plugin.json` is the author's own declaration and is not required
+to change when contents do. Nothing inside Seizu breaks if it does not — but it
+is the only handle an *exported* package carries. Once a package is downloaded
+and installed elsewhere, tools outside Seizu have nothing but the version to
+compare, so two revisions that both declare `1.0.0` are indistinguishable to
+them. Publishing changed contents under an unchanged version therefore records a
+non-blocking `unchanged_package_version` warning on the revision, visible in the
+plugin's diagnostics.
 
 ## Compatibility
 

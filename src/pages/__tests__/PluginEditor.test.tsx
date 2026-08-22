@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
@@ -12,7 +13,11 @@ import * as pluginsApi from 'src/hooks/usePluginsApi';
 import * as toolsetsApi from 'src/hooks/useToolsetsApi';
 import { PLUGIN_SCHEMA } from 'src/pluginAuthoring';
 
+// Exhaustive: a module-factory mock replaces this module for every test file
+// in the shared Bun process, so omitting an export breaks the other suites.
 jest.mock('src/hooks/usePluginsApi', () => ({
+  usePluginsList: jest.fn(),
+  usePluginVersionsList: jest.fn(),
   usePluginMutations: jest.fn(),
 }));
 jest.mock('src/hooks/useToolsetsApi', () => ({
@@ -60,6 +65,7 @@ function Wrapper({ children }: { children: React.ReactNode }) {
       <ThemeProvider theme={theme}>
         <Routes>
           <Route path="/app/plugins/:pluginId/edit" element={<>{children}</>} />
+          <Route path="/app/plugins" element={<div>Plugins list</div>} />
         </Routes>
       </ThemeProvider>
     </MemoryRouter>
@@ -67,6 +73,9 @@ function Wrapper({ children }: { children: React.ReactNode }) {
 }
 
 describe('PluginEditor', () => {
+  const validatePackage = jest.fn();
+  const publishPackage = jest.fn();
+
   beforeEach(() => {
     jest.clearAllMocks();
     const files = [
@@ -74,22 +83,25 @@ describe('PluginEditor', () => {
       file('skills/review-repository/SKILL.md'),
       file('skills/review-repository/references/checklist.md'),
     ];
+    publishPackage.mockResolvedValue({});
+    validatePackage.mockResolvedValue({ valid: true, diagnostics: [] });
     usePluginMutations.mockReturnValue({
-      listDraftFiles: jest.fn().mockResolvedValue(files),
-      readDraftFile: jest.fn().mockImplementation((_: string, path: string) => {
-        const text =
-          path === 'plugin.json'
-            ? JSON.stringify(manifest)
-            : path.endsWith('SKILL.md')
-              ? '---\nname: review-repository\ndescription: Review a repository\nallowed-tools: graph__query\n---\nReview the repository.'
-              : 'Checklist';
-        return Promise.resolve({ bytes: encoder.encode(text) });
+      get: jest.fn().mockResolvedValue({
+        plugin_id: 'security_review',
+        current_revision: 4,
       }),
-      writeDraftFile: jest.fn(),
-      deleteDraftFile: jest.fn(),
-      validateDraft: jest.fn(),
-      publishDraft: jest.fn(),
-      discardDraft: jest.fn(),
+      listFiles: jest.fn().mockResolvedValue(files),
+      readFile: jest
+        .fn()
+        .mockImplementation((_: string, __: number, path: string) => {
+          const text =
+            path === 'plugin.json'
+              ? JSON.stringify(manifest)
+              : '---\nname: review-repository\ndescription: Review a repository\nallowed-tools: graph__query\n---\nReview the repository.';
+          return Promise.resolve({ bytes: encoder.encode(text) });
+        }),
+      validatePackage,
+      publishPackage,
     });
     useToolCatalog.mockReturnValue({
       tools: [
@@ -123,8 +135,8 @@ describe('PluginEditor', () => {
     ).toHaveValue('security_review');
     expect(screen.queryByText('Plugin-relative path')).not.toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: 'Agent Plugins' }),
-    ).not.toBeInTheDocument();
+      screen.getByRole('button', { name: 'Back to Agent Plugins' }),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Review repository'));
 
@@ -202,5 +214,64 @@ describe('PluginEditor', () => {
     expect(
       within(dialog).getByRole('textbox', { name: /display title/i }),
     ).toBeInTheDocument();
+  });
+
+  it('publishes the whole package once, against the loaded revision', async () => {
+    render(<PluginEditor />, { wrapper: Wrapper });
+    await screen.findByRole('heading', { name: 'Plugin details' });
+
+    // Nothing edited yet, so there is nothing to publish.
+    expect(screen.getByRole('button', { name: /Publish/ })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /package name/i }), {
+      target: { value: 'security-review-2' },
+    });
+    const publish = screen.getByRole('button', { name: /Publish/ });
+    expect(publish).toBeEnabled();
+    fireEvent.click(publish);
+
+    await waitFor(() => expect(publishPackage).toHaveBeenCalled());
+    const [pluginId, files, baseRevision] = publishPackage.mock.calls[0];
+    expect(pluginId).toBe('security_review');
+    expect(baseRevision).toBe(4);
+    // One request carrying every file: edited content inline, untouched
+    // supporting files retained by digest.
+    expect(files.map((file: { path: string }) => file.path).sort()).toEqual([
+      'plugin.json',
+      'skills/review-repository/SKILL.md',
+      'skills/review-repository/references/checklist.md',
+    ]);
+    const retained = files.find((file: { path: string }) =>
+      file.path.endsWith('checklist.md'),
+    );
+    expect(retained.sha256).toBe(
+      'skills/review-repository/references/checklist.md',
+    );
+    expect(retained.content_base64).toBeUndefined();
+  });
+
+  it('warns before leaving with unpublished edits', async () => {
+    render(<PluginEditor />, { wrapper: Wrapper });
+    await screen.findByRole('heading', { name: 'Plugin details' });
+
+    fireEvent.change(screen.getByRole('textbox', { name: /package name/i }), {
+      target: { value: 'security-review-2' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Back to Agent Plugins' }),
+    );
+    expect(
+      screen.getByRole('dialog', { name: 'Discard unpublished changes?' }),
+    ).toBeInTheDocument();
+  });
+
+  it('leaves without a prompt when nothing was edited', async () => {
+    render(<PluginEditor />, { wrapper: Wrapper });
+    await screen.findByRole('heading', { name: 'Plugin details' });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Back to Agent Plugins' }),
+    );
+    expect(screen.getByText('Plugins list')).toBeInTheDocument();
   });
 });

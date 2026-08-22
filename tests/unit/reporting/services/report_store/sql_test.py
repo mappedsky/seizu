@@ -5,7 +5,9 @@ sessions within a test share the same underlying connection.
 """
 
 import asyncio
+import hashlib
 import itertools
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -3323,15 +3325,12 @@ async def test_plugin_publish_is_versioned_and_content_addressed(store):
         blobs = (await session.execute(select(sql_module.PluginBlobRecord))).scalars().all()
     assert len(blobs) == len(parsed.files)
 
-    assert await store.create_plugin_draft(parsed.plugin_id, "u1") is True
-    await store.write_plugin_draft_file(
-        parsed.plugin_id,
-        PluginFile(path="notes.txt", content=b"unsaved"),
-        "u1",
-    )
-    assert await store.create_plugin_draft(parsed.plugin_id, "u2") is True
-    assert (await store.read_plugin_draft_file(parsed.plugin_id, "notes.txt")).content == b"unsaved"
-    assert await store.get_plugin_draft_base_revision(parsed.plugin_id) == 2
+    manifest_file = next(item for item in parsed.files if item.path == "plugin.json")
+    digest = hashlib.sha256(manifest_file.content).hexdigest()
+    retained = await store.read_plugin_blob(parsed.plugin_id, digest)
+    assert retained.content == manifest_file.content
+    assert await store.read_plugin_blob(parsed.plugin_id, "0" * 64) is None
+    assert await store.read_plugin_blob("other_plugin", digest) is None
 
 
 async def test_legacy_plugin_projection_takes_postgres_startup_lock(mocker):
@@ -3343,6 +3342,7 @@ async def test_legacy_plugin_projection_takes_postgres_startup_lock(mocker):
     engine.dialect.name = "postgresql"
     engine.begin.return_value = transaction
     mocker.patch.object(sql_module, "_get_engine", return_value=engine)
+    mocker.patch.object(store, "list_skillsets", new=mocker.AsyncMock(return_value=[object()]))
     migrate = mocker.patch.object(store, "_migrate_legacy_skillsets_unlocked", new=mocker.AsyncMock())
 
     await store._migrate_legacy_skillsets()  # noqa: SLF001
@@ -3351,3 +3351,57 @@ async def test_legacy_plugin_projection_takes_postgres_startup_lock(mocker):
     assert "pg_advisory_xact_lock" in lock_sql
     assert "seizu-plugin-legacy-migration" in lock_sql
     migrate.assert_awaited_once_with()
+
+
+async def test_legacy_plugin_projection_skips_the_lock_with_no_legacy_skillsets(mocker):
+    """Every worker runs startup on every boot; the settled case costs one query."""
+    store = SQLModelReportStore()
+    engine = mocker.MagicMock()
+    engine.dialect.name = "postgresql"
+    mocker.patch.object(sql_module, "_get_engine", return_value=engine)
+    mocker.patch.object(store, "list_skillsets", new=mocker.AsyncMock(return_value=[]))
+    migrate = mocker.patch.object(store, "_migrate_legacy_skillsets_unlocked", new=mocker.AsyncMock())
+
+    await store._migrate_legacy_skillsets()  # noqa: SLF001
+
+    engine.begin.assert_not_called()
+    migrate.assert_not_awaited()
+
+
+async def test_deleting_a_plugin_collects_its_orphaned_blobs(store):
+    """Content-addressed blobs are shared, so they are collected, not cascaded."""
+    from reporting.services.plugin_packages import parse_package
+
+    def package(plugin_id: str, body: str) -> object:
+        manifest = {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": plugin_id.replace("_", "-"),
+            "extensions": {"com.mappedsky.seizu": {"skillsetId": plugin_id}},
+        }
+        return parse_package(
+            [
+                PluginFile(path="plugin.json", content=json.dumps(manifest, sort_keys=True).encode()),
+                PluginFile(
+                    path="skills/review/SKILL.md",
+                    content=f"---\nname: review\ndescription: Review it\n---\n{body}".encode(),
+                ),
+                PluginFile(path="shared.txt", content=b"shared between both plugins"),
+            ]
+        )
+
+    for plugin_id, body in (("alpha_tools", "Alpha."), ("beta_tools", "Beta.")):
+        parsed = package(plugin_id, body)
+        await store.publish_plugin(parsed.plugin_id, parsed.manifest, parsed.files, [], [], parsed.package_digest, "u1")
+
+    async def blob_count() -> int:
+        async with AsyncSession(sql_module._get_engine()) as session:
+            return len((await session.execute(select(sql_module.PluginBlobRecord))).scalars().all())
+
+    # Five distinct blobs: two manifests, two SKILL.md bodies, one shared file.
+    assert await blob_count() == 5
+    assert await store.delete_plugin("alpha_tools") is True
+    # Its own two blobs go; the file both plugins share stays.
+    assert await blob_count() == 3
+    assert await store.read_plugin_blob("beta_tools", hashlib.sha256(b"shared between both plugins").hexdigest())
+    assert await store.delete_plugin("beta_tools") is True
+    assert await blob_count() == 0

@@ -1136,10 +1136,27 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
-# How logical Agent Plugin MCP dependencies bind to configured proxies:
-# strict requires an upstream URL alias, lax prefers one then uses an equally
-# named proxy, and none ignores the package URL and uses an equally named proxy.
+# How a portable plugin's logical MCP dependency (`mcp:<server>/<tool>`) binds to
+# a configured proxy. Seizu only ever connects to its own proxies, never to the
+# endpoint a package names, so the URL in mcp.json is documentation rather than
+# an address -- which is why the default ignores it and matches on server name.
+#   none   (default) ignore the package URL; use the equally named proxy.
+#   lax    prefer a proxy that declares the URL, else the equally named proxy.
+#   strict require a proxy that declares the URL in MCP_EXTERNAL_PROXIES.
+# Choose strict only where package-declared endpoints are themselves trusted
+# configuration and a name collision between proxies would be a real risk.
 MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE = _external_plugin_url_match_mode_from_env()
+
+# How long a proxy's discovered tool listing may be reused across turns, per
+# user. Discovery costs a transport, an initialize and a paginated tools/list
+# per proxy, and one turn asks for the same answer several times -- that
+# duplication is always removed, within the turn, regardless of this setting.
+# This is the cross-turn layer, which can be stale: a tool the user has just
+# lost stays listed, and one they have just gained stays hidden, until it
+# expires. Neither is an authorization decision (the call is still checked), but
+# both are visible, so 0 = off is the default. Cleared for a user whenever an
+# upstream refuses their identity.
+MCP_EXTERNAL_DISCOVERY_TTL_SECONDS = int_env("MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 0)
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.
@@ -1205,6 +1222,10 @@ SANDBOX_CORE_TOOLS = _core_tools_from_env()
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+
+# How long one Agent Plugin script may run inside the sandbox before it is
+# killed. Bounds a single sandbox__run_script call, not the turn around it.
+SANDBOX_SCRIPT_TIMEOUT_SECONDS = int_env("SANDBOX_SCRIPT_TIMEOUT_SECONDS", 60)
 # Whether the chat agent may use the conversation's sandbox directly, rather
 # than only through sandbox__delegate. Five more always-disclosed tools cost
 # schema tokens on every call; what they buy is a single round trip where a

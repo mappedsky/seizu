@@ -39,6 +39,7 @@ from reporting.services import (
     chat_context,
     chat_models,
     episodic_memory,
+    external_mcp,
     mcp_builtins,
     mcp_runtime,
     report_store,
@@ -612,6 +613,10 @@ async def _chat_agent_node_with_session(state: ChatState, config: RunnableConfig
 
 
 async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState:
+    # A turn asks for the same external inventory several times -- the system
+    # prompt's capability listing, each skill render's dependency resolution --
+    # and every ask is a transport per proxy. One discovery per turn (AGT-038).
+    external_mcp.begin_discovery_scope()
     provider = _chat_provider()
     current_user = _current_user_from_config(config)
     resume_confirmation_id = _resume_confirmation_id(state["messages"])

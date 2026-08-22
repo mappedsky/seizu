@@ -75,6 +75,10 @@ async def _delete(args: dict[str, Any], current: CurrentUser | None) -> dict[str
     return {"plugin_id": args["plugin_id"], "deleted": await report_store.delete_plugin(args["plugin_id"])}
 
 
+async def _skills(args: dict[str, Any], current: CurrentUser | None) -> dict[str, Any]:
+    return {"skills": [item.model_dump() for item in await report_store.list_plugin_skills(args["plugin_id"])]}
+
+
 async def _versions(args: dict[str, Any], current: CurrentUser | None) -> dict[str, Any]:
     return {"versions": [item.model_dump() for item in await report_store.list_plugin_versions(args["plugin_id"])]}
 
@@ -148,6 +152,15 @@ GROUP_DEF = BuiltinGroup(
             [Permission.PLUGINS_DELETE.value],
             _delete,
             confirmation=_confirm,
+        ),
+        BuiltinTool(
+            "plugins__list_skills",
+            GROUP,
+            "List the skills indexed from an Agent Plugin's current revision.",
+            _ID_SCHEMA,
+            [Permission.PLUGINS_READ.value],
+            _skills,
+            collection_key="skills",
         ),
         BuiltinTool(
             "plugins__list_versions",

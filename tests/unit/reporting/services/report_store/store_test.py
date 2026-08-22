@@ -137,7 +137,7 @@ def mock_store():
         "delete_plugin": False,
         "list_plugin_versions": [],
         "list_plugin_skills": [],
-        "get_plugin_draft_base_revision": None,
+        "read_plugin_blob": None,
         "save_query_history": None,
         "list_query_history": ([], 0),
         "list_roles": [],

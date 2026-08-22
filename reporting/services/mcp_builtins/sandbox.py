@@ -1787,10 +1787,16 @@ def _plugin_skill_root(skill: Any) -> str:
     return f"/home/user/seizu_plugins/{skill.plugin_id}/{skill.revision}-{digest}/skills/{skill.portable_name}"
 
 
-async def materialize_plugin_skill(skill: Any) -> str | None:
-    """Materialize one immutable plugin skill in the conversation sandbox."""
+async def materialize_plugin_skill(skill: Any, *, only_if_open: bool = False) -> str | None:
+    """Materialize one immutable plugin skill in the conversation sandbox.
+
+    ``only_if_open`` refuses to be the thing that provisions a sandbox: a caller
+    that merely wants the files *if they are cheap* (rendering a skill) passes
+    it, and a caller that is about to run code (``sandbox__run_script``) does
+    not. See SBX-018.
+    """
     session = sandbox_session.current_sandbox_session()
-    if session is None:
+    if session is None or (only_if_open and not session.opened):
         return None
     backend = await session.backend()
     root = _plugin_skill_root(skill)
@@ -1802,6 +1808,7 @@ async def materialize_plugin_skill(skill: Any) -> str | None:
         pass
     files = await report_store.list_plugin_files(skill.plugin_id, skill.revision)
     prefix = f"{skill.source_path}/"
+    entries: list[tuple[str, str, int]] = []
     for info in files:
         if not info.path.startswith(prefix):
             continue
@@ -1811,18 +1818,22 @@ async def materialize_plugin_skill(skill: Any) -> str | None:
         file = await report_store.read_plugin_file(skill.plugin_id, info.path, skill.revision)
         if file is None:
             continue
-        target = f"{root}/{relative}"
-        encoded = base64.b64encode(file.content).decode()
         mode = 0o755 if file.executable or relative.startswith("scripts/") else 0o644
+        entries.append((f"{root}/{relative}", base64.b64encode(file.content).decode(), mode))
+    if entries:
+        # One round trip for the whole tree. Per-file `run_python` calls inlined
+        # each file's base64 into its own program, so a package with large
+        # assets built a program many times the size of the asset, N times over.
+        payload = json.dumps(entries)
         code = (
-            "import base64, os\n"
-            f"p={target!r}\n"
-            "os.makedirs(os.path.dirname(p), exist_ok=True)\n"
-            f"open(p, 'wb').write(base64.b64decode({encoded!r}))\n"
-            f"os.chmod(p, {mode})\n"
-            "print('SEIZU_PLUGIN_FILE_WRITTEN')\n"
+            "import base64, json, os\n"
+            f"for path, blob, mode in json.loads({payload!r}):\n"
+            "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+            "    open(path, 'wb').write(base64.b64decode(blob))\n"
+            "    os.chmod(path, mode)\n"
+            "print('SEIZU_PLUGIN_FILES_WRITTEN')\n"
         )
-        if "SEIZU_PLUGIN_FILE_WRITTEN" not in await backend.run_python(code):
+        if "SEIZU_PLUGIN_FILES_WRITTEN" not in await backend.run_python(code):
             return None
     await backend.write_file(marker, skill.package_digest)
     try:
@@ -1860,7 +1871,8 @@ async def _handle_run_script(args: dict[str, Any], current_user: CurrentUser | N
         "import json, os, subprocess\n"
         f"argv=json.loads({argv_json!r})\n"
         f"env=json.loads({env_json!r})\n"
-        f"result=subprocess.run(argv, cwd={root!r}, env=env, capture_output=True, text=True, timeout=60)\n"
+        f"result=subprocess.run(argv, cwd={root!r}, env=env, capture_output=True, text=True,"
+        f" timeout={settings.SANDBOX_SCRIPT_TIMEOUT_SECONDS})\n"
         "print(json.dumps({'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}))\n"
     )
     try:

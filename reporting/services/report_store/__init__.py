@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -845,6 +846,13 @@ async def _is_projection_owned_plugin(store: ReportStore, plugin: PluginListItem
     return bool(current and is_legacy_skillset_projection(current.manifest))
 
 
+# A package's skills are determined by plugin.json, mcp.json and the SKILL.md
+# files; supporting files only set `has_scripts`, which the legacy skill
+# projection does not carry. Reading just these keeps a version listing from
+# pulling every asset of every revision through the database.
+_SKILL_DEFINING_FILES = re.compile(r"^(plugin\.json|mcp\.json|skills/[^/]+/SKILL\.md)$")
+
+
 async def _plugin_skill_version(
     skillset_id: str,
     skill_id: str,
@@ -853,9 +861,12 @@ async def _plugin_skill_version(
     from reporting.services.plugin_packages import parse_package
 
     store = get_store()
-    infos = await store.list_plugin_files(skillset_id, version.revision)
-    files = [await store.read_plugin_file(skillset_id, item.path, version.revision) for item in infos]
-    parsed = parse_package([item for item in files if item is not None])
+    paths = [
+        info.path
+        for info in await store.list_plugin_files(skillset_id, version.revision)
+        if _SKILL_DEFINING_FILES.fullmatch(info.path)
+    ]
+    parsed = parse_package(await store.read_plugin_files(skillset_id, version.revision, paths))
     skill = next((item for item in parsed.skills if item.skill_id == skill_id), None)
     if not skill:
         return None
@@ -976,6 +987,12 @@ async def read_plugin_file(plugin_id: str, path: str, revision: int | None = Non
     return await get_store().read_plugin_file(plugin_id, path, revision)
 
 
+async def read_plugin_files(
+    plugin_id: str, revision: int | None = None, paths: list[str] | None = None
+) -> list[PluginFile]:
+    return await get_store().read_plugin_files(plugin_id, revision, paths)
+
+
 async def list_enabled_plugin_skills() -> list[PluginSkillItem]:
     return await get_store().list_enabled_plugin_skills()
 
@@ -992,34 +1009,8 @@ async def get_enabled_plugin_skill(plugin_id: str, skill_id: str) -> PluginSkill
     return await get_store().get_enabled_plugin_skill(plugin_id, skill_id)
 
 
-async def create_plugin_draft(plugin_id: str, user_id: str) -> bool:
-    return await get_store().create_plugin_draft(plugin_id, user_id)
-
-
-async def get_plugin_draft_base_revision(plugin_id: str) -> int | None:
-    return await get_store().get_plugin_draft_base_revision(plugin_id)
-
-
-async def list_plugin_draft_files(plugin_id: str) -> list[PluginFileInfo]:
-    return await get_store().list_plugin_draft_files(plugin_id)
-
-
-async def read_plugin_draft_file(plugin_id: str, path: str) -> PluginFile | None:
-    return await get_store().read_plugin_draft_file(plugin_id, path)
-
-
-async def write_plugin_draft_file(
-    plugin_id: str, file: PluginFile, user_id: str, expected_etag: str | None = None
-) -> PluginFileInfo | None:
-    return await get_store().write_plugin_draft_file(plugin_id, file, user_id, expected_etag)
-
-
-async def delete_plugin_draft_file(plugin_id: str, path: str, user_id: str, expected_etag: str | None = None) -> bool:
-    return await get_store().delete_plugin_draft_file(plugin_id, path, user_id, expected_etag)
-
-
-async def delete_plugin_draft(plugin_id: str) -> bool:
-    return await get_store().delete_plugin_draft(plugin_id)
+async def read_plugin_blob(plugin_id: str, sha256: str) -> PluginFile | None:
+    return await get_store().read_plugin_blob(plugin_id, sha256)
 
 
 # ---------------------------------------------------------------------------

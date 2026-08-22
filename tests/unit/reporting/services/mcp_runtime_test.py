@@ -10,7 +10,7 @@ from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.external_mcp import ExternalMCPProxy
 from reporting.schema.mcp_config import SkillItem, ToolItem, ToolParamDef
-from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem
+from reporting.schema.plugins import PluginFile, PluginListItem, PluginSkillItem
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.services import action_confirmations, external_mcp, mcp_runtime, report_store
 
@@ -1059,12 +1059,14 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
         update={
             "template": "Plugin summary {% $topic %}.",
             "parameters": [ToolParamDef(name="topic", type="string", required=True)],
+            "has_scripts": True,
         }
     )
     legacy_skill = _skill().model_copy(update={"template": "Legacy summary {% $topic %}."})
     available_tools = [
         mcp_runtime.Tool(name="reports__list", description="List reports", input_schema={"type": "object"}),
         mcp_runtime.Tool(name="ext__drive__search", description="Search GitHub", input_schema={"type": "object"}),
+        mcp_runtime.Tool(name="sandbox__run_script", description="Run a script", input_schema={"type": "object"}),
     ]
     mocker.patch.object(report_store, "is_initialized", return_value=True)
     mocker.patch.object(report_store, "list_enabled_plugin_skills", return_value=[plugin_skill])
@@ -1076,7 +1078,15 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
         "reporting.services.mcp_builtins.sandbox.materialize_plugin_skill",
         return_value="/home/user/seizu_plugins/security/3-abc/skills/summarize",
     )
-    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+    current = _user(
+        frozenset(
+            {
+                Permission.CHAT_SKILLS_CALL.value,
+                Permission.SKILLS_RENDER.value,
+                Permission.SANDBOX_DELEGATE.value,
+            }
+        )
+    )
 
     prompts = await mcp_runtime.list_prompts_for_user(current, gate_permission=Permission.CHAT_SKILLS_CALL)
     outcome = await mcp_runtime.render_prompt_for_chat(
@@ -1092,9 +1102,9 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
     assert "Legacy summary" not in outcome.text
     assert "Supporting plugin files are available" in outcome.text
     assert "/home/user/seizu_plugins/security/3-abc/skills/summarize" in outcome.text
-    assert outcome.tools_required == ("reports__list", "ext__drive__search")
+    assert outcome.tools_required == ("sandbox__run_script", "reports__list", "ext__drive__search")
     get_legacy.assert_not_awaited()
-    materialize.assert_awaited_once_with(plugin_skill)
+    materialize.assert_awaited_once_with(plugin_skill, only_if_open=True)
 
 
 async def test_unavailable_plugin_still_shadows_same_named_legacy_skill(mocker):
@@ -1204,24 +1214,58 @@ def test_plugin_allowed_tools_fallback_still_requires_declared_server(mocker):
     assert missing == ["mcp:github/search"]
 
 
-async def test_plugin_resources_expose_published_text_files(mocker):
-    mocker.patch("reporting.services.mcp_runtime.report_store.list_plugins", return_value=[_plugin()])
+async def test_plugin_resources_catalogue_skills_not_every_packaged_file(mocker):
+    """AGT-037: a listing says what is here and whether it is relevant."""
+    skill = _plugin_skill()
+    list_files = mocker.patch("reporting.services.mcp_runtime.report_store.list_plugin_files")
     mocker.patch(
-        "reporting.services.mcp_runtime.report_store.list_plugin_files",
+        "reporting.services.mcp_runtime.report_store.list_enabled_plugin_skills",
+        return_value=[skill],
+    )
+    # What the fixture's `mcp:github/search` resolves to, plus the plain name.
+    # `portable-tool` is an unrecognized Agent Skills token and stays metadata.
+    mocker.patch.object(
+        mcp_runtime,
+        "list_tools_for_user",
         return_value=[
-            PluginFileInfo(
-                path="skills/summarize/references/guide.md",
-                media_type="text/markdown",
-                size=5,
-                sha256="abc",
-                etag='"abc"',
-            )
+            mcp_runtime.Tool(name=name, description=name, input_schema={"type": "object"})
+            for name in ("reports__list", "ext__github__search")
         ],
     )
-    mocker.patch(
-        "reporting.services.mcp_runtime.report_store.get_plugin",
-        return_value=_plugin(),
+    current = _user(frozenset({Permission.SKILLS_RENDER.value}))
+
+    resources = await mcp_runtime.list_plugin_resources_for_user(current)
+
+    assert len(resources) == 1
+    assert resources[0].name == skill.title
+    assert str(resources[0].uri) == (
+        f"seizu://plugins/{skill.plugin_id}/versions/{skill.revision}/files/{skill.source_path}/SKILL.md"
     )
+    assert skill.description in (resources[0].description or "")
+    assert resources[0].meta == {mcp_runtime.SKILL_TOOLS_META_KEY: ["reports__list", "ext__github__search"]}
+    # No per-plugin file enumeration: that is what the template is for.
+    list_files.assert_not_called()
+
+
+async def test_plugin_resource_template_advertises_the_file_uri_shape(mocker):
+    current = _user(frozenset({Permission.SKILLS_RENDER.value}))
+
+    templates = await mcp_runtime.list_plugin_resource_templates_for_user(current)
+
+    assert [template.uri_template for template in templates] == [
+        "seizu://plugins/{plugin_id}/versions/{revision}/files/{path}"
+    ]
+
+
+async def test_plugin_resource_template_needs_the_same_permission(mocker):
+    templates = await mcp_runtime.list_plugin_resource_templates_for_user(_user(frozenset()))
+
+    assert templates == []
+
+
+async def test_any_packaged_file_is_still_readable_by_uri(mocker):
+    """The listing narrowed; what a caller may read did not."""
+    mocker.patch("reporting.services.mcp_runtime.report_store.get_plugin", return_value=_plugin())
     read_file = mocker.patch(
         "reporting.services.mcp_runtime.report_store.read_plugin_file",
         return_value=PluginFile(
@@ -1232,10 +1276,11 @@ async def test_plugin_resources_expose_published_text_files(mocker):
     )
     current = _user(frozenset({Permission.SKILLS_RENDER.value}))
 
-    resources = await mcp_runtime.list_plugin_resources_for_user(current)
-    resource = await mcp_runtime.read_plugin_resource_for_user(current, str(resources[0].uri))
+    resource = await mcp_runtime.read_plugin_resource_for_user(
+        current,
+        "seizu://plugins/security/versions/3/files/skills/summarize/references/guide.md",
+    )
 
-    assert resources[0].name == "skills/summarize/references/guide.md"
     assert resource is not None
     assert resource.text == "hello"
     read_file.assert_awaited_once_with("security", "skills/summarize/references/guide.md", 3)
@@ -2133,3 +2178,77 @@ async def test_span_error_text_is_withheld_unless_content_recording_is_on(mocker
     _name, span = tracer.spans[0]
     assert span.attributes["seizu.outcome"] == "error"
     assert "seizu.error_text" not in span.attributes
+
+
+async def test_rendering_never_materializes_without_sandbox_permission(mocker):
+    """SBX-018: a render must not be what provisions a sandbox."""
+    plugin_skill = _plugin_skill().model_copy(
+        update={"template": "Plugin summary.", "parameters": [], "allowed_tools": [], "has_scripts": True}
+    )
+    mocker.patch.object(report_store, "is_initialized", return_value=True)
+    mocker.patch.object(report_store, "get_enabled_plugin_skill", return_value=plugin_skill)
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=[])
+    materialize = mocker.patch("reporting.services.mcp_builtins.sandbox.materialize_plugin_skill")
+    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+
+    outcome = await mcp_runtime.render_prompt_for_chat(
+        current, "security__summarize", {}, gate_permission=Permission.CHAT_SKILLS_CALL
+    )
+
+    # Without sandbox:delegate the sandbox tool is not in the caller's
+    # inventory, so a scripted skill is unavailable -- and nothing is written.
+    assert outcome.blocked is mcp_runtime.ChatBlockReason.NOT_AVAILABLE
+    materialize.assert_not_awaited()
+
+
+async def test_rendering_skips_materializing_a_skill_without_scripts(mocker):
+    plugin_skill = _plugin_skill().model_copy(
+        update={"template": "Plugin summary.", "parameters": [], "allowed_tools": [], "has_scripts": False}
+    )
+    mocker.patch.object(report_store, "is_initialized", return_value=True)
+    mocker.patch.object(report_store, "get_enabled_plugin_skill", return_value=plugin_skill)
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=[])
+    materialize = mocker.patch("reporting.services.mcp_builtins.sandbox.materialize_plugin_skill")
+    current = _user(
+        frozenset(
+            {
+                Permission.CHAT_SKILLS_CALL.value,
+                Permission.SKILLS_RENDER.value,
+                Permission.SANDBOX_DELEGATE.value,
+            }
+        )
+    )
+
+    await mcp_runtime.render_prompt_for_chat(
+        current, "security__summarize", {}, gate_permission=Permission.CHAT_SKILLS_CALL
+    )
+
+    materialize.assert_not_awaited()
+
+
+async def test_plugin_resources_omit_a_skill_whose_dependencies_are_unreachable(mocker):
+    """A catalogue must not advertise what the render would refuse."""
+    skill = _plugin_skill()
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.list_enabled_plugin_skills",
+        return_value=[skill],
+    )
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=[])
+    current = _user(frozenset({Permission.SKILLS_RENDER.value}))
+
+    assert await mcp_runtime.list_plugin_resources_for_user(current) == []
+
+
+async def test_plugin_resources_skip_discovery_when_nothing_declares_a_dependency(mocker):
+    skill = _plugin_skill().model_copy(update={"allowed_tools": [], "has_scripts": False})
+    mocker.patch(
+        "reporting.services.mcp_runtime.report_store.list_enabled_plugin_skills",
+        return_value=[skill],
+    )
+    list_tools = mocker.patch.object(mcp_runtime, "list_tools_for_user")
+    current = _user(frozenset({Permission.SKILLS_RENDER.value}))
+
+    resources = await mcp_runtime.list_plugin_resources_for_user(current)
+
+    assert len(resources) == 1
+    list_tools.assert_not_called()
