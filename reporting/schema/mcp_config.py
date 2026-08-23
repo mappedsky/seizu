@@ -764,6 +764,12 @@ def add_skill_frontmatter(text: str, triggers: list[str], tools_required: list[s
     return "\n".join(lines)
 
 
+# Heading of the rendered inputs block. Shared rather than written twice: the
+# orchestrator reads this block back out of a skill call to tell the verifier
+# what the step was told to respect, so both ends must agree on the marker.
+SKILL_INPUTS_HEADING = "## Inputs"
+
+
 def render_skill_inputs(parameters: list[ToolParamDef], arguments: dict[str, Any]) -> str:
     """The argument values for one skill invocation, as their own block.
 
@@ -773,7 +779,7 @@ def render_skill_inputs(parameters: list[ToolParamDef], arguments: dict[str, Any
     """
     if not parameters:
         return ""
-    lines = ["## Inputs", ""]
+    lines = [SKILL_INPUTS_HEADING, ""]
     for param in parameters:
         raw = arguments.get(param.name, param.default)
         value = "_(not provided)_" if raw is None or raw == "" else f"`{raw}`"
