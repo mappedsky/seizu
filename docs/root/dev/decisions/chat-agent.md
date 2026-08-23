@@ -2548,3 +2548,34 @@ if any one of them is missing.
 **Don't:** resolve bare names as Seizu tools again "for convenience". That is a
 second spelling for a tool that already has one, and it collides with the
 built-in names the spec's own example uses.
+
+## AGT-043 — Every stage resolves its model and effort the same way
+
+**Applies to:** `_get_sandbox_model`, `chat_models.model_id_for_role`,
+`_STAGE_PARENT`, `CHAT_LLM_ROUTER_MODEL`, `CHAT_LLM_SANDBOX_REASONING_EFFORT`
+
+The sandbox sub-agent built `ChatLiteLLM` itself whenever `SANDBOX_LLM_MODEL`
+was set, so it never reached `reasoning_kwargs`. Effort travels through
+`model_kwargs` (AGT-019), which means **no setting could reach the wire**: the
+highest-volume stage in the system ran on provider defaults by construction, and
+there was no configuration that could have said otherwise. It now resolves
+through `chat_models.resolve("sandbox_subagent")` like every other stage, which
+carries the derived output ceiling and temperature rules with it.
+
+**Measured.** Grading it `low` took the sub-agent from 955 reasoning tokens and
+11.2s per call to 422 and 7.4s -- across a delegating turn, roughly half the
+tokens and a third off the wall clock, and the first sample in seven to finish
+the reachability step without exhausting its budget. Read the reasoning tokens,
+not the setting: DeepSeek collapses several levels into one value (AGT-033), so
+the token count is the only evidence the grade arrived.
+
+A stage's own model now wins before its parent's, or `SANDBOX_LLM_MODEL` would
+be unreachable — the sub-agent's parent is the worker, and the parent remap ran
+first. The router also gets its own model setting: it shared the planner's, so
+"put the planner on the strong model" silently moved a binary classifier that
+emits 48 tokens there too.
+
+**Don't:** trust `reasoning_effort` on a trace to tell you what a stage is
+graded at unless it is read off `model_kwargs`. The sub-agent's span reported
+`None` while the stage demonstrably ran at `low`, which is the one attribute
+someone would check.

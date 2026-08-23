@@ -45,7 +45,15 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_context, episodic_memory, report_store, sandbox_session, telemetry
+from reporting.services import (
+    chat_budget,
+    chat_context,
+    chat_models,
+    episodic_memory,
+    report_store,
+    sandbox_session,
+    telemetry,
+)
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -1108,6 +1116,10 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             phase=phase,
             role=phase.split(":")[0],
             model=chat_context.model_name_of(self._model),
+            # Read off the model's own kwargs, as the outer path does: this is
+            # the attribute anyone checks to see what the sub-agent is actually
+            # graded at, and it read `None` while the stage ran at `low`.
+            reasoning_effort=chat_models.applied_reasoning_effort(self._model),
         ) as current:
             return await self._ainvoke_traced(input, config, current, scope, phase, **kwargs)
 
@@ -1211,30 +1223,19 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
 
 
 def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
-    """Return a LangChain chat model for the sandbox subagent."""
-    from reporting import settings
-    from reporting.services.chat_graph import get_chat_model
+    """The sub-agent's chat model, resolved like every other stage.
 
-    if settings.SANDBOX_LLM_MODEL.strip():
-        from langchain_litellm import ChatLiteLLM
+    It used to build ``ChatLiteLLM`` itself whenever ``SANDBOX_LLM_MODEL`` was
+    set, which meant it never reached ``reasoning_kwargs``. Reasoning effort has
+    to travel through ``model_kwargs`` (AGT-019), so no setting could reach the
+    wire and the highest-volume stage in the system ran on whatever the provider
+    defaults to. Resolving through ``chat_models`` is what makes it
+    configurable, and carries the derived output ceiling and temperature rules
+    with it (AGT-043).
+    """
+    from reporting.services.chat_graph import build_chat_model
 
-        provider_model = settings.SANDBOX_LLM_MODEL.strip()
-        kwargs: dict[str, Any] = {
-            "model": provider_model,
-            "temperature": settings.CHAT_LLM_TEMPERATURE,
-            "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
-            "max_retries": settings.CHAT_LLM_MAX_RETRIES,
-            "streaming": False,
-        }
-        if settings.CHAT_LLM_MAX_TOKENS > 0:
-            kwargs["max_tokens"] = settings.CHAT_LLM_MAX_TOKENS
-        if settings.CHAT_LLM_API_KEY:
-            kwargs["api_key"] = settings.CHAT_LLM_API_KEY
-        if settings.CHAT_LLM_BASE_URL:
-            kwargs["api_base"] = settings.CHAT_LLM_BASE_URL
-        return _ToolMessageNormalizingModel(ChatLiteLLM(**kwargs))
-
-    return _ToolMessageNormalizingModel(get_chat_model(role="worker"))
+    return _ToolMessageNormalizingModel(build_chat_model(chat_models.resolve("sandbox_subagent")))
 
 
 _SANDBOX_TITLE = "Tool: sandbox__delegate"
