@@ -160,7 +160,7 @@
             },
             {
               "default": "",
-              "description": "Optional. The CVEs to review — CVE id, package, severity, vulnerable range, patched and resolved version. Leave empty when the findings review's output is already in context; passing the list again costs a second copy of it and is not required.",
+              "description": "Optional. The CVEs to review \u2014 CVE id, package, severity, vulnerable range, patched and resolved version. Leave empty when the findings review's output is already in context; passing the list again costs a second copy of it and is not required.",
               "name": "findings",
               "required": false,
               "type": "string"
@@ -188,5 +188,5 @@
     }
   },
   "name": "github-security-investigations",
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

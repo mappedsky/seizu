@@ -25,7 +25,7 @@ from reporting.schema.mcp_config import (
     SkillVersionListResponse,
     UpdateSkillRequest,
     UpdateSkillsetRequest,
-    render_skill_prompt,
+    render_skill_parts,
     validate_skill_template,
 )
 from reporting.schema.plugins import PluginFile
@@ -473,16 +473,19 @@ async def render_skill(
         raise HTTPException(status_code=400, detail="Skillset is disabled")
     if not skill.enabled:
         raise HTTPException(status_code=400, detail="Skill is disabled")
-    rendered, errors = render_skill_prompt(
+    prompt, errors = render_skill_parts(
         skill.parameters,
         skill.template,
         body.arguments,
         skill.triggers,
         skill.tools_required,
     )
-    if errors or rendered is None:
+    if errors or prompt is None:
         return JSONResponse(content={"errors": errors}, status_code=400)
-    return RenderSkillResponse(text=rendered)
+    # The body alone, as this endpoint has always returned. A legacy skill
+    # substitutes its values inline, so an inputs block here would repeat them
+    # and change a response its callers already parse (AGT-039).
+    return RenderSkillResponse(text=prompt.body)
 
 
 @router.get(

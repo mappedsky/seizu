@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse
 import yaml
 from pydantic import ValidationError
 
-from reporting.schema.mcp_config import validate_skill_template
+from reporting.schema.mcp_config import template_placeholders, validate_skill_template
 from reporting.schema.plugins import (
     PluginDiagnostic,
     PluginFile,
@@ -472,6 +472,7 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
         return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
     extension = _parse_seizu_extension(manifest, diagnostics)
     plugin_id = extension.skillset_id if extension else ""
+    legacy_projection = bool(extension and extension.legacy_skillset_projection)
     mcp_servers = _parse_mcp(by_path, diagnostics)
     skills: list[PluginSkillItem] = []
     seen_ids: set[str] = set()
@@ -547,6 +548,22 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
                 for message in template_errors
             )
             continue
+        # Substitution still works, but a body carrying placeholders is not the
+        # file a consumer outside Seizu can read: it sees the tags. Not raised
+        # for the legacy skillset projection, whose bodies are generated from
+        # records their author cannot restructure (AGT-039).
+        if not legacy_projection and template_placeholders(template):
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "templated_skill_body",
+                    "Instructions substitute argument values inline, so a consumer without Seizu's "
+                    "parameter extension reads the raw tags. Prefer a static body that refers to the "
+                    "values by name from the rendered Inputs block.",
+                    path=path,
+                    skill=name,
+                )
+            )
         skills.append(
             PluginSkillItem(
                 plugin_id=plugin_id,

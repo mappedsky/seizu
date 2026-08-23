@@ -31,7 +31,7 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
 from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
-from reporting.schema.mcp_config import EXTERNAL_MCP_TOOL_NAME_RE, MCP_TOOL_NAME_RE, render_skill_prompt
+from reporting.schema.mcp_config import EXTERNAL_MCP_TOOL_NAME_RE, MCP_TOOL_NAME_RE, render_skill_parts
 from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j, telemetry
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
@@ -1131,13 +1131,14 @@ async def _get_prompt_core(
                 None,
                 (),
             )
-        rendered, errors = render_skill_prompt(
+        prompt, errors = render_skill_parts(
             target_skill.parameters,
             target_skill.template,
             arguments or {},
             target_skill.triggers,
             tools_required,
         )
+        rendered = prompt.body if prompt else None
         text = rendered if rendered is not None else json.dumps({"errors": errors}, indent=2)
         if plugin_skill is not None and rendered is not None:
             root_uri = (
@@ -1159,10 +1160,14 @@ async def _get_prompt_core(
                 local_path = await materialize_plugin_skill(plugin_skill, only_if_open=True)
                 if local_path:
                     text = f"{text}\nThe skill package is materialized in the conversation sandbox at `{local_path}`."
+        # Two messages: instructions that are the same bytes every time, then
+        # this invocation's values. `GetPromptResult.messages` is a list, and
+        # keeping them apart is what lets the body stay portable (AGT-039).
+        texts = [text, prompt.inputs] if prompt and prompt.inputs else [text]
         return (
             GetPromptResult(
                 description=target_skill.description or target_skill.name,
-                messages=[PromptMessage(role="user", content=TextContent(type="text", text=text))],
+                messages=[PromptMessage(role="user", content=TextContent(type="text", text=part)) for part in texts],
             ),
             None,
             tuple(tools_required),

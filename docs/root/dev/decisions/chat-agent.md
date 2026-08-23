@@ -2417,3 +2417,34 @@ This is also what made resolving `allowed-tools` affordable in
 `resources/list` (AGT-037): the catalogue now resolves against the same
 inventory the rest of the request already discovered, and omits a skill whose
 dependencies are unreachable, exactly as the prompt listing does.
+
+## AGT-039 — A rendered skill is two messages: static instructions, then its inputs
+
+**Applies to:** `render_skill_parts`, `render_skill_inputs`,
+`mcp_runtime._get_prompt_core`, `plugin_packages.parse_package`
+
+`prompts/get` returns the skill body unchanged and this invocation's argument
+values as a second message. `GetPromptResult.messages` is a list; the body is
+the same bytes on every run, and a skill refers to a value by name rather than
+having it substituted in.
+
+**Why:** the argument mechanism was always standard — MCP prompts take
+`arguments` — but the *template* lived in the portable `SKILL.md` body, and a
+consumer without Seizu's parameter extension reads `{% $repo %}` literally. The
+package was portable while its instructions were not. Keeping values in their
+own message makes the file readable anywhere and removes a second discrepancy:
+`materialize_plugin_skill` writes the raw package bytes into the sandbox, so a
+sub-agent re-reading `SKILL.md` used to see placeholders where the outer agent
+had values.
+
+Substitution still runs, so packages written the old way render exactly as
+before; publishing one records a non-blocking `templated_skill_body` warning.
+The legacy skillset projection is exempt — its bodies are generated from records
+whose author cannot restructure them — and the legacy REST render endpoint still
+returns the body alone, because a legacy skill inlines its values and an inputs
+block there would both duplicate them and change a response callers parse.
+
+**Not a caching change.** A rendered skill arrives as a tool result at the tail
+of the conversation, and only `Prompt.description` reaches the system prompt, so
+neither shape moves the cached prefix. Don't cite caching as the reason for
+this; the reason is that the body travels.

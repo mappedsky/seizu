@@ -2252,3 +2252,30 @@ async def test_plugin_resources_skip_discovery_when_nothing_declares_a_dependenc
 
     assert len(resources) == 1
     list_tools.assert_not_called()
+
+
+async def test_skill_render_returns_instructions_and_inputs_as_two_messages(mocker):
+    """AGT-039: `GetPromptResult.messages` is a list; the body stays portable."""
+    skill = _plugin_skill().model_copy(
+        update={
+            "template": "Summarize the `topic` input.",
+            "parameters": [ToolParamDef(name="topic", type="string", required=True)],
+            "allowed_tools": [],
+            "has_scripts": False,
+        }
+    )
+    mocker.patch.object(report_store, "is_initialized", return_value=True)
+    mocker.patch.object(report_store, "get_enabled_plugin_skill", return_value=skill)
+    mocker.patch.object(mcp_runtime, "list_tools_for_user", return_value=[])
+    current = _user(frozenset({Permission.CHAT_SKILLS_CALL.value, Permission.SKILLS_RENDER.value}))
+
+    result = await mcp_runtime.get_prompt_for_user(
+        current, "security__summarize", {"topic": "alerts"}, gate_permission=Permission.CHAT_SKILLS_CALL
+    )
+
+    assert len(result.messages) == 2
+    instructions, inputs = (message.content.text for message in result.messages)
+    # The instructions never carry the value, so they are identical every run.
+    assert "Summarize the `topic` input." in instructions
+    assert "alerts" not in instructions
+    assert "`topic`: `alerts`" in inputs

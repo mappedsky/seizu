@@ -145,9 +145,12 @@ export function validateSkillAuthoring(
     }
     names.add(parameter.name);
   }
+  // Substitution still renders, so an undeclared placeholder is still an
+  // error -- but a body that carries none is the shape to author for: the
+  // values arrive in a rendered Inputs block, keeping SKILL.md portable.
   for (const match of skill.body.matchAll(MARKDOC_VAR_RE)) {
     if (!names.has(match[1])) {
-      return `Variable $${match[1]} must match a declared parameter.`;
+      return `Variable $${match[1]} must match a declared input.`;
     }
   }
   return null;

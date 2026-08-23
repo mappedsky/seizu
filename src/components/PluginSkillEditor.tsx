@@ -681,20 +681,20 @@ export default function PluginSkillEditor({
       <Divider />
       <Box>
         <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
-          <Typography variant="subtitle2">Template variables</Typography>
+          <Typography variant="subtitle2">Inputs</Typography>
           <Tooltip
-            title="Declare each variable used as {% $variable %} in the instructions."
+            title="Values a caller passes for one invocation. They are rendered into an Inputs block after the instructions, so the instructions themselves stay the same for every run — refer to an input by name rather than substituting it."
             placement="top"
             arrow
             describeChild
           >
-            <IconButton aria-label="Help for template variables" size="small">
+            <IconButton aria-label="Help for inputs" size="small">
               <HelpOutlineIcon fontSize="small" />
             </IconButton>
           </Tooltip>
           <IconButton
             size="small"
-            aria-label="Add template variable"
+            aria-label="Add input"
             onClick={() => setParameters((items) => [...items, newParameter()])}
           >
             <AddCircleOutlineIcon fontSize="small" />
@@ -702,7 +702,7 @@ export default function PluginSkillEditor({
         </Stack>
         {parameters.length === 0 && (
           <Typography variant="body2" color="text.secondary">
-            No template variables.
+            No inputs.
           </Typography>
         )}
         {parameters.map((parameter, index) => (
@@ -777,7 +777,7 @@ export default function PluginSkillEditor({
               />
               <IconButton
                 size="small"
-                aria-label="Remove template variable"
+                aria-label="Remove input"
                 onClick={() =>
                   setParameters((items) =>
                     items.filter((_, itemIndex) => itemIndex !== index),

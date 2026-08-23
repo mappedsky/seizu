@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -763,14 +764,55 @@ def add_skill_frontmatter(text: str, triggers: list[str], tools_required: list[s
     return "\n".join(lines)
 
 
-def render_skill_prompt(
+def render_skill_inputs(parameters: list[ToolParamDef], arguments: dict[str, Any]) -> str:
+    """The argument values for one skill invocation, as their own block.
+
+    Kept separate from the body so a skill's instructions stay the same bytes
+    on every invocation, and stay readable to a consumer that does not know
+    Seizu's parameter extension (AGT-039).
+    """
+    if not parameters:
+        return ""
+    lines = ["## Inputs", ""]
+    for param in parameters:
+        raw = arguments.get(param.name, param.default)
+        value = "_(not provided)_" if raw is None or raw == "" else f"`{raw}`"
+        lines.append(f"- `{param.name}`: {value}")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class SkillPrompt:
+    """A rendered skill: static instructions, and this invocation's inputs."""
+
+    body: str
+    inputs: str
+
+    @property
+    def messages(self) -> list[str]:
+        return [self.body, self.inputs] if self.inputs else [self.body]
+
+    @property
+    def text(self) -> str:
+        """The two parts as one string, for callers that return a single body."""
+        return "\n\n".join(self.messages)
+
+
+def render_skill_parts(
     parameters: list[ToolParamDef],
     template: str,
     arguments: dict[str, Any],
     triggers: list[str],
     tools_required: list[str],
-) -> tuple[str | None, list[str]]:
+) -> tuple[SkillPrompt | None, list[str]]:
+    """Render a skill into its body and its inputs.
+
+    A body containing ``{% $name %}`` is still substituted, so packages written
+    against the older convention render exactly as they did. New skills leave
+    the body static and refer to the values by name from the inputs block.
+    """
     rendered, errors = render_skill_template(parameters, template, arguments)
     if rendered is None:
         return None, errors
-    return add_skill_frontmatter(rendered, triggers, tools_required), []
+    body = add_skill_frontmatter(rendered, triggers, tools_required)
+    return SkillPrompt(body=body, inputs=render_skill_inputs(parameters, arguments)), []

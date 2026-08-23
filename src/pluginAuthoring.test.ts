@@ -65,7 +65,7 @@ Inspect {% $repository %}.`;
     });
   });
 
-  it('validates template variables against the structured declarations', () => {
+  it('validates placeholders against the declared inputs', () => {
     const parameters: ToolParamDef[] = [
       {
         name: 'repository',
@@ -83,7 +83,7 @@ Inspect {% $repository %}.`;
     };
 
     expect(validateSkillAuthoring(skill, 'review_repository', parameters)).toBe(
-      'Variable $branch must match a declared parameter.',
+      'Variable $branch must match a declared input.',
     );
     expect(
       validateSkillAuthoring(

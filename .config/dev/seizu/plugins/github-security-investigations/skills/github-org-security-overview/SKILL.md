@@ -6,13 +6,13 @@ allowed-tools: github_security__sync_freshness github_security__org_overview git
   github_security__top_vulnerabilities github_security__actions_hardening_findings
   github_security__coverage_gaps github_security__identity_access_summary github_security__recommendations
 ---
-Investigate the GitHub organization `{% $org %}` using the github_security user-defined tools. Treat `org` as an explicit required input and do not substitute a default organization.
+Investigate the GitHub organization `org` using the github_security user-defined tools. Treat `org` as an explicit required input and do not substitute a default organization.
 
-Inputs:
-- org: `{% $org %}`
-- exclude_forks: `{% $exclude_forks %}`
-- include_archived: `{% $include_archived %}`
-- limit: `{% $limit %}`
+Inputs — the values arrive in the `## Inputs` block below these instructions:
+- `org` — the organization to review; empty matches every organization in the graph.
+- `exclude_forks` — whether forked repositories are left out.
+- `include_archived` — whether archived repositories are included.
+- `limit` — how many rows to request from each ranked query.
 
 Workflow:
 1. Call `github_security__sync_freshness` with `org` first. State the newest GitHub sync timestamp and qualify the report if the data looks stale or incomplete.
@@ -25,7 +25,7 @@ Workflow:
 8. Call `github_security__recommendations` and reconcile its computed recommendations with the evidence from the earlier tools.
 
 Output format:
-- Start with a concise security posture summary for `{% $org %}`.
+- Start with a concise security posture summary for `org`.
 - Include a `Data Freshness` note with exact sync timestamps when available.
 - Include `Top Risks` ordered by severity and likely exploitability.
 - Include `Vulnerabilities` with repository, package, severity, CVE/GHSA when present, patch version, and why it matters.

@@ -67,7 +67,7 @@ def test_production_security_plugin_is_seeded_independently_of_legacy_skillsets(
 
     assert parsed.valid
     assert parsed.plugin_id == "github_security_investigations"
-    assert parsed.manifest["version"] == "1.0.0"
+    assert parsed.manifest["version"] == "1.1.0"
     assert {skill.skill_id for skill in parsed.skills if skill.enabled} == {
         "github_org_security_overview",
         "repo_cve_findings",

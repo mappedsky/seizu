@@ -5,6 +5,7 @@ import zipfile
 import pytest
 
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem
+from reporting.schema.plugins import PluginFile
 from reporting.services.plugin_packages import (
     MCP_SCHEMA,
     PLUGIN_SCHEMA,
@@ -129,3 +130,49 @@ def test_legacy_projection_preserves_namespaced_identity_and_tools():
     assert is_legacy_skillset_projection(parsed.manifest)
     assert parsed.skills[0].skill_id == "review_alert"
     assert parsed.skills[0].allowed_tools == ["graph__query"]
+
+
+def _package(body: str, *, projection: bool = False) -> object:
+    extension: dict = {
+        "skillsetId": "review_tools",
+        "skills": {"review": {"parameters": [{"name": "repo", "type": "string", "required": True}]}},
+    }
+    if projection:
+        extension["legacySkillsetProjection"] = True
+    manifest = {
+        "$schema": PLUGIN_SCHEMA,
+        "name": "review-tools",
+        "extensions": {"com.mappedsky.seizu": extension},
+    }
+    return parse_package(
+        [
+            PluginFile(path="plugin.json", content=json.dumps(manifest).encode()),
+            PluginFile(
+                path="skills/review/SKILL.md",
+                content=f"---\nname: review\ndescription: Review a target\n---\n{body}".encode(),
+            ),
+        ]
+    )
+
+
+def test_a_templated_body_is_published_with_an_advisory():
+    """AGT-039: it renders, but a consumer without the extension reads the tags."""
+    parsed = _package("Review {% $repo %}.")
+
+    assert parsed.valid
+    codes = [item.code for item in parsed.diagnostics]
+    assert "templated_skill_body" in codes
+
+
+def test_a_static_body_publishes_without_the_advisory():
+    parsed = _package("Review the `repo` input.")
+
+    assert parsed.valid
+    assert "templated_skill_body" not in [item.code for item in parsed.diagnostics]
+
+
+def test_the_legacy_projection_is_not_advised_to_restructure():
+    """Its bodies are generated from records the author cannot restructure."""
+    parsed = _package("Review {% $repo %}.", projection=True)
+
+    assert "templated_skill_body" not in [item.code for item in parsed.diagnostics]

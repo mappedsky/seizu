@@ -108,7 +108,7 @@ function SkillCard({
       {skill.parameters.length > 0 && (
         <Box sx={{ mb: 1 }}>
           <Typography variant="caption" color="text.secondary">
-            Template variables
+            Inputs
           </Typography>
           <Stack
             direction="row"

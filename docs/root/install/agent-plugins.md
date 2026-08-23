@@ -153,6 +153,17 @@ editor prompts before discarding them. Default package bounds are 10 MiB
 compressed, 25 MiB unpacked, 500 files, 10 MiB per file, and 512 KiB per
 `SKILL.md`.
 
+## Skill inputs
+
+A skill declares its inputs in the Seizu extension, and `prompts/get` returns
+two messages: the `SKILL.md` body exactly as packaged, then a rendered `Inputs`
+block carrying this invocation's values. Write instructions that refer to an
+input by name — "the `repo` input" — rather than substituting it, so the file
+reads the same to a consumer that does not implement Seizu's extension.
+
+`{% $name %}` placeholders in a body are still substituted, so existing packages
+keep working, but publishing one records a `templated_skill_body` warning.
+
 ## Revisions and package versions
 
 Seizu assigns every publish a **revision** (`v1`, `v2`, …) and a **package
