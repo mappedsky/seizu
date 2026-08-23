@@ -164,6 +164,13 @@
               "name": "ref",
               "required": false,
               "type": "string"
+            },
+            {
+              "name": "max_cves",
+              "type": "integer",
+              "description": "Most advisories to assess.",
+              "required": false,
+              "default": 8
             }
           ],
           "title": "Repository CVE Reachability",
@@ -179,5 +186,5 @@
     }
   },
   "name": "github-security-investigations",
-  "version": "1.1.0"
+  "version": "1.2.0"
 }
