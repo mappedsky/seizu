@@ -1009,6 +1009,10 @@ async def get_enabled_plugin_skill(plugin_id: str, skill_id: str) -> PluginSkill
     return await get_store().get_enabled_plugin_skill(plugin_id, skill_id)
 
 
+async def set_plugin_skill_enabled(plugin_id: str, skill_id: str, enabled: bool) -> PluginSkillItem | None:
+    return await get_store().set_plugin_skill_enabled(plugin_id, skill_id, enabled)
+
+
 async def read_plugin_blob(plugin_id: str, sha256: str) -> PluginFile | None:
     return await get_store().read_plugin_blob(plugin_id, sha256)
 

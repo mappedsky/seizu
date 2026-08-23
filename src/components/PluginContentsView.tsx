@@ -1,4 +1,13 @@
-import { Alert, Box, Chip, Paper, Stack, Typography } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Chip,
+  Paper,
+  Stack,
+  Switch,
+  Tooltip,
+  Typography,
+} from '@mui/material';
 import ConstellationSpinner from 'src/components/ConstellationSpinner';
 import { DetailSection } from 'src/components/DetailDialog';
 import {
@@ -65,9 +74,11 @@ function FileList({
 function SkillCard({
   skill,
   files,
+  onToggle,
 }: {
   skill: PluginSkillItem;
   files: PluginFileInfo[];
+  onToggle?: (skill: PluginSkillItem, enabled: boolean) => void;
 }) {
   const prefix = `${skill.source_path}/`;
   const skillFiles = files.filter((file) => file.path.startsWith(prefix));
@@ -81,11 +92,22 @@ function SkillCard({
         <Typography variant="body2" sx={{ fontWeight: 600 }}>
           {skill.title}
         </Typography>
-        <Chip
-          label={skill.enabled ? 'Enabled' : 'Disabled'}
-          color={skill.enabled ? 'success' : 'default'}
-          size="small"
-        />
+        {onToggle ? (
+          <Tooltip title="Whether this skill is offered. Survives republishing the package.">
+            <Switch
+              size="small"
+              checked={skill.enabled}
+              onChange={(event) => onToggle(skill, event.target.checked)}
+              slotProps={{ input: { 'aria-label': `Enable ${skill.title}` } }}
+            />
+          </Tooltip>
+        ) : (
+          <Chip
+            label={skill.enabled ? 'Enabled' : 'Disabled'}
+            color={skill.enabled ? 'success' : 'default'}
+            size="small"
+          />
+        )}
       </Stack>
       <Typography
         variant="caption"
@@ -186,9 +208,12 @@ function SkillCard({
 export default function PluginContentsView({
   pluginId,
   revision,
+  onToggleSkill,
 }: {
   pluginId: string;
   revision: number;
+  /** Present only for the current revision: enablement is live state. */
+  onToggleSkill?: (skill: PluginSkillItem, enabled: boolean) => void;
 }) {
   const { skills, files, loading, error } = usePluginContents(
     pluginId,
@@ -223,7 +248,12 @@ export default function PluginContentsView({
         ) : (
           <Stack spacing={1.5}>
             {skills.map((skill) => (
-              <SkillCard key={skill.skill_id} skill={skill} files={files} />
+              <SkillCard
+                key={skill.skill_id}
+                skill={skill}
+                files={files}
+                onToggle={onToggleSkill}
+              />
             ))}
           </Stack>
         )}

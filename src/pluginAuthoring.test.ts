@@ -46,14 +46,13 @@ Inspect {% $repository %}.`;
         extensions: {
           'org.example.vendor': { setting: 'kept' },
           [SEIZU_EXTENSION]: {
-            skillsetId: 'security_review',
             skills: {},
           },
         },
       }),
     );
 
-    seizuExtension(manifest).skills.review = { skillId: 'review' };
+    seizuExtension(manifest).skills.review = { title: 'Review' };
     const serialized = JSON.parse(serializeManifest(manifest));
 
     expect(serialized.xVendorField).toBe(true);
@@ -61,7 +60,7 @@ Inspect {% $repository %}.`;
       setting: 'kept',
     });
     expect(serialized.extensions[SEIZU_EXTENSION].skills.review).toEqual({
-      skillId: 'review',
+      title: 'Review',
     });
   });
 

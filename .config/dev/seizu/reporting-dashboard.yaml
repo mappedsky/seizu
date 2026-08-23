@@ -3030,6 +3030,10 @@ plugins:
   github_security_investigations:
     source: plugins/github-security-investigations
     enabled: true
+    # An operator's choice, not the package's: exploitability reads repository
+    # source through the external GitHub MCP, which is off in most deployments.
+    skills:
+      repo_cve_exploitability: false
   portable_security_review:
     source: plugins/portable-security-review
     enabled: true

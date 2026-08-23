@@ -3213,10 +3213,16 @@ class SQLModelReportStore(ReportStore):
                         executable=file.executable,
                     )
                 )
-            old_skills = await session.execute(
-                select(PluginSkillRecord).where(PluginSkillRecord.plugin_id == plugin_id)
+            old_skills = (
+                (await session.execute(select(PluginSkillRecord).where(PluginSkillRecord.plugin_id == plugin_id)))
+                .scalars()
+                .all()
             )
-            for old_skill in old_skills.scalars().all():
+            # Whether a skill is on is the operator's, not the package's, so a
+            # republish carries it forward rather than resetting it. A skill
+            # this revision introduces starts on (AGT-041).
+            previously_enabled = {record.skill_id: record.enabled for record in old_skills}
+            for old_skill in old_skills:
                 await session.delete(old_skill)
             for skill in skills:
                 session.add(
@@ -3230,10 +3236,10 @@ class SQLModelReportStore(ReportStore):
                         parameters=[item.model_dump() for item in skill.parameters],
                         triggers=skill.triggers,
                         allowed_tools=skill.allowed_tools,
-                        enabled=skill.enabled,
                         source_path=skill.source_path,
                         aliases=skill.aliases,
                         mcp_servers=skill.mcp_servers,
+                        enabled=previously_enabled.get(skill.skill_id, True),
                         revision=revision,
                         package_digest=package_digest,
                         has_scripts=skill.has_scripts,
@@ -3447,6 +3453,18 @@ class SQLModelReportStore(ReportStore):
             )
             record = result.scalars().first()
             return self._plugin_skill(record) if record else None
+
+    async def set_plugin_skill_enabled(self, plugin_id: str, skill_id: str, enabled: bool) -> PluginSkillItem | None:
+        """Turn one indexed skill on or off without republishing the package."""
+        async with AsyncSession(_get_engine()) as session:
+            record = await session.get(PluginSkillRecord, (plugin_id, skill_id))
+            if not record:
+                return None
+            record.enabled = enabled
+            session.add(record)
+            result = self._plugin_skill(record)
+            await session.commit()
+            return result
 
     async def read_plugin_blob(self, plugin_id: str, sha256: str) -> PluginFile | None:
         """Read a blob this plugin already stores, by digest.

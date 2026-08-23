@@ -24,10 +24,8 @@ def _files(extra: dict[str, bytes] | None = None):
         "name": "security-tools",
         "extensions": {
             "com.mappedsky.seizu": {
-                "skillsetId": "security_tools",
                 "skills": {
                     "review-repository": {
-                        "skillId": "review_repository",
                         "parameters": [{"name": "repository", "type": "string"}],
                     }
                 },
@@ -134,7 +132,6 @@ def test_legacy_projection_preserves_namespaced_identity_and_tools():
 
 def _package(body: str, *, projection: bool = False) -> object:
     extension: dict = {
-        "skillsetId": "review_tools",
         "skills": {"review": {"parameters": [{"name": "repo", "type": "string", "required": True}]}},
     }
     if projection:
@@ -178,12 +175,8 @@ def test_the_legacy_projection_is_not_advised_to_restructure():
     assert "templated_skill_body" not in [item.code for item in parsed.diagnostics]
 
 
-def _named_package(name: str, *, skillset_id: str | None = None, skill_id: str | None = None) -> object:
-    extension: dict = {}
-    if skillset_id is not None:
-        extension["skillsetId"] = skillset_id
-    if skill_id is not None:
-        extension["skills"] = {"review": {"skillId": skill_id}}
+def _named_package(name: str, *, extension: dict | None = None) -> object:
+    extension = dict(extension or {})
     manifest: dict = {"$schema": PLUGIN_SCHEMA, "name": name}
     if extension:
         manifest["extensions"] = {"com.mappedsky.seizu": extension}
@@ -207,30 +200,38 @@ def test_ids_derive_from_names_with_no_seizu_extension():
     assert [skill.skill_id for skill in parsed.skills] == ["review"]
 
 
-def test_a_skillset_id_that_repeats_the_derived_one_is_redundant():
-    parsed = _named_package("review-tools", skillset_id="review_tools")
-
-    assert parsed.valid
-    assert "redundant_skillset_id" in [item.code for item in parsed.diagnostics]
-
-
-def test_a_skillset_id_that_names_something_else_is_refused():
-    """Two identities for one package is the thing being removed."""
-    parsed = _named_package("review-tools", skillset_id="other_tools")
-
-    assert not parsed.valid
-    assert "conflicting_skillset_id" in [item.code for item in parsed.diagnostics]
-
-
-def test_a_divergent_skill_id_is_refused():
-    parsed = _named_package("review-tools", skill_id="something_else")
-
-    assert "conflicting_skill_id" in [item.code for item in parsed.diagnostics]
-    assert parsed.skills == []
-
-
 def test_a_package_name_that_derives_no_id_is_refused():
     parsed = _named_package("2fa-tools")
 
     assert not parsed.valid
     assert "underivable_plugin_id" in [item.code for item in parsed.diagnostics]
+
+
+def test_enabled_in_a_package_is_rejected():
+    """AGT-041: the package has no say in whether a skill is on."""
+    manifest = {
+        "$schema": PLUGIN_SCHEMA,
+        "name": "review-tools",
+        "extensions": {"com.mappedsky.seizu": {"skills": {"review": {"enabled": False}}}},
+    }
+    parsed = parse_package(
+        [
+            PluginFile(path="plugin.json", content=json.dumps(manifest).encode()),
+            PluginFile(
+                path="skills/review/SKILL.md",
+                content=b"---\nname: review\ndescription: Review a target\n---\nReview it.",
+            ),
+        ]
+    )
+
+    assert not parsed.valid
+    assert "invalid_seizu_extension" in [item.code for item in parsed.diagnostics]
+
+
+def test_a_package_stating_an_id_is_refused():
+    """AGT-040: ids derive from names; there is no field to state one."""
+    for extension in ({"skillsetId": "review_tools"}, {"skills": {"review": {"skillId": "review"}}}):
+        parsed = _named_package("review-tools", extension=extension)
+
+        assert not parsed.valid
+        assert "invalid_seizu_extension" in [item.code for item in parsed.diagnostics]

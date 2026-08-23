@@ -1101,6 +1101,16 @@ def _seed_skillsets(
     console.print(f"  Skillsets: created={ss_created} updated={ss_updated} skipped={ss_skipped}")
 
 
+def _plugin_skills_differ(plugin_id: str, plugin_def: Any) -> bool:
+    """Whether any stated skill is not already in the state the config asks for."""
+    try:
+        listed = state.get_client().get(f"/api/v1/plugins/{plugin_id}/skills")["skills"]
+    except Exception:
+        return True
+    live = {item["skill_id"]: item["enabled"] for item in listed}
+    return any(live.get(skill_id) != wanted for skill_id, wanted in plugin_def.skills.items())
+
+
 def _seed_plugins(
     config: Any,
     *,
@@ -1148,7 +1158,10 @@ def _seed_plugins(
         current = existing.get(plugin_id)
         package_changed = current is None or current.get("package_digest") != validation.get("package_digest")
         enabled_changed = current is not None and current.get("enabled", True) != plugin_def.enabled
-        if not package_changed and not enabled_changed:
+        # Whether a skill is on is an operator's choice rather than package
+        # content, so it is stated here and applied on every seed (AGT-041).
+        skills_changed = bool(plugin_def.skills) and (current is None or _plugin_skills_differ(plugin_id, plugin_def))
+        if not package_changed and not enabled_changed and not skills_changed:
             console.print(f"  [dim][skip][/dim] plugin '{plugin_id}' (unchanged)")
             skipped += 1
             continue
@@ -1170,6 +1183,11 @@ def _seed_plugins(
                 current = state.get_client().put(
                     f"/api/v1/plugins/{plugin_id}",
                     json={"enabled": plugin_def.enabled},
+                )
+            for skill_id, skill_enabled in plugin_def.skills.items():
+                state.get_client().put(
+                    f"/api/v1/plugins/{plugin_id}/skills/{skill_id}",
+                    json={"enabled": skill_enabled},
                 )
         except Exception as exc:
             _die(exc)

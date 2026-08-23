@@ -2,9 +2,9 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from reporting.schema.mcp_config import ToolParamDef, validate_mcp_slug_component
+from reporting.schema.mcp_config import ToolParamDef
 
 
 class PluginDiagnostic(BaseModel):
@@ -114,6 +114,10 @@ class PluginUpdateRequest(BaseModel):
     enabled: bool
 
 
+class PluginSkillUpdateRequest(BaseModel):
+    enabled: bool
+
+
 class PluginCreateRequest(BaseModel):
     """A new package. Its Seizu id is derived from ``name``, never given."""
 
@@ -173,33 +177,14 @@ class PluginRestoreRequest(BaseModel):
 class SeizuSkillExtension(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    # Deprecated. A skill's Seizu id is derived from its portable name; this is
-    # accepted only so packages that stated the same value still install, and
-    # is an error when it names something else (AGT-040).
-    skill_id: str | None = None
     title: str | None = None
-    enabled: bool = True
     triggers: list[str] = Field(default_factory=list)
     parameters: list[ToolParamDef] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
-
-    @field_validator("skill_id")
-    @classmethod
-    def valid_skill_id(cls, value: str | None) -> str | None:
-        return validate_mcp_slug_component(value) if value is not None else None
 
 
 class SeizuPluginExtension(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    # Deprecated, as `skill_id` is: the plugin's Seizu id is derived from the
-    # package name. Optional, so a package with no Seizu extension at all
-    # installs unmodified (AGT-040).
-    skillset_id: str | None = None
     skills: dict[str, SeizuSkillExtension] = Field(default_factory=dict)
     legacy_skillset_projection: bool = Field(default=False, alias="legacySkillsetProjection")
-
-    @field_validator("skillset_id")
-    @classmethod
-    def valid_skillset_id(cls, value: str | None) -> str | None:
-        return validate_mcp_slug_component(value) if value is not None else None

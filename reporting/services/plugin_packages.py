@@ -314,19 +314,8 @@ def _parse_seizu_extension(
             )
         )
         return None
-    normalized = dict(raw)
-    if "skillsetId" in normalized:
-        normalized["skillset_id"] = normalized.pop("skillsetId")
-    skills = normalized.get("skills")
-    if isinstance(skills, dict):
-        normalized["skills"] = {
-            name: {("skill_id" if key == "skillId" else key): value for key, value in config.items()}
-            if isinstance(config, dict)
-            else config
-            for name, config in skills.items()
-        }
     try:
-        return SeizuPluginExtension.model_validate(normalized)
+        return SeizuPluginExtension.model_validate(raw)
     except ValidationError as exc:
         diagnostics.append(diagnostic("error", "invalid_seizu_extension", str(exc), path="plugin.json"))
         return None
@@ -493,28 +482,6 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
             )
         )
         return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
-    if extension is not None and extension.skillset_id is not None:
-        if extension.skillset_id != plugin_id:
-            diagnostics.append(
-                diagnostic(
-                    "error",
-                    "conflicting_skillset_id",
-                    f"extensions.{EXTENSION_NAMESPACE}.skillsetId is {extension.skillset_id!r}, but the package "
-                    f"name derives {plugin_id!r}. A package has one identity: rename the package, or drop the field.",
-                    path="plugin.json",
-                )
-            )
-            return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
-        if not legacy_projection:
-            diagnostics.append(
-                diagnostic(
-                    "warning",
-                    "redundant_skillset_id",
-                    f"extensions.{EXTENSION_NAMESPACE}.skillsetId repeats what the package name already derives "
-                    "and is no longer read; it can be removed.",
-                    path="plugin.json",
-                )
-            )
     mcp_servers = _parse_mcp(by_path, diagnostics)
     skills: list[PluginSkillItem] = []
     seen_ids: set[str] = set()
@@ -578,18 +545,6 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
                 )
             )
             continue
-        if config and config.skill_id and config.skill_id != derived_skill_id:
-            diagnostics.append(
-                diagnostic(
-                    "warning",
-                    "conflicting_skill_id",
-                    f"skillId is {config.skill_id!r}, but the skill name derives {derived_skill_id!r}. "
-                    "A skill has one identity: rename the skill directory, or drop the field.",
-                    path=path,
-                    skill=name,
-                )
-            )
-            continue
         skill_id = derived_skill_id
         if skill_id in seen_ids:
             diagnostics.append(
@@ -634,7 +589,8 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
                 parameters=parameters,
                 triggers=config.triggers if config else [],
                 allowed_tools=allowed_tools,
-                enabled=config.enabled if config else True,
+                # Not a package property: the store carries it (AGT-041).
+                enabled=True,
                 source_path=f"skills/{directory}",
                 aliases=config.aliases if config else [],
                 mcp_servers=mcp_servers,
@@ -675,7 +631,6 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
         portable_name = skill.skill_id.replace("_", "-")
         extension_skills[portable_name] = {
             "title": skill.name,
-            "enabled": skill.enabled,
             "triggers": skill.triggers,
             "parameters": [parameter.model_dump() for parameter in skill.parameters],
             "aliases": [f"{skillset.skillset_id}__{skill.skill_id}"],

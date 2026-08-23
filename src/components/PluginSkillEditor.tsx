@@ -19,7 +19,6 @@ import {
   Paper,
   Select,
   Stack,
-  Switch,
   TextField,
   Tooltip,
   Typography,
@@ -443,7 +442,6 @@ export default function PluginSkillEditor({
         .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
         .join(' '),
   );
-  const [enabled, setEnabled] = useState(extension.enabled ?? true);
   const [triggers, setTriggers] = useState(extension.triggers ?? []);
   const [aliases, setAliases] = useState(extension.aliases ?? []);
   const [parameters, setParameters] = useState<ParamFormState[]>(
@@ -513,7 +511,6 @@ export default function PluginSkillEditor({
         // Not written: the id derives from the portable name, and a manifest
         // that repeats it is flagged as redundant on publish (AGT-040).
         title: title.trim() || undefined,
-        enabled,
         triggers,
         aliases,
         parameters: typedParameters,
@@ -525,7 +522,6 @@ export default function PluginSkillEditor({
     allowedTools,
     skillId,
     title,
-    enabled,
     triggers,
     aliases,
     JSON.stringify(typedParameters),
@@ -650,15 +646,6 @@ export default function PluginSkillEditor({
           </Button>
         </Box>
       </FieldWithHelp>
-      <FormControlLabel
-        control={
-          <Switch
-            checked={enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-        }
-        label="Enabled"
-      />
       <StringListEditor
         label="Triggers"
         values={triggers}

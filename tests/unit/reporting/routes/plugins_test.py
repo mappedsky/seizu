@@ -28,7 +28,6 @@ def _archive() -> bytes:
     manifest = {
         "$schema": PLUGIN_SCHEMA,
         "name": "review-tools",
-        "extensions": {"com.mappedsky.seizu": {"skillsetId": "review_tools"}},
     }
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
@@ -131,7 +130,6 @@ def _staged_files() -> list[dict]:
     manifest = {
         "$schema": PLUGIN_SCHEMA,
         "name": "review-tools",
-        "extensions": {"com.mappedsky.seizu": {"skillsetId": "review_tools"}},
     }
     skill = "---\nname: review\ndescription: Review a target\n---\nReview it."
     return [
@@ -271,7 +269,6 @@ async def test_version_skills_are_parsed_from_that_revisions_files(mocker):
     manifest = {
         "$schema": PLUGIN_SCHEMA,
         "name": "review-tools",
-        "extensions": {"com.mappedsky.seizu": {"skillsetId": "review_tools"}},
     }
     files = [
         PluginFile(path="plugin.json", content=json.dumps(manifest).encode()),
@@ -332,7 +329,6 @@ async def test_publish_warns_when_contents_change_but_version_does_not(mocker):
         "$schema": PLUGIN_SCHEMA,
         "name": "review-tools",
         "version": "1.0.0",
-        "extensions": {"com.mappedsky.seizu": {"skillsetId": "review_tools"}},
     }
     files = [
         {
@@ -362,7 +358,6 @@ async def test_publish_does_not_warn_when_the_version_moved(mocker):
         "$schema": PLUGIN_SCHEMA,
         "name": "review-tools",
         "version": "1.1.0",
-        "extensions": {"com.mappedsky.seizu": {"skillsetId": "review_tools"}},
     }
     files = [
         {
@@ -386,3 +381,35 @@ async def test_create_plugin_refuses_a_name_that_derives_no_id(mocker):
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.post("/api/v1/plugins", json={"name": "2fa-tools"})
     assert response.status_code == 400
+
+
+async def test_a_skill_can_be_turned_off_without_republishing(mocker):
+    from reporting.schema.plugins import PluginSkillItem
+
+    item = PluginSkillItem(
+        plugin_id="review_tools",
+        skill_id="review",
+        portable_name="review",
+        title="Review",
+        description="Review a target",
+        template="Review it.",
+        source_path="skills/review",
+        revision=2,
+        enabled=False,
+    )
+    setter = mocker.patch(
+        "reporting.routes.plugins.report_store.set_plugin_skill_enabled", new=AsyncMock(return_value=item)
+    )
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
+        response = await client.put("/api/v1/plugins/review_tools/skills/review", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    setter.assert_awaited_once_with("review_tools", "review", False)
+
+
+async def test_toggling_an_unknown_skill_is_a_404(mocker):
+    mocker.patch("reporting.routes.plugins.report_store.set_plugin_skill_enabled", new=AsyncMock(return_value=None))
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
+        response = await client.put("/api/v1/plugins/review_tools/skills/nope", json={"enabled": True})
+    assert response.status_code == 404

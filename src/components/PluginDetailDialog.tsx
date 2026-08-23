@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Alert, Box, Chip, Stack, Typography } from '@mui/material';
 import DetailDialog, {
   DetailCodeBlock,
@@ -5,7 +6,11 @@ import DetailDialog, {
 } from 'src/components/DetailDialog';
 import PluginContentsView from 'src/components/PluginContentsView';
 import UserDisplay from 'src/components/UserDisplay';
-import type { PluginListItem } from 'src/hooks/usePluginsApi';
+import {
+  PluginListItem,
+  PluginSkillItem,
+  usePluginMutations,
+} from 'src/hooks/usePluginsApi';
 
 interface Props {
   open: boolean;
@@ -14,7 +19,21 @@ interface Props {
 }
 
 export default function PluginDetailDialog({ open, onClose, plugin }: Props) {
+  const { setSkillEnabled } = usePluginMutations();
+  const [failure, setFailure] = useState<string | null>(null);
+  const [toggled, setToggled] = useState(0);
   if (!plugin) return null;
+
+  const toggleSkill = async (skill: PluginSkillItem, enabled: boolean) => {
+    setFailure(null);
+    try {
+      await setSkillEnabled(skill.plugin_id, skill.skill_id, enabled);
+      // Re-read rather than patch in place: the server owns this state.
+      setToggled((value) => value + 1);
+    } catch (reason) {
+      setFailure((reason as Error).message);
+    }
+  };
 
   return (
     <DetailDialog
@@ -84,9 +103,16 @@ export default function PluginDetailDialog({ open, onClose, plugin }: Props) {
           </Typography>
         </DetailSection>
 
+        {failure && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {failure}
+          </Alert>
+        )}
         <PluginContentsView
+          key={toggled}
           pluginId={plugin.plugin_id}
           revision={plugin.current_revision}
+          onToggleSkill={(skill, enabled) => void toggleSkill(skill, enabled)}
         />
       </Box>
     </DetailDialog>

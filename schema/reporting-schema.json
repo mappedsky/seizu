@@ -586,6 +586,14 @@
                     "default": true,
                     "title": "Enabled",
                     "type": "boolean"
+                },
+                "skills": {
+                    "additionalProperties": {
+                        "type": "boolean"
+                    },
+                    "description": "Whether individual skills are on, keyed by Seizu skill ID. Omitted skills keep whatever state they already have, and a skill seen for the first time starts on. This is an operator's choice, not part of the package.",
+                    "title": "Skills",
+                    "type": "object"
                 }
             },
             "required": [

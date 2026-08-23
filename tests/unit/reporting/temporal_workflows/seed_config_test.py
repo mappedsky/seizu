@@ -68,11 +68,17 @@ def test_production_security_plugin_is_seeded_independently_of_legacy_skillsets(
     assert parsed.valid
     assert parsed.plugin_id == "github_security_investigations"
     assert parsed.manifest["version"] == "1.1.0"
-    assert {skill.skill_id for skill in parsed.skills if skill.enabled} == {
+    # The package declares its skills; it does not decide which are on. Every
+    # skill it introduces starts enabled, and the seed states the exception
+    # (AGT-041).
+    assert {skill.skill_id for skill in parsed.skills} == {
         "github_org_security_overview",
+        "repo_cve_exploitability",
         "repo_cve_findings",
         "repo_cve_reachability",
     }
+    assert all(skill.enabled for skill in parsed.skills)
+    assert plugin_config["skills"] == {"repo_cve_exploitability": False}
 
     reachability = next(skill for skill in parsed.skills if skill.skill_id == "repo_cve_reachability")
     assert "mcp:github/get_file_contents" in reachability.allowed_tools

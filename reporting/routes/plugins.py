@@ -24,7 +24,9 @@ from reporting.schema.plugins import (
     PluginPackageRequest,
     PluginPublishRequest,
     PluginRestoreRequest,
+    PluginSkillItem,
     PluginSkillListResponse,
+    PluginSkillUpdateRequest,
     PluginUpdateRequest,
     PluginValidationResponse,
     PluginVersion,
@@ -247,6 +249,21 @@ async def list_plugin_skills(
     if not await report_store.get_plugin(plugin_id):
         raise HTTPException(status_code=404, detail="Plugin not found")
     return PluginSkillListResponse(skills=await report_store.list_plugin_skills(plugin_id))
+
+
+@router.put("/api/v1/plugins/{plugin_id}/skills/{skill_id}", response_model=PluginSkillItem)
+async def update_plugin_skill(
+    plugin_id: str,
+    skill_id: str,
+    body: PluginSkillUpdateRequest,
+    current: CurrentUser = Depends(require_permission(Permission.PLUGINS_WRITE)),
+) -> PluginSkillItem:
+    """Turn one skill on or off. Survives republishing the package (AGT-041)."""
+    del current
+    skill = await report_store.set_plugin_skill_enabled(plugin_id, skill_id, body.enabled)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Plugin skill not found")
+    return skill
 
 
 @router.get("/api/v1/plugins/{plugin_id}/versions/{revision}/skills", response_model=PluginSkillListResponse)

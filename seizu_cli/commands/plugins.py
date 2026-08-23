@@ -61,6 +61,24 @@ def remove(plugin_id: str, yes: bool = typer.Option(False, "--yes")) -> None:
     get_client().delete(f"/api/v1/plugins/{plugin_id}")
 
 
+@app.command("skill-enable")
+def skill_enable(plugin_id: str, skill_id: str) -> None:
+    """Turn one skill of an installed plugin on."""
+    typer.echo(
+        json.dumps(get_client().put(f"/api/v1/plugins/{plugin_id}/skills/{skill_id}", json={"enabled": True}), indent=2)
+    )
+
+
+@app.command("skill-disable")
+def skill_disable(plugin_id: str, skill_id: str) -> None:
+    """Turn one skill of an installed plugin off. Survives republishing."""
+    typer.echo(
+        json.dumps(
+            get_client().put(f"/api/v1/plugins/{plugin_id}/skills/{skill_id}", json={"enabled": False}), indent=2
+        )
+    )
+
+
 @app.command("download")
 def download(plugin_id: str, output: Path = typer.Option(..., "--output", "-o")) -> None:
     output.write_bytes(get_client().get_bytes(f"/api/v1/plugins/{plugin_id}/download"))

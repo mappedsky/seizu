@@ -304,6 +304,23 @@ export function usePluginMutations() {
       };
       return { ...body, bytes: base64ToBytes(body.content_base64) };
     },
+    setSkillEnabled: async (
+      pluginId: string,
+      skillId: string,
+      enabled: boolean,
+    ) => {
+      const response = await checked(
+        await fetch(
+          `/api/v1/plugins/${encodeURIComponent(pluginId)}/skills/${encodeURIComponent(skillId)}`,
+          {
+            method: 'PUT',
+            headers: { ...headers(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+          },
+        ),
+      );
+      return response.json() as Promise<PluginSkillItem>;
+    },
     validatePackage: async (pluginId: string, files: StagedFilePayload[]) => {
       const response = await checked(
         await fetch(

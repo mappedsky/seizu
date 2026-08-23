@@ -167,7 +167,31 @@ anything longer are refused at publish with that constraint named.
 
 Because every id derives, the `com.mappedsky.seizu` extension is optional: a
 stock Agent Plugins 1.0.0 package installs unmodified, and the extension is only
-needed to declare inputs, triggers or aliases.
+needed to declare inputs, triggers or aliases. There is no field for stating an
+id — a package carrying `skillsetId` or `skillId` is refused.
+
+## Turning skills on and off
+
+A package does not declare whether its skills are on. Every skill a revision
+introduces starts enabled, and republishing never changes what an operator
+chose. Set it when installing or updating:
+
+```bash
+seizu plugins skill-disable security_review scan_repository
+```
+
+```yaml
+plugins:
+  security_review:
+    source: plugins/security-review
+    enabled: true
+    skills:
+      scan_repository: false
+```
+
+or from the plugin's detail dialog in the UI. `PUT /api/v1/plugins/{id}/skills/{skill_id}`
+is the underlying call, and `plugins__set_skill_enabled` exposes it over MCP.
+A package cannot state this: an `enabled` key in its Seizu extension is refused.
 
 ## Skill inputs
 

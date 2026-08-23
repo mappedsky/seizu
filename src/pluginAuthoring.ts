@@ -30,16 +30,13 @@ export interface PluginAuthor {
 }
 
 export interface PluginSkillExtension {
-  skillId?: string;
   title?: string;
-  enabled?: boolean;
   triggers?: string[];
   parameters?: ToolParamDef[];
   aliases?: string[];
 }
 
 export interface SeizuPluginExtension {
-  skillsetId: string;
   skills: Record<string, PluginSkillExtension>;
   legacySkillsetProjection?: boolean;
 }
@@ -85,7 +82,7 @@ export function seizuExtension(manifest: PluginManifest): SeizuPluginExtension {
     extension.skills ??= {};
     return extension;
   }
-  const extension: SeizuPluginExtension = { skillsetId: '', skills: {} };
+  const extension: SeizuPluginExtension = { skills: {} };
   extensions[SEIZU_EXTENSION] = extension;
   return extension;
 }

@@ -40,6 +40,7 @@ import {
   PluginSkillExtension,
   PORTABLE_SKILL_NAME,
   SkillDocument,
+  deriveSeizuId,
   parseManifest,
   parseSkillDocument,
   seizuExtension,
@@ -188,7 +189,6 @@ function NewSkillDialog({
         },
         {
           title: title.trim() || undefined,
-          enabled: true,
           triggers: [],
           parameters: [],
           aliases: [],
@@ -267,7 +267,6 @@ function PluginManifestEditor({
   manifest: PluginManifest;
   onChange: (manifest: PluginManifest) => void;
 }) {
-  const extension = seizuExtension(manifest);
   const update = (patch: Partial<PluginManifest>) => {
     const next = cloneManifest(manifest);
     Object.assign(next, patch);
@@ -296,7 +295,8 @@ function PluginManifestEditor({
         <TextField label="Schema" value={manifest.$schema} disabled fullWidth />
         <TextField
           label="Seizu namespace"
-          value={extension.skillsetId}
+          value={deriveSeizuId(manifest.name ?? '') ?? '—'}
+          helperText="Derived from the package name"
           disabled
           fullWidth
         />
@@ -553,9 +553,8 @@ export default function PluginEditor() {
     if (skills.some((skill) => skill.path === path)) {
       throw new Error('A skill with that portable name already exists.');
     }
-    if (skills.some((skill) => effectiveSkillId(skill) === extension.skillId)) {
-      throw new Error('A skill with that Seizu skill ID already exists.');
-    }
+    // Ids derive from portable names, so a duplicate name is the only way to
+    // collide, and the check above already caught it.
     const next = cloneManifest(manifest);
     seizuExtension(next).skills[document.portableName] = extension;
     setManifest(next);

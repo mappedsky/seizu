@@ -2456,11 +2456,10 @@ this; the reason is that the body travels.
 
 A plugin's Seizu id is derived from the package `name`, and a skill's from its
 portable name: hyphens and dots become underscores, and the result must be a
-valid MCP name component. `skillsetId` and `skillId` are no longer read. One
-that repeats what the name derives is a `redundant_skillset_id` warning; one
-that names something else is an error that says to rename instead. The whole
-`com.mappedsky.seizu` extension is now optional, so a stock Agent Plugins 1.0
-package installs unmodified.
+valid MCP name component. `skillsetId` and `skillId` do not exist: the
+extension forbids unknown keys, so a package stating either is refused rather
+than reconciled. The whole `com.mappedsky.seizu` extension is optional, so a
+stock Agent Plugins 1.0 package installs unmodified.
 
 **Why:** the pair was immutable in both directions — a package carried a
 portable name *and* a Seizu id forever, with nothing keeping them related and
@@ -2478,3 +2477,37 @@ adopt a legacy skillset that happens to match. Accepted deliberately: the
 legacy surface exists for one release and the collision needs a legacy
 skillset whose id is exactly the derived one. If that release is extended, put
 the check back before the derivation, not the field.
+
+**Consequence:** a revision published before this, whose stored manifest states
+either field, cannot be restored — `restore` republishes that revision's files
+and they no longer validate. Both fields were introduced unreleased, so this
+was settled by discarding the affected history rather than tolerating the keys.
+
+## AGT-041 — Whether a skill is on is an operator's choice, not package content
+
+**Applies to:** `SeizuSkillExtension.enabled`, `publish_plugin`,
+`set_plugin_skill_enabled`, `PUT /api/v1/plugins/{id}/skills/{skill_id}`,
+`PluginDef.skills`
+
+A package does not say whether its skills are on. Enablement is store state,
+chosen when a plugin is installed or updated: every skill a revision introduces
+starts on, `publish_plugin` carries existing values forward, and an operator
+changes one through the API, the CLI, the seed configuration or the plugin
+detail dialog. `enabled` is not a field of the extension at all — a package
+carrying one is refused, because the extension forbids unknown keys.
+
+**Why:** it was neither in the Agent Plugins spec nor meaningful to any other
+consumer — only Seizu's extension carried it — and it sat on the wrong side of
+the authoring/runtime line. Disabling one skill meant editing a manifest and
+publishing a revision, while the *plugin* it belonged to was already toggled at
+runtime and already an install-time seed argument. The two halves of the same
+question worked differently.
+
+Removing it also removes a rule nobody would have got right: if a package ships
+a skill off, an operator turns it on, and a later revision ships it off again,
+what wins? With enablement outside the package there is nothing to reconcile — a
+republish simply never touches it.
+
+**Don't:** reintroduce it as a "default for first install". That is the rule
+above wearing a hat, and it makes a package's meaning depend on whether the
+store had seen it before.

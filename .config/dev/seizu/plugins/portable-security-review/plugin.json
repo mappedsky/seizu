@@ -5,12 +5,9 @@
   "description": "Development plugin exercising logical MCP dependencies through Seizu proxies.",
   "extensions": {
     "com.mappedsky.seizu": {
-      "skillsetId": "portable_security_review",
       "skills": {
         "review-source-dependencies": {
-          "skillId": "review_source_dependencies",
           "title": "Review source dependencies",
-          "enabled": true,
           "triggers": [
             "review source dependencies with portable MCP tools",
             "test Agent Plugin MCP proxy mapping"
@@ -43,9 +40,7 @@
           ]
         },
         "verify-packaged-assets": {
-          "skillId": "verify_packaged_assets",
           "title": "Verify packaged assets",
-          "enabled": true,
           "triggers": [
             "verify live Agent Plugin resources and scripts",
             "test packaged skill references and scripts"

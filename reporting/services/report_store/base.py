@@ -878,6 +878,10 @@ class ReportStore(ABC):
         """Return an enabled plugin skill by its namespaced identity."""
 
     @abstractmethod
+    async def set_plugin_skill_enabled(self, plugin_id: str, skill_id: str, enabled: bool) -> PluginSkillItem | None:
+        """Turn one indexed skill on or off without republishing the package."""
+
+    @abstractmethod
     async def read_plugin_blob(self, plugin_id: str, sha256: str) -> PluginFile | None:
         """Read a blob already stored by one of this plugin's revisions, by digest."""
 

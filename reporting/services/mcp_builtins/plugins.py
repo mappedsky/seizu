@@ -79,6 +79,11 @@ async def _skills(args: dict[str, Any], current: CurrentUser | None) -> dict[str
     return {"skills": [item.model_dump() for item in await report_store.list_plugin_skills(args["plugin_id"])]}
 
 
+async def _set_skill_enabled(args: dict[str, Any], current: CurrentUser | None) -> dict[str, Any]:
+    item = await report_store.set_plugin_skill_enabled(args["plugin_id"], args["skill_id"], args["enabled"])
+    return item.model_dump() if item else {"error": "Plugin skill not found"}
+
+
 async def _versions(args: dict[str, Any], current: CurrentUser | None) -> dict[str, Any]:
     return {"versions": [item.model_dump() for item in await report_store.list_plugin_versions(args["plugin_id"])]}
 
@@ -161,6 +166,24 @@ GROUP_DEF = BuiltinGroup(
             [Permission.PLUGINS_READ.value],
             _skills,
             collection_key="skills",
+        ),
+        BuiltinTool(
+            "plugins__set_skill_enabled",
+            GROUP,
+            "Turn one skill of an installed Agent Plugin on or off.",
+            {
+                "type": "object",
+                "properties": {
+                    "plugin_id": {"type": "string"},
+                    "skill_id": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["plugin_id", "skill_id", "enabled"],
+            },
+            [Permission.PLUGINS_WRITE.value],
+            _set_skill_enabled,
+            requires_user=True,
+            confirmation=_confirm,
         ),
         BuiltinTool(
             "plugins__list_versions",

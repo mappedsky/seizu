@@ -3405,3 +3405,47 @@ async def test_deleting_a_plugin_collects_its_orphaned_blobs(store):
     assert await store.read_plugin_blob("beta_tools", hashlib.sha256(b"shared between both plugins").hexdigest())
     assert await store.delete_plugin("beta_tools") is True
     assert await blob_count() == 0
+
+
+async def test_republishing_a_plugin_keeps_operator_skill_enablement(store):
+    """AGT-041: whether a skill is on is the operator's, not the package's."""
+    from reporting.services.plugin_packages import parse_package
+
+    def package(body: str) -> object:
+        manifest = {
+            "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+            "name": "review-tools",
+        }
+        return parse_package(
+            [
+                PluginFile(path="plugin.json", content=json.dumps(manifest, sort_keys=True).encode()),
+                PluginFile(
+                    path="skills/review/SKILL.md",
+                    content=f"---\nname: review\ndescription: Review it\n---\n{body}".encode(),
+                ),
+                PluginFile(
+                    path="skills/audit/SKILL.md",
+                    content=b"---\nname: audit\ndescription: Audit it\n---\nAudit.",
+                ),
+            ]
+        )
+
+    first = package("Review.")
+    await store.publish_plugin(
+        first.plugin_id, first.manifest, first.files, first.skills, [], first.package_digest, "u1"
+    )
+    # Everything a package introduces starts on.
+    assert (await store.get_plugin_skill("review_tools", "review")).enabled is True
+
+    await store.set_plugin_skill_enabled("review_tools", "review", False)
+    assert (await store.get_plugin_skill("review_tools", "review")).enabled is False
+
+    second = package("Review, revised.")
+    await store.publish_plugin(
+        "review_tools", second.manifest, second.files, second.skills, [], second.package_digest, "u1"
+    )
+
+    # The republish carried the operator's choice, and left the other alone.
+    assert (await store.get_plugin_skill("review_tools", "review")).enabled is False
+    assert (await store.get_plugin_skill("review_tools", "audit")).enabled is True
+    assert await store.set_plugin_skill_enabled("review_tools", "missing", True) is None

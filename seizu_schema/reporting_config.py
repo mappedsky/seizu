@@ -1004,6 +1004,14 @@ class PluginDef(BaseModel):
 
     source: str = Field(description="Plugin directory or ZIP, relative to the YAML file unless absolute.")
     enabled: bool = True
+    skills: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Whether individual skills are on, keyed by Seizu skill ID. Omitted skills keep whatever "
+            "state they already have, and a skill seen for the first time starts on. This is an "
+            "operator's choice, not part of the package."
+        ),
+    )
 
     @field_validator("source")
     @classmethod
