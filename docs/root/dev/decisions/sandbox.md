@@ -688,12 +688,10 @@ from changing the code midway through a turn.
 
 **Applies to:** `mcp_runtime._get_prompt_core`, `materialize_plugin_skill`
 
-Rendering an Agent Skill substitutes arguments into its template. It may attach
-the package's files to the answer, but only when all three hold: the skill ships
-`scripts/`, the caller holds `sandbox:delegate`, and the conversation already has
-an open sandbox. `materialize_plugin_skill(..., only_if_open=True)` is how the
-render path asks; `sandbox__run_script`, which is about to execute code, omits it
-and opens one.
+Rendering an Agent Skill substitutes arguments into its template. It attaches the
+package's files to the answer when two things hold: the skill ships `scripts/`,
+and the caller holds `sandbox:delegate`. It then materializes them, opening the
+conversation's sandbox if that is what it takes.
 
 **Why:** `chat_agent_node` makes a sandbox session ambient for every turn, and the
 session opens its sandbox lazily on first use — so materializing during a render
@@ -701,6 +699,16 @@ made *rendering* the trigger. A user with `chat:skills:call` and no
 `sandbox:delegate` could provision a billable sandbox by loading a skill, which
 inverts the permission and pays for a VM to hold a template nobody will run.
 
-**Don't:** move the materialization earlier "so the files are ready". A skill
-without scripts has nothing to run, and a sandbox that a delegation would have
-opened anyway costs nothing extra to open then.
+**A third condition was tried and reverted.** Requiring the sandbox to be *already
+open* (`only_if_open`) looked like the conservative choice and broke the feature:
+a turn opens its sandbox on first use, which happens *after* the skill renders,
+so `verify_packaged_assets` was handed instructions addressing a materialized
+path that was never written. It read nothing, never reached
+`sandbox__run_script`, and reported itself unverified — caught by a live run, not
+by tests. The two conditions above are the whole guard, and they already cover
+what this decision is for: a skill with nothing to run, or a caller who could not
+run it, still never provisions anything.
+
+**Don't:** materialize for a skill without scripts, or for a caller lacking
+`sandbox:delegate`. Those are the cases where a render would be paying for a VM
+to hold a template nobody can use.

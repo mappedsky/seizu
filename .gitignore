@@ -172,5 +172,5 @@ gunicorn.ctl
 .claude
 
 # Output from scripts/chat_harness.py
-chat-harness-results/
+chat-harness-*/
 chat-harness-arm.yml

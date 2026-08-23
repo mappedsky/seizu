@@ -269,7 +269,9 @@ diagnostics rather than raising. Package bounds live at the top of that module.
   `seizu://plugins/{id}/versions/{n}/files/…` ([`AGT-037`](docs/root/dev/decisions/chat-agent.md)).
 - A skill that ships `scripts/` runs them only through `sandbox__run_script`
   in the conversation sandbox ([`SBX-017`](docs/root/dev/decisions/sandbox.md)).
-  **Rendering a skill never provisions a sandbox** ([`SBX-018`](docs/root/dev/decisions/sandbox.md)).
+  Rendering materializes a scripted skill for a caller holding `sandbox:delegate`,
+  and never provisions a sandbox for any other skill or caller
+  ([`SBX-018`](docs/root/dev/decisions/sandbox.md)).
 - Frontend: `/app/plugins` (list + read-only detail dialog), `/app/plugins/:id/edit`
   (staged editor), `/app/plugins/:id/history`. Docs:
   `docs/root/install/agent-plugins.md`.

@@ -2725,8 +2725,62 @@ async def test_plugin_skill_materializes_immutable_files_and_marker_last(mocker)
     assert backend.write_file.await_args.args[1] == skill.package_digest
 
 
-async def test_plugin_skill_materialization_will_not_open_a_sandbox(mocker):
-    """SBX-018: the render path asks for files, it does not provision a VM."""
+async def test_materializing_a_scripted_skill_opens_the_sandbox_if_needed(mocker):
+    """SBX-018: its instructions address the materialized path, so it must exist.
+
+    Refusing to open here left `verify_packaged_assets` reading a path that was
+    never written -- the sandbox opens later in the turn, after the render.
+    """
+    from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginSkillItem
+
+    skill = PluginSkillItem(
+        plugin_id="security",
+        skill_id="review",
+        portable_name="review",
+        title="Review",
+        description="Review things",
+        template="Review.",
+        source_path="skills/review",
+        revision=2,
+        package_digest="abc123" * 10,
+        has_scripts=True,
+    )
+    backend = MagicMock()
+    backend.read_file = AsyncMock(side_effect=[FileNotFoundError(), skill.package_digest])
+    backend.run_python = AsyncMock(return_value="SEIZU_PLUGIN_FILES_WRITTEN")
+    backend.write_file = AsyncMock(return_value="ok")
+    session = MagicMock()
+    session.opened = False
+    session.backend = AsyncMock(return_value=backend)
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=session)
+    mocker.patch.object(
+        sandbox_module.report_store,
+        "list_plugin_files",
+        new=AsyncMock(
+            return_value=[
+                PluginFileInfo(
+                    path="skills/review/scripts/check.sh",
+                    media_type="text/x-shellscript",
+                    size=10,
+                    sha256="a" * 64,
+                    etag='"a"',
+                )
+            ]
+        ),
+    )
+    mocker.patch.object(
+        sandbox_module.report_store,
+        "read_plugin_file",
+        new=AsyncMock(return_value=PluginFile(path="skills/review/scripts/check.sh", content=b"#!/bin/sh\n")),
+    )
+
+    root = await sandbox_module.materialize_plugin_skill(skill)
+
+    assert root == "/home/user/seizu_plugins/security/2-abc123abc123/skills/review"
+    session.backend.assert_awaited()
+
+
+async def test_materialization_outside_a_conversation_is_a_no_op(mocker):
     from reporting.schema.plugins import PluginSkillItem
 
     skill = PluginSkillItem(
@@ -2741,10 +2795,6 @@ async def test_plugin_skill_materialization_will_not_open_a_sandbox(mocker):
         package_digest="abc123" * 10,
         has_scripts=True,
     )
-    session = MagicMock()
-    session.opened = False
-    session.backend = AsyncMock()
-    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=session)
+    mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=None)
 
-    assert await sandbox_module.materialize_plugin_skill(skill, only_if_open=True) is None
-    session.backend.assert_not_awaited()
+    assert await sandbox_module.materialize_plugin_skill(skill) is None

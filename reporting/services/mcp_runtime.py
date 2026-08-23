@@ -1150,10 +1150,12 @@ async def _get_prompt_core(
                 f"skills/{plugin_skill.portable_name}/"
             )
             text = f"{text}\n\nSupporting plugin files are available as MCP resources under `{root_uri}`."
-            # Rendering is template substitution, not execution: it must never
-            # be what provisions a sandbox. Files are materialized only for a
-            # skill that ships scripts, only for a caller who could run them,
-            # and only into a sandbox the conversation already opened (SBX-018).
+            # Rendering is template substitution, not execution, so it may not
+            # be what provisions a sandbox for a skill that has nothing to run
+            # or a caller who could not run it. Those two conditions are the
+            # whole guard: a scripted skill loaded by someone holding
+            # `sandbox:delegate` is materialized, opening the sandbox if that is
+            # what it takes, because its instructions address that path (SBX-018).
             if (
                 gate_permission == Permission.CHAT_SKILLS_CALL
                 and plugin_skill.has_scripts
@@ -1161,7 +1163,7 @@ async def _get_prompt_core(
             ):
                 from reporting.services.mcp_builtins.sandbox import materialize_plugin_skill
 
-                local_path = await materialize_plugin_skill(plugin_skill, only_if_open=True)
+                local_path = await materialize_plugin_skill(plugin_skill)
                 if local_path:
                     text = f"{text}\nThe skill package is materialized in the conversation sandbox at `{local_path}`."
         # Two messages: instructions that are the same bytes every time, then

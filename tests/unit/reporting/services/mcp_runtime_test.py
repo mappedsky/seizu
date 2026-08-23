@@ -1104,7 +1104,7 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
     assert "/home/user/seizu_plugins/security/3-abc/skills/summarize" in outcome.text
     assert outcome.tools_required == ("sandbox__run_script", "reports__list", "ext__drive__search")
     get_legacy.assert_not_awaited()
-    materialize.assert_awaited_once_with(plugin_skill, only_if_open=True)
+    materialize.assert_awaited_once_with(plugin_skill)
 
 
 async def test_unavailable_plugin_still_shadows_same_named_legacy_skill(mocker):

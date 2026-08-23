@@ -1787,16 +1787,15 @@ def _plugin_skill_root(skill: Any) -> str:
     return f"/home/user/seizu_plugins/{skill.plugin_id}/{skill.revision}-{digest}/skills/{skill.portable_name}"
 
 
-async def materialize_plugin_skill(skill: Any, *, only_if_open: bool = False) -> str | None:
+async def materialize_plugin_skill(skill: Any) -> str | None:
     """Materialize one immutable plugin skill in the conversation sandbox.
 
-    ``only_if_open`` refuses to be the thing that provisions a sandbox: a caller
-    that merely wants the files *if they are cheap* (rendering a skill) passes
-    it, and a caller that is about to run code (``sandbox__run_script``) does
-    not. See SBX-018.
+    Opens the conversation's sandbox if it is not open yet: the callers that
+    reach here have already established that this skill ships code and that the
+    caller may run it (SBX-018).
     """
     session = sandbox_session.current_sandbox_session()
-    if session is None or (only_if_open and not session.opened):
+    if session is None:
         return None
     backend = await session.backend()
     root = _plugin_skill_root(skill)
