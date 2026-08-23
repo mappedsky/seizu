@@ -33,6 +33,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
+from reporting.schema.mcp_config import SKILL_INPUTS_HEADING
 from reporting.services import (
     action_confirmations,
     chat_budget,
@@ -2722,6 +2723,35 @@ def _tool_call_running_detail_data(request: ToolCallRequest) -> dict[str, Any]:
     }
 
 
+def skill_inputs_block(content: str) -> str:
+    """The rendered inputs block of a skill result, if it carries one.
+
+    Taken from the full content because the block is appended *last* and the
+    displayed body is truncated -- at 6,000 characters a real skill loses
+    exactly this. Read from the end for the same reason: a skill's
+    instructions routinely mention the heading ("use the values in the
+    ## Inputs block below"), and that prose is not the values. Only lines
+    shaped like a rendered entry (``- `name`: ...``) are kept, so a mention
+    that happens to be last still yields nothing.
+    """
+    start = content.rfind(SKILL_INPUTS_HEADING)
+    if start < 0:
+        return ""
+    lines: list[str] = []
+    for line in content[start + len(SKILL_INPUTS_HEADING) :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not (stripped.startswith("- `") and "`: " in stripped):
+            # The rendered block is the tail of the message and holds nothing
+            # but entries. Anything else means this match was prose that named
+            # the heading -- skills do that, and one such section is itself a
+            # list of "- `tool`: args" lines that passes a shape test alone.
+            return ""
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
     # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
@@ -2732,7 +2762,7 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         status = "blocked"
     else:
         status = "completed"
-    return {
+    detail: dict[str, Any] = {
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",
         "status": status,
@@ -2740,6 +2770,12 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
     }
+    if result.request.spec.kind == "skill" and (inputs := skill_inputs_block(result.content)):
+        # The values this invocation actually ran with, defaults included --
+        # which the arguments do not show, and the truncated body no longer
+        # holds. The step verifier judges against these.
+        detail["declared_inputs"] = inputs
+    return detail
 
 
 def _planning_narration_detail_data(text: str) -> dict[str, Any]:

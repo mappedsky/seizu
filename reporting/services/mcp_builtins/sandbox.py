@@ -1327,7 +1327,14 @@ def _wrap_with_detail_events(
                     raise
                 telemetry.set_attributes(current, outcome="ok")
             child["status"] = "completed"
-            child["body"] = _truncate(str(out) if out is not None else "", _CHILD_BODY_MAX)
+            body = str(out) if out is not None else ""
+            child["body"] = _truncate(body, _CHILD_BODY_MAX)
+            # A sub-agent reaches a skill through load_seizu_skill, so its
+            # inputs arrive as ordinary tool output -- and the block is
+            # appended last, which is precisely what the truncation above
+            # removes. Keep it whole for the step verifier.
+            if _name == "load_seizu_skill" and (inputs := _skill_inputs_block(body)):
+                child["declared_inputs"] = inputs
             _emit_section("running")
             return out
 
@@ -1503,6 +1510,13 @@ def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
         f"\n\nBudget: about {remaining} tokens are available for this step, shared with any other work "
         "it does. Spend them on code rather than on reading data into context."
     )
+
+
+def _skill_inputs_block(content: str) -> str:
+    """Lazy indirection: chat_graph imports this module, so it cannot be imported at module scope."""
+    from reporting.services.chat_graph import skill_inputs_block
+
+    return skill_inputs_block(content)
 
 
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:

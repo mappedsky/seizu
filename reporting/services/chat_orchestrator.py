@@ -47,7 +47,6 @@ from pydantic import BaseModel, Field
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.schema.mcp_config import SKILL_INPUTS_HEADING
 from reporting.services import (
     chat_budget,
     chat_context,
@@ -3515,35 +3514,23 @@ def _flattened_details(tool_details: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def _declared_inputs(tool_details: list[dict[str, Any]]) -> str:
-    """The inputs blocks of the skills this step loaded.
+    """The inputs each skill this step loaded was actually rendered with.
 
     A skill's parameters are rendered into its prompt and then have no other
     consumer -- nothing reads the values back, so a step that ignored one is
-    indistinguishable from a step that honored it. Reading the block out of
-    the call the step actually made is what puts the constraint in front of
-    the judge. Keyed on the heading rather than on the detail's kind: the same
-    block reaches a sub-agent through ``load_seizu_skill``, which is recorded
-    as an ordinary tool call.
+    indistinguishable from a step that honored it. The values are captured on
+    the call itself (``declared_inputs``) rather than parsed out of the
+    displayed body, which is truncated to 6,000 characters and so loses the
+    block on any real skill. Sub-agent calls count: a delegation reaches a
+    skill through ``load_seizu_skill``, and that is usually where the work is.
     """
     blocks: list[str] = []
     seen: set[str] = set()
     for detail in _flattened_details(tool_details):
-        body = str(detail.get("body") or "")
-        start = body.find(SKILL_INPUTS_HEADING)
-        if start < 0:
+        inputs = str(detail.get("declared_inputs") or "").strip()
+        if not inputs:
             continue
-        section = body[start + len(SKILL_INPUTS_HEADING) :]
-        # Stop at the next heading: the inputs block is rendered last, but a
-        # caller may append its own sections after it.
-        lines: list[str] = []
-        for line in section.splitlines():
-            if line.startswith("## "):
-                break
-            if line.strip():
-                lines.append(line.strip())
-        if not lines:
-            continue
-        block = f"{_detail_tool_name(detail)}:\n" + "\n".join(lines)
+        block = f"{_detail_tool_name(detail)}:\n{inputs}"
         if block not in seen:
             seen.add(block)
             blocks.append(block)

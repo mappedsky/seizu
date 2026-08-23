@@ -4257,3 +4257,44 @@ async def test_structured_output_reserves_from_observation_not_the_ceiling():
     assert reserved[0] == settings.CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS
     assert reserved[-1] < 1_000
     assert controller.snapshot()["phases"]["router"]["llm_calls"] == 4
+
+
+def test_skill_inputs_block_survives_a_truncated_body():
+    # Measured on a real run: the rendered block is appended last and the
+    # displayed body is capped at 6,000 characters, so a real skill loses
+    # exactly the values the verifier needs. Capture reads the full content.
+    from reporting.services.chat_graph import skill_inputs_block
+
+    content = (
+        "# Reachability\n\nUse the values in the `## Inputs` block below these instructions:\n"
+        "- `max_cves` — the most advisories to assess. Treat it as a hard cap.\n"
+        + ("filler line\n" * 900)
+        + "\n## Inputs\n\n- `repo`: `acme/api`\n- `max_cves`: `7`\n"
+    )
+
+    block = skill_inputs_block(content)
+
+    # The rendered values, not the prose that merely names the heading.
+    assert block == "- `repo`: `acme/api`\n- `max_cves`: `7`"
+    assert "hard cap" not in block
+
+
+def test_skill_inputs_block_ignores_a_prose_mention_alone():
+    from reporting.services.chat_graph import skill_inputs_block
+
+    assert skill_inputs_block("See the `## Inputs` block:\n- `repo` — the repository to review.\n") == ""
+
+
+def test_skill_inputs_block_rejects_a_prose_section_shaped_like_entries():
+    # A real skill documents its tools as "- `tool`: args" under prose that
+    # names the heading; a shape test alone accepts that list as the values.
+    from reporting.services.chat_graph import skill_inputs_block
+
+    content = (
+        "Use the `## Inputs` block below.\n\n"
+        "Tool arguments — use exactly these field names:\n"
+        "- `ext__github__search_code`: query, perPage\n"
+        "- `github_security__repo_dependencies`: repos, packages\n"
+    )
+
+    assert skill_inputs_block(content) == ""

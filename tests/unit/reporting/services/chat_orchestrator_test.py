@@ -4217,7 +4217,11 @@ async def test_verify_step_is_shown_the_declared_inputs_and_call_arguments(mocke
                         "kind": "tool",
                         "title": "Sandbox: load_seizu_skill",
                         "arguments": '{"name": "repo_cve_reachability"}',
-                        "body": "# Reachability\n\ndo the work\n\n## Inputs\n\n- `repo`: `acme/api`\n- `max_cves`: `8`",
+                        # Captured whole at the call: the displayed body is
+                        # truncated and loses the block, and the arguments do
+                        # not show a value that came from a default.
+                        "declared_inputs": "- `repo`: `acme/api`\n- `max_cves`: `8`",
+                        "body": "# Reachability\n\ndo the work ... [truncated]",
                     },
                     {
                         "kind": "tool",
