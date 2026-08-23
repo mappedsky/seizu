@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlparse
 import yaml
 from pydantic import ValidationError
 
-from reporting.schema.mcp_config import template_placeholders, validate_skill_template
+from reporting.schema.mcp_config import template_placeholders, validate_mcp_slug_component, validate_skill_template
 from reporting.schema.plugins import (
     PluginDiagnostic,
     PluginFile,
@@ -86,6 +86,20 @@ def diagnostic(
     skill: str | None = None,
 ) -> PluginDiagnostic:
     return PluginDiagnostic(severity=severity, code=code, message=message, path=path, skill=skill)  # type: ignore[arg-type]
+
+
+def derive_seizu_id(portable_name: str) -> str | None:
+    """The Seizu id a portable name implies, or None when it implies none.
+
+    One name, one id. A package that wants a different id renames itself
+    (AGT-040); the separators differ only because the portable grammar uses
+    hyphens and an MCP name component uses underscores.
+    """
+    candidate = portable_name.replace("-", "_").replace(".", "_")
+    try:
+        return validate_mcp_slug_component(candidate)
+    except ValueError:
+        return None
 
 
 def _safe_path(raw: str) -> str | None:
@@ -287,15 +301,9 @@ def _parse_seizu_extension(
     extensions = manifest.get("extensions")
     raw = extensions.get(EXTENSION_NAMESPACE) if isinstance(extensions, dict) else None
     if raw is None:
-        diagnostics.append(
-            diagnostic(
-                "error",
-                "missing_seizu_extension",
-                f"extensions.{EXTENSION_NAMESPACE}.skillsetId is required",
-                path="plugin.json",
-            )
-        )
-        return None
+        # A package with no Seizu extension is a complete package: every id is
+        # derived from the names it already carries (AGT-040).
+        return SeizuPluginExtension()
     if not isinstance(raw, dict):
         diagnostics.append(
             diagnostic(
@@ -471,8 +479,42 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
     if not _validate_manifest(manifest, diagnostics):
         return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
     extension = _parse_seizu_extension(manifest, diagnostics)
-    plugin_id = extension.skillset_id if extension else ""
     legacy_projection = bool(extension and extension.legacy_skillset_projection)
+    # The package name is the identity; the Seizu id follows from it.
+    plugin_id = derive_seizu_id(str(manifest.get("name", "")))
+    if plugin_id is None:
+        diagnostics.append(
+            diagnostic(
+                "error",
+                "underivable_plugin_id",
+                f"Package name {manifest.get('name')!r} does not derive a Seizu id. Rename it to lower-case "
+                "words separated by single hyphens, starting with a letter and at most 31 characters.",
+                path="plugin.json",
+            )
+        )
+        return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
+    if extension is not None and extension.skillset_id is not None:
+        if extension.skillset_id != plugin_id:
+            diagnostics.append(
+                diagnostic(
+                    "error",
+                    "conflicting_skillset_id",
+                    f"extensions.{EXTENSION_NAMESPACE}.skillsetId is {extension.skillset_id!r}, but the package "
+                    f"name derives {plugin_id!r}. A package has one identity: rename the package, or drop the field.",
+                    path="plugin.json",
+                )
+            )
+            return ParsedPlugin("", manifest, list(by_path.values()), [], diagnostics, digest)
+        if not legacy_projection:
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "redundant_skillset_id",
+                    f"extensions.{EXTENSION_NAMESPACE}.skillsetId repeats what the package name already derives "
+                    "and is no longer read; it can be removed.",
+                    path="plugin.json",
+                )
+            )
     mcp_servers = _parse_mcp(by_path, diagnostics)
     skills: list[PluginSkillItem] = []
     seen_ids: set[str] = set()
@@ -524,14 +566,31 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
             continue
         allowed_tools = raw_allowed.split()
         config = extension.skills.get(name) if extension else None
-        skill_id = config.skill_id if config and config.skill_id else name.replace("-", "_")
-        try:
-            from reporting.schema.mcp_config import validate_mcp_slug_component
-
-            validate_mcp_slug_component(skill_id)
-        except ValueError as exc:
-            diagnostics.append(diagnostic("warning", "invalid_skill_id", str(exc), path=path, skill=name))
+        derived_skill_id = derive_seizu_id(name)
+        if derived_skill_id is None:
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "invalid_skill_id",
+                    f"Skill name {name!r} does not derive a Seizu id; rename it to at most 31 characters.",
+                    path=path,
+                    skill=name,
+                )
+            )
             continue
+        if config and config.skill_id and config.skill_id != derived_skill_id:
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "conflicting_skill_id",
+                    f"skillId is {config.skill_id!r}, but the skill name derives {derived_skill_id!r}. "
+                    "A skill has one identity: rename the skill directory, or drop the field.",
+                    path=path,
+                    skill=name,
+                )
+            )
+            continue
+        skill_id = derived_skill_id
         if skill_id in seen_ids:
             diagnostics.append(
                 diagnostic(
@@ -606,7 +665,6 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
         "extensions": {
             EXTENSION_NAMESPACE: {
                 LEGACY_PROJECTION_EXTENSION_KEY: True,
-                "skillsetId": skillset.skillset_id,
                 "skills": {},
             }
         },
@@ -616,7 +674,6 @@ def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:
     for skill in skills:
         portable_name = skill.skill_id.replace("_", "-")
         extension_skills[portable_name] = {
-            "skillId": skill.skill_id,
             "title": skill.name,
             "enabled": skill.enabled,
             "triggers": skill.triggers,

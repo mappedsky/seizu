@@ -40,6 +40,7 @@ import RowMenu, { RowMenuAction } from 'src/components/RowMenu';
 import UserDisplay from 'src/components/UserDisplay';
 import { usePermissions } from 'src/hooks/usePermissions';
 import type { BackState } from 'src/navigation';
+import { deriveSeizuId } from 'src/pluginAuthoring';
 import {
   CreatePluginRequest,
   PluginListItem,
@@ -48,7 +49,6 @@ import {
 } from 'src/hooks/usePluginsApi';
 import { pageContentSx } from 'src/theme/layout';
 
-const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const PORTABLE_NAME =
   /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 const MAX_SLUG_LEN = 31;
@@ -116,25 +116,25 @@ function NewPluginDialog({
   onClose: () => void;
   onCreate: (request: CreatePluginRequest) => Promise<void>;
 }) {
-  const [pluginId, setPluginId] = useState('');
   const [name, setName] = useState('');
   const [version, setVersion] = useState('1.0.0');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const derivedId = deriveSeizuId(name.trim());
 
   const save = async () => {
-    const id = pluginId.trim();
     const packageName = name.trim();
-    if (!LOWER_SNAKE_ID.test(id) || id.length > MAX_SLUG_LEN) {
-      setError(
-        `Namespace must be lower_snake_case and at most ${MAX_SLUG_LEN} characters.`,
-      );
-      return;
-    }
     if (!PORTABLE_NAME.test(packageName)) {
       setError(
         'Package name must use lowercase letters, numbers, dots, or hyphens.',
+      );
+      return;
+    }
+    if (!deriveSeizuId(packageName)) {
+      setError(
+        `Package name must derive a Seizu namespace: lower-case words separated by single ` +
+          `hyphens, starting with a letter and at most ${MAX_SLUG_LEN} characters.`,
       );
       return;
     }
@@ -146,7 +146,6 @@ function NewPluginDialog({
     setError(null);
     try {
       await onCreate({
-        plugin_id: id,
         name: packageName,
         version: version.trim(),
         description: description.trim(),
@@ -169,18 +168,14 @@ function NewPluginDialog({
         )}
         <Stack spacing={2}>
           <TextField
-            label="Namespace"
-            value={pluginId}
-            onChange={(event) => setPluginId(event.target.value)}
-            helperText="Used in skill names, for example security_review__scan_repository"
-            required
-            fullWidth
-          />
-          <TextField
             label="Package name"
             value={name}
             onChange={(event) => setName(event.target.value)}
-            helperText="Agent Plugins name, such as security-review"
+            helperText={
+              derivedId
+                ? `Skills will be named ${derivedId}__<skill>`
+                : 'Agent Plugins name, such as security-review'
+            }
             required
             fullWidth
           />

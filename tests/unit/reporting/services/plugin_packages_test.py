@@ -176,3 +176,61 @@ def test_the_legacy_projection_is_not_advised_to_restructure():
     parsed = _package("Review {% $repo %}.", projection=True)
 
     assert "templated_skill_body" not in [item.code for item in parsed.diagnostics]
+
+
+def _named_package(name: str, *, skillset_id: str | None = None, skill_id: str | None = None) -> object:
+    extension: dict = {}
+    if skillset_id is not None:
+        extension["skillsetId"] = skillset_id
+    if skill_id is not None:
+        extension["skills"] = {"review": {"skillId": skill_id}}
+    manifest: dict = {"$schema": PLUGIN_SCHEMA, "name": name}
+    if extension:
+        manifest["extensions"] = {"com.mappedsky.seizu": extension}
+    return parse_package(
+        [
+            PluginFile(path="plugin.json", content=json.dumps(manifest).encode()),
+            PluginFile(
+                path="skills/review/SKILL.md",
+                content=b"---\nname: review\ndescription: Review a target\n---\nReview it.",
+            ),
+        ]
+    )
+
+
+def test_ids_derive_from_names_with_no_seizu_extension():
+    """AGT-040: a stock Agent Plugin installs unmodified."""
+    parsed = _named_package("review-tools")
+
+    assert parsed.valid
+    assert parsed.plugin_id == "review_tools"
+    assert [skill.skill_id for skill in parsed.skills] == ["review"]
+
+
+def test_a_skillset_id_that_repeats_the_derived_one_is_redundant():
+    parsed = _named_package("review-tools", skillset_id="review_tools")
+
+    assert parsed.valid
+    assert "redundant_skillset_id" in [item.code for item in parsed.diagnostics]
+
+
+def test_a_skillset_id_that_names_something_else_is_refused():
+    """Two identities for one package is the thing being removed."""
+    parsed = _named_package("review-tools", skillset_id="other_tools")
+
+    assert not parsed.valid
+    assert "conflicting_skillset_id" in [item.code for item in parsed.diagnostics]
+
+
+def test_a_divergent_skill_id_is_refused():
+    parsed = _named_package("review-tools", skill_id="something_else")
+
+    assert "conflicting_skill_id" in [item.code for item in parsed.diagnostics]
+    assert parsed.skills == []
+
+
+def test_a_package_name_that_derives_no_id_is_refused():
+    parsed = _named_package("2fa-tools")
+
+    assert not parsed.valid
+    assert "underivable_plugin_id" in [item.code for item in parsed.diagnostics]

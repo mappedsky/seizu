@@ -175,19 +175,22 @@ async def create_plugin(
     body: PluginCreateRequest,
     current: CurrentUser = Depends(require_permission(Permission.PLUGINS_WRITE)),
 ) -> PluginListItem:
-    if await report_store.get_plugin(body.plugin_id):
+    plugin_id = plugin_packages.derive_seizu_id(body.name)
+    if plugin_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Package name does not derive a Seizu id. Use lower-case words separated by single "
+                "hyphens, starting with a letter and at most 31 characters."
+            ),
+        )
+    if await report_store.get_plugin(plugin_id):
         raise HTTPException(status_code=409, detail="Plugin already exists")
     manifest = {
         "$schema": plugin_packages.PLUGIN_SCHEMA,
         "name": body.name,
         "version": body.version,
         "description": body.description,
-        "extensions": {
-            plugin_packages.EXTENSION_NAMESPACE: {
-                "skillsetId": body.plugin_id,
-                "skills": {},
-            }
-        },
     }
     files = [
         PluginFile(

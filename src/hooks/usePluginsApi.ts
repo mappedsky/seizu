@@ -26,7 +26,7 @@ export interface PluginListItem {
 }
 
 export interface CreatePluginRequest {
-  plugin_id: string;
+  /** The Seizu namespace is derived from this, never supplied separately. */
   name: string;
   version: string;
   description: string;

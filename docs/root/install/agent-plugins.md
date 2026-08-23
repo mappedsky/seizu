@@ -153,6 +153,22 @@ editor prompts before discarding them. Default package bounds are 10 MiB
 compressed, 25 MiB unpacked, 500 files, 10 MiB per file, and 512 KiB per
 `SKILL.md`.
 
+## Identity
+
+A package's Seizu namespace is derived from its `name` in `plugin.json`, and a
+skill's id from its directory name: `security-review` becomes
+`security_review`, so its skills are named `security_review__<skill>`. Nothing
+declares an id separately — to change one, rename the package or the skill
+directory.
+
+A name therefore has to derive a valid identifier: lower-case words separated by
+single hyphens, starting with a letter, at most 31 characters. `2fa-tools` and
+anything longer are refused at publish with that constraint named.
+
+Because every id derives, the `com.mappedsky.seizu` extension is optional: a
+stock Agent Plugins 1.0.0 package installs unmodified, and the extension is only
+needed to declare inputs, triggers or aliases.
+
 ## Skill inputs
 
 A skill declares its inputs in the Seizu extension, and `prompts/get` returns

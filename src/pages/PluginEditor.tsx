@@ -87,9 +87,7 @@ function cloneManifest(manifest: PluginManifest): PluginManifest {
 }
 
 function effectiveSkillId(skill: StagedSkill): string {
-  return (
-    skill.extension.skillId || skill.document.portableName.replaceAll('-', '_')
-  );
+  return skill.document.portableName.replaceAll('-', '_');
 }
 
 /** The whole package as the publish/validate endpoints take it. */
@@ -156,20 +154,16 @@ function NewSkillDialog({
   ) => Promise<void>;
 }) {
   const [portableName, setPortableName] = useState('');
-  const [skillId, setSkillId] = useState('');
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const updatePortableName = (value: string) => {
-    setPortableName(value);
-    setSkillId(value.replaceAll('-', '_'));
-  };
+  const skillId = portableName.trim().replaceAll('-', '_');
 
   const create = async () => {
     const portable = portableName.trim();
-    const id = skillId.trim();
+    const id = skillId;
     if (!PORTABLE_SKILL_NAME.test(portable)) {
       setError('Portable name must use lowercase words separated by hyphens.');
       return;
@@ -193,7 +187,6 @@ function NewSkillDialog({
           body: '# Instructions\n\nDescribe how the agent should use this skill.',
         },
         {
-          skillId: id,
           title: title.trim() || undefined,
           enabled: true,
           triggers: [],
@@ -226,19 +219,10 @@ function NewSkillDialog({
             <TextField
               label="Portable name"
               value={portableName}
-              onChange={(event) => updatePortableName(event.target.value)}
-              required
-              fullWidth
-            />
-          </FieldWithHelp>
-          <FieldWithHelp
-            label="Skill ID"
-            tooltip="This appears after the plugin namespace in the Seizu skill name."
-          >
-            <TextField
-              label="Skill ID"
-              value={skillId}
-              onChange={(event) => setSkillId(event.target.value)}
+              onChange={(event) => setPortableName(event.target.value)}
+              helperText={
+                skillId ? `Seizu skill id will be ${skillId}` : undefined
+              }
               required
               fullWidth
             />

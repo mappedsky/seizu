@@ -2448,3 +2448,33 @@ block there would both duplicate them and change a response callers parse.
 of the conversation, and only `Prompt.description` reaches the system prompt, so
 neither shape moves the cached prefix. Don't cite caching as the reason for
 this; the reason is that the body travels.
+
+## AGT-040 — A package and a skill each have one identity
+
+**Applies to:** `plugin_packages.derive_seizu_id`, `SeizuPluginExtension`,
+`PluginCreateRequest`, `PluginSkillEditor.tsx`
+
+A plugin's Seizu id is derived from the package `name`, and a skill's from its
+portable name: hyphens and dots become underscores, and the result must be a
+valid MCP name component. `skillsetId` and `skillId` are no longer read. One
+that repeats what the name derives is a `redundant_skillset_id` warning; one
+that names something else is an error that says to rename instead. The whole
+`com.mappedsky.seizu` extension is now optional, so a stock Agent Plugins 1.0
+package installs unmodified.
+
+**Why:** the pair was immutable in both directions — a package carried a
+portable name *and* a Seizu id forever, with nothing keeping them related and
+no way to change either. `skill_id` already derived by default, so the two
+halves of the same idea disagreed. Naming a thing once is the whole feature;
+an author who wants a different id renames the package or the skill directory.
+
+A name that derives nothing valid — leading digit, over 31 characters — is
+refused at publish and at create, naming the constraint rather than silently
+inventing an id.
+
+**Known trade:** `STO-009` used an explicit same-ID package to bind a
+production cutover to existing skillsets, and a derived id could in principle
+adopt a legacy skillset that happens to match. Accepted deliberately: the
+legacy surface exists for one release and the collision needs a legacy
+skillset whose id is exactly the derived one. If that release is extended, put
+the check back before the derivation, not the field.

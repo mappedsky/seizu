@@ -7,6 +7,21 @@ export const SEIZU_EXTENSION = 'com.mappedsky.seizu';
 export const PORTABLE_SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const LOWER_SNAKE_ID = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 export const MARKDOC_VAR_RE = /\{%\s*\$([a-z][a-z0-9_]*)\s*%\}/g;
+export const MAX_SLUG_LEN = 31;
+
+/**
+ * The Seizu id a portable name implies, or null when it implies none.
+ *
+ * One name, one id: a package or skill that wants a different id renames
+ * itself. Mirrors `derive_seizu_id` in reporting/services/plugin_packages.py.
+ */
+export function deriveSeizuId(portableName: string): string | null {
+  const candidate = portableName.replaceAll('-', '_').replaceAll('.', '_');
+  if (!LOWER_SNAKE_ID.test(candidate) || candidate.length > MAX_SLUG_LEN) {
+    return null;
+  }
+  return candidate;
+}
 
 export interface PluginAuthor {
   name?: string;

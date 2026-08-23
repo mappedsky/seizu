@@ -208,9 +208,10 @@ describe('PluginEditor', () => {
     expect(
       within(dialog).getByRole('textbox', { name: /portable name/i }),
     ).toBeInTheDocument();
+    // The skill id is derived from the portable name, not authored (AGT-040).
     expect(
-      within(dialog).getByRole('textbox', { name: /skill id/i }),
-    ).toBeInTheDocument();
+      within(dialog).queryByRole('textbox', { name: /skill id/i }),
+    ).not.toBeInTheDocument();
     expect(
       within(dialog).getByRole('textbox', { name: /display title/i }),
     ).toBeInTheDocument();

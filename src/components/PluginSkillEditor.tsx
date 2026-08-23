@@ -434,9 +434,8 @@ export default function PluginSkillEditor({
   const [description, setDescription] = useState(document.description);
   const [body, setBody] = useState(document.body);
   const [allowedTools, setAllowedTools] = useState(document.allowedTools);
-  const [skillId, setSkillId] = useState(
-    extension.skillId ?? document.portableName.replaceAll('-', '_'),
-  );
+  // Derived, never authored: the portable name is the skill's identity.
+  const skillId = document.portableName.replaceAll('-', '_');
   const [title, setTitle] = useState(
     extension.title ??
       document.portableName
@@ -511,7 +510,8 @@ export default function PluginSkillEditor({
     stagedRef.current(
       { ...document, description: description.trim(), body, allowedTools },
       {
-        skillId: skillId.trim(),
+        // Not written: the id derives from the portable name, and a manifest
+        // that repeats it is flagged as redundant on publish (AGT-040).
         title: title.trim() || undefined,
         enabled,
         triggers,
@@ -573,15 +573,9 @@ export default function PluginSkillEditor({
         </FieldWithHelp>
         <FieldWithHelp
           label="Skill ID"
-          tooltip="This appears after the plugin namespace in the Seizu skill name."
+          tooltip="Derived from the portable name — a skill has one identity. Rename the skill to change it."
         >
-          <TextField
-            label="Skill ID"
-            value={skillId}
-            onChange={(event) => setSkillId(event.target.value)}
-            required
-            fullWidth
-          />
+          <TextField label="Skill ID" value={skillId} disabled fullWidth />
         </FieldWithHelp>
         <TextField
           label="Display title"

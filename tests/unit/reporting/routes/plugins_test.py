@@ -97,7 +97,6 @@ async def test_create_plugin_publishes_minimal_portable_package(mocker):
         response = await client.post(
             "/api/v1/plugins",
             json={
-                "plugin_id": "review_tools",
                 "name": "review-tools",
                 "version": "1.0.0",
                 "description": "Review security findings",
@@ -108,8 +107,11 @@ async def test_create_plugin_publishes_minimal_portable_package(mocker):
     files = publish.await_args.kwargs["files"]
     manifest = json.loads(files[0].content)
     assert manifest["$schema"] == PLUGIN_SCHEMA
-    assert manifest["extensions"]["com.mappedsky.seizu"]["skillsetId"] == "review_tools"
-    assert manifest["extensions"]["com.mappedsky.seizu"]["skills"] == {}
+    # One identity: the package name, with the Seizu id derived from it, and no
+    # Seizu extension block at all in a package that needs nothing from one.
+    assert manifest["name"] == "review-tools"
+    assert "extensions" not in manifest
+    assert publish.await_args.kwargs["plugin_id"] == "review_tools"
 
 
 async def test_create_plugin_rejects_existing_id(mocker):
@@ -120,7 +122,7 @@ async def test_create_plugin_rejects_existing_id(mocker):
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/plugins",
-            json={"plugin_id": "review_tools", "name": "review-tools"},
+            json={"name": "review-tools"},
         )
     assert response.status_code == 409
 
@@ -377,3 +379,10 @@ async def test_publish_does_not_warn_when_the_version_moved(mocker):
     assert response.status_code == 200
     codes = [item["code"] for item in publish.await_args.kwargs["diagnostics"]]
     assert "unchanged_package_version" not in codes
+
+
+async def test_create_plugin_refuses_a_name_that_derives_no_id(mocker):
+    mocker.patch("reporting.routes.plugins.report_store.get_plugin", new=AsyncMock(return_value=None))
+    async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
+        response = await client.post("/api/v1/plugins", json={"name": "2fa-tools"})
+    assert response.status_code == 400

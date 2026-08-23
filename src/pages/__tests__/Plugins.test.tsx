@@ -169,12 +169,6 @@ describe('Plugins', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New plugin' }));
     const dialog = screen.getByRole('dialog', { name: 'New Agent Plugin' });
     fireEvent.change(
-      within(dialog).getByRole('textbox', { name: /namespace/i }),
-      {
-        target: { value: 'repository_review' },
-      },
-    );
-    fireEvent.change(
       within(dialog).getByRole('textbox', { name: /package name/i }),
       {
         target: { value: 'repository-review' },
@@ -189,8 +183,8 @@ describe('Plugins', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => {
+      // No namespace is supplied: the server derives it from the name.
       expect(create).toHaveBeenCalledWith({
-        plugin_id: 'repository_review',
         name: 'repository-review',
         version: '1.0.0',
         description: 'Review repositories',
