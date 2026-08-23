@@ -1,10 +1,10 @@
 ---
 name: github-org-security-overview
-description: Guide an agent through a GitHub organization security investigation using
-  the github_security toolset and produce a prioritized executive summary.
-allowed-tools: github_security__sync_freshness github_security__org_overview github_security__repo_risk_summary
-  github_security__top_vulnerabilities github_security__actions_hardening_findings
-  github_security__coverage_gaps github_security__identity_access_summary github_security__recommendations
+description: Guide an agent through a GitHub organization security investigation using the github_security
+  toolset and produce a prioritized executive summary.
+allowed-tools: mcp__seizu__github_security__sync_freshness mcp__seizu__github_security__org_overview mcp__seizu__github_security__repo_risk_summary
+  mcp__seizu__github_security__top_vulnerabilities mcp__seizu__github_security__actions_hardening_findings
+  mcp__seizu__github_security__coverage_gaps mcp__seizu__github_security__identity_access_summary mcp__seizu__github_security__recommendations
 ---
 Investigate the GitHub organization `org` using the github_security user-defined tools. Treat `org` as an explicit required input and do not substitute a default organization.
 

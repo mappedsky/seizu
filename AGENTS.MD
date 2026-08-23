@@ -258,7 +258,9 @@ diagnostics rather than raising. Package bounds live at the top of that module.
   acquire package installation by renaming.
 - **`allowed-tools` is a dependency declaration, not a grant** (AGT-036): entries
   Seizu recognizes must exist in the caller's RBAC-filtered inventory or the
-  skill is unavailable; `mcp:<server>/<tool>` binds to a configured proxy by
+  skill is unavailable. Every dependency is `mcp__<server>__<tool>`, Seizu's own
+  included as `mcp__seizu__<tool>` ([`AGT-042`](docs/root/dev/decisions/chat-agent.md));
+  another server binds to a configured proxy by
   `MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE` (default `none` — Seizu only connects to
   its own proxies, so the URL a package declares is documentation).
 - **`resources/list` catalogues skills, not files** — one resource per enabled

@@ -97,7 +97,7 @@ def _plugin_skill() -> PluginSkillItem:
         title="Summarize",
         description="Summarize a topic",
         template="Summarize the topic.",
-        allowed_tools=["reports__list", "mcp:github/search", "portable-tool"],
+        allowed_tools=["mcp__seizu__reports__list", "mcp__github__search", "portable-tool"],
         source_path="skills/summarize",
         mcp_servers={"github": {"type": "streamable-http", "url": "https://github.example/mcp"}},
         revision=3,
@@ -1108,7 +1108,7 @@ async def test_plugin_shadows_legacy_skill_and_renders_materialized_package(mock
 
 
 async def test_unavailable_plugin_still_shadows_same_named_legacy_skill(mocker):
-    plugin_skill = _plugin_skill().model_copy(update={"allowed_tools": ["reports__missing"]})
+    plugin_skill = _plugin_skill().model_copy(update={"allowed_tools": ["mcp__seizu__reports__missing"]})
     legacy_skill = _skill()
     other_legacy_skill = _skill().model_copy(update={"skill_id": "other"})
     mocker.patch.object(report_store, "is_initialized", return_value=True)
@@ -1174,7 +1174,7 @@ def test_plugin_allowed_tools_strict_mode_requires_url_alias(mocker):
     )
 
     assert resolved == ["reports__list"]
-    assert missing == ["mcp:github/search"]
+    assert missing == ["mcp__github__search"]
 
 
 def test_plugin_allowed_tools_none_mode_ignores_url_alias(mocker):
@@ -1211,7 +1211,7 @@ def test_plugin_allowed_tools_fallback_still_requires_declared_server(mocker):
     )
 
     assert resolved == ["reports__list"]
-    assert missing == ["mcp:github/search"]
+    assert missing == ["mcp__github__search"]
 
 
 async def test_plugin_resources_catalogue_skills_not_every_packaged_file(mocker):
@@ -2279,3 +2279,54 @@ async def test_skill_render_returns_instructions_and_inputs_as_two_messages(mock
     assert "Summarize the `topic` input." in instructions
     assert "alerts" not in instructions
     assert "`topic`: `alerts`" in inputs
+
+
+def test_seizu_names_its_own_tools_like_any_other_mcp_server(mocker):
+    """AGT-042: one vocabulary, so a package reads the same wherever it lands."""
+    skill = _plugin_skill().model_copy(
+        update={"allowed_tools": ["mcp__seizu__reports__list", "Read", "Bash(git:*)"], "mcp_servers": {}}
+    )
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(skill, {"reports__list"})  # noqa: SLF001
+
+    # The Seizu tool resolves to its bare runtime name; the consumer's own
+    # built-ins are portable metadata and never ours to gate on.
+    assert resolved == ["reports__list"]
+    assert missing == []
+
+
+def test_a_missing_seizu_tool_still_gates_the_skill(mocker):
+    skill = _plugin_skill().model_copy(update={"allowed_tools": ["mcp__seizu__reports__list"], "mcp_servers": {}})
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(skill, set())  # noqa: SLF001
+
+    assert resolved == []
+    assert missing == ["mcp__seizu__reports__list"]
+
+
+def test_a_bare_tool_name_is_no_longer_a_seizu_dependency(mocker):
+    """Bare tokens mean the consumer's built-ins, per the Agent Skills spec."""
+    skill = _plugin_skill().model_copy(update={"allowed_tools": ["reports__list"], "mcp_servers": {}})
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(skill, set())  # noqa: SLF001
+
+    assert resolved == []
+    assert missing == []
+
+
+def test_an_external_proxy_cannot_claim_the_reserved_seizu_name(mocker):
+    proxy = _external_proxy()
+    proxy.name = "seizu"
+    mocker.patch.object(external_mcp.settings, "MCP_EXTERNAL_PROXIES", [proxy])
+    skill = _plugin_skill().model_copy(
+        update={
+            "allowed_tools": ["mcp__seizu__reports__list"],
+            "mcp_servers": {"seizu": {"type": "streamable-http", "url": "https://impostor.example/mcp"}},
+        }
+    )
+
+    resolved, missing = mcp_runtime._resolve_plugin_allowed_tools(skill, {"reports__list"})  # noqa: SLF001
+
+    # Resolved internally, not through the proxy that took the name.
+    assert resolved == ["reports__list"]
+    assert missing == []

@@ -31,12 +31,12 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.routes.query import _serialize_neo4j_value
 from reporting.schema.confirmations import ActionConfirmationTarget, ConfirmationSource
-from reporting.schema.mcp_config import EXTERNAL_MCP_TOOL_NAME_RE, MCP_TOOL_NAME_RE, render_skill_parts
+from reporting.schema.mcp_config import render_skill_parts
 from reporting.services import action_confirmations, external_mcp, report_store, reporting_neo4j, telemetry
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins.base import BuiltinTool
 from reporting.services.payload_bounds import json_size_bytes, largest_prefix_within_bytes
-from reporting.services.plugin_packages import logical_mcp_ref
+from reporting.services.plugin_packages import SEIZU_MCP_SERVER_NAME, mcp_tool_ref
 from reporting.services.result_limits import (
     ResultLimits,
     Truncation,
@@ -982,32 +982,36 @@ def _resolve_plugin_allowed_tools(skill: Any, available: set[str]) -> tuple[list
         else:
             missing.append("sandbox__run_script")
     for entry in skill.allowed_tools:
-        logical = logical_mcp_ref(entry)
-        if logical is not None:
-            server_name, remote_tool = logical
-            server = skill.mcp_servers.get(server_name)
-            match_mode = settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
-            proxy = (
-                external_mcp.proxy_for_upstream_url(server.get("url", ""))
-                if server and match_mode != settings.ExternalPluginURLMatchMode.NONE
-                else None
-            )
-            name = external_mcp.namespaced_tool_name(proxy.name, remote_tool) if proxy else None
-            if name is None and server is not None and match_mode != settings.ExternalPluginURLMatchMode.STRICT:
-                name = external_mcp.namespaced_tool_name(server_name, remote_tool)
-            if name and name in available:
-                resolved.append(name)
+        ref = mcp_tool_ref(entry)
+        if ref is None:
+            # Not an MCP reference: the consumer's own built-in, such as `Read`
+            # or `Bash(git:*)`. Portable metadata, and never ours to resolve.
+            continue
+        server_name, remote_tool = ref
+        if server_name == SEIZU_MCP_SERVER_NAME:
+            # Seizu named as a server like any other, so one package says what
+            # it needs in one vocabulary wherever it is installed (AGT-042).
+            if remote_tool in available:
+                resolved.append(remote_tool)
             else:
                 missing.append(entry)
             continue
-        if entry.startswith("mcp:"):
+        server = skill.mcp_servers.get(server_name)
+        match_mode = settings.MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE
+        proxy = (
+            external_mcp.proxy_for_upstream_url(server.get("url", ""))
+            if server and match_mode != settings.ExternalPluginURLMatchMode.NONE
+            else None
+        )
+        name = external_mcp.namespaced_tool_name(proxy.name, remote_tool) if proxy else None
+        # An external server still has to be declared in the package's mcp.json:
+        # that file is what a package uses to say which servers it depends on.
+        if name is None and server is not None and match_mode != settings.ExternalPluginURLMatchMode.STRICT:
+            name = external_mcp.namespaced_tool_name(server_name, remote_tool)
+        if name and name in available:
+            resolved.append(name)
+        else:
             missing.append(entry)
-            continue
-        if MCP_TOOL_NAME_RE.fullmatch(entry) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(entry):
-            if entry in available:
-                resolved.append(entry)
-            else:
-                missing.append(entry)
     return resolved, missing
 
 

@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import ValidationError
@@ -361,6 +361,17 @@ def _parse_mcp(files: dict[str, PluginFile], diagnostics: list[PluginDiagnostic]
         return {}
     result: dict[str, dict[str, Any]] = {}
     for name, server in config["mcpServers"].items():
+        if name == SEIZU_MCP_SERVER_NAME:
+            diagnostics.append(
+                diagnostic(
+                    "warning",
+                    "reserved_mcp_server",
+                    f"{SEIZU_MCP_SERVER_NAME!r} names Seizu's own tools and cannot be redefined; "
+                    "this entry is ignored.",
+                    path="mcp.json",
+                )
+            )
+            continue
         if not isinstance(name, str) or not name or not isinstance(server, dict):
             diagnostics.append(
                 diagnostic("warning", "invalid_mcp_server", f"Skipping invalid MCP server {name!r}", path="mcp.json")
@@ -601,13 +612,24 @@ def parse_package(files: list[PluginFile]) -> ParsedPlugin:
     return ParsedPlugin(plugin_id, manifest, list(by_path.values()), skills, diagnostics, digest)
 
 
-def logical_mcp_ref(value: str) -> tuple[str, str] | None:
-    if not value.startswith("mcp:"):
+#: The MCP server name a package uses to mean Seizu itself. Reserved: an
+#: external proxy of this name never answers `mcp__seizu__*` (AGT-042).
+SEIZU_MCP_SERVER_NAME = "seizu"
+
+
+def mcp_tool_ref(value: str) -> tuple[str, str] | None:
+    """Parse ``mcp__<server>__<tool>`` into its parts.
+
+    The convention the ecosystem already uses for MCP tools in `allowed-tools`.
+    The server is the first segment; everything after it is the tool, because a
+    tool name may itself contain ``__`` -- Seizu's own are all ``group__action``.
+    """
+    if not value.startswith("mcp__"):
         return None
-    server, separator, tool = value[4:].partition("/")
+    server, separator, tool = value[len("mcp__") :].partition("__")
     if not separator or not server or not tool:
         return None
-    return unquote(server), unquote(tool)
+    return server, tool
 
 
 def legacy_skillset_package(skillset: Any, skills: list[Any]) -> ParsedPlugin:

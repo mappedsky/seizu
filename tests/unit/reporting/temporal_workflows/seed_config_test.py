@@ -4,7 +4,7 @@ import yaml
 
 from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.services import external_mcp, mcp_runtime
-from reporting.services.plugin_packages import files_from_directory, logical_mcp_ref, parse_package
+from reporting.services.plugin_packages import files_from_directory, mcp_tool_ref, parse_package
 
 
 def _activity(workflow: dict, stage: int, position: int = 0) -> dict:
@@ -34,9 +34,9 @@ def test_portable_plugin_dependencies_match_development_proxy_aliases(mocker) ->
 
     available: set[str] = set()
     for dependency in dependency_review.allowed_tools:
-        logical = logical_mcp_ref(dependency)
-        assert logical is not None
-        server_name, tool_name = logical
+        ref = mcp_tool_ref(dependency)
+        assert ref is not None
+        server_name, tool_name = ref
         upstream = dependency_review.mcp_servers[server_name]["url"]
         assert proxies_by_upstream[upstream].name == server_name
         available.add(external_mcp.namespaced_tool_name(server_name, tool_name))
@@ -81,9 +81,10 @@ def test_production_security_plugin_is_seeded_independently_of_legacy_skillsets(
     assert plugin_config["skills"] == {"repo_cve_exploitability": False}
 
     reachability = next(skill for skill in parsed.skills if skill.skill_id == "repo_cve_reachability")
-    assert "mcp:github/get_file_contents" in reachability.allowed_tools
-    assert "mcp:deps/depsdev_find_dependency_path" in reachability.allowed_tools
-    assert "sandbox__delegate" in reachability.allowed_tools
+    # One vocabulary for every dependency, Seizu's own included (AGT-042).
+    assert "mcp__github__get_file_contents" in reachability.allowed_tools
+    assert "mcp__deps__depsdev_find_dependency_path" in reachability.allowed_tools
+    assert "mcp__seizu__sandbox__delegate" in reachability.allowed_tools
 
     example_line = next(
         line

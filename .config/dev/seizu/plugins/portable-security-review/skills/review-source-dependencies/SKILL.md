@@ -1,7 +1,8 @@
 ---
 name: review-source-dependencies
 description: Inspect a repository and verify how one package reaches a target dependency.
-allowed-tools: mcp:github/get_file_contents mcp:github/search_code mcp:deps/depsdev_find_dependency_path mcp:deps/depsdev_get_requirements
+allowed-tools: mcp__github__get_file_contents mcp__github__search_code mcp__deps__depsdev_find_dependency_path
+  mcp__deps__depsdev_get_requirements
 ---
 Review dependency usage in the `repository` input using only the declared MCP tools.
 

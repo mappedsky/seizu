@@ -1,7 +1,8 @@
 ---
 name: verify-packaged-assets
-description: Verify that a packaged reference can be read and a packaged script can execute in the conversation sandbox.
-allowed-tools: sandbox__read_file
+description: Verify that a packaged reference can be read and a packaged script can execute in the conversation
+  sandbox.
+allowed-tools: mcp__seizu__sandbox__read_file
 ---
 Verify this installed Agent Plugin package using the materialized skill path appended below.
 

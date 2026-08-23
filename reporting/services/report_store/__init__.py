@@ -15,8 +15,6 @@ from reporting.schema.chat import (
 )
 from reporting.schema.confirmations import ActionConfirmation, ConfirmationDecision, ConfirmationSource
 from reporting.schema.mcp_config import (
-    EXTERNAL_MCP_TOOL_NAME_RE,
-    MCP_TOOL_NAME_RE,
     SkillItem,
     SkillsetListItem,
     SkillsetVersion,
@@ -710,12 +708,25 @@ async def list_skills(skillset_id: str) -> list[SkillItem]:
     return [_plugin_skill(item, plugin) for item in await store.list_plugin_skills(skillset_id)]
 
 
+def _seizu_tool_names(allowed_tools: list[str]) -> list[str]:
+    """The Seizu tools an `allowed-tools` list names, unqualified.
+
+    A package names them `mcp__seizu__<tool>` like any other MCP server's
+    (AGT-042); the legacy `SkillItem` projection carries the bare names its
+    consumers already expect.
+    """
+    from reporting.services.plugin_packages import SEIZU_MCP_SERVER_NAME, mcp_tool_ref
+
+    names: list[str] = []
+    for entry in allowed_tools:
+        ref = mcp_tool_ref(entry)
+        if ref is not None and ref[0] == SEIZU_MCP_SERVER_NAME:
+            names.append(ref[1])
+    return names
+
+
 def _plugin_skill(skill: PluginSkillItem, plugin: PluginListItem) -> SkillItem:
-    direct_tools = [
-        name
-        for name in skill.allowed_tools
-        if MCP_TOOL_NAME_RE.fullmatch(name) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(name)
-    ]
+    direct_tools = _seizu_tool_names(skill.allowed_tools)
     return SkillItem(
         skill_id=skill.skill_id,
         skillset_id=skill.plugin_id,
@@ -870,11 +881,7 @@ async def _plugin_skill_version(
     skill = next((item for item in parsed.skills if item.skill_id == skill_id), None)
     if not skill:
         return None
-    direct_tools = [
-        name
-        for name in skill.allowed_tools
-        if MCP_TOOL_NAME_RE.fullmatch(name) or EXTERNAL_MCP_TOOL_NAME_RE.fullmatch(name)
-    ]
+    direct_tools = _seizu_tool_names(skill.allowed_tools)
     return SkillVersion(
         skill_id=skill.skill_id,
         skillset_id=skill.plugin_id,

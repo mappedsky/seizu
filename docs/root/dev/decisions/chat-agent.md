@@ -2511,3 +2511,40 @@ republish simply never touches it.
 **Don't:** reintroduce it as a "default for first install". That is the rule
 above wearing a hat, and it makes a package's meaning depend on whether the
 store had seen it before.
+
+## AGT-042 — Seizu's own tools are named like any other MCP server's
+
+**Applies to:** `plugin_packages.mcp_tool_ref`, `SEIZU_MCP_SERVER_NAME`,
+`_resolve_plugin_allowed_tools`
+
+`allowed-tools` entries are `mcp__<server>__<tool>`, and Seizu is the server
+named `seizu`: `mcp__seizu__graph__query`, `mcp__github__get_file_contents`.
+Anything that is not an MCP reference — `Read`, `Bash(git:*)` — is the
+consumer's own built-in, preserved and never resolved by us. `seizu` is
+reserved: an external proxy or an `mcp.json` entry of that name does not answer
+for it.
+
+**Why:** the package previously used three vocabularies at once — bare
+`graph__query` for Seizu, `mcp:<server>/<tool>` for external MCPs, and
+`ext__<proxy>__<tool>` for their internal names — and only the first was even
+the tool's real name. `mcp:<server>/<tool>` was ours alone; nothing else reads
+it. `mcp__<server>__<tool>` is what the ecosystem uses (it is Claude Code's
+permission-rule syntax, which is what `allowed-tools` values are), and Seizu's
+tool names are already `group__action`, so `mcp__seizu__graph__query` parses as
+server `seizu`, tool `graph__query` and resolves in a client that has Seizu
+configured. Neither the Agent Skills nor the Agent Plugins specification defines
+a tool-naming convention, so the one in use is the one worth matching.
+
+**The field means something different at each end, and we keep our meaning.**
+The Agent Skills spec calls `allowed-tools` "tools that are pre-approved to
+run" and marks it experimental; Claude Code grants those tools for the turn.
+Seizu treats it as a dependency: a skill is *absent* from a user's list when a
+listed tool is unavailable to them (AGT-002 still applies — it grants nothing).
+Gating is kept deliberately, because not offering a skill whose tools the caller
+cannot reach beats offering one that fails halfway. The consequence to know: a
+package authored elsewhere that lists tools defensively becomes unavailable here
+if any one of them is missing.
+
+**Don't:** resolve bare names as Seizu tools again "for convenience". That is a
+second spelling for a tool that already has one, and it collides with the
+built-in names the spec's own example uses.

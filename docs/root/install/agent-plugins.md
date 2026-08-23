@@ -69,25 +69,38 @@ Use the standard Agent Skills `allowed-tools` frontmatter field:
 ---
 name: review-repository
 description: Review one repository for security issues.
-allowed-tools: graph__query mcp:github/get_file
+allowed-tools: mcp__seizu__graph__query mcp__github__get_file_contents
 ---
 ```
 
-For Seizu-recognized values, `allowed-tools` declares both disclosure and a
-required dependency. A skill is absent from an individual user's prompt list
-when a required tool is unavailable to that user. It never grants a permission
-or bypasses an action confirmation; the normal RBAC and confirmation checks
-still apply. Unrecognized portable tokens are preserved and ignored by Seizu.
+Note that Seizu reads this field differently from the Agent Skills
+specification, which calls it "tools that are pre-approved to run". Here it is a
+**dependency**: a skill is absent from an individual user's prompt list when a
+listed tool is unavailable to that user. It never grants a permission or
+bypasses an action confirmation; the normal RBAC and confirmation checks still
+apply. A package authored elsewhere that lists tools defensively therefore
+becomes unavailable here if any one of them is missing. Tokens that are not MCP
+references — `Read`, `Bash(git:*)` — are the consumer's own built-ins,
+preserved and ignored.
 
-Supported Seizu forms are:
+Every dependency is named `mcp__<server>__<tool>`, the convention agent clients
+already use, and Seizu is the server named `seizu`:
 
-- exact Seizu MCP tool names, such as `graph__query`;
-- existing external proxy names, such as `ext__github__get_file`;
-- logical plugin MCP references, `mcp:<server>/<tool>`.
+```yaml
+allowed-tools: mcp__seizu__graph__query mcp__github__get_file_contents
+```
 
-For a logical reference, `<server>` names an entry in the package's `mcp.json`.
-Seizu never connects to that address directly. Configure the identity proxy's
-`upstream_urls` entry to associate the portable endpoint with the proxy:
+A skill's *instructions* still name tools as the host presents them at call
+time — `github_security__repo_risk_summary`, `ext__github__get_file_contents` —
+because that is what the agent has to call. The frontmatter is the portable
+contract; the body describes the tools of whichever host renders it, and the
+rendered skill carries that host's resolved names.
+
+`mcp__seizu__<tool>` names one of Seizu's own MCP tools; `seizu` is reserved, so
+neither an external proxy nor an `mcp.json` entry can claim it. Any other server
+must be declared in the package's `mcp.json`, and binds to a configured identity
+proxy — Seizu never connects to the declared address itself. Configure the
+proxy's `upstream_urls` entry to associate the portable endpoint with the proxy:
 
 ```json
 [
