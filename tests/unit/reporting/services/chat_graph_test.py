@@ -4298,3 +4298,34 @@ def test_skill_inputs_block_rejects_a_prose_section_shaped_like_entries():
     )
 
     assert skill_inputs_block(content) == ""
+
+
+def test_budgeted_context_sizing_is_one_function_for_both_loops(mocker):
+    # The worker and the sandbox sub-agent size their context the same way; the
+    # sub-agent had neither half of it, and it is the loop that re-sends the
+    # whole exchange on every inner call.
+    from reporting.services.chat_budget import BudgetController, initial_budget_ledger
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
+    mocker.patch("reporting.settings.CHAT_RUN_RESERVE_PERCENT", 20)
+
+    fresh = BudgetController(initial_budget_ledger())
+    assert chat_graph.budgeted_context_max_tokens(fresh, base_max_tokens=40_000) == 40_000
+    # Degraded tightens by a quarter, and is asked for rather than inferred, so
+    # a caller can add its own reason (a step degraded on its own share).
+    assert chat_graph.budgeted_context_max_tokens(fresh, base_max_tokens=40_000, degraded=True) == 10_000
+    # No controller at all is the sub-agent outside a budgeted run.
+    assert chat_graph.budgeted_context_max_tokens(None, base_max_tokens=40_000) == 40_000
+    # The floor still wins over the degraded divisor.
+    drained = BudgetController({**initial_budget_ledger(), "total_tokens": 119_000})
+    assert chat_graph.budgeted_context_max_tokens(drained, base_max_tokens=40_000, degraded=True) == 2_500
+
+
+def test_detect_tool_markup_reports_the_tools_a_model_wrote_as_prose():
+    # Shared with the sub-agent, which has no streaming filter and would
+    # otherwise return the markup as its findings.
+    leaked, names = chat_graph.detect_tool_markup("I will call <｜tool▁call▁begin｜>graph__query<｜tool▁sep｜>")
+
+    assert leaked is True
+    assert "graph__query" in names
+    assert chat_graph.detect_tool_markup("A perfectly ordinary answer.") == (False, ())

@@ -712,3 +712,47 @@ run it, still never provisions anything.
 **Don't:** materialize for a skill without scripts, or for a caller lacking
 `sandbox:delegate`. Those are the cases where a render would be paying for a VM
 to hold a template nobody can use.
+
+## SBX-019 — Behavior shared with the outer loop lives in the wrapper, not the loop
+
+**Decision.** Anything both the chat agent and the sandbox sub-agent should do
+is written once and called from both. Where it cannot be — because the
+sub-agent runs `create_react_agent` rather than `_run_llm_tool_turn` — the
+shared part is factored out and only the wiring is duplicated.
+
+**Why.** The sub-agent inherits everything that lives in the *model wrapper*
+and misses everything that lives in the *loop*.
+`_ToolMessageNormalizingModel.ainvoke` gave it budget reservation, scoping,
+tracing, cache breakpoints and projected output tokens for free. Every
+improvement made inside `_run_llm_tool_turn` had to be ported by hand, and
+three were not:
+
+- **Tool-markup leak detection.** A message with no structured tool calls is
+  taken as the delegation's answer, so markup written as prose came back as
+  findings and entered the episode log the next sub-agent reads as established
+  ground. Silent: nothing reported it, and the sub-agent runs on the cheaper
+  model, which is likelier to do it.
+- **Context-overflow retry.** An overflow reached the generic handler and the
+  caller was told "Sandbox task failed" — indistinguishable from a broken
+  sandbox, with the whole delegation discarded.
+- **Budget-aware context sizing.** The sub-agent sized every call against the
+  model window alone while the worker fitted it to what the run could still
+  afford and tightened fourfold once degraded — in the loop that re-sends the
+  whole exchange on every call and is the largest single spender in a
+  delegating turn (200,761 of a measured turn's 246,210 tokens).
+
+`cd29601` is the shape of it: it changed `chat_graph`, `chat_orchestrator`,
+`chat_budget` and `chat_context`, not `sandbox.py`, which is why
+`_get_sandbox_model` was still bypassing `chat_models.resolve` — and every
+stage's reasoning effort silently unreachable — until it was found by reading a
+trace.
+
+**Do:** put new shared behavior where the wrapper can carry it. Where it must
+live in the loop, export it (`budgeted_context_max_tokens`,
+`detect_tool_markup`, `tool_markup_retry_message`, `tool_markup_fallback`) and
+call it from both; pass the decision in (`degraded=`) rather than reading it off
+global state, so adding a caller cannot change an existing one's behavior.
+
+**Don't:** re-implement the outer loop's behavior in `sandbox.py`. A second copy
+of a rule is a second thing to keep current, and this log exists because the
+first copy already drifted.

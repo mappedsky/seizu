@@ -71,7 +71,6 @@ from reporting.services.chat_graph import (
     _append_output_limit_notice,
     _auto_continue_answer,
     _blocked_tool_call_response,
-    _budgeted_context_max_tokens,
     _chat_provider,
     _child_detail_event_accumulator,
     _client_thread_id_from_config,
@@ -3058,9 +3057,11 @@ async def _run_worker_step(
         ]
         # Sized against what the run can still afford, then tightened further
         # when this step or the run as a whole is already degraded.
-        context_limit = _budgeted_context_max_tokens(config, base_max_tokens=chat_context.history_token_budget(model))
-        if (controller is not None and controller.degraded) or step_degraded:
-            context_limit = max(2_500, context_limit // 4)
+        context_limit = chat_graph.budgeted_context_max_tokens(
+            controller,
+            base_max_tokens=chat_context.history_token_budget(model),
+            degraded=(controller is not None and controller.degraded) or step_degraded,
+        )
         messages = _trim_inner_loop_messages(messages, model=model, max_tokens=context_limit)
         for result in batch_results:
             tools_used.append(result.request.name)

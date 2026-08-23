@@ -768,9 +768,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             # the user). Retry once with corrective guidance, then degrade.
             if not tool_markup_retry_used:
                 tool_markup_retry_used = True
-                pending_system_addendum = _tool_markup_retry_message(turn_result.leaked_tool_names)
+                pending_system_addendum = tool_markup_retry_message(turn_result.leaked_tool_names)
                 continue
-            response = _tool_markup_fallback()
+            response = tool_markup_fallback()
             response_is_broken = True
             break
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
@@ -1481,6 +1481,19 @@ def _strip_tool_markup(text: str) -> str:
 _TOOL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*__[a-z0-9_]+")
 
 
+def detect_tool_markup(text: str) -> tuple[bool, tuple[str, ...]]:
+    """Whether a model wrote tool-call markup as prose, and which tools.
+
+    Shared with the sandbox sub-agent, which runs its own loop and so cannot
+    reach the streaming filter: there, a message with no structured tool calls
+    is taken as the delegation's answer, and leaked markup would otherwise be
+    returned as findings and written into the episode log later sub-agents read.
+    """
+    if not _TOOL_MARKUP_RE.search(text):
+        return False, ()
+    return True, _leaked_tool_names(text)
+
+
 def _leaked_tool_names(text: str) -> tuple[str, ...]:
     """Best-effort tool names the model tried to call in leaked markup."""
     match = _TOOL_MARKUP_RE.search(text)
@@ -1760,8 +1773,11 @@ async def _run_llm_tool_turn_inner(
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
         )
-    tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
-    leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
+    detected_in_text, leaked_tool_names = detect_tool_markup(merged_text)
+    tool_markup_leaked = markup_filter.detected or detected_in_text
+    if tool_markup_leaked and not leaked_tool_names:
+        # The streaming filter caught it before it reached merged_text.
+        leaked_tool_names = _leaked_tool_names(merged_text)
     provider_finish_reason = finish_reason or _chunk_finish_reason(merged)
     # Derive the limit rather than take the argument, because callers that pass
     # nothing are not unbounded: get_chat_model builds the model with
@@ -2142,7 +2158,7 @@ _MIN_CONTEXT_MAX_TOKENS = 2_500
 _CONTEXT_BUDGET_SHARE = 0.5
 
 
-def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
+def budgeted_context_max_tokens(controller: Any, *, base_max_tokens: int, degraded: bool = False) -> int:
     """Fit the per-call context cap inside what the run can still afford.
 
     Three limits meet here and they answer different questions: the model's
@@ -2154,15 +2170,29 @@ def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int
     Sizing each call against the remaining allowance makes the loop degrade
     smoothly, and pairs with the digest in ``_trim_inner_loop_messages`` so
     tightening condenses evidence instead of discarding it.
+
+    Takes the controller rather than a ``RunnableConfig`` because the sandbox
+    sub-agent has no config -- it reads the controller ambiently -- and it is
+    the loop that most needs this: it re-sends the whole accumulated exchange
+    on every inner call and is the largest single spender in a delegating turn.
+    ``degraded`` is passed in rather than read off the controller so a caller
+    can add its own reason (a step degraded on its own share, say) and so no
+    existing caller starts tightening merely because this moved.
     """
-    controller = budget_controller_from_config(config)
-    if controller is None or not controller.enabled:
-        return base_max_tokens
-    remaining = controller.remaining_normal_tokens
-    if remaining is None:
-        return base_max_tokens
-    affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
-    return max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
+    limit = base_max_tokens
+    if controller is not None and controller.enabled:
+        remaining = controller.remaining_normal_tokens
+        if remaining is not None:
+            affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
+            limit = max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
+    if degraded:
+        limit = max(_MIN_CONTEXT_MAX_TOKENS, limit // 4)
+    return limit
+
+
+def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
+    """The config-carrying callers' way in to :func:`budgeted_context_max_tokens`."""
+    return budgeted_context_max_tokens(budget_controller_from_config(config), base_max_tokens=base_max_tokens)
 
 
 def _message_context_text(message: BaseMessage) -> str:
@@ -3245,7 +3275,7 @@ def _initial_empty_response_retry_message() -> str:
     )
 
 
-def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
+def tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
     if leaked_tool_names:
         names = ", ".join(f"`{name}`" for name in leaked_tool_names)
         return (
@@ -3262,7 +3292,7 @@ def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
     )
 
 
-def _tool_markup_fallback() -> str:
+def tool_markup_fallback() -> str:
     return (
         "I couldn't complete that request: the model returned an unusable tool call. Please try again, "
         "or rephrase the request."

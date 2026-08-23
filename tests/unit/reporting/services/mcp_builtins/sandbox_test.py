@@ -2798,3 +2798,78 @@ async def test_materialization_outside_a_conversation_is_a_no_op(mocker):
     mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=None)
 
     assert await sandbox_module.materialize_plugin_skill(skill) is None
+
+
+def _delegate_patches(fake_backend: MagicMock, agent: MagicMock) -> Any:
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    for ctx in (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", return_value=agent),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ):
+        stack.enter_context(ctx)
+    return stack
+
+
+async def test_delegate_corrects_leaked_tool_markup_instead_of_returning_it() -> None:
+    # The sub-agent takes any message without structured tool calls as its
+    # answer, so leaked markup came back as findings -- and went into the
+    # episode log the next sub-agent reads as established ground.
+    leaked = "I will call <｜tool▁call▁begin｜>graph__query<｜tool▁sep｜> now"
+    agent = MagicMock(
+        ainvoke=AsyncMock(side_effect=[_make_fake_agent_result(leaked), _make_fake_agent_result("17 repositories.")])
+    )
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "count repos"}, _current_user())
+
+    assert result.get("result") == "17 repositories."
+    assert agent.ainvoke.await_count == 2
+    # The correction is the outer loop's own message, not a second copy of it.
+    correction = agent.ainvoke.await_args_list[1].args[0]["messages"][-1]
+    assert "graph__query" in correction.content
+
+
+async def test_delegate_gives_up_rather_than_hand_back_markup() -> None:
+    leaked = "<｜tool▁call▁begin｜>graph__query<｜tool▁sep｜>"
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result(leaked)))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "count repos"}, _current_user())
+
+    assert "｜" not in str(result.get("result"))
+    assert "unusable tool call" in str(result.get("result"))
+
+
+async def test_delegate_retries_once_when_the_context_window_overflows() -> None:
+    # Previously this reached the generic handler and the caller was told
+    # "Sandbox task failed" -- indistinguishable from a broken sandbox, with the
+    # whole delegation discarded.
+    overflow = Exception("This model's maximum context length is 65536 tokens")
+    agent = MagicMock(ainvoke=AsyncMock(side_effect=[overflow, _make_fake_agent_result("done")]))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "read everything"}, _current_user())
+
+    assert result.get("result") == "done"
+    assert agent.ainvoke.await_count == 2
+
+
+async def test_delegate_does_not_retry_an_overflow_twice() -> None:
+    overflow = Exception("This model's maximum context length is 65536 tokens")
+    agent = MagicMock(ainvoke=AsyncMock(side_effect=[overflow, overflow]))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "read everything"}, _current_user())
+
+    assert "failed" in str(result.get("error", "")).lower()
+    assert agent.ainvoke.await_count == 2

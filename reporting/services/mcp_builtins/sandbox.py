@@ -1512,6 +1512,25 @@ def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
     )
 
 
+def chat_graph_markup(text: str) -> tuple[bool, tuple[str, ...]]:
+    """Lazy indirection to the shared detector; chat_graph imports this module."""
+    from reporting.services.chat_graph import detect_tool_markup
+
+    return detect_tool_markup(text)
+
+
+def _markup_retry_message(names: tuple[str, ...]) -> str:
+    from reporting.services.chat_graph import tool_markup_retry_message
+
+    return tool_markup_retry_message(names)
+
+
+def _markup_fallback() -> str:
+    from reporting.services.chat_graph import tool_markup_fallback
+
+    return tool_markup_fallback()
+
+
 def _skill_inputs_block(content: str) -> str:
     """Lazy indirection: chat_graph imports this module, so it cannot be imported at module scope."""
     from reporting.services.chat_graph import skill_inputs_block
@@ -1606,6 +1625,11 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             f"{recall}\n\n---\n\n{base_prompt}"
         )
 
+    # One shot each, for the whole delegation rather than per agent invocation:
+    # a second overflow means tightening did not help and retrying again would
+    # only burn budget.
+    overflow_retry = [False]
+
     async def _agent_over(backend: SandboxBackend) -> str:
         tools = _build_sandbox_tools(backend)
         if current_user is not None:
@@ -1639,10 +1663,32 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             """
             # Imported here: chat_graph imports the builtin registry this
             # module is part of, so a module-level import is a cycle.
-            from reporting.services.chat_graph import _trim_inner_loop_messages
+            from reporting.services.chat_graph import (
+                _MIN_CONTEXT_MAX_TOKENS,
+                _message_context_tokens,
+                _trim_inner_loop_messages,
+                budgeted_context_max_tokens,
+            )
 
             messages = state.get("messages") or []
-            budget = chat_context.history_token_budget(model)
+            controller = chat_budget.current_budget_controller()
+            # The same sizing the worker uses, from the same function: fit the
+            # cap to what the run can still afford, and tighten hard once the
+            # run is degraded. This loop needed it most and had it least -- it
+            # re-sends the whole exchange every call and outspends everything
+            # else in a delegating turn.
+            budget = budgeted_context_max_tokens(
+                controller,
+                base_max_tokens=chat_context.history_token_budget(model),
+                degraded=controller is not None and controller.degraded,
+            )
+            if overflow_retry[0]:
+                # An overflow is our belief about the window being wrong, so
+                # halve what was actually sent rather than our own allowance,
+                # which can leave the request exactly as oversized (chat_graph
+                # states the same reasoning for the outer loop).
+                sent = sum(_message_context_tokens(model, message) for message in messages)
+                budget = max(_MIN_CONTEXT_MAX_TOKENS, min(budget, sent // 2))
             trimmed = _trim_inner_loop_messages(messages, model=model, max_tokens=budget)
             note = _live_budget_note()
             # Last, and only in the model's input: it changes every call, and
@@ -1651,8 +1697,36 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             return {"llm_input_messages": [*trimmed, HumanMessage(content=note)] if note else trimmed}
 
         agent = create_react_agent(model=model, tools=tools, prompt=system_prompt, pre_model_hook=_trim_before_model)
-        result = await agent.ainvoke({"messages": [HumanMessage(content=_prompt_for(backend))]})
-        messages = result.get("messages", [])
+        opening = [HumanMessage(content=_prompt_for(backend))]
+        try:
+            result = await agent.ainvoke({"messages": opening})
+        except Exception as exc:
+            # A window we sized wrong is recoverable; losing the whole
+            # delegation over it is not. The outer loop has always retried
+            # here; without it this reached the generic handler and the caller
+            # was told "Sandbox task failed", which is indistinguishable from a
+            # broken sandbox and discards everything the sub-agent had done.
+            if overflow_retry[0] or not chat_context.is_context_overflow(exc):
+                raise
+            overflow_retry[0] = True
+            logger.warning("sandbox sub-agent exceeded the context window; retrying once, tightened")
+            result = await agent.ainvoke({"messages": opening})
+        answer = _final_answer(result.get("messages", []))
+        leaked, leaked_names = chat_graph_markup(answer)
+        if leaked:
+            # A sub-agent that writes tool-call markup as prose gets no
+            # structured call, so this loop reads the markup as its answer and
+            # returns it as findings. Correct it once, exactly as the outer loop
+            # does, and never hand the markup back as a result.
+            retry = await agent.ainvoke(
+                {"messages": [*result.get("messages", []), HumanMessage(content=_markup_retry_message(leaked_names))]}
+            )
+            answer = _final_answer(retry.get("messages", []))
+            if chat_graph_markup(answer)[0]:
+                return _markup_fallback()
+        return answer
+
+    def _final_answer(messages: list[Any]) -> str:
         for msg in reversed(messages):
             if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
                 # message_text, not str(): a reasoning model returns content as
