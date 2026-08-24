@@ -250,6 +250,12 @@ class LLMTurnResult:
     reasoning_text: str = ""
     cost_usd: float = 0.0
     usage_estimated: bool = False
+    # What the provider served from its prompt cache. Carried so the span can
+    # report it: the sandbox sub-agent's wrapper has always recorded this and
+    # the outer loop never did, which reads on a trace as a cache that is never
+    # hit rather than one that is never measured (SBX-019's asymmetry, the other
+    # way round).
+    cache_read_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -1581,6 +1587,8 @@ async def _run_llm_tool_turn(
             # (AGT-026).
             reasoning=telemetry.content(result.reasoning_text, 4000),
             cost_usd=result.cost_usd,
+            cache_read_tokens=result.cache_read_tokens,
+            usage_estimated=result.usage_estimated,
             finish_reason=result.finish_reason or "",
             provider_finish_reason=result.provider_finish_reason or "",
             response=telemetry.content(message_text(result.message.content)),
@@ -1812,6 +1820,7 @@ async def _run_llm_tool_turn_inner(
             reasoning_text=reasoning_text,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
+            cache_read_tokens=usage.cache_read_tokens,
         )
     fallback = AIMessage(
         content=_strip_tool_markup(merged_text),
@@ -1838,6 +1847,7 @@ async def _run_llm_tool_turn_inner(
         reasoning_text=reasoning_text,
         cost_usd=cost_usd,
         usage_estimated=usage_estimated,
+        cache_read_tokens=usage.cache_read_tokens,
     )
 
 

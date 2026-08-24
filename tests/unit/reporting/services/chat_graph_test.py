@@ -4329,3 +4329,37 @@ def test_detect_tool_markup_reports_the_tools_a_model_wrote_as_prose():
     assert leaked is True
     assert "graph__query" in names
     assert chat_graph.detect_tool_markup("A perfectly ordinary answer.") == (False, ())
+
+
+async def test_the_outer_llm_span_reports_what_the_prompt_cache_served(mocker):
+    # The sub-agent's wrapper has always recorded this and the outer loop never
+    # did, so a trace read as a cache that is never hit rather than one that is
+    # never measured — and a diagnosis was built on the difference.
+    recorded: dict[str, object] = {}
+    real_set = chat_graph.telemetry.set_attributes
+
+    def _capture(current, **attrs):
+        if "cache_read_tokens" in attrs:
+            recorded.update(attrs)
+        return real_set(current, **attrs)
+
+    mocker.patch.object(chat_graph.telemetry, "set_attributes", _capture)
+    mocker.patch.object(
+        chat_graph,
+        "_run_llm_tool_turn_inner",
+        mocker.AsyncMock(
+            return_value=chat_graph.LLMTurnResult(
+                message=AIMessage(content="done"),
+                streamed="",
+                input_tokens=900,
+                output_tokens=20,
+                cache_read_tokens=768,
+                usage_estimated=False,
+            )
+        ),
+    )
+
+    await chat_graph._run_llm_tool_turn(mocker.MagicMock(), "sys", [], [], {"configurable": {}}, None)
+
+    assert recorded["cache_read_tokens"] == 768
+    assert recorded["usage_estimated"] is False
