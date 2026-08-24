@@ -781,7 +781,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             break
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
         if unavailable:
-            action_summaries.append(_tool_call_user_summary(unavailable))
+            action_summaries.append(_tool_call_user_summary(unavailable, model))
             response = _blocked_tool_call_response(unavailable)
             break
 
@@ -797,7 +797,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 response = message_text(ai_message.content)
                 if response and post_action and not terminal_response_retry_used:
                     terminal_response_retry_used = True
-                    pending_system_addendum = _terminal_stall_retry_message(action_summaries)
+                    pending_system_addendum = _terminal_stall_retry_message(action_summaries, model)
                     response = ""
                     continue
             if response:
@@ -830,7 +830,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             if repeated:
                 if not repeated_action_retry_used:
                     repeated_action_retry_used = True
-                    pending_system_addendum = _repeated_tool_call_retry_message(repeated, action_summaries)
+                    pending_system_addendum = _repeated_tool_call_retry_message(repeated, action_summaries, model)
                     continue
                 response = _repeated_tool_call_fallback(repeated, action_summaries)
                 response_is_broken = True
@@ -877,7 +877,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 detail_data["children"] = children
             detail_events.append(detail_data)
             writer({"kind": "detail", "id": result.request.id, "data": detail_data})
-        action_summaries.append(_tool_call_user_summary(results))
+        action_summaries.append(_tool_call_user_summary(results, model))
         blocked_results = _blocked_tool_call_results(results)
         tool_ai_message = _ai_message_for_tool_results(ai_message, results)
         messages = [
@@ -1396,7 +1396,14 @@ async def _resume_confirmed_tool_turn(
         return _chat_state_with_ai_response(state, response, details=detail_events)
 
     provider = _chat_provider()
-    combined_results = "\n\n".join(f"`{name}`:\n{_truncate_text(text, 6000)}" for name, text in outcomes)
+    # Budgeted in tokens against the model that will read it, and shared between
+    # however many actions were approved together.
+    resume_model = _context_model()
+    combined_budget = _context_block_tokens(resume_model, _COMBINED_RESULT_BUDGET_DIVISOR)
+    per_result = max(1, combined_budget // max(1, len(outcomes)))
+    combined_results = "\n\n".join(
+        f"`{name}`:\n{_truncate_text(text, _context_chars(resume_model, text, per_result))}" for name, text in outcomes
+    )
     if errors:
         combined_results += "\n\nThe following actions could not be executed:\n" + "\n".join(f"- {e}" for e in errors)
 
@@ -1421,14 +1428,28 @@ async def _resume_confirmed_tool_turn(
     context = [
         *_llm_context_messages(state["messages"], model),
         HumanMessage(
-            content=f"Approved Seizu tool(s) ran with result(s):\n\n{_truncate_text(combined_results, 12000)}",
+            content=(
+                "Approved Seizu tool(s) ran with result(s):\n\n"
+                + _truncate_text(
+                    combined_results,
+                    _context_chars(resume_model, combined_results, combined_budget * 2),
+                )
+            ),
             id=f"msg_{uuid.uuid4().hex}",
         ),
     ]
     turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer)
     detail_events.extend(turn_result.details)
     response = message_text(turn_result.message.content) or (
-        f"Approved action(s) completed.\n\nResult:\n{_truncate_text(combined_results, 4000)}"
+        "Approved action(s) completed.\n\nResult:\n"
+        + _truncate_text(
+            combined_results,
+            _context_chars(
+                resume_model,
+                combined_results,
+                _context_block_tokens(resume_model, _TOOL_RESULT_BUDGET_DIVISOR),
+            ),
+        )
     )
     response, hit_output_limit = _append_output_limit_notice(response, turn_result.finish_reason)
     streamed = turn_result.streamed
@@ -2728,12 +2749,23 @@ def _answer_budget_prompt(budget: AnswerBudget) -> str:
     )
 
 
-def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
+def _tool_call_user_summary(results: list[ToolCallResult], model: Any = None) -> str:
+    """What the model is shown about actions that just ran.
+
+    This text becomes context, so its bound is a token budget measured against
+    the content itself. ``model`` is optional only so the callers that render a
+    summary outside a turn keep working; with one, a JSON result gets the
+    characters its tokens are actually worth instead of a constant fitted to
+    prose.
+    """
     if len(results) > 1:
+        # Shared between however many ran in parallel, so one large result
+        # cannot crowd out its siblings.
+        per_result = max(1, _context_block_tokens(model, _TOOL_RESULT_BUDGET_DIVISOR) // len(results))
         rendered_results = "\n\n".join(
             (
                 f"- `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}` returned:\n"
-                f"{_truncate_text(result.content, 1800)}"
+                f"{_truncate_text(result.content, _context_chars(model, result.content, per_result))}"
             )
             for result in results
         )
@@ -2742,7 +2774,11 @@ def _tool_call_user_summary(results: list[ToolCallResult]) -> str:
     action = "rendered skill" if result.request.spec.kind == "skill" else "ran tool"
     return (
         f"Seizu {action} `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}`.\n\n"
-        f"Result:\n{_truncate_text(result.content, 4000)}"
+        + "Result:\n"
+        + _truncate_text(
+            result.content,
+            _context_chars(model, result.content, _context_block_tokens(model, _TOOL_RESULT_BUDGET_DIVISOR)),
+        )
     )
 
 
@@ -2792,6 +2828,79 @@ def skill_inputs_block(content: str) -> str:
     return "\n".join(lines)
 
 
+# Text that goes into a model's context is budgeted in tokens, because that is
+# what the window and the ledger measure. `chars_for_tokens` then calibrates the
+# character cut on the content in hand rather than assuming a ratio: a constant
+# is right on prose and about a third out on structured payloads, which is
+# exactly what a tool result is (CTX-004).
+#
+# The budget itself is a *share of what a call may carry*, not a number someone
+# picked. `history_token_budget` is already "tokens of prior conversation one
+# call may carry", and these blocks are items inside it -- so a block that is
+# reasonable at a 40,000-token budget is not reasonable at 4,000, and a fixed
+# count has the defect AGT-021 rejected for the run backstop: too tight on a
+# small model and too loose on a large one. The divisors are the judgment that
+# remains, in one place with a stated reason, rather than three literals.
+_TOOL_RESULT_BUDGET_DIVISOR = 16
+_COMBINED_RESULT_BUDGET_DIVISOR = 8
+_ACTION_SUMMARY_BUDGET_DIVISOR = 10
+
+# A block below the floor cannot carry a finding, so truncating to it buys
+# nothing but a confusing fragment; above the ceiling a single block starts
+# crowding out the conversation it is supposed to support. Both bound the
+# derivation rather than replacing it.
+_CONTEXT_BLOCK_MIN_TOKENS = 400
+_CONTEXT_BLOCK_MAX_TOKENS = 8_000
+
+# Display bounds, not context bounds: these cap what a UI pane renders and what
+# is persisted for replay, so size is the constraint and characters are the
+# unit. They are NOT a data source -- read a value from where it was produced,
+# never back out of a rendered body, which is truncated here and will lose
+# whatever was appended last.
+_DETAIL_BODY_MAX_CHARS = 6_000
+_DETAIL_ARGUMENTS_MAX_CHARS = 3_000
+_DETAIL_NARRATION_MAX_CHARS = 4_000
+
+
+def _context_block_tokens(model: Any, divisor: int, config: RunnableConfig | None = None) -> int:
+    """A share of what one call may carry, for a single block of context.
+
+    Derived rather than configured: what a tool result may occupy depends on
+    what the call can carry at all. Passed a ``config``, it also tightens as the
+    run spends, the same way the tool loop does -- a block sized for a fresh run
+    is not sized for one about to finalize.
+    """
+    budget = chat_context.history_token_budget(model) if model is not None else settings.CHAT_LLM_CONTEXT_MAX_TOKENS
+    if config is not None:
+        budget = budgeted_context_max_tokens(budget_controller_from_config(config), base_max_tokens=budget)
+    share = budget // max(1, divisor)
+    return max(_CONTEXT_BLOCK_MIN_TOKENS, min(_CONTEXT_BLOCK_MAX_TOKENS, share))
+
+
+def _context_chars(model: Any, sample: str, tokens: int) -> int:
+    """A character budget worth ``tokens`` of this model's context.
+
+    Without a model there is nothing to calibrate against, so fall back to the
+    conservative prose ratio rather than leaving the text unbounded.
+    """
+    if model is None:
+        return tokens * 4
+    return chat_context.chars_for_tokens(model, sample, tokens)
+
+
+def _context_model() -> Any:
+    """The chat model, for sizing text, or ``None`` where there isn't one.
+
+    Sizing must never be the thing that fails a turn: on the mock provider
+    there is no real model at all, and this is called from paths that run
+    there. A missing model costs calibration, not correctness.
+    """
+    try:
+        return get_chat_model()
+    except Exception:
+        return None
+
+
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
     # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
@@ -2807,8 +2916,8 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "title": f"{action}: {result.request.name}",
         "status": status,
         "detail_id": result.request.id,
-        "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
-        "body": _truncate_text(result.content, 6000),
+        "arguments": _truncate_text(_json_dump(result.request.arguments), _DETAIL_ARGUMENTS_MAX_CHARS),
+        "body": _truncate_text(result.content, _DETAIL_BODY_MAX_CHARS),
     }
     if result.request.spec.kind == "skill" and (inputs := skill_inputs_block(result.content)):
         # The values this invocation actually ran with, defaults included --
@@ -2830,7 +2939,7 @@ def _planning_narration_detail_data(text: str) -> dict[str, Any]:
         "kind": "thinking",
         "title": "Planning",
         "status": "completed",
-        "body": _truncate_text(text.strip(), 4000),
+        "body": _truncate_text(text.strip(), _DETAIL_NARRATION_MAX_CHARS),
     }
 
 
@@ -2839,8 +2948,8 @@ def _confirmation_tool_detail_data(confirmation: ActionConfirmation, content: st
         "kind": "tool",
         "title": f"Tool: {confirmation.tool_name}",
         "status": status,
-        "arguments": _truncate_text(_json_dump(confirmation.arguments), 3000),
-        "body": _truncate_text(content, 6000),
+        "arguments": _truncate_text(_json_dump(confirmation.arguments), _DETAIL_ARGUMENTS_MAX_CHARS),
+        "body": _truncate_text(content, _DETAIL_BODY_MAX_CHARS),
     }
 
 
@@ -3231,7 +3340,7 @@ def _balanced_brace_objects(text: str) -> list[str]:
     return objects
 
 
-def _terminal_stall_retry_message(action_summaries: list[str]) -> str:
+def _terminal_stall_retry_message(action_summaries: list[str], model: Any = None) -> str:
     """Nudge a post-action turn that returned plain text instead of finishing.
 
     The model either still needs live data — in which case it should make the
@@ -3245,17 +3354,37 @@ def _terminal_stall_retry_message(action_summaries: list[str]) -> str:
         f"If the user's request needs more live data, make the next structured skill/tool call now. If you have "
         f"enough evidence, deliver the complete final answer by calling the `{FINAL_ANSWER_TOOL.name}` tool with the "
         "full answer in `answer`. Do not describe future work in plain text.\n\n"
-        f"Completed action summaries so far:\n{_truncate_text(chr(10).join(action_summaries), 10000)}"
+        "Completed action summaries so far:\n"
+        + _truncate_text(
+            joined := chr(10).join(action_summaries),
+            _context_chars(model, joined, _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR)),
+        )
     )
 
 
-def _repeated_tool_call_retry_message(requests: list[ToolCallRequest], action_summaries: list[str]) -> str:
+def _repeated_tool_call_retry_message(
+    requests: list[ToolCallRequest], action_summaries: list[str], model: Any = None
+) -> str:
     repeated = ", ".join(f"`{request.name}` with arguments `{_json_dump(request.arguments)}`" for request in requests)
     prior = (
-        "\n\nMost recent completed action:\n" + _truncate_text(action_summaries[-1], 5000) if action_summaries else ""
+        "\n\nMost recent completed action:\n"
+        + _truncate_text(
+            action_summaries[-1],
+            _context_chars(
+                model,
+                action_summaries[-1],
+                _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR * 2),
+            ),
+        )
+        if action_summaries
+        else ""
     )
     all_results = (
-        "\n\nAll completed action summaries so far:\n" + _truncate_text("\n\n".join(action_summaries), 10000)
+        "\n\nAll completed action summaries so far:\n"
+        + _truncate_text(
+            everything := "\n\n".join(action_summaries),
+            _context_chars(model, everything, _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR)),
+        )
         if action_summaries
         else ""
     )
