@@ -6,9 +6,10 @@ reports medians and ranges, so a comparison rests on more than one sample.
     make chat_harness ARMS="baseline CHAT_EPISODIC_RECALL_MAX_CHARS=0" SAMPLES=4
 
 Each arm is ``KEY=VALUE`` for any setting in ``reporting.settings``, or the
-literal ``baseline`` for no override. An arm is applied by recreating the
-``seizu`` service with a compose overlay, and the value is then read back out of
-the running container before any sample is taken -- an override that silently
+literal ``baseline`` for no override. An arm is applied by recreating every
+service in ``ARM_SERVICES`` with a compose overlay -- the web service and the
+Temporal worker, since a turn runs on the worker -- and the value is then read
+back out of the running containers before any sample is taken -- an override that silently
 fails to reach the service is otherwise indistinguishable from one that had no
 effect.
 
@@ -544,10 +545,15 @@ def main() -> int:
     finally:
         OVERLAY.unlink(missing_ok=True)
         # Restore the stack to its own configuration, and say so loudly if that
-        # fails: leaving the service on the last experimental arm would make
-        # every later run -- by anyone, for any purpose -- quietly wrong.
+        # fails: leaving a service on the last experimental arm would make every
+        # later run -- by anyone, for any purpose -- quietly wrong. Every service
+        # the arm was applied to, not just the web one: chat turns execute on the
+        # Temporal worker, so restoring only `seizu` left the worker holding the
+        # last arm indefinitely. Observed after a completed run, with the worker
+        # still on CHAT_RUN_TOKEN_BUDGET=200000 while .env read 0 -- a normal
+        # exit, not a killed one, so nothing looked wrong.
         try:
-            _compose("up", "-d", "--force-recreate", "seizu")
+            _compose("up", "-d", "--force-recreate", *ARM_SERVICES)
         except HarnessError as exc:
             print(f"WARNING: could not restore the baseline service: {exc}", file=sys.stderr)
             raise
