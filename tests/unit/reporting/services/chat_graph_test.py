@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -4363,3 +4364,58 @@ async def test_the_outer_llm_span_reports_what_the_prompt_cache_served(mocker):
 
     assert recorded["cache_read_tokens"] == 768
     assert recorded["usage_estimated"] is False
+
+
+def test_tool_result_context_budget_is_measured_in_tokens_not_characters():
+    """A JSON result and prose of equal length get different character budgets.
+
+    These were char literals from the first chat commit. `chars_for_tokens`
+    calibrates on the content in hand because the ratio differs by about a
+    third between prose and structured payloads -- and a tool result is always
+    the structured case, so a constant fitted to prose under-fills it.
+    """
+    # Only the model *name* matters here -- count_tokens tokenizes by name, so
+    # this exercises the real ratio rather than a stub's guess.
+    model = SimpleNamespace(model_name="gpt-4o-mini")
+
+    prose = "The dependency review found several issues worth attention. " * 40
+    payload = json.dumps({"results": [{"repo": f"acme/svc{i}", "severity": "high"} for i in range(60)]})
+
+    prose_budget = chat_graph._context_chars(model, prose, 500)
+    payload_budget = chat_graph._context_chars(model, payload, 500)
+
+    assert prose_budget != payload_budget
+    # Both are real budgets, not a fallback constant.
+    assert prose_budget > 0 and payload_budget > 0
+
+
+def test_tool_result_summary_shares_one_budget_between_parallel_results():
+    """One large result must not crowd its siblings out of the model's view."""
+    model = SimpleNamespace(model_name="gpt-4o-mini")
+
+    def _result(name: str, size: int):
+        request = SimpleNamespace(
+            name=name, arguments={"q": "x"}, id=name, spec=SimpleNamespace(kind="tool", name=name)
+        )
+        return SimpleNamespace(request=request, content="y" * size, blocked=None)
+
+    one = chat_graph._tool_call_user_summary([_result("t__a", 40_000)], model)
+    many = chat_graph._tool_call_user_summary([_result(f"t__{i}", 40_000) for i in range(4)], model)
+
+    # Four results do not cost four times one result's allowance.
+    assert len(many) < 4 * len(one)
+
+
+def test_detail_body_cap_is_a_display_bound(mocker):
+    """The detail body is truncated for rendering, so it is not a data source.
+
+    Reading a value back out of it is what lost a skill's rendered inputs: the
+    block is appended last and falls outside this cap.
+    """
+    assert chat_graph._DETAIL_BODY_MAX_CHARS == 6_000
+    request = SimpleNamespace(name="t__a", arguments={}, id="d1", spec=SimpleNamespace(kind="tool", name="t__a"))
+    result = SimpleNamespace(request=request, content="z" * 20_000, blocked=None)
+
+    detail = chat_graph._tool_call_detail_data(result)
+
+    assert len(detail["body"]) <= chat_graph._DETAIL_BODY_MAX_CHARS + 32
