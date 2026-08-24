@@ -2069,7 +2069,9 @@ async def test_a_reasoning_sub_agents_answer_is_read_as_text_not_stringified() -
             stack.enter_context(item)
         result = await _handle_delegate({"task": "count them"}, _current_user())
 
-    assert result == {"result": "There are 412 CVE nodes."}
+    # The subject is the answer's text, not the payload's shape (which also
+    # carries `saved_to` now that a delegation's result is written to disk).
+    assert result["result"] == "There are 412 CVE nodes."
 
 
 async def test_a_later_turn_is_told_about_files_earlier_turns_saved() -> None:
@@ -2873,3 +2875,61 @@ async def test_delegate_does_not_retry_an_overflow_twice() -> None:
 
     assert "failed" in str(result.get("error", "")).lower()
     assert agent.ainvoke.await_count == 2
+
+
+async def test_delegate_saves_its_own_result_and_names_the_file() -> None:
+    # The delegation's answer was the one result never written anywhere: an
+    # oversized *tool* result gets a file and a receipt, this got truncated and
+    # the remainder was gone, so the worker re-ran the whole delegation to see
+    # it again (observed in a traced run).
+    fake_backend = _make_fake_backend()
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("A long analysis.")))
+
+    with _delegate_patches(fake_backend, agent):
+        result = await _handle_delegate({"task": "assess reachability"}, _current_user())
+
+    assert result.get("result") == "A long analysis."
+    saved = result.get("saved_to")
+    assert saved and saved.startswith(sandbox_module.sandbox_result_dir())
+    written = {call.args[0] for call in fake_backend.write_file.await_args_list}
+    assert saved in written
+
+
+async def test_delegate_tells_the_caller_where_the_untruncated_result_is() -> None:
+    fake_backend = _make_fake_backend()
+    long_answer = "x" * 5_000
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result(long_answer)))
+
+    with _delegate_patches(fake_backend, agent), patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000):
+        result = await _handle_delegate({"task": "assess reachability"}, _current_user())
+
+    assert result.get("truncated") is True
+    assert "rather than delegating the work again" in result["note"]
+    # The whole answer reached disk, not the shortened copy.
+    body = next(c.args[1] for c in fake_backend.write_file.await_args_list if c.args[0] == result["saved_to"])
+    assert body == long_answer
+    assert len(result["result"]) < len(long_answer)
+
+
+async def test_delegate_still_returns_its_result_when_the_write_fails() -> None:
+    fake_backend = _make_fake_backend()
+    fake_backend.write_file = AsyncMock(side_effect=RuntimeError("disk gone"))
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("Findings.")))
+
+    with _delegate_patches(fake_backend, agent):
+        result = await _handle_delegate({"task": "assess"}, _current_user())
+
+    assert result.get("result") == "Findings."
+    assert "saved_to" not in result
+
+
+def test_subagent_prompt_forbids_reconstructing_a_file_to_count_lines() -> None:
+    # 11 of 99 sub-agent calls in a traced run were reconstructing file text to
+    # produce path:line citations -- 25% of the run's output tokens, at 13.8s a
+    # call against 6.2s for everything else.
+    # Normalized: the prompt is written with line continuations, so the source
+    # spacing is not what the model receives.
+    prompt = " ".join(sandbox_module._subagent_prompt({"run_python", "read_file"}).split())
+
+    assert "Never reconstruct a file from memory to count its lines" in prompt
+    assert "write the content to a file and let run_python find it" in prompt

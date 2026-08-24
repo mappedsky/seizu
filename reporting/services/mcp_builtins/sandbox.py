@@ -1406,6 +1406,10 @@ How to work:
 - Query once, save what you get, and compute over it. Repeating a query to see more of it \
   costs more than processing what you already have.
 - Aggregate, filter, join and count in run_python, not by reading rows yourself.
+- Needing a line number, an exact quote, or a count over a file's text is the same rule: \
+  write the content to a file and let run_python find it. Never reconstruct a file from \
+  memory to count its lines -- that answer is guesswork however careful it looks, and it \
+  costs more than the tool call that would settle it.
 - Prefer a purpose-built tool over raw Cypher when one covers the question.
 - Return the findings and the numbers behind them. Do not return transcripts, row dumps, \
   or a description of what you tried."""
@@ -1450,6 +1454,24 @@ _FALLBACK_WITHOUT_CYPHER = """\
 def _fallback_clause(tool_names: set[str]) -> str:
     """What to fall back on, decided by what is actually bound."""
     return _FALLBACK_WITH_CYPHER if "graph__query" in tool_names else _FALLBACK_WITHOUT_CYPHER
+
+
+async def _save_delegation_result(answer: str, backend: SandboxBackend, task: str) -> str:
+    """Write a delegation's answer to the shared sandbox and receipt it.
+
+    Best effort by design: the answer is returned to the caller either way, so a
+    write failure costs only the ability to re-read it later.
+    """
+    if not answer.strip():
+        return ""
+    path = f"{_RESULT_DIR}/delegation_{uuid.uuid4().hex[:8]}.md"
+    try:
+        await backend.write_file(path, answer)
+    except Exception:
+        logger.warning("sandbox: could not write delegation result to %s", path, exc_info=True)
+        return ""
+    _record_receipt(path, "sandbox__delegate", task, backend, None)
+    return path
 
 
 def _subagent_prompt(tool_names: set[str]) -> str:
@@ -1629,6 +1651,7 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
     # a second overflow means tightening did not help and retrying again would
     # only burn budget.
     overflow_retry = [False]
+    saved_result_path: list[str] = [""]
 
     async def _agent_over(backend: SandboxBackend) -> str:
         tools = _build_sandbox_tools(backend)
@@ -1724,6 +1747,15 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             answer = _final_answer(retry.get("messages", []))
             if chat_graph_markup(answer)[0]:
                 return _markup_fallback()
+        # The delegation's own answer is the most expensive artifact this system
+        # produces -- fifty tool calls and twenty-odd model calls -- and it was
+        # the one result never written anywhere. An oversized *tool* result gets
+        # a file and a receipt; this got `_truncate_bytes` and the remainder was
+        # gone. It does not even take the byte cap to lose it: the worker's own
+        # inner loop condenses a long step's evidence, and then the only way
+        # back to the analysis is to run it again, which a traced run recorded
+        # the worker deciding to do in as many words.
+        saved_result_path[0] = await _save_delegation_result(answer, backend, task)
         return answer
 
     def _final_answer(messages: list[Any]) -> str:
@@ -1771,12 +1803,24 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         return {"error": "Sandbox task failed — see server logs for details"}
 
     result_text = _truncate_bytes(output, settings.SANDBOX_MAX_OUTPUT_BYTES)
+    truncated = result_text != output
     # Record only on success: a timeout or crash returns above, and logging a
     # failure as a "result" would teach the next sub-agent that the ground was
     # already covered when it was not.
     if episode_log is not None:
         episode_log.append(task, result_text)
-    return {"result": result_text}
+    payload: dict[str, Any] = {"result": result_text}
+    if saved_result_path[0]:
+        # Named on the way out, not left to be discovered in a receipt listing:
+        # the caller that needs it is the one holding a shortened copy right now.
+        payload["saved_to"] = saved_result_path[0]
+        if truncated:
+            payload["truncated"] = True
+            payload["note"] = (
+                f"The result above is shortened. The full analysis is at {saved_result_path[0]} — "
+                "read that file rather than delegating the work again."
+            )
+    return payload
 
 
 def _sandbox_enabled() -> bool:
