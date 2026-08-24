@@ -14,7 +14,7 @@ from mcp.types import Prompt, Tool, ToolAnnotations
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
-from reporting.services import chat_budget, episodic_memory, mcp_runtime
+from reporting.services import chat_budget, chat_models, episodic_memory, mcp_runtime
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins import sandbox as sandbox_module
@@ -1206,15 +1206,28 @@ def test_normalizing_model_bind_tools_returns_wrapped_model() -> None:
     assert isinstance(bound, _ToolMessageNormalizingModel)
 
 
-def test_get_sandbox_model_returns_normalizing_model() -> None:
-    """_get_sandbox_model always wraps the base model in _ToolMessageNormalizingModel."""
+def test_get_sandbox_model_is_built_from_the_resolved_stage_spec() -> None:
+    """The sub-agent's model comes from chat_models.resolve, and stays wrapped.
+
+    Building it directly is what made every reasoning-effort setting
+    unreachable for the largest spender in a delegating turn: the effort is
+    carried on the spec, so a model built without one is graded at whatever the
+    provider defaults to. Patching ``build_chat_model`` rather than
+    ``get_chat_model`` is the point of the test -- the previous version patched
+    a function this path no longer calls, so it exercised the real builder and
+    passed only where a real provider happened to be configured.
+    """
+    built = MagicMock()
     with (
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
-        patch("reporting.services.chat_graph.get_chat_model", return_value=MagicMock()),
+        patch("reporting.services.chat_graph.build_chat_model", return_value=built) as build,
     ):
         model = _get_sandbox_model()
 
     assert isinstance(model, _ToolMessageNormalizingModel)
+    spec = build.call_args.args[0]
+    assert spec == chat_models.resolve("sandbox_subagent")
+    assert spec.role == "sandbox_subagent"
 
 
 async def test_e2b_run_bash_streaming_passes_per_command_envs() -> None:
@@ -2069,7 +2082,9 @@ async def test_a_reasoning_sub_agents_answer_is_read_as_text_not_stringified() -
             stack.enter_context(item)
         result = await _handle_delegate({"task": "count them"}, _current_user())
 
-    assert result == {"result": "There are 412 CVE nodes."}
+    # The subject is the answer's text, not the payload's shape (which also
+    # carries `saved_to` now that a delegation's result is written to disk).
+    assert result["result"] == "There are 412 CVE nodes."
 
 
 async def test_a_later_turn_is_told_about_files_earlier_turns_saved() -> None:
@@ -2798,3 +2813,136 @@ async def test_materialization_outside_a_conversation_is_a_no_op(mocker):
     mocker.patch.object(sandbox_module.sandbox_session, "current_sandbox_session", return_value=None)
 
     assert await sandbox_module.materialize_plugin_skill(skill) is None
+
+
+def _delegate_patches(fake_backend: MagicMock, agent: MagicMock) -> Any:
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    for ctx in (
+        patch("reporting.settings.SANDBOX_ENABLED", True),
+        patch("reporting.settings.CHAT_LLM_PROVIDER", "anthropic"),
+        patch("reporting.settings.SANDBOX_API_KEY", "test-key"),
+        patch("reporting.settings.SANDBOX_DOMAIN", ""),
+        patch("reporting.settings.SANDBOX_TIMEOUT_SECONDS", 30),
+        patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 50_000),
+        patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.mcp_builtins.sandbox.open_backend", new=_open_backend_ctx(fake_backend)),
+        patch("reporting.services.mcp_builtins.sandbox.create_react_agent", return_value=agent),
+        patch("reporting.services.mcp_builtins.sandbox._get_sandbox_model", return_value=MagicMock()),
+    ):
+        stack.enter_context(ctx)
+    return stack
+
+
+async def test_delegate_corrects_leaked_tool_markup_instead_of_returning_it() -> None:
+    # The sub-agent takes any message without structured tool calls as its
+    # answer, so leaked markup came back as findings -- and went into the
+    # episode log the next sub-agent reads as established ground.
+    leaked = "I will call <｜tool▁call▁begin｜>graph__query<｜tool▁sep｜> now"
+    agent = MagicMock(
+        ainvoke=AsyncMock(side_effect=[_make_fake_agent_result(leaked), _make_fake_agent_result("17 repositories.")])
+    )
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "count repos"}, _current_user())
+
+    assert result.get("result") == "17 repositories."
+    assert agent.ainvoke.await_count == 2
+    # The correction is the outer loop's own message, not a second copy of it.
+    correction = agent.ainvoke.await_args_list[1].args[0]["messages"][-1]
+    assert "graph__query" in correction.content
+
+
+async def test_delegate_gives_up_rather_than_hand_back_markup() -> None:
+    leaked = "<｜tool▁call▁begin｜>graph__query<｜tool▁sep｜>"
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result(leaked)))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "count repos"}, _current_user())
+
+    assert "｜" not in str(result.get("result"))
+    assert "unusable tool call" in str(result.get("result"))
+
+
+async def test_delegate_retries_once_when_the_context_window_overflows() -> None:
+    # Previously this reached the generic handler and the caller was told
+    # "Sandbox task failed" -- indistinguishable from a broken sandbox, with the
+    # whole delegation discarded.
+    overflow = Exception("This model's maximum context length is 65536 tokens")
+    agent = MagicMock(ainvoke=AsyncMock(side_effect=[overflow, _make_fake_agent_result("done")]))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "read everything"}, _current_user())
+
+    assert result.get("result") == "done"
+    assert agent.ainvoke.await_count == 2
+
+
+async def test_delegate_does_not_retry_an_overflow_twice() -> None:
+    overflow = Exception("This model's maximum context length is 65536 tokens")
+    agent = MagicMock(ainvoke=AsyncMock(side_effect=[overflow, overflow]))
+
+    with _delegate_patches(_make_fake_backend(), agent):
+        result = await _handle_delegate({"task": "read everything"}, _current_user())
+
+    assert "failed" in str(result.get("error", "")).lower()
+    assert agent.ainvoke.await_count == 2
+
+
+async def test_delegate_saves_its_own_result_and_names_the_file() -> None:
+    # The delegation's answer was the one result never written anywhere: an
+    # oversized *tool* result gets a file and a receipt, this got truncated and
+    # the remainder was gone, so the worker re-ran the whole delegation to see
+    # it again (observed in a traced run).
+    fake_backend = _make_fake_backend()
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("A long analysis.")))
+
+    with _delegate_patches(fake_backend, agent):
+        result = await _handle_delegate({"task": "assess reachability"}, _current_user())
+
+    assert result.get("result") == "A long analysis."
+    saved = result.get("saved_to")
+    assert saved and saved.startswith(sandbox_module.sandbox_result_dir())
+    written = {call.args[0] for call in fake_backend.write_file.await_args_list}
+    assert saved in written
+
+
+async def test_delegate_tells_the_caller_where_the_untruncated_result_is() -> None:
+    fake_backend = _make_fake_backend()
+    long_answer = "x" * 5_000
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result(long_answer)))
+
+    with _delegate_patches(fake_backend, agent), patch("reporting.settings.SANDBOX_MAX_OUTPUT_BYTES", 1_000):
+        result = await _handle_delegate({"task": "assess reachability"}, _current_user())
+
+    assert result.get("truncated") is True
+    assert "rather than delegating the work again" in result["note"]
+    # The whole answer reached disk, not the shortened copy.
+    body = next(c.args[1] for c in fake_backend.write_file.await_args_list if c.args[0] == result["saved_to"])
+    assert body == long_answer
+    assert len(result["result"]) < len(long_answer)
+
+
+async def test_delegate_still_returns_its_result_when_the_write_fails() -> None:
+    fake_backend = _make_fake_backend()
+    fake_backend.write_file = AsyncMock(side_effect=RuntimeError("disk gone"))
+    agent = MagicMock(ainvoke=AsyncMock(return_value=_make_fake_agent_result("Findings.")))
+
+    with _delegate_patches(fake_backend, agent):
+        result = await _handle_delegate({"task": "assess"}, _current_user())
+
+    assert result.get("result") == "Findings."
+    assert "saved_to" not in result
+
+
+def test_subagent_prompt_forbids_reconstructing_a_file_to_count_lines() -> None:
+    # 11 of 99 sub-agent calls in a traced run were reconstructing file text to
+    # produce path:line citations -- 25% of the run's output tokens, at 13.8s a
+    # call against 6.2s for everything else.
+    # Normalized: the prompt is written with line continuations, so the source
+    # spacing is not what the model receives.
+    prompt = " ".join(sandbox_module._subagent_prompt({"run_python", "read_file"}).split())
+
+    assert "Never reconstruct a file from memory to count its lines" in prompt
+    assert "write the content to a file and let run_python find it" in prompt

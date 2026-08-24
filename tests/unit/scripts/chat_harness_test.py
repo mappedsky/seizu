@@ -86,3 +86,26 @@ async def test_list_settings_compare_against_a_comma_separated_arm() -> None:
     # Unchanged for the scalar cases.
     assert _same_value("2000", "2000")
     assert _same_value("True", "true")
+
+
+def test_every_service_an_arm_touches_is_restored() -> None:
+    """The restore must cover ARM_SERVICES, not just the web service.
+
+    A completed run left `seizu-temporal-worker` on
+    `CHAT_RUN_TOKEN_BUDGET=200000` while `.env` read `0`: the arm was applied to
+    both services and restored on one. Chat turns execute on the worker, so
+    every later turn was silently capped -- and because the run exited normally,
+    nothing looked wrong.
+    """
+    import inspect
+
+    from scripts import chat_harness
+
+    source = inspect.getsource(chat_harness.main)
+    restore = [line for line in source.splitlines() if "--force-recreate" in line]
+
+    assert restore, "the harness no longer restores the stack"
+    for line in restore:
+        assert "ARM_SERVICES" in line, f"restore recreates a fixed service list: {line.strip()}"
+    # And the worker is in that list, which is what makes the above meaningful.
+    assert "seizu-temporal-worker" in chat_harness.ARM_SERVICES

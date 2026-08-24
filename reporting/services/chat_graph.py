@@ -33,6 +33,7 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.confirmations import ActionConfirmation
+from reporting.schema.mcp_config import SKILL_INPUTS_HEADING
 from reporting.services import (
     action_confirmations,
     chat_budget,
@@ -249,6 +250,12 @@ class LLMTurnResult:
     reasoning_text: str = ""
     cost_usd: float = 0.0
     usage_estimated: bool = False
+    # What the provider served from its prompt cache. Carried so the span can
+    # report it: the sandbox sub-agent's wrapper has always recorded this and
+    # the outer loop never did, which reads on a trace as a cache that is never
+    # hit rather than one that is never measured (SBX-019's asymmetry, the other
+    # way round).
+    cache_read_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -767,9 +774,9 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             # the user). Retry once with corrective guidance, then degrade.
             if not tool_markup_retry_used:
                 tool_markup_retry_used = True
-                pending_system_addendum = _tool_markup_retry_message(turn_result.leaked_tool_names)
+                pending_system_addendum = tool_markup_retry_message(turn_result.leaked_tool_names)
                 continue
-            response = _tool_markup_fallback()
+            response = tool_markup_fallback()
             response_is_broken = True
             break
         unavailable = _unavailable_tool_call_results(ai_message, available_specs)
@@ -1480,6 +1487,19 @@ def _strip_tool_markup(text: str) -> str:
 _TOOL_NAME_RE = re.compile(r"[a-z][a-z0-9_]*__[a-z0-9_]+")
 
 
+def detect_tool_markup(text: str) -> tuple[bool, tuple[str, ...]]:
+    """Whether a model wrote tool-call markup as prose, and which tools.
+
+    Shared with the sandbox sub-agent, which runs its own loop and so cannot
+    reach the streaming filter: there, a message with no structured tool calls
+    is taken as the delegation's answer, and leaked markup would otherwise be
+    returned as findings and written into the episode log later sub-agents read.
+    """
+    if not _TOOL_MARKUP_RE.search(text):
+        return False, ()
+    return True, _leaked_tool_names(text)
+
+
 def _leaked_tool_names(text: str) -> tuple[str, ...]:
     """Best-effort tool names the model tried to call in leaked markup."""
     match = _TOOL_MARKUP_RE.search(text)
@@ -1567,6 +1587,8 @@ async def _run_llm_tool_turn(
             # (AGT-026).
             reasoning=telemetry.content(result.reasoning_text, 4000),
             cost_usd=result.cost_usd,
+            cache_read_tokens=result.cache_read_tokens,
+            usage_estimated=result.usage_estimated,
             finish_reason=result.finish_reason or "",
             provider_finish_reason=result.provider_finish_reason or "",
             response=telemetry.content(message_text(result.message.content)),
@@ -1759,8 +1781,11 @@ async def _run_llm_tool_turn_inner(
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_creation_tokens,
         )
-    tool_markup_leaked = markup_filter.detected or bool(_TOOL_MARKUP_RE.search(merged_text))
-    leaked_tool_names = _leaked_tool_names(merged_text) if tool_markup_leaked else ()
+    detected_in_text, leaked_tool_names = detect_tool_markup(merged_text)
+    tool_markup_leaked = markup_filter.detected or detected_in_text
+    if tool_markup_leaked and not leaked_tool_names:
+        # The streaming filter caught it before it reached merged_text.
+        leaked_tool_names = _leaked_tool_names(merged_text)
     provider_finish_reason = finish_reason or _chunk_finish_reason(merged)
     # Derive the limit rather than take the argument, because callers that pass
     # nothing are not unbounded: get_chat_model builds the model with
@@ -1795,6 +1820,7 @@ async def _run_llm_tool_turn_inner(
             reasoning_text=reasoning_text,
             cost_usd=cost_usd,
             usage_estimated=usage_estimated,
+            cache_read_tokens=usage.cache_read_tokens,
         )
     fallback = AIMessage(
         content=_strip_tool_markup(merged_text),
@@ -1821,6 +1847,7 @@ async def _run_llm_tool_turn_inner(
         reasoning_text=reasoning_text,
         cost_usd=cost_usd,
         usage_estimated=usage_estimated,
+        cache_read_tokens=usage.cache_read_tokens,
     )
 
 
@@ -2141,7 +2168,7 @@ _MIN_CONTEXT_MAX_TOKENS = 2_500
 _CONTEXT_BUDGET_SHARE = 0.5
 
 
-def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
+def budgeted_context_max_tokens(controller: Any, *, base_max_tokens: int, degraded: bool = False) -> int:
     """Fit the per-call context cap inside what the run can still afford.
 
     Three limits meet here and they answer different questions: the model's
@@ -2153,15 +2180,29 @@ def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int
     Sizing each call against the remaining allowance makes the loop degrade
     smoothly, and pairs with the digest in ``_trim_inner_loop_messages`` so
     tightening condenses evidence instead of discarding it.
+
+    Takes the controller rather than a ``RunnableConfig`` because the sandbox
+    sub-agent has no config -- it reads the controller ambiently -- and it is
+    the loop that most needs this: it re-sends the whole accumulated exchange
+    on every inner call and is the largest single spender in a delegating turn.
+    ``degraded`` is passed in rather than read off the controller so a caller
+    can add its own reason (a step degraded on its own share, say) and so no
+    existing caller starts tightening merely because this moved.
     """
-    controller = budget_controller_from_config(config)
-    if controller is None or not controller.enabled:
-        return base_max_tokens
-    remaining = controller.remaining_normal_tokens
-    if remaining is None:
-        return base_max_tokens
-    affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
-    return max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
+    limit = base_max_tokens
+    if controller is not None and controller.enabled:
+        remaining = controller.remaining_normal_tokens
+        if remaining is not None:
+            affordable = int(remaining * _CONTEXT_BUDGET_SHARE)
+            limit = max(_MIN_CONTEXT_MAX_TOKENS, min(base_max_tokens, affordable))
+    if degraded:
+        limit = max(_MIN_CONTEXT_MAX_TOKENS, limit // 4)
+    return limit
+
+
+def _budgeted_context_max_tokens(config: RunnableConfig, *, base_max_tokens: int) -> int:
+    """The config-carrying callers' way in to :func:`budgeted_context_max_tokens`."""
+    return budgeted_context_max_tokens(budget_controller_from_config(config), base_max_tokens=base_max_tokens)
 
 
 def _message_context_text(message: BaseMessage) -> str:
@@ -2722,6 +2763,35 @@ def _tool_call_running_detail_data(request: ToolCallRequest) -> dict[str, Any]:
     }
 
 
+def skill_inputs_block(content: str) -> str:
+    """The rendered inputs block of a skill result, if it carries one.
+
+    Taken from the full content because the block is appended *last* and the
+    displayed body is truncated -- at 6,000 characters a real skill loses
+    exactly this. Read from the end for the same reason: a skill's
+    instructions routinely mention the heading ("use the values in the
+    ## Inputs block below"), and that prose is not the values. Only lines
+    shaped like a rendered entry (``- `name`: ...``) are kept, so a mention
+    that happens to be last still yields nothing.
+    """
+    start = content.rfind(SKILL_INPUTS_HEADING)
+    if start < 0:
+        return ""
+    lines: list[str] = []
+    for line in content[start + len(SKILL_INPUTS_HEADING) :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not (stripped.startswith("- `") and "`: " in stripped):
+            # The rendered block is the tail of the message and holds nothing
+            # but entries. Anything else means this match was prose that named
+            # the heading -- skills do that, and one such section is itself a
+            # list of "- `tool`: args" lines that passes a shape test alone.
+            return ""
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
 def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
     action = "Skill" if result.request.spec.kind == "skill" else "Tool"
     # A confirmation gate is a genuine wait (the UI shows it as "awaiting"); any
@@ -2732,7 +2802,7 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         status = "blocked"
     else:
         status = "completed"
-    return {
+    detail: dict[str, Any] = {
         "kind": result.request.spec.kind,
         "title": f"{action}: {result.request.name}",
         "status": status,
@@ -2740,6 +2810,12 @@ def _tool_call_detail_data(result: ToolCallResult) -> dict[str, Any]:
         "arguments": _truncate_text(_json_dump(result.request.arguments), 3000),
         "body": _truncate_text(result.content, 6000),
     }
+    if result.request.spec.kind == "skill" and (inputs := skill_inputs_block(result.content)):
+        # The values this invocation actually ran with, defaults included --
+        # which the arguments do not show, and the truncated body no longer
+        # holds. The step verifier judges against these.
+        detail["declared_inputs"] = inputs
+    return detail
 
 
 def _planning_narration_detail_data(text: str) -> dict[str, Any]:
@@ -3209,7 +3285,7 @@ def _initial_empty_response_retry_message() -> str:
     )
 
 
-def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
+def tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
     if leaked_tool_names:
         names = ", ".join(f"`{name}`" for name in leaked_tool_names)
         return (
@@ -3226,7 +3302,7 @@ def _tool_markup_retry_message(leaked_tool_names: tuple[str, ...] = ()) -> str:
     )
 
 
-def _tool_markup_fallback() -> str:
+def tool_markup_fallback() -> str:
     return (
         "I couldn't complete that request: the model returned an unusable tool call. Please try again, "
         "or rephrase the request."

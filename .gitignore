@@ -174,3 +174,9 @@ gunicorn.ctl
 # Output from scripts/chat_harness.py
 chat-harness-*/
 chat-harness-arm.yml
+
+# Editor swap files. A .env.swp carries the contents of .env, secrets included:
+# `git add -A` swept one into a commit and GitHub push protection caught it.
+*.swp
+*.swo
+.*.sw?

@@ -4257,3 +4257,109 @@ async def test_structured_output_reserves_from_observation_not_the_ceiling():
     assert reserved[0] == settings.CHAT_BUDGET_OUTPUT_ESTIMATE_TOKENS
     assert reserved[-1] < 1_000
     assert controller.snapshot()["phases"]["router"]["llm_calls"] == 4
+
+
+def test_skill_inputs_block_survives_a_truncated_body():
+    # Measured on a real run: the rendered block is appended last and the
+    # displayed body is capped at 6,000 characters, so a real skill loses
+    # exactly the values the verifier needs. Capture reads the full content.
+    from reporting.services.chat_graph import skill_inputs_block
+
+    content = (
+        "# Reachability\n\nUse the values in the `## Inputs` block below these instructions:\n"
+        "- `max_cves` — the most advisories to assess. Treat it as a hard cap.\n"
+        + ("filler line\n" * 900)
+        + "\n## Inputs\n\n- `repo`: `acme/api`\n- `max_cves`: `7`\n"
+    )
+
+    block = skill_inputs_block(content)
+
+    # The rendered values, not the prose that merely names the heading.
+    assert block == "- `repo`: `acme/api`\n- `max_cves`: `7`"
+    assert "hard cap" not in block
+
+
+def test_skill_inputs_block_ignores_a_prose_mention_alone():
+    from reporting.services.chat_graph import skill_inputs_block
+
+    assert skill_inputs_block("See the `## Inputs` block:\n- `repo` — the repository to review.\n") == ""
+
+
+def test_skill_inputs_block_rejects_a_prose_section_shaped_like_entries():
+    # A real skill documents its tools as "- `tool`: args" under prose that
+    # names the heading; a shape test alone accepts that list as the values.
+    from reporting.services.chat_graph import skill_inputs_block
+
+    content = (
+        "Use the `## Inputs` block below.\n\n"
+        "Tool arguments — use exactly these field names:\n"
+        "- `ext__github__search_code`: query, perPage\n"
+        "- `github_security__repo_dependencies`: repos, packages\n"
+    )
+
+    assert skill_inputs_block(content) == ""
+
+
+def test_budgeted_context_sizing_is_one_function_for_both_loops(mocker):
+    # The worker and the sandbox sub-agent size their context the same way; the
+    # sub-agent had neither half of it, and it is the loop that re-sends the
+    # whole exchange on every inner call.
+    from reporting.services.chat_budget import BudgetController, initial_budget_ledger
+
+    mocker.patch("reporting.settings.CHAT_RUN_TOKEN_BUDGET", 120_000)
+    mocker.patch("reporting.settings.CHAT_RUN_RESERVE_PERCENT", 20)
+
+    fresh = BudgetController(initial_budget_ledger())
+    assert chat_graph.budgeted_context_max_tokens(fresh, base_max_tokens=40_000) == 40_000
+    # Degraded tightens by a quarter, and is asked for rather than inferred, so
+    # a caller can add its own reason (a step degraded on its own share).
+    assert chat_graph.budgeted_context_max_tokens(fresh, base_max_tokens=40_000, degraded=True) == 10_000
+    # No controller at all is the sub-agent outside a budgeted run.
+    assert chat_graph.budgeted_context_max_tokens(None, base_max_tokens=40_000) == 40_000
+    # The floor still wins over the degraded divisor.
+    drained = BudgetController({**initial_budget_ledger(), "total_tokens": 119_000})
+    assert chat_graph.budgeted_context_max_tokens(drained, base_max_tokens=40_000, degraded=True) == 2_500
+
+
+def test_detect_tool_markup_reports_the_tools_a_model_wrote_as_prose():
+    # Shared with the sub-agent, which has no streaming filter and would
+    # otherwise return the markup as its findings.
+    leaked, names = chat_graph.detect_tool_markup("I will call <｜tool▁call▁begin｜>graph__query<｜tool▁sep｜>")
+
+    assert leaked is True
+    assert "graph__query" in names
+    assert chat_graph.detect_tool_markup("A perfectly ordinary answer.") == (False, ())
+
+
+async def test_the_outer_llm_span_reports_what_the_prompt_cache_served(mocker):
+    # The sub-agent's wrapper has always recorded this and the outer loop never
+    # did, so a trace read as a cache that is never hit rather than one that is
+    # never measured — and a diagnosis was built on the difference.
+    recorded: dict[str, object] = {}
+    real_set = chat_graph.telemetry.set_attributes
+
+    def _capture(current, **attrs):
+        if "cache_read_tokens" in attrs:
+            recorded.update(attrs)
+        return real_set(current, **attrs)
+
+    mocker.patch.object(chat_graph.telemetry, "set_attributes", _capture)
+    mocker.patch.object(
+        chat_graph,
+        "_run_llm_tool_turn_inner",
+        mocker.AsyncMock(
+            return_value=chat_graph.LLMTurnResult(
+                message=AIMessage(content="done"),
+                streamed="",
+                input_tokens=900,
+                output_tokens=20,
+                cache_read_tokens=768,
+                usage_estimated=False,
+            )
+        ),
+    )
+
+    await chat_graph._run_llm_tool_turn(mocker.MagicMock(), "sys", [], [], {"configurable": {}}, None)
+
+    assert recorded["cache_read_tokens"] == 768
+    assert recorded["usage_estimated"] is False

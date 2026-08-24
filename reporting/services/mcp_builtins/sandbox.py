@@ -45,7 +45,15 @@ from langgraph.prebuilt import create_react_agent
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import chat_budget, chat_context, episodic_memory, report_store, sandbox_session, telemetry
+from reporting.services import (
+    chat_budget,
+    chat_context,
+    chat_models,
+    episodic_memory,
+    report_store,
+    sandbox_session,
+    telemetry,
+)
 from reporting.services.chat_messages import message_text
 from reporting.services.mcp_builtins.base import BuiltinGroup, BuiltinTool
 from reporting.services.sandbox_backend import SandboxBackend, open_backend
@@ -1108,6 +1116,10 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             phase=phase,
             role=phase.split(":")[0],
             model=chat_context.model_name_of(self._model),
+            # Read off the model's own kwargs, as the outer path does: this is
+            # the attribute anyone checks to see what the sub-agent is actually
+            # graded at, and it read `None` while the stage ran at `low`.
+            reasoning_effort=chat_models.applied_reasoning_effort(self._model),
         ) as current:
             return await self._ainvoke_traced(input, config, current, scope, phase, **kwargs)
 
@@ -1211,30 +1223,19 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
 
 
 def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
-    """Return a LangChain chat model for the sandbox subagent."""
-    from reporting import settings
-    from reporting.services.chat_graph import get_chat_model
+    """The sub-agent's chat model, resolved like every other stage.
 
-    if settings.SANDBOX_LLM_MODEL.strip():
-        from langchain_litellm import ChatLiteLLM
+    It used to build ``ChatLiteLLM`` itself whenever ``SANDBOX_LLM_MODEL`` was
+    set, which meant it never reached ``reasoning_kwargs``. Reasoning effort has
+    to travel through ``model_kwargs`` (AGT-019), so no setting could reach the
+    wire and the highest-volume stage in the system ran on whatever the provider
+    defaults to. Resolving through ``chat_models`` is what makes it
+    configurable, and carries the derived output ceiling and temperature rules
+    with it (AGT-043).
+    """
+    from reporting.services.chat_graph import build_chat_model
 
-        provider_model = settings.SANDBOX_LLM_MODEL.strip()
-        kwargs: dict[str, Any] = {
-            "model": provider_model,
-            "temperature": settings.CHAT_LLM_TEMPERATURE,
-            "request_timeout": settings.CHAT_LLM_TIMEOUT_SECONDS,
-            "max_retries": settings.CHAT_LLM_MAX_RETRIES,
-            "streaming": False,
-        }
-        if settings.CHAT_LLM_MAX_TOKENS > 0:
-            kwargs["max_tokens"] = settings.CHAT_LLM_MAX_TOKENS
-        if settings.CHAT_LLM_API_KEY:
-            kwargs["api_key"] = settings.CHAT_LLM_API_KEY
-        if settings.CHAT_LLM_BASE_URL:
-            kwargs["api_base"] = settings.CHAT_LLM_BASE_URL
-        return _ToolMessageNormalizingModel(ChatLiteLLM(**kwargs))
-
-    return _ToolMessageNormalizingModel(get_chat_model(role="worker"))
+    return _ToolMessageNormalizingModel(build_chat_model(chat_models.resolve("sandbox_subagent")))
 
 
 _SANDBOX_TITLE = "Tool: sandbox__delegate"
@@ -1326,7 +1327,14 @@ def _wrap_with_detail_events(
                     raise
                 telemetry.set_attributes(current, outcome="ok")
             child["status"] = "completed"
-            child["body"] = _truncate(str(out) if out is not None else "", _CHILD_BODY_MAX)
+            body = str(out) if out is not None else ""
+            child["body"] = _truncate(body, _CHILD_BODY_MAX)
+            # A sub-agent reaches a skill through load_seizu_skill, so its
+            # inputs arrive as ordinary tool output -- and the block is
+            # appended last, which is precisely what the truncation above
+            # removes. Keep it whole for the step verifier.
+            if _name == "load_seizu_skill" and (inputs := _skill_inputs_block(body)):
+                child["declared_inputs"] = inputs
             _emit_section("running")
             return out
 
@@ -1398,6 +1406,10 @@ How to work:
 - Query once, save what you get, and compute over it. Repeating a query to see more of it \
   costs more than processing what you already have.
 - Aggregate, filter, join and count in run_python, not by reading rows yourself.
+- Needing a line number, an exact quote, or a count over a file's text is the same rule: \
+  write the content to a file and let run_python find it. Never reconstruct a file from \
+  memory to count its lines -- that answer is guesswork however careful it looks, and it \
+  costs more than the tool call that would settle it.
 - Prefer a purpose-built tool over raw Cypher when one covers the question.
 - Return the findings and the numbers behind them. Do not return transcripts, row dumps, \
   or a description of what you tried."""
@@ -1442,6 +1454,24 @@ _FALLBACK_WITHOUT_CYPHER = """\
 def _fallback_clause(tool_names: set[str]) -> str:
     """What to fall back on, decided by what is actually bound."""
     return _FALLBACK_WITH_CYPHER if "graph__query" in tool_names else _FALLBACK_WITHOUT_CYPHER
+
+
+async def _save_delegation_result(answer: str, backend: SandboxBackend, task: str) -> str:
+    """Write a delegation's answer to the shared sandbox and receipt it.
+
+    Best effort by design: the answer is returned to the caller either way, so a
+    write failure costs only the ability to re-read it later.
+    """
+    if not answer.strip():
+        return ""
+    path = f"{_RESULT_DIR}/delegation_{uuid.uuid4().hex[:8]}.md"
+    try:
+        await backend.write_file(path, answer)
+    except Exception:
+        logger.warning("sandbox: could not write delegation result to %s", path, exc_info=True)
+        return ""
+    _record_receipt(path, "sandbox__delegate", task, backend, None)
+    return path
 
 
 def _subagent_prompt(tool_names: set[str]) -> str:
@@ -1502,6 +1532,32 @@ def _budget_note(remaining: int | None, *, wrap_up: bool) -> str:
         f"\n\nBudget: about {remaining} tokens are available for this step, shared with any other work "
         "it does. Spend them on code rather than on reading data into context."
     )
+
+
+def chat_graph_markup(text: str) -> tuple[bool, tuple[str, ...]]:
+    """Lazy indirection to the shared detector; chat_graph imports this module."""
+    from reporting.services.chat_graph import detect_tool_markup
+
+    return detect_tool_markup(text)
+
+
+def _markup_retry_message(names: tuple[str, ...]) -> str:
+    from reporting.services.chat_graph import tool_markup_retry_message
+
+    return tool_markup_retry_message(names)
+
+
+def _markup_fallback() -> str:
+    from reporting.services.chat_graph import tool_markup_fallback
+
+    return tool_markup_fallback()
+
+
+def _skill_inputs_block(content: str) -> str:
+    """Lazy indirection: chat_graph imports this module, so it cannot be imported at module scope."""
+    from reporting.services.chat_graph import skill_inputs_block
+
+    return skill_inputs_block(content)
 
 
 async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | None) -> Any:
@@ -1591,6 +1647,12 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             f"{recall}\n\n---\n\n{base_prompt}"
         )
 
+    # One shot each, for the whole delegation rather than per agent invocation:
+    # a second overflow means tightening did not help and retrying again would
+    # only burn budget.
+    overflow_retry = [False]
+    saved_result_path: list[str] = [""]
+
     async def _agent_over(backend: SandboxBackend) -> str:
         tools = _build_sandbox_tools(backend)
         if current_user is not None:
@@ -1624,10 +1686,32 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             """
             # Imported here: chat_graph imports the builtin registry this
             # module is part of, so a module-level import is a cycle.
-            from reporting.services.chat_graph import _trim_inner_loop_messages
+            from reporting.services.chat_graph import (
+                _MIN_CONTEXT_MAX_TOKENS,
+                _message_context_tokens,
+                _trim_inner_loop_messages,
+                budgeted_context_max_tokens,
+            )
 
             messages = state.get("messages") or []
-            budget = chat_context.history_token_budget(model)
+            controller = chat_budget.current_budget_controller()
+            # The same sizing the worker uses, from the same function: fit the
+            # cap to what the run can still afford, and tighten hard once the
+            # run is degraded. This loop needed it most and had it least -- it
+            # re-sends the whole exchange every call and outspends everything
+            # else in a delegating turn.
+            budget = budgeted_context_max_tokens(
+                controller,
+                base_max_tokens=chat_context.history_token_budget(model),
+                degraded=controller is not None and controller.degraded,
+            )
+            if overflow_retry[0]:
+                # An overflow is our belief about the window being wrong, so
+                # halve what was actually sent rather than our own allowance,
+                # which can leave the request exactly as oversized (chat_graph
+                # states the same reasoning for the outer loop).
+                sent = sum(_message_context_tokens(model, message) for message in messages)
+                budget = max(_MIN_CONTEXT_MAX_TOKENS, min(budget, sent // 2))
             trimmed = _trim_inner_loop_messages(messages, model=model, max_tokens=budget)
             note = _live_budget_note()
             # Last, and only in the model's input: it changes every call, and
@@ -1636,8 +1720,45 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
             return {"llm_input_messages": [*trimmed, HumanMessage(content=note)] if note else trimmed}
 
         agent = create_react_agent(model=model, tools=tools, prompt=system_prompt, pre_model_hook=_trim_before_model)
-        result = await agent.ainvoke({"messages": [HumanMessage(content=_prompt_for(backend))]})
-        messages = result.get("messages", [])
+        opening = [HumanMessage(content=_prompt_for(backend))]
+        try:
+            result = await agent.ainvoke({"messages": opening})
+        except Exception as exc:
+            # A window we sized wrong is recoverable; losing the whole
+            # delegation over it is not. The outer loop has always retried
+            # here; without it this reached the generic handler and the caller
+            # was told "Sandbox task failed", which is indistinguishable from a
+            # broken sandbox and discards everything the sub-agent had done.
+            if overflow_retry[0] or not chat_context.is_context_overflow(exc):
+                raise
+            overflow_retry[0] = True
+            logger.warning("sandbox sub-agent exceeded the context window; retrying once, tightened")
+            result = await agent.ainvoke({"messages": opening})
+        answer = _final_answer(result.get("messages", []))
+        leaked, leaked_names = chat_graph_markup(answer)
+        if leaked:
+            # A sub-agent that writes tool-call markup as prose gets no
+            # structured call, so this loop reads the markup as its answer and
+            # returns it as findings. Correct it once, exactly as the outer loop
+            # does, and never hand the markup back as a result.
+            retry = await agent.ainvoke(
+                {"messages": [*result.get("messages", []), HumanMessage(content=_markup_retry_message(leaked_names))]}
+            )
+            answer = _final_answer(retry.get("messages", []))
+            if chat_graph_markup(answer)[0]:
+                return _markup_fallback()
+        # The delegation's own answer is the most expensive artifact this system
+        # produces -- fifty tool calls and twenty-odd model calls -- and it was
+        # the one result never written anywhere. An oversized *tool* result gets
+        # a file and a receipt; this got `_truncate_bytes` and the remainder was
+        # gone. It does not even take the byte cap to lose it: the worker's own
+        # inner loop condenses a long step's evidence, and then the only way
+        # back to the analysis is to run it again, which a traced run recorded
+        # the worker deciding to do in as many words.
+        saved_result_path[0] = await _save_delegation_result(answer, backend, task)
+        return answer
+
+    def _final_answer(messages: list[Any]) -> str:
         for msg in reversed(messages):
             if hasattr(msg, "content") and not getattr(msg, "tool_calls", None):
                 # message_text, not str(): a reasoning model returns content as
@@ -1682,12 +1803,24 @@ async def _handle_delegate(args: dict[str, Any], current_user: CurrentUser | Non
         return {"error": "Sandbox task failed — see server logs for details"}
 
     result_text = _truncate_bytes(output, settings.SANDBOX_MAX_OUTPUT_BYTES)
+    truncated = result_text != output
     # Record only on success: a timeout or crash returns above, and logging a
     # failure as a "result" would teach the next sub-agent that the ground was
     # already covered when it was not.
     if episode_log is not None:
         episode_log.append(task, result_text)
-    return {"result": result_text}
+    payload: dict[str, Any] = {"result": result_text}
+    if saved_result_path[0]:
+        # Named on the way out, not left to be discovered in a receipt listing:
+        # the caller that needs it is the one holding a shortened copy right now.
+        payload["saved_to"] = saved_result_path[0]
+        if truncated:
+            payload["truncated"] = True
+            payload["note"] = (
+                f"The result above is shortened. The full analysis is at {saved_result_path[0]} — "
+                "read that file rather than delegating the work again."
+            )
+    return payload
 
 
 def _sandbox_enabled() -> bool:

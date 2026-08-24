@@ -76,6 +76,9 @@ class ModelCapability:
 _STAGE_PARENT = {
     "worker_summary": "worker",
     "worker_summary_retry": "worker",
+    # The sandbox sub-agent is the worker's own tool loop, one level down, so
+    # configuring the worker still governs it (AGT-043).
+    "sandbox_subagent": "worker",
 }
 
 
@@ -230,6 +233,7 @@ def _role_reasoning_effort(stage: str) -> str:
         "worker_summary_retry": settings.CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT,
         "verifier": settings.CHAT_LLM_VERIFIER_REASONING_EFFORT,
         "synthesizer": settings.CHAT_LLM_SYNTHESIZER_REASONING_EFFORT,
+        "sandbox_subagent": settings.CHAT_LLM_SANDBOX_REASONING_EFFORT,
     }
     parent = _STAGE_PARENT.get(stage, "")
     return (
@@ -346,18 +350,24 @@ def temperature_for(spec: "ModelSpec") -> float | None:
 def model_id_for_role(role: str, *, economy: bool = False) -> str:
     if economy and settings.CHAT_LLM_ECONOMY_MODEL.strip():
         return settings.CHAT_LLM_ECONOMY_MODEL.strip()
-    # A stage runs on its parent role's model; only the effort differs.
-    role = _STAGE_PARENT.get(role, role)
     role_models = {
         "planner": settings.CHAT_LLM_PLANNER_MODEL,
-        # The router shares the planner's model deliberately: both are small
-        # structured calls made once per turn.
-        "router": settings.CHAT_LLM_PLANNER_MODEL,
+        # Its own setting, falling back to the planner's: the two were one knob,
+        # which made "put the planner on the strong model" silently move a
+        # binary classifier there too (AGT-043).
+        "router": settings.CHAT_LLM_ROUTER_MODEL or settings.CHAT_LLM_PLANNER_MODEL,
         "worker": settings.CHAT_LLM_WORKER_MODEL,
+        "sandbox_subagent": settings.SANDBOX_LLM_MODEL,
         "verifier": settings.CHAT_LLM_VERIFIER_MODEL,
         "synthesizer": settings.CHAT_LLM_SYNTHESIZER_MODEL,
     }
-    return role_models.get(role, "").strip() or settings.CHAT_LLM_MODEL.strip()
+    # A stage's own model wins; only then does it inherit its parent's. Checking
+    # the parent first would make `SANDBOX_LLM_MODEL` unreachable, since the
+    # sub-agent's parent is the worker.
+    explicit = role_models.get(role, "").strip()
+    if explicit:
+        return explicit
+    return role_models.get(_STAGE_PARENT.get(role, role), "").strip() or settings.CHAT_LLM_MODEL.strip()
 
 
 def resolve(

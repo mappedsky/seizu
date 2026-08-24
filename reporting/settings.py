@@ -684,6 +684,10 @@ CHAT_LLM_WORKER_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_REASONING_EFFORT", "
 # deciding what to do next. Empty inherits CHAT_LLM_WORKER_REASONING_EFFORT.
 CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT = str_env("CHAT_LLM_WORKER_SUMMARY_REASONING_EFFORT", "")
 CHAT_LLM_VERIFIER_REASONING_EFFORT = str_env("CHAT_LLM_VERIFIER_REASONING_EFFORT", "")
+# The sandbox sub-agent's own loop. It is the highest-volume stage there is, so
+# what it spends thinking on each of its many iterations dominates a delegating
+# turn. Empty inherits CHAT_LLM_WORKER_REASONING_EFFORT.
+CHAT_LLM_SANDBOX_REASONING_EFFORT = str_env("CHAT_LLM_SANDBOX_REASONING_EFFORT", "")
 # Same reasoning as the planner's. Measured at 10,084 output tokens for an answer
 # of about 2,400 -- roughly three quarters of it thinking -- and 229s of a
 # 1,194s turn (AGT-033).
@@ -1039,6 +1043,9 @@ TELEMETRY_RECORD_CONTENT = bool_env("TELEMETRY_RECORD_CONTENT", False)
 # economy model is selected for read-only worker/synthesis calls after the run
 # crosses its soft budget limit.
 CHAT_LLM_PLANNER_MODEL = str_env("CHAT_LLM_PLANNER_MODEL", "")
+# The router only classifies a turn, so it does not need the planner's model.
+# Empty inherits CHAT_LLM_PLANNER_MODEL, which is where it used to live.
+CHAT_LLM_ROUTER_MODEL = str_env("CHAT_LLM_ROUTER_MODEL", "")
 CHAT_LLM_WORKER_MODEL = str_env("CHAT_LLM_WORKER_MODEL", "")
 CHAT_LLM_VERIFIER_MODEL = str_env("CHAT_LLM_VERIFIER_MODEL", "")
 CHAT_LLM_SYNTHESIZER_MODEL = str_env("CHAT_LLM_SYNTHESIZER_MODEL", "")

@@ -712,3 +712,95 @@ run it, still never provisions anything.
 **Don't:** materialize for a skill without scripts, or for a caller lacking
 `sandbox:delegate`. Those are the cases where a render would be paying for a VM
 to hold a template nobody can use.
+
+## SBX-019 — Behavior shared with the outer loop lives in the wrapper, not the loop
+
+**Decision.** Anything both the chat agent and the sandbox sub-agent should do
+is written once and called from both. Where it cannot be — because the
+sub-agent runs `create_react_agent` rather than `_run_llm_tool_turn` — the
+shared part is factored out and only the wiring is duplicated.
+
+**Why.** The sub-agent inherits everything that lives in the *model wrapper*
+and misses everything that lives in the *loop*.
+`_ToolMessageNormalizingModel.ainvoke` gave it budget reservation, scoping,
+tracing, cache breakpoints and projected output tokens for free. Every
+improvement made inside `_run_llm_tool_turn` had to be ported by hand, and
+three were not:
+
+- **Tool-markup leak detection.** A message with no structured tool calls is
+  taken as the delegation's answer, so markup written as prose came back as
+  findings and entered the episode log the next sub-agent reads as established
+  ground. Silent: nothing reported it, and the sub-agent runs on the cheaper
+  model, which is likelier to do it.
+- **Context-overflow retry.** An overflow reached the generic handler and the
+  caller was told "Sandbox task failed" — indistinguishable from a broken
+  sandbox, with the whole delegation discarded.
+- **Budget-aware context sizing.** The sub-agent sized every call against the
+  model window alone while the worker fitted it to what the run could still
+  afford and tightened fourfold once degraded — in the loop that re-sends the
+  whole exchange on every call and is the largest single spender in a
+  delegating turn (200,761 of a measured turn's 246,210 tokens).
+
+`cd29601` is the shape of it: it changed `chat_graph`, `chat_orchestrator`,
+`chat_budget` and `chat_context`, not `sandbox.py`, which is why
+`_get_sandbox_model` was still bypassing `chat_models.resolve` — and every
+stage's reasoning effort silently unreachable — until it was found by reading a
+trace.
+
+**Do:** put new shared behavior where the wrapper can carry it. Where it must
+live in the loop, export it (`budgeted_context_max_tokens`,
+`detect_tool_markup`, `tool_markup_retry_message`, `tool_markup_fallback`) and
+call it from both; pass the decision in (`degraded=`) rather than reading it off
+global state, so adding a caller cannot change an existing one's behavior.
+
+**Don't:** re-implement the outer loop's behavior in `sandbox.py`. A second copy
+of a rule is a second thing to keep current, and this log exists because the
+first copy already drifted.
+
+## SBX-020 — Caching a duplicate tool result was built, measured and reverted
+
+**Applies to:** anyone proposing to dedupe sub-agent tool calls across parallel
+plan steps. Related: [AGT-027](chat-agent.md#agt-027), [SBX-015](#sbx-015).
+
+**The duplicates are real.** Across the multi-step streams on one dev box,
+identical tool calls recur *between* plan steps: 13 of 97 calls in the worst
+sample, 5–7 in several others — the same `get_file_contents` on `setup.py`, the
+same `repo_dependencies` for one package, the same `sync_freshness`. `_settled`
+cannot catch them: it is built per delegation, so four delegations in one traced
+step re-read 15 of the 56 distinct files they touched.
+
+**What was built.** A content-addressed result cache — `sha256(tool + canonical
+arguments)` under `/home/user/seizu_cache`, checked before the upstream call and
+written after, behind `SANDBOX_RESULT_CACHE_ENABLED` with a TTL. Content-addressed
+rather than propagated because AGT-027 settles that space: the steps of a batch
+start together, so a receipt reaches a sibling only after the batch returns, and
+the filesystem is the one thing they share in time to matter.
+
+**Measured, two arms of two samples on the reachability request.** Hit rate
+**10.9%** (13 of 119 lookups), twelve of them `ext__github__get_file_contents`.
+No benefit: baseline $0.171 [0.153–0.190] against $0.281 [0.275–0.288] armed.
+The cost gap is not attributed to the cache — serving identical bytes from disk
+has no mechanism to raise token spend, and n=2 on a box that swings fourfold on
+unchanged config — but nothing offset it either.
+
+**Why it cannot pay for itself, which is the part that generalizes.** A
+duplicated tool call costs a fetch *and* a model call, and a result cache only
+removes the fetch. The sub-agent has already decided to call the tool; the
+result returns; the model is invoked again to reason over it. On that run
+`get_file_contents` averaged **1.16s** against **~7s** for a sub-agent model
+call, so the cache addressed roughly 15% of a duplicate's wall time and **none**
+of its tokens — cached text occupies exactly the context the fetched text would.
+Armed, it also added a `read_file` round trip per call (119 lookups, 106 stores)
+against the ~15s its 13 hits saved.
+
+**Also, the duplicates were partly gone before the cache saw them.** Persisting
+a delegation's own result removed the re-run branch that guaranteed re-reading:
+the same runs show **one delegation in three of four samples**, against the four
+delegations for one step that prompted this.
+
+**Don't:** cache tool results to reduce duplicate work. The lever that would pay
+is the one that removes the **model call** — making `_settled`'s stuck notice
+survive across delegations rather than resetting per delegation. That targets
+the 7s rather than the 1.2s, and needs care for the opposite reason: the
+per-delegation reset is deliberate, and a stale notice could suppress a call
+that genuinely needed remaking.
