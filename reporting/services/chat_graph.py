@@ -1399,7 +1399,8 @@ async def _resume_confirmed_tool_turn(
     # Budgeted in tokens against the model that will read it, and shared between
     # however many actions were approved together.
     resume_model = _context_model()
-    per_result = max(1, _COMBINED_RESULT_CONTEXT_TOKENS // max(1, len(outcomes)))
+    combined_budget = _context_block_tokens(resume_model, _COMBINED_RESULT_BUDGET_DIVISOR)
+    per_result = max(1, combined_budget // max(1, len(outcomes)))
     combined_results = "\n\n".join(
         f"`{name}`:\n{_truncate_text(text, _context_chars(resume_model, text, per_result))}" for name, text in outcomes
     )
@@ -1431,7 +1432,7 @@ async def _resume_confirmed_tool_turn(
                 "Approved Seizu tool(s) ran with result(s):\n\n"
                 + _truncate_text(
                     combined_results,
-                    _context_chars(resume_model, combined_results, _COMBINED_RESULT_CONTEXT_TOKENS * 2),
+                    _context_chars(resume_model, combined_results, combined_budget * 2),
                 )
             ),
             id=f"msg_{uuid.uuid4().hex}",
@@ -1441,7 +1442,14 @@ async def _resume_confirmed_tool_turn(
     detail_events.extend(turn_result.details)
     response = message_text(turn_result.message.content) or (
         "Approved action(s) completed.\n\nResult:\n"
-        + _truncate_text(combined_results, _context_chars(resume_model, combined_results, _TOOL_RESULT_CONTEXT_TOKENS))
+        + _truncate_text(
+            combined_results,
+            _context_chars(
+                resume_model,
+                combined_results,
+                _context_block_tokens(resume_model, _TOOL_RESULT_BUDGET_DIVISOR),
+            ),
+        )
     )
     response, hit_output_limit = _append_output_limit_notice(response, turn_result.finish_reason)
     streamed = turn_result.streamed
@@ -2753,7 +2761,7 @@ def _tool_call_user_summary(results: list[ToolCallResult], model: Any = None) ->
     if len(results) > 1:
         # Shared between however many ran in parallel, so one large result
         # cannot crowd out its siblings.
-        per_result = max(1, _TOOL_RESULT_CONTEXT_TOKENS // len(results))
+        per_result = max(1, _context_block_tokens(model, _TOOL_RESULT_BUDGET_DIVISOR) // len(results))
         rendered_results = "\n\n".join(
             (
                 f"- `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}` returned:\n"
@@ -2766,7 +2774,11 @@ def _tool_call_user_summary(results: list[ToolCallResult], model: Any = None) ->
     action = "rendered skill" if result.request.spec.kind == "skill" else "ran tool"
     return (
         f"Seizu {action} `{result.request.name}` with arguments `{_json_dump(result.request.arguments)}`.\n\n"
-        f"Result:\n{_truncate_text(result.content, _context_chars(model, result.content, _TOOL_RESULT_CONTEXT_TOKENS))}"
+        + "Result:\n"
+        + _truncate_text(
+            result.content,
+            _context_chars(model, result.content, _context_block_tokens(model, _TOOL_RESULT_BUDGET_DIVISOR)),
+        )
     )
 
 
@@ -2817,14 +2829,28 @@ def skill_inputs_block(content: str) -> str:
 
 
 # Text that goes into a model's context is budgeted in tokens, because that is
-# what the window and the ledger measure. `chars_for_tokens` calibrates the
-# ratio on the content in hand rather than assuming one: a char constant is
-# right on prose and about a third out on structured payloads, which is exactly
-# what a tool result is (CTX-004). These were char literals from the first chat
-# commit and had never been revisited.
-_TOOL_RESULT_CONTEXT_TOKENS = 1_500
-_COMBINED_RESULT_CONTEXT_TOKENS = 3_000
-_ACTION_SUMMARY_CONTEXT_TOKENS = 2_500
+# what the window and the ledger measure. `chars_for_tokens` then calibrates the
+# character cut on the content in hand rather than assuming a ratio: a constant
+# is right on prose and about a third out on structured payloads, which is
+# exactly what a tool result is (CTX-004).
+#
+# The budget itself is a *share of what a call may carry*, not a number someone
+# picked. `history_token_budget` is already "tokens of prior conversation one
+# call may carry", and these blocks are items inside it -- so a block that is
+# reasonable at a 40,000-token budget is not reasonable at 4,000, and a fixed
+# count has the defect AGT-021 rejected for the run backstop: too tight on a
+# small model and too loose on a large one. The divisors are the judgment that
+# remains, in one place with a stated reason, rather than three literals.
+_TOOL_RESULT_BUDGET_DIVISOR = 16
+_COMBINED_RESULT_BUDGET_DIVISOR = 8
+_ACTION_SUMMARY_BUDGET_DIVISOR = 10
+
+# A block below the floor cannot carry a finding, so truncating to it buys
+# nothing but a confusing fragment; above the ceiling a single block starts
+# crowding out the conversation it is supposed to support. Both bound the
+# derivation rather than replacing it.
+_CONTEXT_BLOCK_MIN_TOKENS = 400
+_CONTEXT_BLOCK_MAX_TOKENS = 8_000
 
 # Display bounds, not context bounds: these cap what a UI pane renders and what
 # is persisted for replay, so size is the constraint and characters are the
@@ -2834,6 +2860,21 @@ _ACTION_SUMMARY_CONTEXT_TOKENS = 2_500
 _DETAIL_BODY_MAX_CHARS = 6_000
 _DETAIL_ARGUMENTS_MAX_CHARS = 3_000
 _DETAIL_NARRATION_MAX_CHARS = 4_000
+
+
+def _context_block_tokens(model: Any, divisor: int, config: RunnableConfig | None = None) -> int:
+    """A share of what one call may carry, for a single block of context.
+
+    Derived rather than configured: what a tool result may occupy depends on
+    what the call can carry at all. Passed a ``config``, it also tightens as the
+    run spends, the same way the tool loop does -- a block sized for a fresh run
+    is not sized for one about to finalize.
+    """
+    budget = chat_context.history_token_budget(model) if model is not None else settings.CHAT_LLM_CONTEXT_MAX_TOKENS
+    if config is not None:
+        budget = budgeted_context_max_tokens(budget_controller_from_config(config), base_max_tokens=budget)
+    share = budget // max(1, divisor)
+    return max(_CONTEXT_BLOCK_MIN_TOKENS, min(_CONTEXT_BLOCK_MAX_TOKENS, share))
 
 
 def _context_chars(model: Any, sample: str, tokens: int) -> int:
@@ -3316,7 +3357,7 @@ def _terminal_stall_retry_message(action_summaries: list[str], model: Any = None
         "Completed action summaries so far:\n"
         + _truncate_text(
             joined := chr(10).join(action_summaries),
-            _context_chars(model, joined, _ACTION_SUMMARY_CONTEXT_TOKENS),
+            _context_chars(model, joined, _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR)),
         )
     )
 
@@ -3329,7 +3370,11 @@ def _repeated_tool_call_retry_message(
         "\n\nMost recent completed action:\n"
         + _truncate_text(
             action_summaries[-1],
-            _context_chars(model, action_summaries[-1], _ACTION_SUMMARY_CONTEXT_TOKENS // 2),
+            _context_chars(
+                model,
+                action_summaries[-1],
+                _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR * 2),
+            ),
         )
         if action_summaries
         else ""
@@ -3338,7 +3383,7 @@ def _repeated_tool_call_retry_message(
         "\n\nAll completed action summaries so far:\n"
         + _truncate_text(
             everything := "\n\n".join(action_summaries),
-            _context_chars(model, everything, _ACTION_SUMMARY_CONTEXT_TOKENS),
+            _context_chars(model, everything, _context_block_tokens(model, _ACTION_SUMMARY_BUDGET_DIVISOR)),
         )
         if action_summaries
         else ""
