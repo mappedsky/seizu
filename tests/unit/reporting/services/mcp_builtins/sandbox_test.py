@@ -14,7 +14,7 @@ from mcp.types import Prompt, Tool, ToolAnnotations
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import ALL_PERMISSIONS, Permission
 from reporting.schema.report_config import User
-from reporting.services import chat_budget, episodic_memory, mcp_runtime
+from reporting.services import chat_budget, chat_models, episodic_memory, mcp_runtime
 from reporting.services.chat_budget import BudgetController, BudgetExceeded, initial_budget_ledger
 from reporting.services.mcp_builtins import find_builtin, list_builtin_tools
 from reporting.services.mcp_builtins import sandbox as sandbox_module
@@ -1206,15 +1206,28 @@ def test_normalizing_model_bind_tools_returns_wrapped_model() -> None:
     assert isinstance(bound, _ToolMessageNormalizingModel)
 
 
-def test_get_sandbox_model_returns_normalizing_model() -> None:
-    """_get_sandbox_model always wraps the base model in _ToolMessageNormalizingModel."""
+def test_get_sandbox_model_is_built_from_the_resolved_stage_spec() -> None:
+    """The sub-agent's model comes from chat_models.resolve, and stays wrapped.
+
+    Building it directly is what made every reasoning-effort setting
+    unreachable for the largest spender in a delegating turn: the effort is
+    carried on the spec, so a model built without one is graded at whatever the
+    provider defaults to. Patching ``build_chat_model`` rather than
+    ``get_chat_model`` is the point of the test -- the previous version patched
+    a function this path no longer calls, so it exercised the real builder and
+    passed only where a real provider happened to be configured.
+    """
+    built = MagicMock()
     with (
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
-        patch("reporting.services.chat_graph.get_chat_model", return_value=MagicMock()),
+        patch("reporting.services.chat_graph.build_chat_model", return_value=built) as build,
     ):
         model = _get_sandbox_model()
 
     assert isinstance(model, _ToolMessageNormalizingModel)
+    spec = build.call_args.args[0]
+    assert spec == chat_models.resolve("sandbox_subagent")
+    assert spec.role == "sandbox_subagent"
 
 
 async def test_e2b_run_bash_streaming_passes_per_command_envs() -> None:
