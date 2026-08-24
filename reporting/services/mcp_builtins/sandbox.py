@@ -29,10 +29,12 @@ sandbox service hostname to switch from E2B's cloud to a self-hosted instance.
 
 import asyncio
 import base64
+import hashlib
 import itertools
 import json
 import logging
 import posixpath
+import time
 import uuid
 from typing import Any
 
@@ -554,6 +556,64 @@ def _result_columns(rows: list[Any] | None) -> list[str]:
     return columns
 
 
+# Separate from _RESULT_DIR so cache files never appear in a receipt listing or
+# a sub-agent's file browse: this is an implementation detail of fetching, not
+# data anyone should be told to read.
+_CACHE_DIR = "/home/user/seizu_cache"
+
+
+def _cache_path(signature: str) -> str:
+    """A path derived from the call itself, so a sibling worker finds it.
+
+    Content-addressed rather than propagated, because the steps of a batch start
+    together and a receipt reaches a sibling only once the batch returns
+    (AGT-027). The disk is the one thing they already share (SBX-015), so the
+    key has to be computable without talking to anyone.
+    """
+    return f"{_CACHE_DIR}/{hashlib.sha256(signature.encode()).hexdigest()[:32]}.json"
+
+
+async def _cache_lookup(backend: SandboxBackend | None, signature: str, tool_name: str) -> str | None:
+    """A previous identical call's result, if one is on disk and still fresh."""
+    from reporting import settings as _settings
+
+    if backend is None or not _settings.SANDBOX_RESULT_CACHE_ENABLED:
+        return None
+    text: str | None = None
+    try:
+        envelope = json.loads(await backend.read_file(_cache_path(signature)))
+        age = time.time() - float(envelope["cached_at"])
+        if age <= max(0, _settings.SANDBOX_RESULT_CACHE_TTL_SECONDS):
+            cached = envelope["text"]
+            text = cached if isinstance(cached, str) else None
+    except Exception:
+        # A miss, an expired entry and a malformed one are the same thing here:
+        # fetch it. Only the count distinguishes them, and that is what the
+        # marker below is for.
+        text = None
+    # A zero-duration marker: the measurement wants the hit rate, and there is
+    # no work to enclose. Emitted only when the cache is armed, so an unarmed
+    # deployment does not pay a span per tool call.
+    with telemetry.span("sandbox result cache", tool=tool_name, outcome="hit" if text else "miss"):
+        pass
+    return text
+
+
+async def _cache_store(backend: SandboxBackend | None, signature: str, tool_name: str, text: str) -> None:
+    from reporting import settings as _settings
+
+    if backend is None or not _settings.SANDBOX_RESULT_CACHE_ENABLED:
+        return
+    try:
+        await backend.write_file(
+            _cache_path(signature),
+            json.dumps({"cached_at": time.time(), "tool": tool_name, "text": text}),
+        )
+    except Exception:
+        # Best effort by construction: the result is already in hand.
+        logger.debug("sandbox: could not cache %s result", tool_name, exc_info=True)
+
+
 def _record_receipt(
     path: str,
     tool_name: str,
@@ -668,25 +728,37 @@ async def _build_seizu_tools(
             max_rows = max(_settings.CHAT_TOOL_RESULT_MAX_ROWS, _settings.SANDBOX_FILE_RESULT_MAX_ROWS)
             max_bytes = max(_settings.CHAT_TOOL_RESULT_MAX_BYTES, _settings.SANDBOX_FILE_RESULT_MAX_BYTES)
 
-        call_kwargs: dict[str, Any] = {}
-        tool = reachable_by_name.get(tool_name)
-        if tool is not None and tool.annotations is not None:
-            call_kwargs["external_tool_annotations"] = tool.annotations
-        outcome = await _rt.call_tool_for_chat(
-            current_user,
-            tool_name,
-            arguments,
-            gate_permission=Permission.CHAT_TOOLS_CALL,
-            chat_safe_only=True,
-            result_max_rows=max_rows,
-            result_max_bytes=max_bytes,
-            **call_kwargs,
-        )
-        if outcome.blocked:
-            blocked = f"[blocked: {outcome.blocked}]"
-            _settled[signature] = _repeat_note(blocked, "was blocked")
-            return blocked
-        text = outcome.text or "(no output)"
+        # Checked before the call and keyed on the call, so a sibling step
+        # running on another worker finds it: they share this filesystem and
+        # nothing else in time to matter (AGT-027, SBX-015). Wrapped around the
+        # upstream call rather than the returned payload, so a hit still runs
+        # the size decision and writes its own receipt.
+        cached_text = await _cache_lookup(backend, signature, tool_name)
+        if cached_text is not None:
+            text = cached_text
+        else:
+            call_kwargs: dict[str, Any] = {}
+            tool = reachable_by_name.get(tool_name)
+            if tool is not None and tool.annotations is not None:
+                call_kwargs["external_tool_annotations"] = tool.annotations
+            outcome = await _rt.call_tool_for_chat(
+                current_user,
+                tool_name,
+                arguments,
+                gate_permission=Permission.CHAT_TOOLS_CALL,
+                chat_safe_only=True,
+                result_max_rows=max_rows,
+                result_max_bytes=max_bytes,
+                **call_kwargs,
+            )
+            if outcome.blocked:
+                # Never cached: a block is about who is asking, not about the
+                # data, and the next caller may be entitled to it.
+                blocked = f"[blocked: {outcome.blocked}]"
+                _settled[signature] = _repeat_note(blocked, "was blocked")
+                return blocked
+            text = outcome.text or "(no output)"
+            await _cache_store(backend, signature, tool_name, text)
         if (repeat_reason := _unchanging_outcome(text)) is not None:
             _settled[signature] = _repeat_note(text, repeat_reason)
 

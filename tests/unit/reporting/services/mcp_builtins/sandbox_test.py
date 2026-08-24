@@ -2933,3 +2933,90 @@ def test_subagent_prompt_forbids_reconstructing_a_file_to_count_lines() -> None:
 
     assert "Never reconstruct a file from memory to count its lines" in prompt
     assert "write the content to a file and let run_python find it" in prompt
+
+
+def test_result_cache_path_is_derived_from_the_call_not_the_caller() -> None:
+    # Content-addressed on purpose: a sibling step on another worker has to be
+    # able to compute the path without being told, because the steps of a batch
+    # start together and a receipt reaches a sibling only after it returns.
+    a = sandbox_module._cache_path('github_security__top_vulnerabilities:{"org":"acme"}')
+    again = sandbox_module._cache_path('github_security__top_vulnerabilities:{"org":"acme"}')
+    other = sandbox_module._cache_path('github_security__top_vulnerabilities:{"org":"other"}')
+
+    assert a == again
+    assert a != other
+    # Never under the results dir, or cache files would surface in receipts and
+    # file listings as though they were data to read.
+    assert not a.startswith(sandbox_module.sandbox_result_dir())
+
+
+async def test_result_cache_is_inert_until_armed() -> None:
+    backend = _make_fake_backend()
+
+    with patch("reporting.settings.SANDBOX_RESULT_CACHE_ENABLED", False):
+        assert await sandbox_module._cache_lookup(backend, "sig", "t") is None
+        await sandbox_module._cache_store(backend, "sig", "t", "text")
+
+    backend.read_file.assert_not_awaited()
+    backend.write_file.assert_not_awaited()
+
+
+async def test_result_cache_round_trips_and_expires() -> None:
+    import json as _json
+    import time as _time
+
+    backend = _make_fake_backend()
+    with patch("reporting.settings.SANDBOX_RESULT_CACHE_ENABLED", True):
+        await sandbox_module._cache_store(backend, "sig", "graph__query", "42 rows")
+        stored = backend.write_file.await_args_list[-1].args[1]
+
+        backend.read_file = AsyncMock(return_value=stored)
+        assert await sandbox_module._cache_lookup(backend, "sig", "graph__query") == "42 rows"
+
+        # The sandbox outlives a turn, so an old entry must not be served.
+        stale = _json.dumps({"cached_at": _time.time() - 10_000, "text": "42 rows"})
+        backend.read_file = AsyncMock(return_value=stale)
+        with patch("reporting.settings.SANDBOX_RESULT_CACHE_TTL_SECONDS", 900):
+            assert await sandbox_module._cache_lookup(backend, "sig", "graph__query") is None
+
+
+async def test_result_cache_treats_an_unreadable_entry_as_a_miss() -> None:
+    backend = _make_fake_backend()
+    backend.read_file = AsyncMock(side_effect=RuntimeError("no such file"))
+
+    with patch("reporting.settings.SANDBOX_RESULT_CACHE_ENABLED", True):
+        assert await sandbox_module._cache_lookup(backend, "sig", "graph__query") is None
+
+
+async def test_an_identical_call_is_served_from_the_shared_disk() -> None:
+    # The point of the cache: a second worker making the same call reads the
+    # first one's result off the filesystem they already share, instead of
+    # asking upstream again. Measured on real runs at up to 13 of 97 calls.
+    store: dict[str, str] = {}
+    backend = _make_fake_backend()
+    backend.write_file = AsyncMock(side_effect=lambda p, t: store.__setitem__(p, t))
+
+    async def _read(path: str) -> str:
+        if path not in store:
+            raise RuntimeError("no such file")
+        return store[path]
+
+    backend.read_file = AsyncMock(side_effect=_read)
+    upstream = AsyncMock(return_value=_outcome('{"rows": 1}'))
+
+    with (
+        _disclosure(False),
+        patch("reporting.settings.SANDBOX_RESULT_CACHE_ENABLED", True),
+        patch("reporting.services.mcp_runtime.call_tool_for_chat", upstream),
+    ):
+        first = await _build_seizu_tools(_current_user(), backend=backend)
+        # A second builder stands in for a sibling worker: its own dedupe map is
+        # empty, which is exactly why the disk has to carry this.
+        second = await _build_seizu_tools(_current_user(), backend=backend)
+        a = {t.name: t for t in first}["graph__query"]
+        b = {t.name: t for t in second}["graph__query"]
+
+        assert await a.coroutine(cypher="MATCH (n) RETURN count(n)") == '{"rows": 1}'
+        assert await b.coroutine(cypher="MATCH (n) RETURN count(n)") == '{"rows": 1}'
+
+    assert upstream.await_count == 1

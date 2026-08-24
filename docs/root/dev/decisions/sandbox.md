@@ -756,3 +756,51 @@ global state, so adding a caller cannot change an existing one's behavior.
 **Don't:** re-implement the outer loop's behavior in `sandbox.py`. A second copy
 of a rule is a second thing to keep current, and this log exists because the
 first copy already drifted.
+
+## SBX-020 — Identical calls dedupe through the shared disk, and the mechanism is armed, not assumed
+
+**Applies to:** `mcp_builtins.sandbox._cache_path` / `_cache_lookup` /
+`_cache_store`, `SANDBOX_RESULT_CACHE_ENABLED`,
+`SANDBOX_RESULT_CACHE_TTL_SECONDS`
+
+**Measured.** Across the multi-step streams on one dev box, identical tool calls
+recur *between* plan steps: 13 of 97 calls in the worst sample, 5–7 in several
+others — the same `get_file_contents` on `setup.py`, the same
+`repo_dependencies` for one package, the same `sync_freshness`. Within a single
+step the existing `_settled` map catches exact repeats, but it is built per
+delegation, so four delegations in one traced step re-read 15 of the 56 distinct
+files they touched.
+
+**Why it is content-addressed rather than propagated.**
+[AGT-027](chat-agent.md#agt-027) settles the design space: the steps of a batch
+start together, so a receipt reaches a sibling only once the batch it was
+written in has returned, and *no carry can close that because there is nothing
+yet to carry*. A parallel path that handed a step its dependency's files was
+built, measured against `EpisodeLog.recall` and `session_digest`, and reverted.
+What the siblings do share at the moment they need it is the filesystem
+([SBX-015](#sbx-015)) — AGT-027 records the eight children writing the same
+schema "to its own file **on the disk they were already sharing**". So the key
+has to be computable from the call alone: `sha256(tool + canonical arguments)`,
+under `/home/user/seizu_cache`, kept out of `sandbox_result_dir()` so entries
+never surface in a receipt listing as data to read.
+
+**Bounded.** A blocked outcome is never cached — a block is about who is asking,
+not about the data. A miss, an expired entry and a malformed one are one case:
+fetch. The TTL exists because the sandbox outlives a turn, so an unbounded entry
+could serve a result from before the graph last synced. Identity needs no key:
+a sandbox belongs to one conversation, so one user's results cannot reach
+another's.
+
+**Off by default, deliberately.** This is a second mechanism in the territory
+where AGT-027's parallel path was already built and reverted, and it dedupes
+only *partially* — two siblings starting simultaneously both miss and both
+fetch, so it catches staggered calls rather than the worst case. It is wired to
+be armed against a measured baseline, with a `sandbox result cache` marker span
+carrying `outcome=hit|miss` so the hit rate is countable from a run's spans.
+The marker is emitted only when the cache is armed, so an unarmed deployment
+does not pay a span per tool call.
+
+**Do:** measure it against a baseline before defaulting it on, and re-measure
+after a change that reduces re-delegation — persisting a delegation's own result
+removes the re-run branch that guaranteed re-reading, so the duplicate rate this
+was built for may not survive it.

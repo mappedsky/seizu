@@ -1305,6 +1305,18 @@ SANDBOX_REAP_UNTAGGED = bool_env("SANDBOX_REAP_UNTAGGED", False)
 # the per-call trigger, 1.1M tokens in total, one receipt written. Set 0 to
 # disable and keep only the per-call triggers.
 SANDBOX_INLINE_RESULT_BUDGET_TOKENS = int_env("SANDBOX_INLINE_RESULT_BUDGET_TOKENS", 60_000)
+
+# Dedupe identical tool calls through the sandbox filesystem, which parallel
+# plan steps already share (SBX-015). Off by default: it is a second mechanism
+# in territory where one parallel path was already built, measured and reverted
+# (AGT-027), so it is meant to be armed against a measured baseline rather than
+# assumed to pay for itself. Keyed on the tool and its arguments; scoped to one
+# conversation's sandbox, so one user's results never reach another's.
+SANDBOX_RESULT_CACHE_ENABLED = bool_env("SANDBOX_RESULT_CACHE_ENABLED", False)
+# How long a cached result stays usable. The sandbox outlives a turn, so without
+# a bound a follow-up turn could read a result from before the graph last
+# synced. Short enough to stay inside one turn's work by default.
+SANDBOX_RESULT_CACHE_TTL_SECONDS = int_env("SANDBOX_RESULT_CACHE_TTL_SECONDS", 900)
 # Consecutive already-answered calls before a delegation is told, in terms it
 # can act on, that there is nothing further to get and it should report what it
 # has. The per-call note says one call was pointless; a run of them says the
