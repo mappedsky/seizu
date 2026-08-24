@@ -14,9 +14,12 @@ from reporting.services.report_store.sql import SQLModelReportStore
 def reset_store():
     """Reset the module-level store singleton between tests."""
     original = report_store._store
+    original_initialized = report_store._initialized
     report_store._store = None
+    report_store._initialized = False
     yield
     report_store._store = original
+    report_store._initialized = original_initialized
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +131,13 @@ def mock_store():
         "get_skill_version": None,
         "list_enabled_skills": [],
         "get_enabled_skill": None,
+        "list_plugins": [],
+        "get_plugin": None,
+        "publish_plugin": None,
+        "delete_plugin": False,
+        "list_plugin_versions": [],
+        "list_plugin_skills": [],
+        "read_plugin_blob": None,
         "save_query_history": None,
         "list_query_history": ([], 0),
         "list_roles": [],
@@ -161,6 +171,56 @@ def mock_store():
 async def test_initialize_delegates(mock_store):
     await report_store.initialize()
     mock_store.initialize.assert_called_once()
+
+
+async def test_legacy_update_does_not_overwrite_explicit_plugin(mock_store):
+    mock_store.update_skillset.return_value = MagicMock()
+    mock_store.get_plugin.return_value = MagicMock(plugin_id="security", current_revision=2)
+    mock_store.list_plugin_versions.return_value = [
+        MagicMock(
+            revision=2,
+            manifest={"extensions": {"com.mappedsky.seizu": {"skillsetId": "security"}}},
+        )
+    ]
+
+    await report_store.update_skillset("security", "Security", "Explicit package", False, "u1")
+
+    mock_store.publish_plugin.assert_not_awaited()
+
+
+async def test_legacy_delete_preserves_explicit_plugin(mock_store):
+    mock_store.get_plugin.return_value = MagicMock(plugin_id="security", current_revision=2)
+    mock_store.list_plugin_versions.return_value = [
+        MagicMock(
+            revision=2,
+            manifest={"extensions": {"com.mappedsky.seizu": {"skillsetId": "security"}}},
+        )
+    ]
+
+    assert await report_store.delete_skillset("security")
+
+    mock_store.delete_plugin.assert_not_awaited()
+
+
+async def test_legacy_delete_removes_projection_owned_plugin(mock_store):
+    mock_store.get_plugin.return_value = MagicMock(plugin_id="security", current_revision=2)
+    mock_store.list_plugin_versions.return_value = [
+        MagicMock(
+            revision=2,
+            manifest={
+                "extensions": {
+                    "com.mappedsky.seizu": {
+                        "legacySkillsetProjection": True,
+                        "skillsetId": "security",
+                    }
+                }
+            },
+        )
+    ]
+
+    assert await report_store.delete_skillset("security")
+
+    mock_store.delete_plugin.assert_awaited_once_with("security")
 
 
 async def test_list_reports_delegates(mock_store):

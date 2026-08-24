@@ -21,9 +21,19 @@ Temporal worker.
 ```text
 MCP_EXTERNAL_ENABLED=true
 MCP_EXTERNAL_PROXIES=[{"name":"drive","url":"https://mcp-proxy.example/mcp/drive","transport":"streamable_http","auth_mode":"m2m_jwt","token_env":"MCP_EXTERNAL_PROXY_TOKEN","header_mappings":{"user_id":"X-Target-User-ID","email":"X-Target-Email"}}]
+MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE=none
+# Reuse a proxy's discovered tool listing across turns, per user (0 = off).
+MCP_EXTERNAL_DISCOVERY_TTL_SECONDS=0
 MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS=ext__drive__delete_file,ext__drive__share_file
 MCP_EXTERNAL_PROXY_TOKEN=<short-lived-service-jwt>
 ```
+
+Agent Plugin `mcp:<server>/<tool>` dependencies use the matching proxy name by
+default; the package URL is ignored. Set `MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE`
+to `lax` to prefer configured or advertised upstream URL aliases before the
+same-name fallback, or `strict` to require exactly one URL alias match. Every
+mode also requires the current user's discovered inventory to contain the exact
+remote tool.
 
 Each object accepts:
 
@@ -242,3 +252,23 @@ Configure the gateway to:
 The gateway must not treat `X-Target-User-ID` alone as authentication. That
 would allow any caller able to reach it to select another tenant and recreate
 the confused-deputy problem this integration is designed to avoid.
+
+## Discovery cost
+
+Listing a proxy's tools opens a transport, runs an MCP `initialize` and reads a
+paginated `tools/list`. One chat turn needs that answer several times — the
+capability listing in the system prompt, the planner's own, and each skill
+render that resolves its declared dependencies — so Seizu discovers each proxy
+**once per turn** and reuses it for the rest of that turn. Nothing to configure;
+it is always on and cannot go stale within a turn.
+
+`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS` adds a second layer that survives *between*
+turns, so a fresh turn need not discover at all. It is off by default because it
+can be stale: a tool a user has just been granted stays invisible, and one they
+have just lost stays listed, until the entry expires. Neither changes what a
+call is allowed to do — every call is still checked by Seizu's RBAC and by the
+upstream — but both are visible to the user. A cached listing is dropped for
+that user as soon as an upstream refuses their identity.
+
+Both layers are keyed per user, because a proxy's listing reflects the delegated
+identity it was fetched with.

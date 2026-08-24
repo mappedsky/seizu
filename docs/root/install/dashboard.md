@@ -12,9 +12,19 @@ Rows are rendered in the order specified, and panels within rows are also render
 ## Configuration Storage
 
 Report and dashboard configurations are stored in PostgreSQL, not in the YAML configuration file.
-The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, a `spaces` section, a `reports` section, a `toolsets` section, and a `skillsets` section — all used to seed the report store.
+The YAML file contains a top-level `queries` dict (used only by `scheduled_queries` references), `scheduled_queries`, a `dashboard` pointer, and `spaces`, `reports`, `toolsets`, `skillsets`, and `plugins` sections — all used to seed the report store.
 A report may name a `space` (and optionally a `subspace`) from the `spaces` section to be filed into it — see [Spaces](spaces.html#seeding).
 Each report has its own `queries` dict for named Cypher strings used by its panels.
+
+Plugin entries name a package directory or ZIP. Relative sources resolve from
+the YAML file's directory; the key must match the package's Seizu plugin ID:
+
+```yaml
+plugins:
+  security_review:
+    source: plugins/security-review
+    enabled: true
+```
 
 To populate the report store from the YAML file during initial setup or development, use the CLI directly:
 

@@ -11,6 +11,7 @@ helpers used by ``reporting.services.mcp_server``:
 """
 
 from reporting.services.mcp_builtins import graph as _graph
+from reporting.services.mcp_builtins import plugins as _plugins
 from reporting.services.mcp_builtins import reports as _reports
 from reporting.services.mcp_builtins import roles as _roles
 from reporting.services.mcp_builtins import sandbox as _sandbox
@@ -27,6 +28,7 @@ from reporting.services.mcp_builtins.sandbox import sandbox_result_dir
 # alphabetical.
 _GROUPS: list[BuiltinGroup] = [
     _graph.GROUP_DEF,
+    _plugins.GROUP_DEF,
     _reports.GROUP_DEF,
     _roles.GROUP_DEF,
     _sandbox.GROUP_DEF,

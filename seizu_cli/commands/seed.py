@@ -2,12 +2,14 @@
 
 import re
 import sys
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from rich.console import Console
 
 from seizu_cli import schema, state
 from seizu_cli.client import APIError
+from seizu_cli.plugin_package import build_plugin_package
 
 console = Console()
 err_console = Console(stderr=True)
@@ -149,6 +151,10 @@ def _list_skillsets() -> list[dict[str, Any]]:
     return state.get_client().get("/api/v1/skillsets").get("skillsets", [])
 
 
+def _list_plugins() -> list[dict[str, Any]]:
+    return state.get_client().get("/api/v1/plugins").get("plugins", [])
+
+
 def _list_skills(skillset_id: str) -> list[dict[str, Any]]:
     return state.get_client().get(f"/api/v1/skillsets/{skillset_id}/skills").get("skills", [])
 
@@ -218,7 +224,7 @@ def _skill_content_changed(
 
 
 def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
-    """Seed spaces, reports, workflows, toolsets, and skillsets from YAML."""
+    """Seed application configuration and Agent Plugin packages from YAML."""
     loaded = schema.load_file(config)
 
     if (
@@ -227,9 +233,12 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
         and not loaded.scheduled_queries
         and not loaded.toolsets
         and not loaded.skillsets
+        and not loaded.plugins
         and not loaded.spaces
     ):
-        console.print("No spaces, reports, workflows, toolsets, or skillsets found in config file. Nothing to do.")
+        console.print(
+            "No spaces, reports, workflows, toolsets, skillsets, or plugins found in config file. Nothing to do."
+        )
         return
 
     # Spaces first: filing a report needs its space to already exist.
@@ -361,6 +370,9 @@ def seed_cmd(config: str, force: bool, dry_run: bool) -> None:
 
     console.print("\nSeeding skillsets...")
     _seed_skillsets(loaded, force=force, dry_run=dry_run)
+
+    console.print("\nSeeding plugins...")
+    _seed_plugins(loaded, config_path=Path(config), force=force, dry_run=dry_run)
 
     if dry_run:
         console.print("\n(dry-run, no writes performed)")
@@ -1089,6 +1101,108 @@ def _seed_skillsets(
     console.print(f"  Skillsets: created={ss_created} updated={ss_updated} skipped={ss_skipped}")
 
 
+def _plugin_skills_differ(plugin_id: str, plugin_def: Any) -> bool:
+    """Whether any stated skill is not already in the state the config asks for."""
+    try:
+        listed = state.get_client().get(f"/api/v1/plugins/{plugin_id}/skills")["skills"]
+    except Exception:
+        return True
+    live = {item["skill_id"]: item["enabled"] for item in listed}
+    return any(live.get(skill_id) != wanted for skill_id, wanted in plugin_def.skills.items())
+
+
+def _seed_plugins(
+    config: Any,
+    *,
+    config_path: Path,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    """Validate and install package sources named by the seed configuration."""
+    del force  # Package digests make identical installs idempotent, including forced seeds.
+    if not config.plugins:
+        console.print("  No plugins in config, skipping.")
+        return
+
+    try:
+        existing = {item["plugin_id"]: item for item in _list_plugins()}
+    except Exception as exc:
+        _die(exc)
+        return
+
+    created = updated = skipped = 0
+    for plugin_id, plugin_def in config.plugins.items():
+        source = Path(plugin_def.source).expanduser()
+        if not source.is_absolute():
+            source = config_path.resolve().parent / source
+        try:
+            filename, content = build_plugin_package(source)
+            upload = {"package": (filename, content, "application/zip")}
+            validation = state.get_client().post("/api/v1/plugins/validate", files=upload)
+        except Exception as exc:
+            _die(exc)
+            return
+
+        if not validation.get("valid"):
+            messages = "; ".join(item.get("message", "invalid package") for item in validation.get("diagnostics", []))
+            _die(ValueError(f"plugin '{plugin_id}' failed validation: {messages or 'invalid package'}"))
+            return
+        if validation.get("plugin_id") != plugin_id:
+            _die(
+                ValueError(
+                    f"plugin seed key '{plugin_id}' does not match package plugin ID {validation.get('plugin_id')!r}"
+                )
+            )
+            return
+
+        current = existing.get(plugin_id)
+        package_changed = current is None or current.get("package_digest") != validation.get("package_digest")
+        enabled_changed = current is not None and current.get("enabled", True) != plugin_def.enabled
+        # Whether a skill is on is an operator's choice rather than package
+        # content, so it is stated here and applied on every seed (AGT-041).
+        skills_changed = bool(plugin_def.skills) and (current is None or _plugin_skills_differ(plugin_id, plugin_def))
+        if not package_changed and not enabled_changed and not skills_changed:
+            console.print(f"  [dim][skip][/dim] plugin '{plugin_id}' (unchanged)")
+            skipped += 1
+            continue
+        if dry_run:
+            action = "install" if current is None else "update"
+            console.print(
+                f"  [yellow][dry-run][/yellow] would {action} plugin '{plugin_id}' (enabled={plugin_def.enabled})"
+            )
+            if current is None:
+                created += 1
+            else:
+                updated += 1
+            continue
+
+        try:
+            if package_changed:
+                current = state.get_client().post("/api/v1/plugins/install", files=upload)
+            if current is not None and current.get("enabled", True) != plugin_def.enabled:
+                current = state.get_client().put(
+                    f"/api/v1/plugins/{plugin_id}",
+                    json={"enabled": plugin_def.enabled},
+                )
+            for skill_id, skill_enabled in plugin_def.skills.items():
+                state.get_client().put(
+                    f"/api/v1/plugins/{plugin_id}/skills/{skill_id}",
+                    json={"enabled": skill_enabled},
+                )
+        except Exception as exc:
+            _die(exc)
+            return
+
+        if plugin_id in existing:
+            console.print(f"  [blue][updated][/blue] plugin '{plugin_id}' (enabled={plugin_def.enabled})")
+            updated += 1
+        else:
+            console.print(f"  [green][created][/green] plugin '{plugin_id}' (enabled={plugin_def.enabled})")
+            created += 1
+
+    console.print(f"  Plugins: created={created} updated={updated} skipped={skipped}")
+
+
 def _export_spaces(existing_cfg: Any) -> tuple[dict[str, Any], dict[str, str], dict[str, str], dict[str, str], int]:
     """Fetch every space and return the pieces the report pass needs.
 
@@ -1396,6 +1510,7 @@ def export_cmd(config: str, dry_run: bool) -> None:
         workflows=new_workflows,
         toolsets=new_toolsets,
         skillsets=new_skillsets,
+        plugins=existing_cfg.plugins,
     )
     yaml_content = schema.dump_yaml(updated_cfg)
 

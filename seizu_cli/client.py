@@ -60,3 +60,8 @@ class SeizuClient:
         if resp.content:
             return resp.json()
         return None
+
+    def get_bytes(self, path: str, **kwargs: Any) -> bytes:
+        resp = self._session.get(f"{self.base_url}{path}", timeout=30, **kwargs)
+        self._raise_for_status(resp)
+        return resp.content

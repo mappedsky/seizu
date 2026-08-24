@@ -232,6 +232,50 @@ Exposed at `/api/v1/mcp` when `MCP_ENABLED=true` (default). LLM agents connect a
 
 PostgreSQL tables: `toolsets`, `toolset_versions`, `tools`, `tool_versions`.
 
+### Agent Plugins (`reporting/services/plugin_packages.py`, `reporting/routes/plugins.py`)
+
+Agent Plugins 1.0.0 packages are the canonical skill surface; skillsets and skills
+are compatibility aliases for one release. A package is `plugin.json` (manifest,
+with Seizu's own settings under the `com.mappedsky.seizu` extension), optional
+`mcp.json`, and `skills/<portable-name>/SKILL.md` plus `references/`, `scripts/`,
+`assets/`. `parse_package` is the single validator for every entry point — ZIP
+install, staged publish, the CLI, and the legacy projection — and returns
+diagnostics rather than raising. Package bounds live at the top of that module.
+
+- **Storage is immutable revisions over content-addressed blobs** — `plugins`,
+  `plugin_versions`, `plugin_blobs`, `plugin_files`, `plugin_skills`
+  (migration `0009`). Blobs are shared, so `delete_plugin` collects the ones it
+  orphans ([`STO-006`](docs/root/dev/decisions/report-store.md)).
+- **Editing is staged in the client and published atomically.** `POST
+  /api/v1/plugins/{id}/publish` takes the complete package; an unchanged file is
+  carried by `sha256` and resolved against that plugin's own blobs, and a
+  required `base_revision` makes a stale publish a `409` rather than a silent
+  revert. Nothing partial is stored server-side
+  ([`STO-010`](docs/root/dev/decisions/report-store.md)).
+- **Permissions** are `plugins:read` (Viewer) / `plugins:write` / `plugins:delete`
+  (Admin). `plugins:X` implies the legacy `skillsets:X` + `skills:X`; the reverse
+  needs **both** legacy permissions, so a role scoped to writing skills cannot
+  acquire package installation by renaming.
+- **`allowed-tools` is a dependency declaration, not a grant** (AGT-036): entries
+  Seizu recognizes must exist in the caller's RBAC-filtered inventory or the
+  skill is unavailable. Every dependency is `mcp__<server>__<tool>`, Seizu's own
+  included as `mcp__seizu__<tool>` ([`AGT-042`](docs/root/dev/decisions/chat-agent.md));
+  another server binds to a configured proxy by
+  `MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE` (default `none` — Seizu only connects to
+  its own proxies, so the URL a package declares is documentation).
+- **`resources/list` catalogues skills, not files** — one resource per enabled
+  skill with its declared `allowed-tools`, plus a template for the file URI
+  shape; any packaged file is still readable at
+  `seizu://plugins/{id}/versions/{n}/files/…` ([`AGT-037`](docs/root/dev/decisions/chat-agent.md)).
+- A skill that ships `scripts/` runs them only through `sandbox__run_script`
+  in the conversation sandbox ([`SBX-017`](docs/root/dev/decisions/sandbox.md)).
+  Rendering materializes a scripted skill for a caller holding `sandbox:delegate`,
+  and never provisions a sandbox for any other skill or caller
+  ([`SBX-018`](docs/root/dev/decisions/sandbox.md)).
+- Frontend: `/app/plugins` (list + read-only detail dialog), `/app/plugins/:id/edit`
+  (staged editor), `/app/plugins/:id/history`. Docs:
+  `docs/root/install/agent-plugins.md`.
+
 ### External MCP Proxies (`reporting/services/external_mcp.py`)
 
 `MCP_EXTERNAL_ENABLED` gates both the agent capability and the optional local
@@ -251,6 +295,11 @@ their delegated identity headers across users. Bearer/M2M secrets are named by
 `token_env`, not embedded in JSON. A call an upstream refuses as rate-limited is retried after the
 delay the refusal itself names, bounded by `MCP_EXTERNAL_RATE_LIMIT_*` (AGT-029). The web and Temporal worker must receive the
 same proxy config and token env vars.
+
+Discovering a proxy's tools is **memoized per turn** and, with
+`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`, cached across turns; both layers key on
+the user, because a listing is what that delegated identity may see
+([`AGT-038`](docs/root/dev/decisions/chat-agent.md)).
 
 Confirmation is decided per tool: the local
 `MCP_EXTERNAL_CONFIRMATION_REQUIRED_TOOLS` exact-name list wins, then MCP

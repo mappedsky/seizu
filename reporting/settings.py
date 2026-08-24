@@ -1,4 +1,5 @@
 import os
+from enum import StrEnum
 from importlib import resources
 
 from cartography_sync.registry import parse_enabled_modules
@@ -6,6 +7,23 @@ from reporting.schema.external_mcp import parse_external_mcp_proxies
 from reporting.utils.settings import bool_env, float_env, int_env, list_env, str_env
 
 _DEFAULT_SANDBOX_CORE_TOOLS = ["graph__query", "graph__schema", "graph__validate_query", "graph__explain"]
+
+
+class ExternalPluginURLMatchMode(StrEnum):
+    """How Agent Plugin MCP declarations bind to external MCP proxies."""
+
+    STRICT = "strict"
+    LAX = "lax"
+    NONE = "none"
+
+
+def _external_plugin_url_match_mode_from_env() -> ExternalPluginURLMatchMode:
+    raw = str_env("MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE", ExternalPluginURLMatchMode.NONE.value)
+    try:
+        return ExternalPluginURLMatchMode(raw)
+    except ValueError as exc:
+        choices = ", ".join(mode.value for mode in ExternalPluginURLMatchMode)
+        raise RuntimeError(f"MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE must be one of: {choices}") from exc
 
 
 def _core_tools_from_env() -> list[str]:
@@ -1107,7 +1125,7 @@ MCP_ENABLED = bool_env("MCP_ENABLED", True)
 # Unset or empty → all groups enabled (default).
 # "none"         → all built-in groups disabled (user-defined toolsets unaffected).
 # Comma-separated list (e.g. "graph,reports") → only those groups.
-# Known groups: graph, reports, roles, sandbox, scheduled_queries, skillsets, spaces, toolsets.
+# Known groups: graph, plugins, reports, roles, sandbox, scheduled_queries, skillsets, spaces, toolsets.
 # Note: the sandbox group is chat-only (never exposed via the MCP server endpoint
 # regardless of this setting) and also requires SANDBOX_ENABLED=true.
 MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
@@ -1118,6 +1136,27 @@ MCP_ENABLED_BUILTINS = list_env("MCP_ENABLED_BUILTINS", [])
 MCP_EXTERNAL_ENABLED = bool_env("MCP_EXTERNAL_ENABLED", False)
 _MCP_EXTERNAL_CONFIGURED_PROXIES = parse_external_mcp_proxies(str_env("MCP_EXTERNAL_PROXIES", ""))
 MCP_EXTERNAL_PROXIES = _MCP_EXTERNAL_CONFIGURED_PROXIES if MCP_EXTERNAL_ENABLED else []
+# How a portable plugin's logical MCP dependency (`mcp:<server>/<tool>`) binds to
+# a configured proxy. Seizu only ever connects to its own proxies, never to the
+# endpoint a package names, so the URL in mcp.json is documentation rather than
+# an address -- which is why the default ignores it and matches on server name.
+#   none   (default) ignore the package URL; use the equally named proxy.
+#   lax    prefer a proxy that declares the URL, else the equally named proxy.
+#   strict require a proxy that declares the URL in MCP_EXTERNAL_PROXIES.
+# Choose strict only where package-declared endpoints are themselves trusted
+# configuration and a name collision between proxies would be a real risk.
+MCP_EXTERNAL_PLUGIN_URL_MATCH_MODE = _external_plugin_url_match_mode_from_env()
+
+# How long a proxy's discovered tool listing may be reused across turns, per
+# user. Discovery costs a transport, an initialize and a paginated tools/list
+# per proxy, and one turn asks for the same answer several times -- that
+# duplication is always removed, within the turn, regardless of this setting.
+# This is the cross-turn layer, which can be stale: a tool the user has just
+# lost stays listed, and one they have just gained stays hidden, until it
+# expires. Neither is an authorization decision (the call is still checked), but
+# both are visible, so 0 = off is the default. Cleared for a user whenever an
+# upstream refuses their identity.
+MCP_EXTERNAL_DISCOVERY_TTL_SECONDS = int_env("MCP_EXTERNAL_DISCOVERY_TTL_SECONDS", 0)
 
 # Fully namespaced external tools that always require confirmation, regardless
 # of remote MCP annotations or a proxy's fallback policy.
@@ -1183,6 +1222,10 @@ SANDBOX_CORE_TOOLS = _core_tools_from_env()
 
 # Maximum bytes of sandbox agent output returned to the outer chat agent.
 SANDBOX_MAX_OUTPUT_BYTES = int_env("SANDBOX_MAX_OUTPUT_BYTES", 50_000)
+
+# How long one Agent Plugin script may run inside the sandbox before it is
+# killed. Bounds a single sandbox__run_script call, not the turn around it.
+SANDBOX_SCRIPT_TIMEOUT_SECONDS = int_env("SANDBOX_SCRIPT_TIMEOUT_SECONDS", 60)
 # Whether the chat agent may use the conversation's sandbox directly, rather
 # than only through sandbox__delegate. Five more always-disclosed tools cost
 # schema tokens on every call; what they buy is a single round trip where a

@@ -2326,3 +2326,225 @@ the end — 33 recorded calls, 25 distinct, on the run above.
 **Don't:** treat "the budget ended the run" as "the run found nothing". The
 terminal status is `budget_exhausted` and the answer must be the partial one the
 evidence supports, with the limit stated.
+
+## AGT-036 — Agent Skill `allowed-tools` is a dependency declaration in Seizu
+
+**Applies to:** `plugin_packages.py`, `mcp_runtime._resolve_plugin_allowed_tools`
+
+For tool names Seizu recognizes, `allowed-tools` means the skill requires and
+discloses that tool. The skill is hidden for a user whose ordinary tool listing
+does not contain it. Unknown portable tokens are retained and ignored.
+
+**Why:** the existing `tools_required` field already meant that the workflow
+could not run without those tools. Keeping a second Seizu-only field would make
+portable packages declare the same dependency twice and allow the declarations
+to drift. Treating the standard field as permission instead would conflict with
+[AGT-002](#agt-002): disclosure is not authorization, and RBAC plus confirmation
+remain the only execution boundary.
+
+Logical `mcp:<server>/<tool>` names resolve only to operator-configured proxies;
+the package endpoint is never contacted. URL matching has three modes. `none`,
+the default, ignores the package URL and binds an equally named proxy. `lax`
+prefers a configured or advertised URL alias and then falls back to the proxy
+name. `strict` requires exactly one URL alias match. Every mode also requires
+the user's discovered inventory to contain the exact remote tool.
+
+**Why:** in a server-side agent the operator-controlled proxy configuration is
+the execution boundary, while the package URL is deployment-specific metadata
+and neither grants authorization nor selects a network destination. URL matching
+still offers optional provenance and configuration checking. Name fallback
+remains narrower than matching a tool leaf globally: both the plugin server name
+and remote tool name must match, while RBAC determines whether the discovered
+tool is present.
+
+## AGT-037 — A resource listing is a catalogue of skills, not of files
+
+**Applies to:** `mcp_runtime.list_plugin_resources_for_user`,
+`list_plugin_resource_templates_for_user`, `mcp_server._handle_list_resources`
+
+`resources/list` returns one resource per *enabled plugin skill* — its SKILL.md
+URI, title, description and declared `allowed-tools` — not one per packaged
+file. `resources/templates/list` advertises
+`seizu://plugins/{plugin_id}/versions/{revision}/files/{path}`, and
+`resources/read` still accepts any file in a published revision.
+
+**Why:** a listing exists so a caller can decide what is relevant, and that
+decision is made from a skill's identity and description. A skill's
+`references/`, `scripts/` and `assets/` are named by its own instructions and
+fetched by URI, so enumerating them made every file of every installed plugin
+the price of asking what was available — a listing bounded by
+`plugins x files` rather than by skills. It was also a query per plugin, and it
+was the one surface here that would have needed cursor pagination to stay
+bounded. Narrowing it removed all three at once.
+
+**Don't:** resolve `allowed-tools` against the caller's inventory to build this
+listing. Resolution fans out to every configured external MCP proxy, and a
+catalogue read must not pay for that; the names are carried as *declared*, and
+availability is still decided at render time (AGT-002, AGT-036). **Don't:**
+re-add file enumeration "for discoverability" — the template is the
+discoverability mechanism, and the render already hands over the skill's prefix.
+
+## AGT-038 — External discovery is memoized per turn, cached across turns only on request
+
+**Applies to:** `external_mcp.discovery_scope` / `begin_discovery_scope` /
+`discover_proxy_tools` / `invalidate_discovery_cache`,
+`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`
+
+Discovering one proxy's tools costs a transport, an MCP `initialize` and a
+paginated `tools/list`. A single turn asks for that answer from the system
+prompt's capability listing, the planner's, and every skill render that resolves
+dependencies — five to ten identical fan-outs. Two layers now sit in front of it:
+
+- A **scope memo**, opened by `chat_agent_node`, `dispatcher_node`, the
+  distributed step worker and the MCP ASGI middleware. Valid by construction:
+  one identity, one turn, seconds wide, removing only duplicate work. Always on.
+- A **TTL cache** (`MCP_EXTERNAL_DISCOVERY_TTL_SECONDS`, default `0` = off) that
+  makes a *cold* turn cheap. Bounded to 512 entries, LRU-evicted, and dropped
+  for a user whenever an upstream refuses their identity.
+
+**Why the split:** the memo cannot be wrong; the TTL cache can. A tool the user
+just lost stays listed and one they just gained stays hidden until it expires.
+Neither is an authorization decision — the call is still checked by RBAC and by
+the upstream, and disclosure was never a boundary (AGT-002) — but both are
+visible, which is why the cross-turn layer is opt-in rather than a default.
+
+**Both key on the user.** A proxy's listing is what *that* delegated identity is
+authorized to see, so a cache keyed by proxy alone would hand one user another's
+view. This is AGT-010's rule against pooling the transport, applied to what the
+transport returned. **Don't** widen the key to make the hit rate look better.
+
+This is also what made resolving `allowed-tools` affordable in
+`resources/list` (AGT-037): the catalogue now resolves against the same
+inventory the rest of the request already discovered, and omits a skill whose
+dependencies are unreachable, exactly as the prompt listing does.
+
+## AGT-039 — A rendered skill is two messages: static instructions, then its inputs
+
+**Applies to:** `render_skill_parts`, `render_skill_inputs`,
+`mcp_runtime._get_prompt_core`, `plugin_packages.parse_package`
+
+`prompts/get` returns the skill body unchanged and this invocation's argument
+values as a second message. `GetPromptResult.messages` is a list; the body is
+the same bytes on every run, and a skill refers to a value by name rather than
+having it substituted in.
+
+**Why:** the argument mechanism was always standard — MCP prompts take
+`arguments` — but the *template* lived in the portable `SKILL.md` body, and a
+consumer without Seizu's parameter extension reads `{% $repo %}` literally. The
+package was portable while its instructions were not. Keeping values in their
+own message makes the file readable anywhere and removes a second discrepancy:
+`materialize_plugin_skill` writes the raw package bytes into the sandbox, so a
+sub-agent re-reading `SKILL.md` used to see placeholders where the outer agent
+had values.
+
+Substitution still runs, so packages written the old way render exactly as
+before; publishing one records a non-blocking `templated_skill_body` warning.
+The legacy skillset projection is exempt — its bodies are generated from records
+whose author cannot restructure them — and the legacy REST render endpoint still
+returns the body alone, because a legacy skill inlines its values and an inputs
+block there would both duplicate them and change a response callers parse.
+
+**Not a caching change.** A rendered skill arrives as a tool result at the tail
+of the conversation, and only `Prompt.description` reaches the system prompt, so
+neither shape moves the cached prefix. Don't cite caching as the reason for
+this; the reason is that the body travels.
+
+## AGT-040 — A package and a skill each have one identity
+
+**Applies to:** `plugin_packages.derive_seizu_id`, `SeizuPluginExtension`,
+`PluginCreateRequest`, `PluginSkillEditor.tsx`
+
+A plugin's Seizu id is derived from the package `name`, and a skill's from its
+portable name: hyphens and dots become underscores, and the result must be a
+valid MCP name component. `skillsetId` and `skillId` do not exist: the
+extension forbids unknown keys, so a package stating either is refused rather
+than reconciled. The whole `com.mappedsky.seizu` extension is optional, so a
+stock Agent Plugins 1.0 package installs unmodified.
+
+**Why:** the pair was immutable in both directions — a package carried a
+portable name *and* a Seizu id forever, with nothing keeping them related and
+no way to change either. `skill_id` already derived by default, so the two
+halves of the same idea disagreed. Naming a thing once is the whole feature;
+an author who wants a different id renames the package or the skill directory.
+
+A name that derives nothing valid — leading digit, over 31 characters — is
+refused at publish and at create, naming the constraint rather than silently
+inventing an id.
+
+**Known trade:** `STO-009` used an explicit same-ID package to bind a
+production cutover to existing skillsets, and a derived id could in principle
+adopt a legacy skillset that happens to match. Accepted deliberately: the
+legacy surface exists for one release and the collision needs a legacy
+skillset whose id is exactly the derived one. If that release is extended, put
+the check back before the derivation, not the field.
+
+**Consequence:** a revision published before this, whose stored manifest states
+either field, cannot be restored — `restore` republishes that revision's files
+and they no longer validate. Both fields were introduced unreleased, so this
+was settled by discarding the affected history rather than tolerating the keys.
+
+## AGT-041 — Whether a skill is on is an operator's choice, not package content
+
+**Applies to:** `SeizuSkillExtension.enabled`, `publish_plugin`,
+`set_plugin_skill_enabled`, `PUT /api/v1/plugins/{id}/skills/{skill_id}`,
+`PluginDef.skills`
+
+A package does not say whether its skills are on. Enablement is store state,
+chosen when a plugin is installed or updated: every skill a revision introduces
+starts on, `publish_plugin` carries existing values forward, and an operator
+changes one through the API, the CLI, the seed configuration or the plugin
+detail dialog. `enabled` is not a field of the extension at all — a package
+carrying one is refused, because the extension forbids unknown keys.
+
+**Why:** it was neither in the Agent Plugins spec nor meaningful to any other
+consumer — only Seizu's extension carried it — and it sat on the wrong side of
+the authoring/runtime line. Disabling one skill meant editing a manifest and
+publishing a revision, while the *plugin* it belonged to was already toggled at
+runtime and already an install-time seed argument. The two halves of the same
+question worked differently.
+
+Removing it also removes a rule nobody would have got right: if a package ships
+a skill off, an operator turns it on, and a later revision ships it off again,
+what wins? With enablement outside the package there is nothing to reconcile — a
+republish simply never touches it.
+
+**Don't:** reintroduce it as a "default for first install". That is the rule
+above wearing a hat, and it makes a package's meaning depend on whether the
+store had seen it before.
+
+## AGT-042 — Seizu's own tools are named like any other MCP server's
+
+**Applies to:** `plugin_packages.mcp_tool_ref`, `SEIZU_MCP_SERVER_NAME`,
+`_resolve_plugin_allowed_tools`
+
+`allowed-tools` entries are `mcp__<server>__<tool>`, and Seizu is the server
+named `seizu`: `mcp__seizu__graph__query`, `mcp__github__get_file_contents`.
+Anything that is not an MCP reference — `Read`, `Bash(git:*)` — is the
+consumer's own built-in, preserved and never resolved by us. `seizu` is
+reserved: an external proxy or an `mcp.json` entry of that name does not answer
+for it.
+
+**Why:** the package previously used three vocabularies at once — bare
+`graph__query` for Seizu, `mcp:<server>/<tool>` for external MCPs, and
+`ext__<proxy>__<tool>` for their internal names — and only the first was even
+the tool's real name. `mcp:<server>/<tool>` was ours alone; nothing else reads
+it. `mcp__<server>__<tool>` is what the ecosystem uses (it is Claude Code's
+permission-rule syntax, which is what `allowed-tools` values are), and Seizu's
+tool names are already `group__action`, so `mcp__seizu__graph__query` parses as
+server `seizu`, tool `graph__query` and resolves in a client that has Seizu
+configured. Neither the Agent Skills nor the Agent Plugins specification defines
+a tool-naming convention, so the one in use is the one worth matching.
+
+**The field means something different at each end, and we keep our meaning.**
+The Agent Skills spec calls `allowed-tools` "tools that are pre-approved to
+run" and marks it experimental; Claude Code grants those tools for the turn.
+Seizu treats it as a dependency: a skill is *absent* from a user's list when a
+listed tool is unavailable to them (AGT-002 still applies — it grants nothing).
+Gating is kept deliberately, because not offering a skill whose tools the caller
+cannot reach beats offering one that fails halfway. The consequence to know: a
+package authored elsewhere that lists tools defensively becomes unavailable here
+if any one of them is missing.
+
+**Don't:** resolve bare names as Seizu tools again "for convenience". That is a
+second spelling for a tool that already has one, and it collides with the
+built-in names the spec's own example uses.

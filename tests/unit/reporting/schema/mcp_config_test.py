@@ -6,6 +6,7 @@ from reporting.schema.mcp_config import (
     ToolDisplayParamDef,
     ToolParamDef,
     cypher_parameter_names,
+    render_skill_parts,
     render_skill_template,
     template_placeholders,
     undeclared_cypher_parameters,
@@ -171,3 +172,50 @@ def test_render_skill_template_boolean_coercion():
     )
     assert errors == []
     assert rendered == "dry_run=True"
+
+
+def test_render_skill_parts_keeps_a_static_body_and_renders_inputs():
+    """AGT-039: the instructions are the same bytes on every invocation."""
+    parameters = [
+        ToolParamDef(name="repo", type="string", required=True),
+        ToolParamDef(name="limit", type="integer", required=False, default=10),
+    ]
+    body = "Review the `repo` input. Keep at most `limit` findings."
+
+    first, errors = render_skill_parts(parameters, body, {"repo": "octo/a"}, [], [])
+    second, _ = render_skill_parts(parameters, body, {"repo": "octo/b", "limit": 3}, [], [])
+
+    assert errors == []
+    assert first.body == second.body == body
+    assert first.inputs != second.inputs
+    assert "`repo`: `octo/a`" in first.inputs
+    # An omitted optional falls back to its declared default.
+    assert "`limit`: `10`" in first.inputs
+    assert "`limit`: `3`" in second.inputs
+    assert first.messages == [first.body, first.inputs]
+
+
+def test_render_skill_parts_still_substitutes_a_templated_body():
+    """Packages written against the older convention render as they did."""
+    parameters = [ToolParamDef(name="topic", type="string", required=True)]
+
+    prompt, errors = render_skill_parts(parameters, "Summarize {% $topic %}.", {"topic": "alerts"}, [], [])
+
+    assert errors == []
+    assert prompt.body == "Summarize alerts."
+    assert "`topic`: `alerts`" in prompt.inputs
+
+
+def test_render_skill_inputs_marks_a_value_that_was_not_provided():
+    parameters = [ToolParamDef(name="ref", type="string", required=False)]
+
+    prompt, _ = render_skill_parts(parameters, "Inspect the `ref` input.", {}, [], [])
+
+    assert "_(not provided)_" in prompt.inputs
+
+
+def test_a_skill_without_inputs_renders_one_message():
+    prompt, _ = render_skill_parts([], "Do the thing.", {}, [], [])
+
+    assert prompt.inputs == ""
+    assert prompt.messages == ["Do the thing."]

@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from reporting.app import create_app
@@ -31,6 +32,14 @@ _FAKE_USER = User(
     last_login=_NOW,
 )
 _FAKE_CURRENT_USER = CurrentUser(user=_FAKE_USER, jwt_claims={}, permissions=ALL_PERMISSIONS)
+
+
+@pytest.fixture(autouse=True)
+def _no_plugin_skill(mocker):
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_plugin_skill",
+        new=AsyncMock(return_value=None),
+    )
 
 
 def _make_app():
@@ -174,6 +183,14 @@ async def test_skillset_not_found_paths(mocker):
     )
     mocker.patch(
         "reporting.routes.skillsets.report_store.delete_skillset",
+        new=AsyncMock(return_value=False),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.get_plugin",
+        new=AsyncMock(return_value=None),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.delete_plugin",
         new=AsyncMock(return_value=False),
     )
     mocker.patch(
@@ -553,6 +570,10 @@ async def test_skill_not_found_paths(mocker):
     mocker.patch(
         "reporting.routes.skillsets.report_store.get_skill_version",
         new=AsyncMock(return_value=None),
+    )
+    mocker.patch(
+        "reporting.routes.skillsets.report_store.list_skills",
+        new=AsyncMock(return_value=[]),
     )
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

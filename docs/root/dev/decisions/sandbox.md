@@ -669,3 +669,46 @@ back into a worker-local loop; the Schedule is the singleton mechanism.
 **Don't:** delete the session record before its checkpoint, or let a schedule
 failure propagate out of worker startup — both were review findings, and both
 trade a housekeeping sweep for something much larger.
+
+## SBX-017 — Plugin code runs only from an immutable sandbox materialization
+
+**Applies to:** `materialize_plugin_skill`, `sandbox__run_script`
+
+A selected plugin skill is materialized beneath `/home/user/seizu_plugins` at a
+path containing its revision and package digest. The digest marker is written
+last. Scripts execute there through an argv-array subprocess launched inside the
+sandbox; the Seizu web and Temporal worker processes never execute package code.
+
+**Why:** package scripts are untrusted code. Reusing the conversation sandbox
+keeps their files available to the rest of the skill while preserving SBX-009's
+isolation boundary. Revision-addressed paths prevent a draft or later publish
+from changing the code midway through a turn.
+
+## SBX-018 — Rendering a skill never provisions a sandbox
+
+**Applies to:** `mcp_runtime._get_prompt_core`, `materialize_plugin_skill`
+
+Rendering an Agent Skill substitutes arguments into its template. It attaches the
+package's files to the answer when two things hold: the skill ships `scripts/`,
+and the caller holds `sandbox:delegate`. It then materializes them, opening the
+conversation's sandbox if that is what it takes.
+
+**Why:** `chat_agent_node` makes a sandbox session ambient for every turn, and the
+session opens its sandbox lazily on first use — so materializing during a render
+made *rendering* the trigger. A user with `chat:skills:call` and no
+`sandbox:delegate` could provision a billable sandbox by loading a skill, which
+inverts the permission and pays for a VM to hold a template nobody will run.
+
+**A third condition was tried and reverted.** Requiring the sandbox to be *already
+open* (`only_if_open`) looked like the conservative choice and broke the feature:
+a turn opens its sandbox on first use, which happens *after* the skill renders,
+so `verify_packaged_assets` was handed instructions addressing a materialized
+path that was never written. It read nothing, never reached
+`sandbox__run_script`, and reported itself unverified — caught by a live run, not
+by tests. The two conditions above are the whole guard, and they already cover
+what this decision is for: a skill with nothing to run, or a caller who could not
+run it, still never provisions anything.
+
+**Don't:** materialize for a skill without scripts, or for a caller lacking
+`sandbox:delegate`. Those are the cases where a render would be paying for a VM
+to hold a template nobody can use.

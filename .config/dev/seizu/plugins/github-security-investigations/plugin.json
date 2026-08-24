@@ -1,0 +1,190 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "description": "Reusable Agent Plugin workflows for GitHub organization security posture and repository CVE reachability.",
+  "extensions": {
+    "com.mappedsky.seizu": {
+      "skills": {
+        "github-org-security-overview": {
+          "aliases": [
+            "github_security_investigations__github_org_security_overview"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "GitHub organization login to investigate.",
+              "name": "org",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Exclude repositories marked as forks when the graph has fork metadata.",
+              "name": "exclude_forks",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": false,
+              "description": "Include archived or disabled repositories.",
+              "name": "include_archived",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": 25,
+              "description": "Maximum number of top vulnerabilities to inspect in detail.",
+              "name": "limit",
+              "required": false,
+              "type": "integer"
+            }
+          ],
+          "title": "GitHub Organization Security Overview",
+          "triggers": [
+            "GitHub organization security overview",
+            "GitHub org security posture",
+            "GitHub vulnerability and misconfiguration investigation",
+            "investigate GitHub security findings"
+          ]
+        },
+        "repo-cve-exploitability": {
+          "aliases": [
+            "github_security_investigations__repo_cve_exploitability"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "Repository fullname to assess, as owner/name.",
+              "name": "repo",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Comma-separated CVE or GHSA identifiers to assess. Empty means assess the highest-severity open findings for the repository.",
+              "name": "cve_ids",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": 8,
+              "description": "Maximum number of findings to assess in detail when cve_ids is empty.",
+              "name": "max_cves",
+              "required": false,
+              "type": "integer"
+            },
+            {
+              "default": "",
+              "description": "Severity filter for graph findings: critical, high, medium, low, or empty string for all.",
+              "name": "severity",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Branch, tag, or commit SHA to inspect. Empty means the repository's default branch.",
+              "name": "ref",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "title": "Repository CVE Exploitability Review",
+          "triggers": [
+            "is this CVE exploitable in this repository",
+            "does this vulnerability actually apply",
+            "assess CVE reachability in the code",
+            "triage repository CVEs against the source",
+            "check if a dependency vulnerability is reachable",
+            "repository vulnerability exploitability review"
+          ]
+        },
+        "repo-cve-findings": {
+          "aliases": [
+            "github_security_investigations__repo_cve_findings"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "Repository to assess, as `owner/name` or a bare name.",
+              "name": "repo",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Comma-separated CVE or GHSA identifiers to restrict to. Empty means the highest-severity open findings.",
+              "name": "cve_ids",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": 8,
+              "description": "Maximum number of findings to carry forward when cve_ids is empty.",
+              "name": "max_cves",
+              "required": false,
+              "type": "integer"
+            },
+            {
+              "default": "",
+              "description": "Severity filter: critical, high, medium, low, or empty for all.",
+              "name": "severity",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "title": "Repository CVE Findings",
+          "triggers": [
+            "what CVEs affect this repository",
+            "list CVEs for a repository",
+            "repository vulnerability findings",
+            "which vulnerable versions are installed"
+          ]
+        },
+        "repo-cve-reachability": {
+          "aliases": [
+            "github_security_investigations__repo_cve_reachability"
+          ],
+          "parameters": [
+            {
+              "default": null,
+              "description": "Repository fullname (`owner/name`) as resolved by the findings review.",
+              "name": "repo",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Optional. The CVEs to review \u2014 CVE id, package, severity, vulnerable range, patched and resolved version. Leave empty when the findings review's output is already in context; passing the list again costs a second copy of it and is not required.",
+              "name": "findings",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": "",
+              "description": "Branch, tag, or commit SHA to inspect. Empty means the default branch.",
+              "name": "ref",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "name": "max_cves",
+              "type": "integer",
+              "description": "Most advisories to assess.",
+              "required": false,
+              "default": 8
+            }
+          ],
+          "title": "Repository CVE Reachability",
+          "triggers": [
+            "is this CVE exploitable in this repository",
+            "does this vulnerability actually apply",
+            "assess CVE reachability in the code",
+            "check if a dependency vulnerability is reachable",
+            "repository vulnerability exploitability review"
+          ]
+        }
+      }
+    }
+  },
+  "name": "github-security-investigations",
+  "version": "1.2.0"
+}

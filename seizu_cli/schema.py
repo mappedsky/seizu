@@ -13,6 +13,7 @@ from seizu_schema.reporting_config import (
     Panel,  # noqa: F401
     PanelParam,  # noqa: F401
     PiePanelSettings,  # noqa: F401
+    PluginDef,  # noqa: F401
     Report,  # noqa: F401
     ReportingConfig,  # noqa: F401
     Row,  # noqa: F401

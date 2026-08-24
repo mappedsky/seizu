@@ -30,6 +30,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
     QueryHistoryItem,
@@ -47,6 +48,10 @@ from reporting.schema.space_config import (
     SpaceListItem,
     SubspaceItem,
 )
+
+
+class PluginRevisionConflict(RuntimeError):
+    """A staged package was derived from a revision that is no longer current."""
 
 
 def require_public_space_member(access: ReportAccess, space_id: str | None) -> None:
@@ -802,6 +807,83 @@ class ReportStore(ABC):
     @abstractmethod
     async def get_enabled_skill(self, skillset_id: str, skill_id: str) -> SkillItem | None:
         """Return an enabled skill in an enabled skillset, or None if not found."""
+
+    # ------------------------------------------------------------------
+    # Agent plugins
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_plugins(self) -> list[PluginListItem]:
+        """Return installed Agent Plugins."""
+
+    @abstractmethod
+    async def get_plugin(self, plugin_id: str) -> PluginListItem | None:
+        """Return an installed Agent Plugin."""
+
+    @abstractmethod
+    async def publish_plugin(
+        self,
+        plugin_id: str,
+        manifest: dict[str, Any],
+        files: list[PluginFile],
+        skills: list[PluginSkillItem],
+        diagnostics: list[dict[str, Any]],
+        package_digest: str,
+        created_by: str,
+        comment: str | None = None,
+        expected_revision: int | None = None,
+    ) -> PluginListItem:
+        """Atomically publish a complete immutable plugin package revision."""
+
+    @abstractmethod
+    async def set_plugin_enabled(self, plugin_id: str, enabled: bool, updated_by: str) -> PluginListItem | None:
+        """Set plugin activation without changing package contents."""
+
+    @abstractmethod
+    async def delete_plugin(self, plugin_id: str) -> bool:
+        """Delete an installed plugin, its revisions, files, and indexes."""
+
+    @abstractmethod
+    async def list_plugin_versions(self, plugin_id: str) -> list[PluginVersion]:
+        """Return immutable plugin revisions newest first."""
+
+    @abstractmethod
+    async def list_plugin_files(self, plugin_id: str, revision: int | None = None) -> list[PluginFileInfo]:
+        """Return a plugin revision's file manifest."""
+
+    @abstractmethod
+    async def read_plugin_file(self, plugin_id: str, path: str, revision: int | None = None) -> PluginFile | None:
+        """Read one file from a published plugin revision."""
+
+    @abstractmethod
+    async def read_plugin_files(
+        self, plugin_id: str, revision: int | None = None, paths: list[str] | None = None
+    ) -> list[PluginFile]:
+        """Read a revision's files in one statement, optionally restricted to ``paths``."""
+
+    @abstractmethod
+    async def list_enabled_plugin_skills(self) -> list[PluginSkillItem]:
+        """Return enabled skills indexed from enabled plugins."""
+
+    @abstractmethod
+    async def list_plugin_skills(self, plugin_id: str) -> list[PluginSkillItem]:
+        """Return all indexed skills for one plugin, including disabled skills."""
+
+    @abstractmethod
+    async def get_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        """Return one indexed plugin skill regardless of activation state."""
+
+    @abstractmethod
+    async def get_enabled_plugin_skill(self, plugin_id: str, skill_id: str) -> PluginSkillItem | None:
+        """Return an enabled plugin skill by its namespaced identity."""
+
+    @abstractmethod
+    async def set_plugin_skill_enabled(self, plugin_id: str, skill_id: str, enabled: bool) -> PluginSkillItem | None:
+        """Turn one indexed skill on or off without republishing the package."""
+
+    @abstractmethod
+    async def read_plugin_blob(self, plugin_id: str, sha256: str) -> PluginFile | None:
+        """Read a blob already stored by one of this plugin's revisions, by digest."""
 
     # ------------------------------------------------------------------
     # Query history

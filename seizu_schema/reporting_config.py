@@ -999,6 +999,28 @@ class SkillsetDef(BaseModel):
         return v
 
 
+class PluginDef(BaseModel):
+    """An Agent Plugin package installed by the YAML seeder."""
+
+    source: str = Field(description="Plugin directory or ZIP, relative to the YAML file unless absolute.")
+    enabled: bool = True
+    skills: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Whether individual skills are on, keyed by Seizu skill ID. Omitted skills keep whatever "
+            "state they already have, and a skill seen for the first time starts on. This is an "
+            "operator's choice, not part of the package."
+        ),
+    )
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("source must not be empty")
+        return value
+
+
 class SubspaceDef(BaseModel):
     """A sub-space: a grouping label for reports within a single space."""
 
@@ -1164,6 +1186,28 @@ class ReportingConfig(BaseModel):
             """
         ],
     )
+
+    plugins: dict[str, PluginDef] = Field(
+        default_factory=dict,
+        description="Agent Plugin packages keyed by their expected Seizu plugin ID.",
+        examples=[
+            """
+            .. code-block:: yaml
+
+              plugins:
+                security_review:
+                  source: plugins/security-review
+                  enabled: true
+            """
+        ],
+    )
+
+    @field_validator("plugins")
+    @classmethod
+    def validate_plugin_ids(cls, value: dict[str, PluginDef]) -> dict[str, PluginDef]:
+        for key in value:
+            validate_lower_snake_id(key)
+        return value
 
     spaces: dict[str, SpaceDef] = Field(
         default_factory=dict,

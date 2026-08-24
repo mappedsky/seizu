@@ -48,6 +48,9 @@ class ExternalMCPProxy(BaseModel):
 
     name: str
     url: str
+    # Portable Agent Plugin mcp.json endpoints represented by this proxy. The
+    # proxy URL remains the only address Seizu connects to.
+    upstream_urls: list[str] = Field(default_factory=list)
     transport: ExternalMCPTransport = ExternalMCPTransport.SSE
     auth_mode: ExternalMCPAuthMode = ExternalMCPAuthMode.HEADER_DELEGATION
     header_mappings: dict[ExternalMCPHeaderSource, str] = Field(default_factory=dict)
@@ -71,6 +74,17 @@ class ExternalMCPProxy(BaseModel):
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
             raise ValueError("must be an http(s) URL without embedded credentials")
         return value
+
+    @field_validator("upstream_urls")
+    @classmethod
+    def valid_upstream_urls(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("upstream_urls entries must be unique")
+        for value in values:
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+                raise ValueError("upstream_urls entries must be http(s) URLs without embedded credentials")
+        return values
 
     @field_validator("token_env")
     @classmethod
