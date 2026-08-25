@@ -77,12 +77,20 @@ function ProfileDialog({
     payload: ModelProfilePayload & { comment?: string },
   ) => Promise<void>;
 }) {
-  const [value, setValue] = useState<ModelProfilePayload>(
-    profile ?? emptyPayload(),
+  const initialValue = profile ?? emptyPayload();
+  const [value, setValue] = useState<ModelProfilePayload>(initialValue);
+  const [runCostBudgetInput, setRunCostBudgetInput] = useState(
+    String(initialValue.run_cost_budget_usd),
   );
   const [comment, setComment] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const runCostBudgetUsd = Number(runCostBudgetInput);
+  const runCostBudgetValid =
+    runCostBudgetInput.trim() !== '' &&
+    Number.isFinite(runCostBudgetUsd) &&
+    runCostBudgetUsd > 0 &&
+    runCostBudgetUsd <= 10_000;
   const updateChoice = (
     kind: 'primary' | 'economy',
     field: 'model_id' | 'reasoning_effort',
@@ -120,6 +128,7 @@ function ProfileDialog({
     try {
       await onSave({
         ...value,
+        run_cost_budget_usd: runCostBudgetUsd,
         ...(profile ? { comment: comment || undefined } : {}),
       });
       onClose();
@@ -161,13 +170,9 @@ function ProfileDialog({
             label="Run cost cap (USD)"
             required
             type="number"
-            value={value.run_cost_budget_usd}
-            onChange={(e) =>
-              setValue({
-                ...value,
-                run_cost_budget_usd: Number(e.target.value),
-              })
-            }
+            value={runCostBudgetInput}
+            onChange={(e) => setRunCostBudgetInput(e.target.value)}
+            slotProps={{ htmlInput: { min: 0, max: 10_000, step: 'any' } }}
           />
           <TextField
             label="Description"
@@ -310,7 +315,7 @@ function ProfileDialog({
             !value.name.trim() ||
             !value.primary.model_id ||
             !value.economy.model_id ||
-            value.run_cost_budget_usd <= 0
+            !runCostBudgetValid
           }
           onClick={() => void submit()}
         >
