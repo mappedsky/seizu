@@ -130,7 +130,7 @@ export default memo(function ChatInput({
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleInputKeyDown}
-              placeholder="Ask about your security graph..."
+              placeholder="Ask Seizu..."
               disabled={busy}
               variant="outlined"
               slotProps={{

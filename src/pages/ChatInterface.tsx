@@ -32,6 +32,7 @@ import CheckCircle from '@mui/icons-material/CheckCircle';
 import HourglassEmpty from '@mui/icons-material/HourglassEmpty';
 import ErrorOutlined from '@mui/icons-material/ErrorOutlined';
 import Psychology from '@mui/icons-material/Psychology';
+import PsychologyAlt from '@mui/icons-material/PsychologyAlt';
 import AltRoute from '@mui/icons-material/AltRoute';
 import Checklist from '@mui/icons-material/Checklist';
 import PlayArrow from '@mui/icons-material/PlayArrow';
@@ -111,6 +112,8 @@ const KNOWN_DETAIL_KINDS = [
 function detailKindIcon(kind: SeizuChatDetail['kind']) {
   const sx = { color: 'text.secondary', fontSize: 14, flexShrink: 0 };
   switch (kind) {
+    case 'thinking':
+      return <PsychologyAlt sx={sx} />;
     case 'routing':
       return <AltRoute sx={sx} />;
     case 'plan':
@@ -146,6 +149,8 @@ type SeizuChatMessage = UIMessage<
     'seizu-detail': SeizuChatDetail;
   }
 >;
+
+const CHAT_LANDING_PATH = '/app/chat';
 
 function chatSessionPath(threadId: string): string {
   return `/app/chat/${encodeURIComponent(threadId)}`;
@@ -353,9 +358,10 @@ function toDetailNode(detail: SeizuChatDetail): DetailNode {
 //    inline children still group on reload.  Pass 1 keys a node map by detail_id;
 //    pass 2 assigns these children.
 //
-// 3. step_id grouping (orchestrator): a `step` detail opens a group; tool/
-//    verify details tagged with its step_id nest under it.  A subagent grouped
-//    here keeps its own inline children, so the orchestrator trace nests two deep.
+// 3. step_id grouping (orchestrator): a `step` detail owns every tool/verify/
+//    thinking detail tagged with its step_id, wherever those arrive in the
+//    stream.  A subagent grouped here keeps its own inline children, so the
+//    orchestrator trace nests two deep.
 //
 // Ungrouped details (routing, plan, top-level thinking) stay at the root.
 function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
@@ -382,11 +388,22 @@ function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
     }
   }
 
-  // Pass 2: assign each node to either a parent (by parent_id or step_id) or
+  // Pass 2: index the step nodes by step_id.  Keyed rather than tracked as "the
+  // step we last saw", because steps run in parallel: their tool calls and their
+  // thinking interleave in one stream, and a verifier's thinking arrives after
+  // every step has opened.  Order therefore says nothing about ownership —
+  // step_id does.
+  const stepNodes = new Map<string, DetailNode>();
+  for (const node of allNodes) {
+    if (node.detail.kind === 'step' && node.detail.step_id) {
+      stepNodes.set(node.detail.step_id, node);
+    }
+  }
+
+  // Pass 3: assign each node to either a parent (by parent_id or step_id) or
   // to the root list.  Nodes (not bare details) are attached so a grouped
   // subagent keeps its own children.
   const roots: DetailNode[] = [];
-  let currentStep: DetailNode | null = null;
 
   for (const node of allNodes) {
     const { detail } = node;
@@ -400,15 +417,9 @@ function buildDetailTree(details: SeizuChatDetail[]): DetailNode[] {
       // Parent not found (e.g. older message without detail_id) — fall through.
     }
 
-    if (detail.kind === 'step') {
-      currentStep = node;
-      roots.push(node);
-    } else if (
-      detail.step_id &&
-      currentStep &&
-      currentStep.detail.step_id === detail.step_id
-    ) {
-      currentStep.children.push(node);
+    const step = detail.step_id ? stepNodes.get(detail.step_id) : undefined;
+    if (step && step !== node) {
+      step.children.push(node);
     } else {
       roots.push(node);
     }
@@ -463,11 +474,19 @@ function DetailStatus({ status }: { status?: string }) {
 
 function DetailRow({ detail }: { detail: SeizuChatDetail }) {
   const hasContent = Boolean(detail.arguments || detail.body);
+  // Thinking reads as prose and is the reason the pane is open at all, so it
+  // starts expanded — a tool call starts closed, because its value is in the
+  // one line naming it.  `toggled` is the user's own choice once they make one,
+  // so a thought they closed stays closed as the next frame arrives.
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  const expanded = hasContent && (toggled ?? detail.kind === 'thinking');
   return (
     <Accordion
       disableGutters
       elevation={0}
       square
+      expanded={expanded}
+      onChange={(_event, next) => setToggled(next)}
       slotProps={{ transition: { timeout: 0, unmountOnExit: true } }}
       sx={{
         border: 1,
@@ -505,7 +524,10 @@ function DetailRow({ detail }: { detail: SeizuChatDetail }) {
             <DetailPre label="Arguments" value={detail.arguments} />
           ) : null}
           {detail.body ? (
-            <DetailPre label="Output" value={detail.body} />
+            <DetailPre
+              label={detail.kind === 'thinking' ? 'Thinking' : 'Output'}
+              value={detail.body}
+            />
           ) : null}
         </AccordionDetails>
       ) : null}
@@ -545,6 +567,11 @@ function DetailTreeRow({ node }: { node: DetailNode }) {
   );
 }
 
+// The turn's trace, at the top of the turn it belongs to and scrolling with it
+// like everything else in the conversation. It was briefly sticky, which put it
+// over the answer it sat on and meant collapsing and re-expanding itself from a
+// measurement of when it had pinned — inferring intent from scroll position, and
+// unpredictable to use. A block in normal flow needs none of that.
 const ChatMessageDetails = memo(
   function ChatMessageDetails({
     details,
@@ -555,16 +582,10 @@ const ChatMessageDetails = memo(
   }) {
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const tree = useMemo(() => buildDetailTree(details), [details]);
-    const [expanded, setExpanded] = useState(Boolean(isStreaming));
-
-    useEffect(() => {
-      // Auto-expand when streaming starts so the user sees tool calls as they
-      // arrive, but do NOT auto-collapse when streaming ends — the user can
-      // close the panel manually if they want to.
-      if (isStreaming) {
-        setExpanded(true);
-      }
-    }, [isStreaming]);
+    // Open by default and moved by nothing but a click. Nothing reopens or
+    // recloses it as the turn progresses: a block that moves on its own is what
+    // made the sticky version unreadable.
+    const [expanded, setExpanded] = useState(true);
 
     // Follow the content while it streams, but only when the user is already near
     // the bottom — never yank them away from something they scrolled up to read.
@@ -577,73 +598,80 @@ const ChatMessageDetails = memo(
 
     if (details.length === 0) return null;
     return (
-      <Accordion
-        disableGutters
-        elevation={0}
-        square
-        expanded={expanded}
-        onChange={(_event, nextExpanded) => setExpanded(nextExpanded)}
-        slotProps={{ transition: { timeout: 0 } }}
+      <Box
         sx={{
-          bgcolor: 'background.paper',
-          border: 1,
-          borderColor: 'divider',
-          borderRadius: 1,
-          mb: 1,
-          mt: 0,
-          width: '100%',
           boxSizing: 'border-box',
-          zIndex: 1,
-          borderTopLeftRadius: 0,
-          borderTopRightRadius: 0,
-          '&:before': { display: 'none' },
+          maxWidth: { xs: '92%', md: '74%' },
+          mb: 0.5,
+          width: '100%',
         }}
       >
-        <AccordionSummary
-          expandIcon={<ExpandMore fontSize="small" />}
+        <Accordion
+          disableGutters
+          elevation={0}
+          square
+          expanded={expanded}
+          onChange={(_event, nextExpanded) => setExpanded(nextExpanded)}
+          slotProps={{ transition: { timeout: 0 } }}
           sx={{
-            minHeight: 32,
-            px: 1,
-            py: 0,
-            '& .MuiAccordionSummary-content': {
-              alignItems: 'center',
-              gap: 0.75,
-              my: 0.5,
-            },
+            bgcolor: 'background.paper',
+            border: 1,
+            borderColor: 'divider',
+            borderRadius: 1,
+            boxSizing: 'border-box',
+            mt: 0,
+            width: '100%',
+            '&:before': { display: 'none' },
           }}
         >
-          <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
-          <Typography color="text.secondary" variant="caption">
-            Details
-          </Typography>
-          <Chip
-            label={details.length}
-            size="small"
-            sx={{ height: 18, minWidth: 18 }}
-          />
-        </AccordionSummary>
-        <AccordionDetails sx={{ px: 0, py: 0 }}>
-          <Box
-            ref={scrollRef}
+          <AccordionSummary
+            expandIcon={<ExpandMore fontSize="small" />}
             sx={{
-              height: 300,
-              overflowY: 'auto',
+              minHeight: 32,
               px: 1,
-              py: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 0.75,
+              py: 0,
+              '& .MuiAccordionSummary-content': {
+                alignItems: 'center',
+                gap: 0.75,
+                my: 0.5,
+              },
             }}
           >
-            {tree.map((node, index) => (
-              <DetailTreeRow
-                key={`${node.detail.step_id ?? node.detail.detail_id ?? node.detail.title}-${index}`}
-                node={node}
-              />
-            ))}
-          </Box>
-        </AccordionDetails>
-      </Accordion>
+            <Psychology sx={{ color: 'text.secondary', fontSize: 16 }} />
+            <Typography color="text.secondary" variant="caption">
+              Details
+            </Typography>
+            <Chip
+              label={details.length}
+              size="small"
+              sx={{ height: 18, minWidth: 18 }}
+            />
+          </AccordionSummary>
+          <AccordionDetails sx={{ px: 0, py: 0 }}>
+            <Box
+              ref={scrollRef}
+              sx={{
+                // A bound, not a reservation: a two-entry trace takes two rows,
+                // and no turn's trace takes over the view it scrolls through.
+                maxHeight: 'min(300px, 40vh)',
+                overflowY: 'auto',
+                px: 1,
+                py: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 0.75,
+              }}
+            >
+              {tree.map((node, index) => (
+                <DetailTreeRow
+                  key={`${node.detail.step_id ?? node.detail.detail_id ?? node.detail.title}-${index}`}
+                  node={node}
+                />
+              ))}
+            </Box>
+          </AccordionDetails>
+        </Accordion>
+      </Box>
     );
   },
   (previous, next) =>
@@ -711,12 +739,10 @@ export default function ChatInterface() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyPolling, setHistoryPolling] = useState(false);
-  const {
-    getStoredActiveSessionId,
-    panelOpen,
-    setPanelOpen,
-    setStoredActiveSessionId,
-  } = useChatLocalStorage();
+  // The stored id is written, not read: a visit to /app/chat is the landing, not
+  // a resumed conversation.
+  const { panelOpen, setPanelOpen, setStoredActiveSessionId } =
+    useChatLocalStorage();
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [autoTitleError, setAutoTitleError] = useState<string | null>(null);
@@ -742,7 +768,20 @@ export default function ChatInterface() {
     null,
   );
 
-  const creatingInitialSessionRef = useRef(false);
+  // A turn this page admitted itself, waiting for the chat to be keyed to its
+  // thread so the SDK can attach to it. Carries the thread id so it attaches to
+  // *that* conversation rather than whichever one settles first.
+  const [pendingAttach, setPendingAttach] = useState<{
+    threadId: string;
+    text: string;
+  } | null>(null);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  // A session created in this tab. It cannot have a turn that predates this
+  // page view, so it is the one thread the reattach probe must never run
+  // against — see the `resume` flag below.
+  const createdHereRef = useRef<string | null>(null);
   const autoTitleAttemptRef = useRef<string | null>(null);
   const messagesRef = useRef<SeizuChatMessage[]>([]);
   const setMessagesRef = useRef<
@@ -820,60 +859,49 @@ export default function ChatInterface() {
       };
     }
 
-    const storedId = getStoredActiveSessionId();
-    const target =
-      sessions.find((s) => s.thread_id === storedId) ?? sessions[0];
-    if (target) {
-      navigate(chatSessionPath(target.thread_id), { replace: true });
-      return () => {
-        cancelled = true;
-      };
+    // No thread in the URL: this is the landing, and it stays that way. Neither
+    // restoring the last conversation nor minting an empty one — a session is
+    // created by asking a question, so the sessions list is a list of questions
+    // that were actually asked.
+    //
+    // Except while an admitted turn is waiting to be attached to.
+    // `handleStartSession` sets the thread and navigates together, and the route
+    // can land a commit later; clearing the thread in that window unkeys the
+    // chat that is about to read the turn.
+    if (pendingAttach === null && activeThreadId !== null) {
+      setActiveThreadId(null);
+      setMessagesRef.current([]);
     }
-
-    if (activeThreadId) {
-      navigate(chatSessionPath(activeThreadId), { replace: true });
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (!creatingInitialSessionRef.current) {
-      creatingInitialSessionRef.current = true;
-      void createSession()
-        .then((session) => {
-          if (cancelled) return;
-          setActiveThreadId(session.thread_id);
-          setStoredActiveSessionId(session.thread_id);
-          navigate(chatSessionPath(session.thread_id), { replace: true });
-        })
-        .catch(() => {
-          if (!cancelled) setHistoryLoading(false);
-        })
-        .finally(() => {
-          creatingInitialSessionRef.current = false;
-        });
-    }
+    setHistoryLoading((current) => (current ? false : current));
     return () => {
       cancelled = true;
-      creatingInitialSessionRef.current = false;
     };
   }, [
     routeThreadId,
     activeThreadId,
+    pendingAttach,
     sessionsLoading,
     sessionsFeedEnabled,
     sessionsError,
     sessions,
-    createSession,
     getSession,
-    getStoredActiveSessionId,
-    navigate,
     setStoredActiveSessionId,
   ]);
 
   // Load history whenever the active session changes.
   useEffect(() => {
     if (!activeThreadId || !sessionsFeedEnabled) return;
+    if (createdHereRef.current === activeThreadId) {
+      // A session created in this tab, whose first turn this page is about to
+      // read from the stream. There is nothing on the server it does not
+      // already have, and fetching anyway is what took the answer away:
+      // `applyHistory` replaces the whole message list, so a response that
+      // arrived between the request and its answer was overwritten -- and
+      // gating the attach on the fetch instead made the attach wait on a
+      // request with no error path at all.
+      setHistoryLoading(false);
+      return;
+    }
     let cancelled = false;
     let pollTimer: number | undefined;
     let pollAttempts = 0;
@@ -893,24 +921,30 @@ export default function ChatInterface() {
     };
 
     const loadHistory = () => {
-      void fetchHistory(activeThreadId).then((history) => {
-        if (cancelled) return;
-        applyHistory(history);
-        setHistoryLoading(false);
-        if (
-          shouldPollChatHistory(history) &&
-          pollAttempts < CHAT_HISTORY_POLL_MAX_ATTEMPTS
-        ) {
-          pollAttempts += 1;
-          setHistoryPolling(true);
-          pollTimer = window.setTimeout(
-            loadHistory,
-            CHAT_HISTORY_POLL_INTERVAL_MS,
-          );
-        } else {
-          setHistoryPolling(false);
-        }
-      });
+      void fetchHistory(activeThreadId)
+        .catch(() => {
+          // Nothing to hydrate with, but the conversation still has to be
+          // usable: a rejected fetch used to leave the page loading forever.
+          return [] as SeizuChatMessage[];
+        })
+        .then((history) => {
+          if (cancelled) return;
+          applyHistory(history);
+          setHistoryLoading(false);
+          if (
+            shouldPollChatHistory(history) &&
+            pollAttempts < CHAT_HISTORY_POLL_MAX_ATTEMPTS
+          ) {
+            pollAttempts += 1;
+            setHistoryPolling(true);
+            pollTimer = window.setTimeout(
+              loadHistory,
+              CHAT_HISTORY_POLL_INTERVAL_MS,
+            );
+          } else {
+            setHistoryPolling(false);
+          }
+        });
     };
 
     setHistoryLoading(true);
@@ -992,6 +1026,10 @@ export default function ChatInterface() {
 
   const handleChatFinish = useCallback<ChatOnFinishCallback<SeizuChatMessage>>(
     ({ message, isDisconnect }) => {
+      // The session is no longer newborn: it has a finished turn, so returning
+      // to it later has something to reattach to and the probe is welcome again.
+      // Held only for the first turn, which is the one it would have raced.
+      createdHereRef.current = null;
       if (message.role === 'assistant') {
         setPendingContinuationTargetMessageId((current) =>
           current === message.id ? null : current,
@@ -1029,6 +1067,26 @@ export default function ChatInterface() {
     [activeThreadId, fetchConfirmations, transport],
   );
 
+  // Seeds the `Chat` that `useChat` builds when the id changes — the only
+  // moment it reads this. The landing's question has to be in the transcript
+  // *before* the reattach fires, and a `setMessages` from an effect is too
+  // late: the chat for the new thread is built during render, so anything
+  // written to the old one is gone, and anything written after the attach has
+  // started overwrites the assistant message it has already pushed.
+  const initialMessages = useMemo(
+    () =>
+      pendingAttach
+        ? [
+            {
+              id: `msg_${crypto.randomUUID()}`,
+              role: 'user' as const,
+              parts: [{ type: 'text' as const, text: pendingAttach.text }],
+            },
+          ]
+        : undefined,
+    [pendingAttach],
+  );
+
   const {
     messages,
     sendMessage,
@@ -1040,6 +1098,7 @@ export default function ChatInterface() {
     resumeStream,
   } = useChat<SeizuChatMessage>({
     id: chatId,
+    messages: initialMessages,
     experimental_throttle: CHAT_MESSAGE_THROTTLE_MS,
     onFinish: handleChatFinish,
     transport,
@@ -1056,6 +1115,12 @@ export default function ChatInterface() {
     // turns out to be longer. Waiting means the messages present when resume
     // fires are the persisted ones, which only ever contain finished turns —
     // so there is never a partial message to resume into.
+    //
+    // A session started from the landing gets here the same way a reload does:
+    // its turn is already admitted, so the transport knows the id and
+    // `reconnectToStream` attaches to it. Calling `resumeStream` by hand instead
+    // did not show the turn at all, and the reload path is the one known to
+    // work — so there is one route into it, not two.
     resume: activeThreadId !== null && !historyLoading,
   });
 
@@ -1202,16 +1267,49 @@ export default function ChatInterface() {
     [activeThreadId, navigate, setMessages, setStoredActiveSessionId],
   );
 
-  const handleNewSession = useCallback(async () => {
-    const session = await createSession();
-    setActiveThreadId(session.thread_id);
+  // No API call: "new session" is the landing, and the session is created by the
+  // question. It does not clear `activeThreadId` either — the URL-sync effect
+  // owns that, and a thread cleared here while the route still named it made
+  // that effect re-adopt the session, refetch its history and show it again on
+  // the way out (spinner, old conversation, then the landing).
+  const handleNewSession = useCallback(() => {
     setMessages([]);
-    setHistoryLoading(false);
     setSessionNotFound(false);
     setAutoTitleError(null);
-    setStoredActiveSessionId(session.thread_id);
-    navigate(chatSessionPath(session.thread_id));
-  }, [createSession, navigate, setMessages, setStoredActiveSessionId]);
+    setPendingAttach(null);
+    navigate(CHAT_LANDING_PATH);
+  }, [navigate, setMessages]);
+
+  // The landing's question: create the session, then let the send happen once
+  // `useChat` has re-keyed to it. Sending in this callback would post to the
+  // chat instance still keyed to the previous thread.
+  const handleStartSession = useCallback(
+    async (text: string) => {
+      setStartError(null);
+      setCreatingSession(true);
+      try {
+        const session = await createSession();
+        // Admitted before anything is navigated or re-keyed, so the question is
+        // the server's before the UI has to be right about anything. If this
+        // throws, the turn does not exist and the user still has their text.
+        await transport.startTurn(session.thread_id, text);
+        setMessages([]);
+        setHistoryLoading(false);
+        setSessionNotFound(false);
+        setAutoTitleError(null);
+        createdHereRef.current = session.thread_id;
+        setActiveThreadId(session.thread_id);
+        setStoredActiveSessionId(session.thread_id);
+        setPendingAttach({ threadId: session.thread_id, text });
+        navigate(chatSessionPath(session.thread_id));
+      } catch {
+        setStartError('Could not start a new conversation. Please try again.');
+      } finally {
+        setCreatingSession(false);
+      }
+    },
+    [createSession, navigate, setMessages, setStoredActiveSessionId, transport],
+  );
 
   const handleDeleteSession = useCallback(
     async (threadId: string) => {
@@ -1228,20 +1326,17 @@ export default function ChatInterface() {
         setStoredActiveSessionId(next.thread_id);
         navigate(chatSessionPath(next.thread_id), { replace: true });
       } else {
-        const newSession = await createSession();
-        setActiveThreadId(newSession.thread_id);
+        setActiveThreadId(null);
         setMessages([]);
         setHistoryLoading(false);
         setAutoTitleError(null);
-        setStoredActiveSessionId(newSession.thread_id);
-        navigate(chatSessionPath(newSession.thread_id), { replace: true });
+        navigate(CHAT_LANDING_PATH, { replace: true });
       }
     },
     [
       activeThreadId,
       sessions,
       deleteSession,
-      createSession,
       navigate,
       setMessages,
       setStoredActiveSessionId,
@@ -1256,6 +1351,15 @@ export default function ChatInterface() {
     },
     [activeThreadId, touchSession, sendMessage],
   );
+
+  useEffect(() => {
+    // The chat for this thread has been built and seeded with the question, and
+    // `resume` has taken it from there. All that is left is to stop holding it:
+    // the URL-sync effect reads this to know a thread is mid-handover.
+    if (!pendingAttach || activeThreadId !== pendingAttach.threadId) return;
+    setPendingAttach(null);
+    touchSession(activeThreadId);
+  }, [pendingAttach, activeThreadId, touchSession]);
 
   const handleConfirmationDecision = useCallback(
     async (
@@ -1414,7 +1518,7 @@ export default function ChatInterface() {
           loading={sessionsLoading}
           activeThreadId={activeThreadId}
           onSelectSession={handleSelectSession}
-          onNewSession={() => void handleNewSession()}
+          onNewSession={handleNewSession}
           onDeleteSession={handleDeleteSession}
           onRenameSession={updateSession}
         />
@@ -1435,6 +1539,72 @@ export default function ChatInterface() {
     );
   }
 
+  // No conversation open: ask for one. Nothing is created until the question is
+  // asked, so an abandoned visit leaves no empty session behind. Keyed on the
+  // route alone: `activeThreadId` trails it by a commit on the way in and out,
+  // and reading both here is what showed the conversation being left.
+  if (!routeThreadId) {
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          height: 'calc(100vh - 64px)',
+          overflow: 'hidden',
+        }}
+      >
+        <ChatSessionsPanel
+          open={panelOpen}
+          onToggle={() => setPanelOpen((v) => !v)}
+          sessions={sessions}
+          loading={sessionsLoading}
+          activeThreadId={activeThreadId}
+          onSelectSession={handleSelectSession}
+          onNewSession={handleNewSession}
+          onDeleteSession={handleDeleteSession}
+          onRenameSession={updateSession}
+        />
+        <Box
+          sx={{
+            ...pageContentSx,
+            alignItems: 'center',
+            boxSizing: 'border-box',
+            display: 'flex',
+            flex: 1,
+            flexDirection: 'column',
+            justifyContent: 'center',
+            minHeight: 0,
+            minWidth: 0,
+            overflow: 'auto',
+          }}
+        >
+          <Box sx={{ maxWidth: 720, width: '100%' }}>
+            <Typography
+              component="h1"
+              sx={{ mb: 2, textAlign: 'center' }}
+              variant="h2"
+            >
+              What should we ask the security graph?
+            </Typography>
+            {startError ? (
+              <Alert severity="error" sx={{ mb: 1 }}>
+                {startError}
+              </Alert>
+            ) : null}
+            <ChatInput
+              // Disabled rather than busy while the session is being created:
+              // busy turns the send button into a Stop, and there is nothing
+              // here to stop.
+              busy={false}
+              disabled={creatingSession}
+              onSubmit={(text) => void handleStartSession(text)}
+              onStop={() => {}}
+            />
+          </Box>
+        </Box>
+      </Box>
+    );
+  }
+
   return (
     <Box
       sx={{ display: 'flex', height: 'calc(100vh - 64px)', overflow: 'hidden' }}
@@ -1446,7 +1616,7 @@ export default function ChatInterface() {
         loading={sessionsLoading}
         activeThreadId={activeThreadId}
         onSelectSession={handleSelectSession}
-        onNewSession={() => void handleNewSession()}
+        onNewSession={handleNewSession}
         onDeleteSession={handleDeleteSession}
         onRenameSession={updateSession}
       />
@@ -1564,22 +1734,10 @@ export default function ChatInterface() {
                           </Box>
                           {message.role === 'assistant' &&
                           details.length > 0 ? (
-                            <Box
-                              sx={{
-                                boxSizing: 'border-box',
-                                maxWidth: { xs: '92%', md: '74%' },
-                                mb: 0.5,
-                                position: 'sticky',
-                                top: (theme) => theme.spacing(-1.5),
-                                width: '100%',
-                                zIndex: 2,
-                              }}
-                            >
-                              <ChatMessageDetails
-                                details={details}
-                                isStreaming={message.id === streamingMessageId}
-                              />
-                            </Box>
+                            <ChatMessageDetails
+                              details={details}
+                              isStreaming={message.id === streamingMessageId}
+                            />
                           ) : null}
                           <Box
                             sx={{
@@ -1847,6 +2005,18 @@ export default function ChatInterface() {
           </Card>
         </Box>
 
+        {startError ? (
+          // A first question that never reached its session. Shown here as well
+          // as on the landing, because by the time it fails the user is already
+          // looking at the conversation it was meant to start.
+          <Alert
+            onClose={() => setStartError(null)}
+            severity="error"
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {startError}
+          </Alert>
+        ) : null}
         {(activeThreadId && unresolvedThreads.has(activeThreadId)) || error ? (
           <Alert
             severity="error"

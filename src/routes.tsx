@@ -62,8 +62,11 @@ const routes = [
       { path: 'spaces/:spaceId', element: <SpaceDetail /> },
       { path: 'spaces/:spaceId/reports/:reportId', element: <SpaceDetail /> },
       { path: 'query-console', element: <QueryConsole /> },
-      { path: 'chat', element: <ChatInterface /> },
-      { path: 'chat/:threadId', element: <ChatInterface /> },
+      // One route, not two. As separate entries the landing and a conversation
+      // were separate element instances, so asking a question unmounted the
+      // page mid-navigation: the session was created and the question it was
+      // created for went with the discarded state.
+      { path: 'chat/:threadId?', element: <ChatInterface /> },
       {
         path: 'confirmations/batch/:batchId',
         element: <BatchConfirmationPage />,

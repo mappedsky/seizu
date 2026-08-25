@@ -354,6 +354,40 @@ export class SeizuChatTransport<
     return this.attach(turnId, options.abortSignal);
   }
 
+  /**
+   * Admit a turn directly, and leave it as this thread's pending turn so the
+   * SDK attaches to it on the next `reconnectToStream`.
+   *
+   * The two halves of a send are already separate here (admit, then attach);
+   * this exposes the first on its own. The landing's first question needs that:
+   * going through `sendMessage` means calling a chat that was keyed to the
+   * newly created session in the same commit, racing the SDK's own reattach
+   * probe and its message state, and the question was lost with the session
+   * already created. Admitting first and attaching second orders the pair
+   * explicitly instead of hoping React settles them in the right order.
+   *
+   * Everything a send gets applies unchanged: the idempotency key, the 503
+   * retry, expiry recovery, and a stop asked for before the turn had an id.
+   */
+  async startTurn(threadId: string, message: string): Promise<string> {
+    const pending: PendingSend = {
+      messageId: `start_${crypto.randomUUID()}`,
+      idempotencyKey: `ik_${crypto.randomUUID().replace(/-/g, '')}`,
+      turnId: null,
+      stopRequested: false,
+      unresolved: false,
+      body: '',
+    };
+    const body = JSON.stringify({
+      ...this.seizu.admissionBody({ messages: [], body: undefined }),
+      message,
+      idempotency_key: pending.idempotencyKey,
+    });
+    pending.body = body;
+    this.pending.set(threadId, pending);
+    return this.admit(threadId, body, pending);
+  }
+
   async reconnectToStream(
     _options: Parameters<
       DefaultChatTransport<UI_MESSAGE>['reconnectToStream']
@@ -369,6 +403,10 @@ export class SeizuChatTransport<
     // resolves to a turn that completed while the connection was down.
     const known = this.pending.get(threadId)?.turnId;
     if (known) return this.attach(known);
+    // What was here when the question was asked. A send can be admitted while
+    // this request is in flight, and 204 then answers a question about a moment
+    // that has passed -- see the delete below.
+    const asked = this.pending.get(threadId);
     const active = await fetch(
       `/api/v1/chat/threads/${encodeURIComponent(threadId)}/turns/active`,
       { headers: this.authHeaders() },
@@ -376,7 +414,13 @@ export class SeizuChatTransport<
     if (active.status === 204) {
       // This thread only. Clearing the whole slot used to disarm Stop for a
       // conversation the user had switched away from but left running.
-      this.pending.delete(threadId);
+      //
+      // And only what this probe actually asked about: `sendMessages` replaces
+      // the entry wholesale, so a different object means a turn was admitted
+      // after the question was asked and 204 is simply out of date. Deleting it
+      // anyway threw away the record of a live turn -- no id to attach to, stop
+      // or recover, which is a conversation that looks like it never started.
+      if (this.pending.get(threadId) === asked) this.pending.delete(threadId);
       return null;
     }
     if (!active.ok) throw new Error('Failed to look for a running turn');

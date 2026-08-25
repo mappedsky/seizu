@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -145,10 +146,12 @@ type ChatRenderOptions = {
   initialPath?: string;
 };
 
+// A conversation by default: /app/chat itself is the landing, which opens no
+// session at all, so a test about messages has to name the thread it is in.
 function chatTree({
   accessToken = 'token-123',
   chatEnabled = true,
-  initialPath = '/app/chat',
+  initialPath = '/app/chat/thread-1',
 }: ChatRenderOptions = {}) {
   return (
     <MemoryRouter initialEntries={[initialPath]}>
@@ -164,9 +167,13 @@ function chatTree({
         >
           <AuthContext.Provider value={{ accessToken, isLoading: false }}>
             <ThemeProvider theme={theme}>
+              {/* One route for both paths, as in src/routes.tsx: two would
+                  remount the page on the landing -> conversation navigation. */}
               <Routes>
-                <Route path="/app/chat" element={<ChatInterface />} />
-                <Route path="/app/chat/:threadId" element={<ChatInterface />} />
+                <Route
+                  path="/app/chat/:threadId?"
+                  element={<ChatInterface />}
+                />
               </Routes>
             </ThemeProvider>
           </AuthContext.Provider>
@@ -357,7 +364,7 @@ describe('ChatInterface', () => {
 
     expect(screen.getByText('Chat is not enabled.')).toBeInTheDocument();
     expect(
-      screen.queryByPlaceholderText('Ask about your security graph...'),
+      screen.queryByPlaceholderText('Ask Seizu...'),
     ).not.toBeInTheDocument();
     expect(fetchHistory).not.toHaveBeenCalled();
   });
@@ -596,6 +603,215 @@ describe('ChatInterface', () => {
     });
   });
 
+  it('asks for a question instead of opening or minting a session', async () => {
+    const createSession = jest.fn();
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession,
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession: jest.fn(),
+    });
+
+    renderChat({ initialPath: '/app/chat' });
+    await act(async () => {});
+
+    expect(
+      screen.getByText('What should we ask the security graph?'),
+    ).toBeInTheDocument();
+    // Neither the last conversation restored nor an empty one created: the
+    // sessions list stays a list of questions that were actually asked.
+    expect(createSession).not.toHaveBeenCalled();
+    expect(screen.queryByText('Session 1 message')).not.toBeInTheDocument();
+  });
+
+  it('admits the turn itself for the landing question, then attaches to it', async () => {
+    // Admit-then-attach with the two halves ordered here rather than by React.
+    // Routing the first question through the SDK's `sendMessage` meant calling a
+    // chat keyed to the session in the same commit that created it, and the
+    // question was lost with the session already made.
+    // Stateful like the real hook: `createSession` puts the session into the
+    // list it returns. Without that the page cannot find the thread the route
+    // now names and falls into "session not found", which is not the flow under
+    // test and hides whatever it would otherwise have done.
+    let sessions: {
+      thread_id: string;
+      title: string;
+      created_at: string;
+      updated_at: string;
+    }[] = [];
+    const createSession = jest.fn().mockImplementation(async () => {
+      const session = {
+        thread_id: 'thread-new',
+        title: '',
+        created_at: '2024-01-02T00:00:00+00:00',
+        updated_at: '2024-01-02T00:00:00+00:00',
+      };
+      sessions = [session];
+      return session;
+    });
+    const touchSession = jest.fn();
+    mockUseChatSessions.mockImplementation(() => ({
+      sessions,
+      loading: false,
+      error: null,
+      createSession,
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession,
+    }));
+    const resumeStream = jest.fn().mockResolvedValue(undefined);
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream,
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+    const fetchMock = mockAdmitThenAttach('turn-new');
+    // A session created here is never hydrated: `applyHistory` replaces the
+    // whole message list, so fetching alongside the stream took the answer back
+    // off the screen, and making the attach wait for the fetch instead put it
+    // behind a request with no error path.
+    const fetchHistory = jest.fn().mockResolvedValue([]);
+    mockUseChatHistory.mockReturnValue(fetchHistory);
+
+    renderChat({ initialPath: '/app/chat' });
+    await act(async () => {});
+
+    fireEvent.change(screen.getByPlaceholderText('Ask Seizu...'), {
+      target: { value: 'Which repos are exposed?' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(createSession).toHaveBeenCalled();
+    });
+
+    // The question reached the server as the turn's own message...
+    await waitFor(() => {
+      const admit = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes('/threads/thread-new/turns') &&
+          (init as RequestInit | undefined)?.method === 'POST',
+      );
+      expect(admit).toBeDefined();
+      const body = JSON.parse(
+        String((admit?.[1] as RequestInit).body),
+      ) as Record<string, unknown>;
+      expect(body.message).toBe('Which repos are exposed?');
+    });
+
+    // ...and the landing is left behind for the conversation it created. Read
+    // off the live DOM: `queryByText` matches the detached heading from the
+    // previous commit. Asserted before the attach checks below, so those are
+    // made from inside the session view rather than while the page is still
+    // mid-navigation — where they would pass without proving anything.
+    await waitFor(() => {
+      expect(document.body.textContent).not.toContain(
+        'What should we ask the security graph?',
+      );
+    });
+
+    // The chat built for the new thread starts with the question in it, and is
+    // told to reattach — the same route a reload takes to a running turn.
+    await waitFor(() => {
+      const built = mockUseChat.mock.calls
+        .map(([options]) => options as { id?: string; messages?: unknown[] })
+        .find((options) => options.id === 'thread-new');
+      expect(built?.messages).toEqual([
+        expect.objectContaining({
+          role: 'user',
+          parts: [{ type: 'text', text: 'Which repos are exposed?' }],
+        }),
+      ]);
+    });
+    const attaching = mockUseChat.mock.calls
+      .map(([options]) => options as { id?: string; resume?: boolean })
+      .find((options) => options.id === 'thread-new');
+    expect(attaching?.resume).toBe(true);
+    // ...and nothing fetches history over the top of the stream.
+    expect(fetchHistory).not.toHaveBeenCalledWith('thread-new');
+    expect(touchSession).toHaveBeenCalledWith('thread-new');
+    fetchMock.mockRestore();
+  }, 15_000);
+
+  it('does not reload the session it is leaving on New session', async () => {
+    // The route and `activeThreadId` disagree for a commit on the way out.
+    // Clearing the thread locally made the URL-sync effect re-adopt the session
+    // the route still named, refetch its history and put the conversation back
+    // on screen — spinner, old chat, then the landing.
+    const fetchHistory = jest.fn().mockResolvedValue([]);
+    mockUseChatHistory.mockReturnValue(fetchHistory);
+
+    renderChat();
+    await act(async () => {});
+    await waitFor(() => {
+      expect(fetchHistory).toHaveBeenCalledWith('thread-1');
+    });
+    const loadsBefore = fetchHistory.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    await waitFor(() => {
+      expect(
+        screen.getByText('What should we ask the security graph?'),
+      ).toBeInTheDocument();
+    });
+    await act(async () => {});
+    expect(fetchHistory.mock.calls.length).toBe(loadsBefore);
+  });
+
+  it('returns to the landing on New session without creating one', async () => {
+    const createSession = jest.fn();
+    mockUseChatSessions.mockReturnValue({
+      sessions: [
+        {
+          thread_id: 'thread-1',
+          title: 'Session 1',
+          created_at: '2024-01-01T00:00:00+00:00',
+          updated_at: '2024-01-01T00:00:00+00:00',
+        },
+      ],
+      loading: false,
+      error: null,
+      createSession,
+      getSession: jest.fn().mockResolvedValue(null),
+      updateSession: jest.fn(),
+      deleteSession: jest.fn(),
+      touchSession: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole('button', { name: 'New session' }));
+    await waitFor(() => {
+      expect(
+        screen.getByText('What should we ask the security graph?'),
+      ).toBeInTheDocument();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
   it('sends typed input through useChat', async () => {
     const sendMessage = jest.fn();
     mockUseChat.mockReturnValue({
@@ -615,17 +831,12 @@ describe('ChatInterface', () => {
     });
 
     renderChat();
-    fireEvent.change(
-      screen.getByPlaceholderText('Ask about your security graph...'),
-      {
-        target: { value: 'Map my graph' },
-      },
-    );
+    fireEvent.change(screen.getByPlaceholderText('Ask Seizu...'), {
+      target: { value: 'Map my graph' },
+    });
     const sendButton = screen.getByRole('button', { name: 'Send' });
     expect(
-      screen
-        .getByPlaceholderText('Ask about your security graph...')
-        .closest('.MuiInputBase-root'),
+      screen.getByPlaceholderText('Ask Seizu...').closest('.MuiInputBase-root'),
     ).toContainElement(sendButton);
     fireEvent.click(sendButton);
 
@@ -653,9 +864,7 @@ describe('ChatInterface', () => {
     });
 
     renderChat();
-    const input = screen.getByPlaceholderText(
-      'Ask about your security graph...',
-    );
+    const input = screen.getByPlaceholderText('Ask Seizu...');
     await act(async () => {
       fireEvent.change(input, { target: { value: 'Map my graph' } });
       fireEvent.keyDown(input, { key: 'Enter' });
@@ -685,9 +894,7 @@ describe('ChatInterface', () => {
     });
 
     renderChat();
-    const input = screen.getByPlaceholderText(
-      'Ask about your security graph...',
-    );
+    const input = screen.getByPlaceholderText('Ask Seizu...');
     await act(async () => {
       fireEvent.change(input, { target: { value: 'Line one' } });
       fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
@@ -727,7 +934,7 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Assistant is working...')).toBeInTheDocument();
   });
 
-  it('renders assistant detail data parts in a collapsed details block', async () => {
+  it("renders assistant detail data parts in the turn's details block", async () => {
     mockUseChat.mockReturnValue({
       id: 'chat-id',
       messages: [
@@ -766,20 +973,16 @@ describe('ChatInterface', () => {
     renderChat();
     await act(async () => {});
 
+    // The panel is open by default; the rows inside it are not.
     expect(screen.getByText('Details')).toBeInTheDocument();
     expect(screen.getByText('Schema has CVEs.')).toBeInTheDocument();
-    expect(screen.getByText('Tool: graph__schema')).not.toBeVisible();
+    expect(screen.getByText('Tool: graph__schema')).toBeVisible();
     expect(screen.queryByText('{}')).not.toBeInTheDocument();
     expect(screen.queryByText('{"labels":["CVE"]}')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
-    const toolDetails = await screen.findByRole(
-      'button',
-      { name: /Tool: graph__schema/ },
-      { timeout: 10_000 },
+    fireEvent.click(
+      screen.getByRole('button', { name: /Tool: graph__schema/ }),
     );
-    expect(toolDetails).toBeVisible();
-    fireEvent.click(toolDetails);
 
     await waitFor(
       () => {
@@ -790,7 +993,7 @@ describe('ChatInterface', () => {
     );
   }, 15_000);
 
-  it('keeps details expanded when the response completes, collapses on manual click', async () => {
+  it("opens a turn's details by default and moves them only on a click", async () => {
     const messages = [
       {
         id: 'assistant-message',
@@ -831,13 +1034,13 @@ describe('ChatInterface', () => {
     const { rerender } = renderChat();
     await act(async () => {});
 
+    // Open by default.
     expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
       'aria-expanded',
       'true',
     );
 
-    // When streaming ends the panel must stay open so the user can read details
-    // without having to manually re-expand it.
+    // Nothing but a click moves it: not the turn finishing...
     mockUseChat.mockReturnValue(chatResult('ready'));
     rerender(chatTree());
 
@@ -847,8 +1050,17 @@ describe('ChatInterface', () => {
       'true',
     );
 
-    // The user can still collapse the panel manually.
     fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
+    expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+
+    // ...and not more of the turn arriving. Nothing reopens a block the user
+    // closed; only a click moves it.
+    mockUseChat.mockReturnValue(chatResult('streaming'));
+    rerender(chatTree());
+    await act(async () => {});
     expect(screen.getByRole('button', { name: 'Details 1' })).toHaveAttribute(
       'aria-expanded',
       'false',
@@ -917,7 +1129,7 @@ describe('ChatInterface', () => {
 
     // All four orchestration kinds are surfaced (count chip = 4).
     expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
+    expect(screen.getByRole('button', { name: 'Details 4' })).toBeVisible();
     await waitFor(
       () => {
         expect(screen.getByText('Routing')).toBeVisible();
@@ -992,7 +1204,6 @@ describe('ChatInterface', () => {
     await act(async () => {});
 
     expect(screen.getByText('Synthesized answer.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Details 2' }));
     await waitFor(
       () => {
         expect(screen.getByText('Step: crunch data')).toBeVisible();
@@ -1002,6 +1213,182 @@ describe('ChatInterface', () => {
       },
       { timeout: 10_000 },
     );
+  }, 15_000);
+
+  it("files a step's thinking under that step, whatever order it arrives in", async () => {
+    // Steps run in parallel, so their thinking interleaves: the thinking of the
+    // first step arrives after the second step has already opened, and a
+    // verifier thinks about a step after every step has opened. Ownership is
+    // step_id, never arrival order.
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-step-1',
+              data: {
+                kind: 'step',
+                title: 'Step: alpha',
+                status: 'completed',
+                step_id: 's1',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-step-2',
+              data: {
+                kind: 'step',
+                title: 'Step: beta',
+                status: 'completed',
+                step_id: 's2',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-think-1',
+              data: {
+                kind: 'thinking',
+                title: 'Thinking',
+                status: 'completed',
+                step_id: 's1',
+                detail_id: 'detail-think-1',
+                body: 'alpha reasoning',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-verify-think',
+              data: {
+                kind: 'thinking',
+                title: 'Thinking: verifying',
+                status: 'completed',
+                step_id: 's2',
+                detail_id: 'detail-verify-think',
+                body: 'beta reasoning',
+              },
+            },
+            { type: 'text', text: 'Synthesized answer.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    await waitFor(
+      () => {
+        expect(screen.getByText('Step: alpha')).toBeVisible();
+      },
+      { timeout: 10_000 },
+    );
+
+    // A DetailTreeRow renders the row and its children inside one wrapper, so
+    // the step's wrapper is what must contain its thinking.
+    const wrapperFor = (title: string) =>
+      screen.getByText(title).closest('.MuiAccordion-root')!.parentElement!;
+
+    // Asserted on the bodies, which are unique: an expanded thinking row labels
+    // its own body "Thinking" too, so the title alone matches twice.
+    expect(
+      within(wrapperFor('Step: alpha')).getByText('alpha reasoning'),
+    ).toBeInTheDocument();
+    expect(
+      within(wrapperFor('Step: alpha')).queryByText('beta reasoning'),
+    ).not.toBeInTheDocument();
+    expect(
+      within(wrapperFor('Step: beta')).getByText('beta reasoning'),
+    ).toBeInTheDocument();
+    expect(
+      within(wrapperFor('Step: beta')).getByText('Thinking: verifying'),
+    ).toBeInTheDocument();
+  }, 15_000);
+
+  it('expands thinking by default and leaves tool calls closed', async () => {
+    mockUseChat.mockReturnValue({
+      id: 'chat-id',
+      messages: [
+        {
+          id: 'assistant-message',
+          role: 'assistant',
+          parts: [
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-think',
+              data: {
+                kind: 'thinking',
+                title: 'Thinking',
+                status: 'completed',
+                detail_id: 'detail-think',
+                body: 'weighing the options',
+              },
+            },
+            {
+              type: 'data-seizu-detail',
+              id: 'detail-tool',
+              data: {
+                kind: 'tool',
+                title: 'Tool: graph__schema',
+                status: 'completed',
+                detail_id: 'detail-tool',
+                body: '{"labels":["CVE"]}',
+              },
+            },
+            { type: 'text', text: 'Answer.' },
+          ],
+        },
+      ],
+      sendMessage: jest.fn(),
+      regenerate: jest.fn(),
+      stop: jest.fn(),
+      resumeStream: jest.fn(),
+      addToolResult: jest.fn(),
+      addToolOutput: jest.fn(),
+      addToolApprovalResponse: jest.fn(),
+      status: 'ready',
+      error: undefined,
+      setMessages: jest.fn(),
+      clearError: jest.fn(),
+    });
+
+    renderChat();
+    await act(async () => {});
+
+    // Thinking reads as prose and is why the pane is open; a tool call's value
+    // is the one line naming it. (`unmountOnExit` means a closed row has no body
+    // in the DOM at all.)
+    expect(screen.getByText('weighing the options')).toBeInTheDocument();
+    expect(screen.queryByText('{"labels":["CVE"]}')).not.toBeInTheDocument();
+
+    // The rows only enter the accessibility tree once the pane itself is open.
+    const thinkingRow = await screen.findByRole(
+      'button',
+      { name: /Thinking/ },
+      { timeout: 10_000 },
+    );
+    expect(thinkingRow).toHaveAttribute('aria-expanded', 'true');
+    expect(
+      screen.getByRole('button', { name: /Tool: graph__schema/ }),
+    ).toHaveAttribute('aria-expanded', 'false');
+
+    // The user's own choice still wins over the default.
+    fireEvent.click(thinkingRow);
+    expect(thinkingRow).toHaveAttribute('aria-expanded', 'false');
   }, 15_000);
 
   it('groups Sandbox: sub-events under their parent Tool: sandbox__delegate entry', async () => {
@@ -1076,7 +1463,6 @@ describe('ChatInterface', () => {
 
     // The chip shows the raw event count (3); grouping is structural, not counted.
     expect(screen.getByText('All done.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Details 3' }));
     await waitFor(
       () => {
         expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
@@ -1170,7 +1556,6 @@ describe('ChatInterface', () => {
 
     // 4 raw detail events; chip reflects the raw count.
     expect(screen.getByText('All done.')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Details 4' }));
     await waitFor(
       () => {
         // Upsert collapses running+completed for sandbox__delegate into one node.
@@ -1246,7 +1631,6 @@ describe('ChatInterface', () => {
 
     expect(screen.getByText('All done.')).toBeInTheDocument();
     // One top-level detail (the subagent section); children are structural.
-    fireEvent.click(screen.getByRole('button', { name: 'Details 1' }));
     await waitFor(
       () => {
         expect(screen.getByText('Tool: sandbox__delegate')).toBeVisible();
@@ -2355,6 +2739,58 @@ describe('ChatInterface', () => {
     thread = 'thread-1';
     await transport.requestStop();
     expect(stops).toEqual(['/api/v1/chat/turns/turn-thread-1/cancel']);
+    fetchMock.mockRestore();
+  });
+
+  it('keeps a turn admitted while the reattach probe was in flight', async () => {
+    // The landing's first question sends on the same commit that keys the chat
+    // to the session it just created, so the SDK's reattach probe and that send
+    // overlap. The probe asked before the turn existed; its 204 describes a
+    // moment that has passed, and acting on it erased the record of the turn the
+    // send had just admitted — no id left to attach to, stop or recover, which
+    // reads as a session where nothing ever started.
+    let releaseProbe: () => void = () => {};
+    const probeAnswered = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const stops: string[] = [];
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes('/turns/active')) {
+          await probeAnswered;
+          return new Response(null, { status: 204 });
+        }
+        if (url.includes('/cancel')) {
+          stops.push(url);
+          return new Response(null, { status: 200 });
+        }
+        if (url.includes('/turns') && !url.includes('/stream')) {
+          return new Response(
+            JSON.stringify({ turn_id: 'turn-1', status: 'created' }),
+            { status: 201, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response('data: [DONE]\n\n', { status: 200 });
+      });
+
+    const transport = standaloneTransport(() => 'thread-1');
+    const reconnect = transport.reconnectToStream(
+      {} as unknown as Parameters<
+        SeizuChatTransport<UIMessage>['reconnectToStream']
+      >[0],
+    );
+    await transport.sendMessages(
+      sendArgs([
+        { id: 'u1', role: 'user', parts: [{ type: 'text', text: 'Hi' }] },
+      ]),
+    );
+    releaseProbe();
+    await reconnect;
+
+    await transport.requestStop();
+    expect(stops).toEqual(['/api/v1/chat/turns/turn-1/cancel']);
     fetchMock.mockRestore();
   });
 

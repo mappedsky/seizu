@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextvars import ContextVar
@@ -753,6 +754,10 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 available_specs,
                 config,
                 turn_writer,
+                # A post-action turn ships no prose, but it still thinks -- and
+                # it is the turn a viewer waits longest through. Details are the
+                # one thing it can show without shipping text it may retract.
+                detail_writer=writer,
             )
         except BudgetExceeded as exc:
             # Exhausting the run budget is an expected end to a long turn, not a
@@ -919,7 +924,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # all about the work it did.
         try:
             turn_result = await _run_llm_tool_turn(
-                model, synthesis_system_prompt, messages, [], config, None, allow_reserve=True
+                model, synthesis_system_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
             )
             final_message = turn_result.message
             streamed_in_last_turn = turn_result.streamed
@@ -937,7 +942,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             )
             try:
                 turn_result = await _run_llm_tool_turn(
-                    model, retry_prompt, messages, [], config, None, allow_reserve=True
+                    model, retry_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
                 )
                 final_message = turn_result.message
                 streamed_in_last_turn = turn_result.streamed
@@ -1625,6 +1630,7 @@ async def _run_llm_tool_turn_inner(
     config: RunnableConfig,
     writer: Callable[[dict[str, Any]], None] | None = None,
     *,
+    detail_writer: Callable[[dict[str, Any]], None] | None = None,
     allow_reserve: bool = False,
     phase: str = "worker",
     max_output_tokens: int | None = None,
@@ -1640,6 +1646,13 @@ async def _run_llm_tool_turn_inner(
     Returns the merged message, the concatenation of deltas already shipped,
     and any provider finish reason observed while streaming. The streamed text
     lets the caller avoid re-emitting the final response when it matches.
+
+    ``detail_writer`` receives detail events (the model's thinking) for a caller
+    that streams no user-visible text: a worker step, a summary pass, a
+    post-action turn. Without it those stages are the ones with the most
+    thinking and the least to show for it, since ``writer`` is both the text
+    channel and the detail channel and they must switch it off to keep
+    un-retractable prose out of the answer.
     """
     runnable = model
     bind_tools = getattr(model, "bind_tools", None)
@@ -1675,6 +1688,12 @@ async def _run_llm_tool_turn_inner(
     reasoning_text = ""
     reasoning_detail_data: dict[str, Any] | None = None
     reasoning_detail_started = False
+    reasoning_streamed_chars = 0
+    reasoning_streamed_at = 0.0
+    # Details go wherever text goes, and to ``detail_writer`` when text goes
+    # nowhere. One channel, so a stage's thinking is emitted identically however
+    # it was called.
+    detail_out = writer if writer is not None else detail_writer
     streamed = ""
     finish_reason: str | None = None
     stream_text = writer is not None
@@ -1703,25 +1722,33 @@ async def _run_llm_tool_turn_inner(
                 # -- the stages that spend the most of it -- used to be parsed and
                 # dropped, which is the reasoning you most want to read when
                 # asking why a stage is slow (AGT-033).
-                reasoning_text = _truncate_text(f"{reasoning_text}{reasoning_delta}", 6000)
-            if reasoning_delta and writer is not None:
-                reasoning_detail_data = {
-                    "kind": "thinking",
-                    "title": "Thinking",
-                    "status": "completed",
-                    "body": reasoning_text,
-                }
-                if not reasoning_detail_started:
+                reasoning_text = _append_reasoning(reasoning_text, reasoning_delta)
+                reasoning_detail_data = _reasoning_detail_data(
+                    reasoning_detail_id, phase, reasoning_text, status="completed"
+                )
+            if reasoning_delta and detail_out is not None:
+                # Sent as it arrives rather than only at the end: thinking is the
+                # only thing a stage produces while it is thinking, and a stage
+                # that emits its body once it is done shows nothing for exactly
+                # the stretch a viewer is waiting through. The first frame goes
+                # out immediately -- that is the one that says the stage started
+                # -- and the rest are paced.
+                now = time.monotonic()
+                grown = len(reasoning_text) - reasoning_streamed_chars
+                if not reasoning_detail_started or (
+                    grown >= _REASONING_STREAM_MIN_CHARS
+                    and now - reasoning_streamed_at >= _REASONING_STREAM_INTERVAL_SECONDS
+                ):
                     reasoning_detail_started = True
-                    writer(
+                    reasoning_streamed_chars = len(reasoning_text)
+                    reasoning_streamed_at = now
+                    detail_out(
                         {
                             "kind": "detail",
                             "id": reasoning_detail_id,
-                            "data": {
-                                "kind": "thinking",
-                                "title": "Thinking",
-                                "status": "running",
-                            },
+                            "data": _reasoning_detail_data(
+                                reasoning_detail_id, phase, reasoning_text, status="running"
+                            ),
                         }
                     )
             if stream_text and writer is not None:
@@ -1764,6 +1791,7 @@ async def _run_llm_tool_turn_inner(
                 tools,
                 config,
                 writer,
+                detail_writer=detail_writer,
                 allow_reserve=allow_reserve,
                 phase=phase,
                 max_output_tokens=max_output_tokens,
@@ -1775,8 +1803,8 @@ async def _run_llm_tool_turn_inner(
         if tail:
             writer({"kind": "token", "content": tail})
             streamed += tail
-    if reasoning_detail_started and reasoning_detail_data is not None and writer is not None:
-        writer({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
+    if reasoning_detail_started and reasoning_detail_data is not None and detail_out is not None:
+        detail_out({"kind": "detail", "id": reasoning_detail_id, "data": reasoning_detail_data})
 
     merged_text = message_text(getattr(merged, "content", "")) if merged is not None else ""
     usage = usage_from_message(merged)
@@ -2860,6 +2888,29 @@ _CONTEXT_BLOCK_MAX_TOKENS = 8_000
 _DETAIL_BODY_MAX_CHARS = 6_000
 _DETAIL_ARGUMENTS_MAX_CHARS = 3_000
 _DETAIL_NARRATION_MAX_CHARS = 4_000
+_DETAIL_REASONING_MAX_CHARS = 6_000
+_REASONING_ELISION = "[earlier thinking truncated] ..."
+
+# How often a growing thinking body is re-sent while the model is still
+# reasoning. Each frame carries the whole body so far and is a store append that
+# replays on every reload, so a frame has to earn itself twice over: enough new
+# text to be worth reading *and* enough time since the last one. At about one
+# per second the pane reads as live and the log stays the size of a few tool
+# results rather than of the reasoning itself.
+_REASONING_STREAM_MIN_CHARS = 200
+_REASONING_STREAM_INTERVAL_SECONDS = 1.0
+
+# The stage a phase names, as the pane labels it. Anything unlisted (the
+# single-agent turn, a continuation) is plain "Thinking".
+_REASONING_TITLES = {
+    "planner": "Thinking: planning",
+    "router": "Thinking: routing",
+    "verifier": "Thinking: verifying",
+    "synthesizer": "Thinking: writing the answer",
+    "synthesizer_retry": "Thinking: writing the answer",
+    "worker_summary": "Thinking: summarizing the step",
+    "worker_summary_retry": "Thinking: summarizing the step",
+}
 
 
 def _context_block_tokens(model: Any, divisor: int, config: RunnableConfig | None = None) -> int:
@@ -2941,6 +2992,44 @@ def _planning_narration_detail_data(text: str) -> dict[str, Any]:
         "status": "completed",
         "body": _truncate_text(text.strip(), _DETAIL_NARRATION_MAX_CHARS),
     }
+
+
+def _append_reasoning(text: str, delta: str, max_chars: int = _DETAIL_REASONING_MAX_CHARS) -> str:
+    """Accumulate streamed thinking, keeping the most recent *max_chars*.
+
+    The tail, not the head, and the one place in this module that truncates that
+    way: this body is read while the stage is still running, and one that stops
+    growing at its bound is indistinguishable from a stage that stopped
+    thinking. Idempotent -- the elision marker is stripped before each append,
+    so it never accumulates.
+    """
+    combined = f"{text.removeprefix(_REASONING_ELISION)}{delta}"
+    if max_chars <= 0 or len(combined) <= max_chars:
+        return combined
+    return f"{_REASONING_ELISION}{combined[-max_chars:]}"
+
+
+def _reasoning_detail_data(detail_id: str, phase: str, body: str, *, status: str) -> dict[str, Any]:
+    """Render the thinking of one model call as a detail entry.
+
+    The phase is what files the entry: its role names the stage, and for a plan
+    step it also carries the step id (``worker:s2``, ``verifier:s2`` --
+    the grammar :func:`chat_budget._observation_key` documents), which is what
+    puts the entry inside that step's section instead of at the root of the turn.
+    """
+    parts = [part for part in phase.split(":") if part]
+    role = parts[0] if parts else ""
+    step_id = parts[1] if len(parts) > 1 else ""
+    data: dict[str, Any] = {
+        "kind": "thinking",
+        "title": _REASONING_TITLES.get(role, "Thinking"),
+        "status": status,
+        "detail_id": detail_id,
+        "body": body,
+    }
+    if step_id:
+        data["step_id"] = step_id
+    return data
 
 
 def _confirmation_tool_detail_data(confirmation: ActionConfirmation, content: str, *, status: str) -> dict[str, Any]:
@@ -3155,6 +3244,7 @@ async def _invoke_structured_output(
     messages: list[BaseMessage],
     config: RunnableConfig,
     *,
+    detail_writer: Callable[[dict[str, Any]], None] | None = None,
     allow_reserve: bool = False,
     phase: str = "structured",
     max_output_tokens: int = 1024,
@@ -3164,6 +3254,10 @@ async def _invoke_structured_output(
     Some LiteLLM/provider combinations are inconsistent with LangChain's
     ``with_structured_output`` wrapper. The fallback still delegates the
     semantic decision to the LLM; code only validates and parses the JSON object.
+
+    ``detail_writer`` streams the call's thinking to the details pane. It reaches
+    only the fallback, which is the only path that streams at all: the native
+    wrapper is a single ``ainvoke`` and never yields the reasoning chunks.
     """
     structured = getattr(model, "with_structured_output", None)
     if callable(structured) and _structured_output_native_ok.get(id(model), True):
@@ -3234,6 +3328,7 @@ async def _invoke_structured_output(
         [],
         config,
         None,
+        detail_writer=detail_writer,
         allow_reserve=allow_reserve,
         phase=phase,
         max_output_tokens=max_output_tokens,
@@ -3256,6 +3351,7 @@ async def _invoke_structured_output(
         [],
         config,
         None,
+        detail_writer=detail_writer,
         allow_reserve=allow_reserve,
         phase=phase,
         max_output_tokens=max_output_tokens,

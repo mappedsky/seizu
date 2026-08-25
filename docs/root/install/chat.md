@@ -50,11 +50,11 @@ Users holding `chat:bypass_permissions` see a **Bypass confirmations** toggle (o
 
 ## Sessions and history
 
-Conversations are grouped into sessions listed in the chat sidebar; sessions can be created, renamed, and deleted. Hovering a sidebar entry shows when that session was last active. The active thread id is kept in browser `localStorage`, so reloading the page rehydrates the conversation from the server. Thread ids are namespaced server-side per user, so one user can never reach another user's thread.
+Conversations are grouped into sessions listed in the chat sidebar; sessions can be renamed and deleted. Opening `/app/chat` — and **New session** — shows a question prompt rather than a conversation: the session is created when you ask something, so an abandoned visit leaves no empty session behind and the sidebar lists only questions that were actually asked. A session's own URL (`/app/chat/<thread id>`) opens it directly and reloading rehydrates it from the server. Thread ids are namespaced server-side per user, so one user can never reach another user's thread.
 
 Every turn is timestamped when it is persisted. Assistant replies show the time beside their copy button; hovering your own message reveals its time and a copy button of its own. Messages persisted before timestamps were recorded simply show no time.
 
-Assistant turns include an expandable details section showing thinking and tool calls (arguments and output). Replies cut off by the output-token limit are auto-continued server-side and stitched into one response (bounded by `CHAT_LLM_MAX_CONTINUATIONS`); a manual **Continue response** action covers the rest.
+Each assistant turn opens with a details block showing its thinking and tool calls (arguments and output). It is open by default and moves only when you click it; thinking appears while the model is still reasoning and is expanded, while a tool call starts collapsed. An orchestrated turn nests each step's thinking, tool calls and verification under that step. A plan step's thinking is shown live only — a reloaded turn replays its plan, calls and results, not the reasoning behind them — and a model that returns structured output natively exposes no thinking to show. Replies cut off by the output-token limit are auto-continued server-side and stitched into one response (bounded by `CHAT_LLM_MAX_CONTINUATIONS`); a manual **Continue response** action covers the rest.
 
 Sessions created by scheduled chats are excluded from the sidebar and are read-only; see [scheduled chats](chat-schedules.html).
 
