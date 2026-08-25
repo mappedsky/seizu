@@ -1997,6 +1997,45 @@ would pay for the same work twice and re-apply its tool side effects. A step the
 fan-out could not produce comes back as a recorded execution error for the
 verifier to judge, never as a silently missing step.
 
+### The first question of a conversation admits its own turn
+
+`SeizuChatTransport.startTurn` admits a turn without going through the SDK's
+send path, and the page then attaches to it (`resumeStream`). Only the chat
+landing uses this: it creates the session and asks the question in one gesture,
+so `sendMessage` would be called on a chat keyed to that session in the same
+commit that created it — racing the SDK's own reattach probe, its message state
+and the transport's pending slot. Measured by its absence: no `chat_turns` row
+was ever written for those sessions, so nothing was sent at all.
+
+**A session created here is not hydrated at all.** History is fetched
+concurrently and `applyHistory` replaces the whole message list whenever what it
+fetched is at least as long as what is there, so fetching alongside the stream
+took the answer back off the screen. Gating the attach on the fetch instead only
+moved the problem: the attach then waited on a request that had no error path,
+and the conversation appeared only when history polling picked up the finished
+turn. There is nothing on the server a newborn session does not already have —
+so it does not ask. The skip is released in `onFinish`, after which the thread
+hydrates like any other.
+
+Admitting first makes the question the server's before the UI has to be right
+about anything. It is the same pair a send makes and keeps everything a send
+gets — the idempotency key, the 503 retry, expiry recovery, a stop asked for
+before the turn had an id.
+
+**The attach is the ordinary reattach, not a second route into it.** Calling
+`resumeStream` by hand from an effect did not show the turn at all, while a
+reload of the same conversation attached and streamed correctly — so the landing
+uses the reload's path: `resume` is left alone, and the turn is already in the
+transport's pending slot, so `reconnectToStream` finds its id without probing.
+The question is put in the transcript by seeding `useChat({messages})`, which is
+read when the `Chat` for the new thread is *constructed*; writing it from an
+effect is always either too early for that construction or late enough to
+overwrite what the attach has already pushed.
+
+Related, and a hazard in its own right: `reconnectToStream` deletes this
+thread's pending slot on a 204, and a turn admitted while that probe was in
+flight is newer than the answer. It now deletes only the slot it asked about.
+
 ## AGT-009 — Answer-only plan steps require complete evidence
 
 **Applies to:** `chat_orchestrator._PLANNER_PROMPT`
@@ -2579,3 +2618,62 @@ emits 48 tokens there too.
 graded at unless it is read off `model_kwargs`. The sub-agent's span reported
 `None` while the stage demonstrably ran at `low`, which is the one attribute
 someone would check.
+
+## AGT-044 — Thinking is streamed as a detail, and filed by the phase that produced it
+
+**Applies to:** `_run_llm_tool_turn_inner`, `_reasoning_detail_data`,
+`_append_reasoning`, `detail_writer`, `buildDetailTree`
+
+The details pane shows a `thinking` entry per model call. It is emitted **while
+the reasoning arrives** (paced by `_REASONING_STREAM_MIN_CHARS` /
+`_REASONING_STREAM_INTERVAL_SECONDS`, never re-sent unchanged) rather than once
+at the end, and it carries the step it belongs to, so it renders inside that
+step's section instead of at the root of the turn.
+
+**Three things had to change together, and each is load-bearing.**
+
+*The channel.* `writer` was both the text channel and the detail channel, so a
+stage that must not ship prose — a worker step, a summary pass, a post-action
+turn in the single-agent loop, the synthesizer — switched off its details along
+with its text. Those are exactly the stages that spend the longest thinking and
+show the least while doing it. `detail_writer` is the second channel; a call
+with a `writer` still uses it for both.
+
+*The section.* The `phase` a call already carries is what files the entry:
+`worker:s2`, `verifier:s2`, `worker_summary:s2` — the grammar
+`chat_budget._observation_key` documents, which drops the step id again for
+estimation. `_structured_invoke` grew `step_id`/`writer` for the same reason.
+Nothing new is threaded through the call graph to say where a call belongs.
+
+*The order.* The pane grouped a detail under "the step we last saw", which is
+only correct when steps are sequential. They are not (AGT-018): two steps' tool
+calls and thinking interleave in one log, and the verifier thinks about a step
+after every step has opened. `buildDetailTree` now keys the step nodes by
+`step_id`, so ownership is stated rather than inferred from arrival order — the
+same fix a reload always needed.
+
+**Streamed thinking keeps its tail, not its head** (`_append_reasoning`, the one
+place in `chat_graph` that truncates that way). At the display bound a
+head-truncated body stops growing, which is indistinguishable from a stage that
+stopped thinking — and it happens precisely on the long calls this exists for.
+
+**The block is ordinary content at the top of its turn.** A thinking entry starts
+expanded — it reads as prose and is why the block is open — while a tool call
+starts closed, its value being the one line that names it. The block itself is in
+normal flow and scrolls with the conversation. It was briefly `position: sticky`,
+which pinned it over the answer it sat on top of, so it had to collapse and
+re-expand itself from a measurement of when it had pinned — inferring the user's
+intent from scroll position, and unpredictable to use. Nothing moves it now but a
+click, and its height is bounded (`min(300px, 40vh)`) rather than reserved, so a
+two-entry trace takes two rows.
+
+**What is *not* persisted:** a plan step's thinking is live-only. Worker
+`LLMTurnResult.details` are dropped, and `_orchestration_details` rebuilds a
+reloaded turn from the plan and the step results, which would have to carry up
+to 6,000 characters per step through Temporal history to keep it. The
+single-agent path and the synthesizer persist theirs, as they always have.
+
+**A native structured call has no thinking to show.** `with_structured_output`
+is one `ainvoke` and yields no reasoning chunks, so the planner's entry appears
+only on the JSON-prompt fallback. Do not stream the structured runnable to get
+one: it yields parsed objects, not chunks.

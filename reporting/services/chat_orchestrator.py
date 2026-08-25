@@ -558,6 +558,8 @@ async def _structured_invoke(
     config: RunnableConfig,
     *,
     role: str,
+    step_id: str = "",
+    writer: Any = None,
     allow_reserve: bool = False,
     max_output_tokens: int = 0,
 ) -> BaseModel:
@@ -582,8 +584,12 @@ async def _structured_invoke(
         schema,
         messages,
         config,
+        detail_writer=writer,
         allow_reserve=allow_reserve,
-        phase=role,
+        # ``role:step_id`` where the call is about one step, so its thinking is
+        # filed under that step rather than at the root of the turn. The budget
+        # already reads this grammar and drops the step id again.
+        phase=f"{role}:{step_id}" if step_id else role,
         max_output_tokens=min(max_output_tokens, ceiling) if max_output_tokens > 0 else ceiling,
     )
 
@@ -652,6 +658,7 @@ async def router_node(state: ChatState, config: RunnableConfig) -> dict[str, Any
                 [SystemMessage(content=_ROUTER_PROMPT), HumanMessage(content=user_text)],
                 config,
                 role="router",
+                writer=writer,
             ),
         )
     except Exception:
@@ -757,7 +764,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     run_errors: list[str] = []
     planned: list[_PlannedStep] = []
     try:
-        plan_result = await _invoke_planner(planner_messages, config)
+        plan_result = await _invoke_planner(planner_messages, config, writer)
         planned, truncation_notes = _truncate_plan(plan_result.steps)
         run_errors.extend(truncation_notes)
     except BudgetExceeded as exc:
@@ -804,7 +811,7 @@ async def planner_node(state: ChatState, config: RunnableConfig) -> dict[str, An
     }
 
 
-async def _invoke_planner(messages: list[BaseMessage], config: RunnableConfig) -> _Plan:
+async def _invoke_planner(messages: list[BaseMessage], config: RunnableConfig, writer: Any = None) -> _Plan:
     return cast(
         _Plan,
         await _structured_invoke(
@@ -812,6 +819,7 @@ async def _invoke_planner(messages: list[BaseMessage], config: RunnableConfig) -
             messages,
             config,
             role="planner",
+            writer=writer,
             max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
         ),
     )
@@ -1371,6 +1379,8 @@ async def _expand_mapped_steps(
                         ],
                         config,
                         role="planner",
+                        step_id=str(parent["id"]),
+                        writer=writer,
                         max_output_tokens=settings.CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS,
                     ),
                 )
@@ -2940,6 +2950,10 @@ async def _run_worker_step(
                 available,
                 config,
                 None,
+                # A step never streams prose -- only the synthesizer does -- but
+                # its thinking is most of what happens inside it, and the pane
+                # files it under this step by the phase below.
+                detail_writer=writer,
                 # Request the cap explicitly so a submission cut off by it is
                 # detectable; without a known cap _effective_finish_reason cannot
                 # tell truncation from a clean stop. Clamped to what the model
@@ -3153,6 +3167,7 @@ async def _run_worker_step(
                 [],
                 config,
                 None,
+                detail_writer=writer,
                 # A step stopped at its hard bound was stopped precisely because
                 # continuing would reach the finalization reserve, so its summary
                 # is the case the reserve is for: without it the step reports
@@ -3195,6 +3210,7 @@ async def _run_worker_step(
                 [],
                 config,
                 None,
+                detail_writer=writer,
                 allow_reserve=True,
                 phase=f"worker_summary_retry:{step_id}",
                 max_output_tokens=chat_context.max_output_tokens(summary_model),
@@ -3459,7 +3475,7 @@ async def verifier_node(state: ChatState, config: RunnableConfig) -> dict[str, A
         if step["status"] != "ran":
             continue
         result = results_by_id.get(step["id"], {})
-        passed, reason = await _verify_step(step, result, config)
+        passed, reason = await _verify_step(step, result, config, writer)
         step["status"] = "passed" if passed else "failed"
         result["verified"] = passed
         result["verify_reason"] = reason
@@ -3554,7 +3570,9 @@ def _call_footprint(tool_details: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: RunnableConfig) -> tuple[bool, str]:
+async def _verify_step(
+    step: dict[str, Any], result: dict[str, Any], config: RunnableConfig, writer: Any = None
+) -> tuple[bool, str]:
     # A step whose mutating action the user explicitly approved and that executed
     # is done: do not LLM-re-judge the raw tool output (which reads as data, not a
     # success narrative) and do not retry — retrying re-runs the whole worker and
@@ -3645,6 +3663,8 @@ async def _verify_step(step: dict[str, Any], result: dict[str, Any], config: Run
                 [HumanMessage(content=prompt)],
                 config,
                 role="verifier",
+                step_id=str(step.get("id") or ""),
+                writer=writer,
             ),
         )
     except BudgetExceeded as exc:
@@ -3692,6 +3712,7 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
             [],
             config,
             None,
+            detail_writer=writer,
             allow_reserve=True,
             phase="synthesizer",
             # Not capped at a concision ceiling: on a reasoning model the
@@ -3722,6 +3743,7 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
                 [],
                 config,
                 None,
+                detail_writer=writer,
                 allow_reserve=True,
                 phase="synthesizer_retry",
                 max_output_tokens=chat_context.max_output_tokens(model),
@@ -3744,6 +3766,7 @@ async def synthesizer_node(state: ChatState, config: RunnableConfig) -> dict[str
             [],
             config,
             None,
+            detail_writer=writer,
             allow_reserve=True,
             phase="synthesizer",
             max_output_tokens=min(chat_context.max_output_tokens(model), 2048),

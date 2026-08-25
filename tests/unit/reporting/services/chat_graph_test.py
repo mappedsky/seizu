@@ -382,29 +382,100 @@ async def test_run_llm_tool_turn_streams_reasoning_as_detail_and_strips_context(
     )
 
     detail_events = [event for event in events if event["kind"] == "detail"]
+    detail_id = detail_events[0]["id"]
+    # The first frame carries the thinking so far, not an empty placeholder: a
+    # body that only arrives at the end shows nothing for the whole wait.
     assert detail_events == [
         {
             "kind": "detail",
-            "id": detail_events[0]["id"],
+            "id": detail_id,
             "data": {
                 "kind": "thinking",
                 "title": "Thinking",
                 "status": "running",
+                "detail_id": detail_id,
+                "body": "checking ",
             },
         },
         {
             "kind": "detail",
-            "id": detail_events[0]["id"],
+            "id": detail_id,
             "data": {
                 "kind": "thinking",
                 "title": "Thinking",
                 "status": "completed",
+                "detail_id": detail_id,
                 "body": "checking graph",
             },
         },
     ]
     assert result.streamed == "Final answer."
     assert "reasoning_content" not in result.message.additional_kwargs
+
+
+async def test_run_llm_tool_turn_files_reasoning_under_the_step_that_produced_it():
+    class _FakeModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "weighing the plan"})
+            yield AIMessageChunk(content="Done.")
+
+    events: list[dict] = []
+
+    await chat_graph._run_llm_tool_turn(
+        _FakeModel(),
+        "system",
+        [HumanMessage(content="Run overview")],
+        [],
+        {},
+        events.append,
+        phase="worker:s2",
+    )
+
+    data = [event["data"] for event in events if event["kind"] == "detail"]
+    # The step id is what nests the entry inside that step's section; the role
+    # names the stage for anything that is not a plain agent turn.
+    assert all(entry["step_id"] == "s2" for entry in data)
+    assert {entry["title"] for entry in data} == {"Thinking"}
+
+    events.clear()
+    await chat_graph._run_llm_tool_turn(
+        _FakeModel(),
+        "system",
+        [HumanMessage(content="Run overview")],
+        [],
+        {},
+        events.append,
+        phase="verifier:s2",
+    )
+    data = [event["data"] for event in events if event["kind"] == "detail"]
+    assert {entry["title"] for entry in data} == {"Thinking: verifying"}
+    assert all(entry["step_id"] == "s2" for entry in data)
+
+
+async def test_run_llm_tool_turn_streams_reasoning_without_streaming_text():
+    """A stage that must not ship prose still shows what it is thinking."""
+
+    class _FakeModel:
+        async def astream(self, input, config=None, **kwargs):
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "deciding"})
+            yield AIMessageChunk(content="Answer nobody should see yet.")
+
+    events: list[dict] = []
+
+    result = await chat_graph._run_llm_tool_turn(
+        _FakeModel(),
+        "system",
+        [HumanMessage(content="Run overview")],
+        [],
+        {},
+        None,
+        detail_writer=events.append,
+    )
+
+    assert [event["kind"] for event in events] == ["detail", "detail"]
+    assert events[-1]["data"]["body"] == "deciding"
+    # Nothing was shipped as text, so the caller still owns the response.
+    assert result.streamed == ""
 
 
 async def test_chat_graph_streams_final_no_tool_text_deltas_as_they_arrive(mocker):
@@ -4466,3 +4537,17 @@ def test_context_block_budget_tightens_as_the_run_spends(mocker):
     assert chat_graph._context_block_tokens(model, divisor, spent) < chat_graph._context_block_tokens(
         model, divisor, fresh
     )
+
+
+def test_streamed_thinking_keeps_the_most_recent_window():
+    """A body that stops growing at its bound reads as a stalled stage."""
+    text = ""
+    for index in range(40):
+        text = chat_graph._append_reasoning(text, f"thought {index:02d}. ", max_chars=60)
+    assert text.startswith(chat_graph._REASONING_ELISION)
+    assert text.endswith("thought 39. ")
+    # The marker is stripped before each append, so it never accumulates.
+    assert text.count(chat_graph._REASONING_ELISION) == 1
+    assert len(text) == 60 + len(chat_graph._REASONING_ELISION)
+    # Under the bound nothing is marked or dropped.
+    assert chat_graph._append_reasoning("a", "b", max_chars=60) == "ab"
