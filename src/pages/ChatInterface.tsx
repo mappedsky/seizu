@@ -20,9 +20,7 @@ import {
   Button,
   Card,
   Chip,
-  FormControlLabel,
   IconButton,
-  Switch,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -2075,33 +2073,14 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
-        {canBypassConfirmations ? (
-          <Box
-            sx={{ display: 'flex', flexShrink: 0, justifyContent: 'flex-end' }}
-          >
-            <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={bypassConfirmations}
-                    onChange={(e) => setBypassConfirmations(e.target.checked)}
-                    size="small"
-                  />
-                }
-                label={
-                  <Typography variant="caption" color="text.secondary">
-                    Bypass confirmations
-                  </Typography>
-                }
-              />
-            </Tooltip>
-          </Box>
-        ) : null}
         <ChatInput
           busy={busy}
+          bypassConfirmations={bypassConfirmations}
           disabled={disabled}
-          onSubmit={handleSubmit}
+          onBypassConfirmationsChange={setBypassConfirmations}
           onStop={handleStop}
+          onSubmit={handleSubmit}
+          showBypassConfirmations={canBypassConfirmations}
         />
       </Box>
       <ChatConfirmationsPanel

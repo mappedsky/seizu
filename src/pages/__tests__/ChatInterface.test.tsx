@@ -2329,6 +2329,13 @@ describe('ChatInterface', () => {
     expect(screen.getByText('Bypass confirmations')).toBeInTheDocument();
     const toggle = screen.getByRole('switch');
     expect(toggle).not.toBeChecked();
+    // In the composer, not floating between it and the conversation: it is a
+    // property of the message about to be sent.
+    const composer = screen
+      .getByPlaceholderText('Ask Seizu...')
+      .closest('form');
+    expect(composer).not.toBeNull();
+    expect(within(composer!).getByRole('switch')).toBe(toggle);
   });
   it('reattaches only once the real thread id is known, not to the placeholder', async () => {
     // useChat's resume effect depends on the flag, not on the chat id, so a
