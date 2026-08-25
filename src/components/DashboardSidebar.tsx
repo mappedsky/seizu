@@ -12,6 +12,7 @@ import EventRepeat from '@mui/icons-material/EventRepeat';
 import Extension from '@mui/icons-material/Extension';
 import Psychology from '@mui/icons-material/Psychology';
 import AdminPanelSettings from '@mui/icons-material/AdminPanelSettings';
+import Tune from '@mui/icons-material/Tune';
 import NavItem, { NavItemData } from 'src/components/NavItem';
 import Hidden from 'src/components/Hidden';
 import { useReportsList } from 'src/hooks/useReportsApi';
@@ -127,6 +128,15 @@ function DashboardSidebar({
             href: '/app/roles',
             icon: AdminPanelSettings,
             title: 'Roles',
+          },
+        ]
+      : []),
+    ...(hasPermission('model_profiles:read')
+      ? [
+          {
+            href: '/app/model-profiles',
+            icon: Tune,
+            title: 'Model Profiles',
           },
         ]
       : []),

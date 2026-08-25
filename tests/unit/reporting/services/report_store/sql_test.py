@@ -30,6 +30,22 @@ from reporting.services.report_store import sql as sql_module
 from reporting.services.report_store.base import PluginRevisionConflict
 from reporting.services.report_store.sql import SQLModelReportStore
 
+
+def _model_profile_data(**updates):
+    data = {
+        "name": "Accurate",
+        "description": "Measured profile",
+        "enabled": True,
+        "is_default": False,
+        "primary": {"model_id": "openai/gpt-5", "reasoning_effort": "high"},
+        "economy": {"model_id": "openai/gpt-5-mini", "reasoning_effort": "low"},
+        "stage_overrides": {},
+        "run_cost_budget_usd": 1.0,
+    }
+    data.update(updates)
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -3449,3 +3465,39 @@ async def test_republishing_a_plugin_keeps_operator_skill_enablement(store):
     assert (await store.get_plugin_skill("review_tools", "review")).enabled is False
     assert (await store.get_plugin_skill("review_tools", "audit")).enabled is True
     assert await store.set_plugin_skill_enabled("review_tools", "missing", True) is None
+
+
+async def test_model_profiles_are_versioned_and_keep_one_default(store):
+    first = await store.create_model_profile(_model_profile_data(), "admin")
+    assert first.is_default is True
+
+    second = await store.create_model_profile(
+        _model_profile_data(name="Fast", is_default=True),
+        "admin",
+    )
+    assert second.is_default is True
+    assert (await store.get_model_profile(first.profile_id)).is_default is False
+
+    updated = await store.update_model_profile(
+        second.profile_id,
+        _model_profile_data(name="Fast", is_default=True, run_cost_budget_usd=0.5),
+        "admin",
+        "Lower cap",
+    )
+    assert updated is not None
+    assert updated.current_version == 2
+    versions = await store.list_model_profile_versions(second.profile_id)
+    assert [version.version for version in versions] == [2, 1]
+    assert versions[0].comment == "Lower cap"
+    assert versions[0].run_cost_budget_usd == 0.5
+
+
+async def test_model_profile_default_cannot_be_disabled_without_replacement(store):
+    profile = await store.create_model_profile(_model_profile_data(), "admin")
+
+    with pytest.raises(ValueError, match="default model profile must be enabled"):
+        await store.update_model_profile(
+            profile.profile_id,
+            _model_profile_data(enabled=False, is_default=True),
+            "admin",
+        )

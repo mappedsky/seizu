@@ -44,6 +44,7 @@ from reporting.services import (
     external_mcp,
     mcp_builtins,
     mcp_runtime,
+    model_profiles,
     report_store,
     sandbox_session,
     telemetry,
@@ -1590,12 +1591,16 @@ async def _run_llm_tool_turn(
     context manager here closes the span on all of them. The figures it records
     are ones the result already carries (AGT-026).
     """
+    profile_spec = model_profiles.current_spec(phase.split(":")[0])
     with telemetry.span(
         f"llm {phase}",
         phase=phase,
         role=phase.split(":")[0],
         model=chat_context.model_name_of(model),
         tool_count=len(tools),
+        model_profile_id=profile_spec.profile_id if profile_spec else "",
+        model_profile_name=profile_spec.profile_name if profile_spec else "",
+        model_profile_version=profile_spec.profile_version if profile_spec else 0,
     ) as current:
         result = await _run_llm_tool_turn_inner(model, system_prompt, messages, tools, *args, phase=phase, **kwargs)
         telemetry.set_attributes(

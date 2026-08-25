@@ -285,3 +285,20 @@ through the `report_phase` callback rather than the caller guessing.
 the seconds that actually elapsed, because the proxy phases run under fixed
 bounds (600s/240s) far below `REMEDIATION_TIMEOUT_SECONDS` — reporting the
 run-wide deadline for one of them names a duration that never passed.
+
+## WF-010 — Headless profile choices resolve in activities before workflow dispatch
+
+**Applies to:** `load_scheduled_chat`, `build_code_workflow_input`,
+`ScheduledChatDefinition.resolved_model_profile`,
+`AgentChatInput.resolved_model_profile`
+
+The activities that load a scheduled chat or build an `agent_chat` input resolve
+its selected/default model profile and place the complete snapshot in the child
+workflow input. Workflow code only carries that dataclass value; the activity
+that runs the agent validates it and passes it to the shared headless runner.
+
+**Why:** database access in workflow code is non-deterministic (WF-001), while
+resolving only in the eventual run activity allows catalog edits between
+dispatch and execution to change the run. The loading/build activity is the
+last deterministic-history boundary at which mutable configuration can be
+captured once.

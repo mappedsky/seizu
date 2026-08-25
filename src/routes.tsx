@@ -33,6 +33,7 @@ import WorkflowHistory from 'src/pages/WorkflowHistory';
 import Plugins from 'src/pages/Plugins';
 import PluginEditor from 'src/pages/PluginEditor';
 import PluginHistory from 'src/pages/PluginHistory';
+import ModelProfiles from 'src/pages/ModelProfiles';
 
 function LegacyWorkflowRedirect({ history = false }: { history?: boolean }) {
   const { id } = useParams();
@@ -106,6 +107,7 @@ const routes = [
       },
       { path: 'roles', element: <Roles /> },
       { path: 'roles/:roleId/history', element: <RoleHistory /> },
+      { path: 'model-profiles', element: <ModelProfiles /> },
       // Unknown /app/* paths render the 404 page inside the standard
       // dashboard chrome (navbar + sidebar) so it matches the rest of the app.
       { path: '*', element: <NotFound /> },

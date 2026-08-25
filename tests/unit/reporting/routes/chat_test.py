@@ -24,6 +24,7 @@ from reporting.schema.chat import (
     ChatTurnItem,
     ChatTurnRequest,
 )
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.report_config import User
 from reporting.services import chat_turns
 from reporting.services.chat_budget import BudgetController
@@ -95,6 +96,19 @@ class FakeDetailChatGraph(FakeChatGraph):
 @pytest.fixture(autouse=True)
 def _chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
+
+
+@pytest.fixture(autouse=True)
+def _environment_model_profile(mocker):
+    mocker.patch(
+        "reporting.routes.chat.model_profiles.resolve",
+        AsyncMock(
+            return_value=ResolvedModelProfile(
+                source="environment",
+                cost_budget_usd=settings.CHAT_RUN_COST_BUDGET_USD,
+            )
+        ),
+    )
 
 
 #: Sessions the current test has, shared so admission can refuse a thread that
@@ -387,12 +401,18 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
         return sessions.get((user_id, thread_id))
 
-    async def create_chat_session(user_id: str, title: str) -> ChatSessionItem:
+    async def create_chat_session(user_id: str, title: str, model_profile_id: str | None = None) -> ChatSessionItem:
         nonlocal id_counter
         id_counter += 1
         thread_id = str(id_counter)
         now = _now()
-        session = ChatSessionItem(thread_id=thread_id, title=title, created_at=now, updated_at=now)
+        session = ChatSessionItem(
+            thread_id=thread_id,
+            title=title,
+            created_at=now,
+            updated_at=now,
+            model_profile_id=model_profile_id,
+        )
         sessions[(user_id, thread_id)] = session
         return session
 

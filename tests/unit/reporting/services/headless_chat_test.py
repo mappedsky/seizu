@@ -3,6 +3,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.chat import ChatSessionItem
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.report_config import User
 from reporting.services import headless_chat
 
@@ -38,6 +39,10 @@ class _FakeGraph:
 
 
 def _patch_store(mocker):
+    mocker.patch(
+        "reporting.services.headless_chat.model_profiles.resolve",
+        mocker.AsyncMock(return_value=ResolvedModelProfile(source="environment")),
+    )
     mocker.patch(
         "reporting.services.report_store.create_chat_session",
         mocker.AsyncMock(
@@ -135,7 +140,13 @@ async def test_scheduled_run_creates_scheduled_origin_session(mocker):
         scheduled_chat_id="sc-1",
     )
 
-    create.assert_awaited_once_with("user-1", "Run", origin="scheduled", scheduled_chat_id="sc-1")
+    create.assert_awaited_once_with(
+        "user-1",
+        "Run",
+        origin="scheduled",
+        scheduled_chat_id="sc-1",
+        model_profile_id=None,
+    )
     assert graph.calls  # the session still runs normally
 
 

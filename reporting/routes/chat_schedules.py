@@ -22,12 +22,21 @@ from reporting.schema.chat import (
     ScheduledChatVersion,
     ScheduledChatVersionListResponse,
 )
-from reporting.services import chat_schedules, report_store
+from reporting.services import chat_schedules, model_profiles, report_store
 from reporting.services.chat_graph import load_thread_messages
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _validate_profile(profile_id: str | None) -> None:
+    if profile_id is None:
+        return
+    try:
+        await model_profiles.resolve(profile_id)
+    except model_profiles.ModelProfileUnavailable as exc:
+        raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
 
 
 def _can_read_all(current: CurrentUser) -> bool:
@@ -83,6 +92,7 @@ async def create_scheduled_chat(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_SCHEDULE)),
 ) -> ScheduledChatItem:
     """Create a scheduled chat owned by the requesting user."""
+    await _validate_profile(body.model_profile_id)
     try:
         item = await chat_schedules.create_managed(body, current.user.user_id)
     except Exception as exc:
@@ -157,6 +167,7 @@ async def update_scheduled_chat(
 ) -> ScheduledChatItem:
     """Update one of the requesting user's scheduled chats."""
     await _owned_schedule(sc_id, current)
+    await _validate_profile(body.model_profile_id)
     try:
         item = await chat_schedules.update_managed(sc_id, body, current.user.user_id)
     except chat_schedules.ScheduledChatNotFoundError as exc:

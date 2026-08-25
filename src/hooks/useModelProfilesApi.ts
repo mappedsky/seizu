@@ -1,0 +1,189 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
+
+export type ReasoningEffort =
+  | ''
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high';
+
+export interface ModelChoice {
+  model_id: string;
+  reasoning_effort: ReasoningEffort;
+}
+
+export interface ModelChoiceOverride {
+  model_id?: string | null;
+  reasoning_effort?: ReasoningEffort | null;
+}
+
+export interface StageModelOverride {
+  primary?: ModelChoiceOverride | null;
+  economy?: ModelChoiceOverride | null;
+}
+
+export interface ModelProfilePayload {
+  name: string;
+  description: string;
+  enabled: boolean;
+  is_default: boolean;
+  primary: ModelChoice;
+  economy: ModelChoice;
+  stage_overrides: Record<string, StageModelOverride>;
+  run_cost_budget_usd: number;
+}
+
+export interface ModelProfile extends ModelProfilePayload {
+  profile_id: string;
+  current_version: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  updated_by?: string | null;
+}
+
+export interface ModelProfileVersion extends ModelProfilePayload {
+  profile_id: string;
+  version: number;
+  created_at: string;
+  created_by: string;
+  comment?: string | null;
+}
+
+export interface SelectableModelProfile {
+  profile_id: string;
+  name: string;
+  description: string;
+  is_default: boolean;
+  run_cost_budget_usd: number;
+  effective_cost_budget_usd: number;
+}
+
+async function responseError(response: Response): Promise<Error> {
+  const data = (await response.json().catch(() => null)) as {
+    error?: string;
+  } | null;
+  return new Error(data?.error || 'Model profile request failed');
+}
+
+export function useSelectableModelProfiles(enabled = true) {
+  const { authHeaders } = useAuthHeaders();
+  const [profiles, setProfiles] = useState<SelectableModelProfile[]>([]);
+  const [defaultProfileId, setDefaultProfileId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!enabled) return;
+    setLoading(true);
+    try {
+      const response = await fetch('/api/v1/chat/model-profiles', {
+        headers: authHeaders(),
+      });
+      if (!response.ok) throw await responseError(response);
+      const data = (await response.json()) as {
+        profiles: SelectableModelProfile[];
+        default_profile_id: string | null;
+      };
+      setProfiles(data.profiles);
+      setDefaultProfileId(data.default_profile_id);
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : 'Failed to load model profiles',
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [authHeaders, enabled]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { profiles, defaultProfileId, loading, error, refresh };
+}
+
+export function useModelProfilesList(enabled = true) {
+  const { authHeaders } = useAuthHeaders();
+  const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = useCallback(async () => {
+    if (!enabled) return;
+    setLoading(true);
+    try {
+      const response = await fetch('/api/v1/model-profiles', {
+        headers: authHeaders(),
+      });
+      if (!response.ok) throw await responseError(response);
+      setProfiles(
+        ((await response.json()) as { profiles: ModelProfile[] }).profiles,
+      );
+      setError(null);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : 'Failed to load model profiles',
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [authHeaders, enabled]);
+  useEffect(() => void refresh(), [refresh]);
+  return { profiles, loading, error, refresh };
+}
+
+export function useModelProfileMutations() {
+  const { authHeaders } = useAuthHeaders();
+  const request = useCallback(
+    async (path: string, method: string, body?: unknown) => {
+      const response = await fetch(path, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Seizu-Csrf': '1',
+          ...authHeaders(),
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      if (!response.ok) throw await responseError(response);
+      return response.json();
+    },
+    [authHeaders],
+  );
+  return {
+    create: (body: ModelProfilePayload) =>
+      request('/api/v1/model-profiles', 'POST', body) as Promise<ModelProfile>,
+    update: (
+      profileId: string,
+      body: ModelProfilePayload & { comment?: string },
+    ) =>
+      request(
+        `/api/v1/model-profiles/${encodeURIComponent(profileId)}`,
+        'PUT',
+        body,
+      ) as Promise<ModelProfile>,
+    remove: (profileId: string) =>
+      request(
+        `/api/v1/model-profiles/${encodeURIComponent(profileId)}`,
+        'DELETE',
+      ),
+    versions: async (profileId: string) => {
+      const response = await fetch(
+        `/api/v1/model-profiles/${encodeURIComponent(profileId)}/versions`,
+        {
+          headers: authHeaders(),
+        },
+      );
+      if (!response.ok) throw await responseError(response);
+      return ((await response.json()) as { versions: ModelProfileVersion[] })
+        .versions;
+    },
+  };
+}

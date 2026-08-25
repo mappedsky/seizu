@@ -41,7 +41,8 @@ from reporting.schema.chat import (
     ChatTurnItem,
     ChatTurnRequest,
 )
-from reporting.services import report_store, schedule_reconciler
+from reporting.schema.model_profiles import ResolvedModelProfile
+from reporting.services import model_profiles, report_store, schedule_reconciler
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import ChatState, build_turn_config, get_chat_graph
 from reporting.services.chat_messages import CONTINUATION_MARKDOC, MessageTag, tag_message
@@ -276,7 +277,12 @@ def build_graph_input(body: ChatTurnCommand, budget_controller: BudgetController
     }
 
 
-async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser) -> ChatTurnAdmission:
+async def start_turn(
+    thread_id: str,
+    body: ChatTurnRequest,
+    current: CurrentUser,
+    resolved_model_profile: ResolvedModelProfile | None = None,
+) -> ChatTurnAdmission:
     """Admit a turn, and hand it to the worker that will produce it.
 
     The store decides and reports which of ``created``, ``existing``, ``busy``
@@ -290,6 +296,7 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
     message_id = (
         body.continue_message_id if body.continue_response and body.continue_message_id else f"msg_{uuid.uuid4().hex}"
     )
+    profile = resolved_model_profile or model_profiles.environment_snapshot()
     command = ChatTurnCommand(
         message=body.message,
         resume_confirmation_id=body.resume_confirmation_id,
@@ -298,6 +305,7 @@ async def start_turn(thread_id: str, body: ChatTurnRequest, current: CurrentUser
         bypass_confirmations=body.bypass_confirmations,
         permission_cap=sorted(current.permissions),
         timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+        resolved_model_profile=profile,
     )
     admission = await report_store.admit_chat_turn(
         current.user.user_id,
@@ -439,7 +447,13 @@ async def produce_turn(
             opening.append({"type": "text-delta", "id": turn.text_id, "delta": CONTINUATION_MARKDOC})
         await publisher.publish(opening)
 
-        budget_controller = BudgetController(initial_budget_ledger())
+        resolved_profile = body.resolved_model_profile or await model_profiles.resolve(None)
+        budget_controller = BudgetController(
+            initial_budget_ledger(
+                cost_limit_usd=resolved_profile.cost_budget_usd,
+                model_specs=[*resolved_profile.primary_specs.values(), *resolved_profile.economy_specs.values()],
+            )
+        )
         config = build_turn_config(
             current,
             turn.thread_id,
@@ -462,7 +476,11 @@ async def produce_turn(
                     continue
                 await publisher.publish(render_parts(chunk, turn.text_id))
 
-        child = asyncio.create_task(_drive())
+        async def _drive_captured() -> None:
+            with model_profiles.use(resolved_profile):
+                await _drive()
+
+        child = asyncio.create_task(_drive_captured())
         stopped = asyncio.create_task(publisher.stopped.wait())
         try:
             done, _ = await asyncio.wait({child, stopped}, return_when=asyncio.FIRST_COMPLETED)

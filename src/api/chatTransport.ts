@@ -275,6 +275,14 @@ export class SeizuChatTransport<
         );
       }
       if (admission.status === 409) {
+        const detail = (await admission.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        if (detail?.error?.startsWith('MODEL_PROFILE_UNAVAILABLE:')) {
+          throw new Error(
+            detail.error.replace('MODEL_PROFILE_UNAVAILABLE:', '').trim(),
+          );
+        }
         throw new Error('This conversation already has a turn in progress');
       }
       if (admission.status === 404) {

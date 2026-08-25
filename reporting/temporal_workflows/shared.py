@@ -315,6 +315,7 @@ class ScheduledChatDefinition:
     prompt: str = ""
     timeout_seconds: int = 600
     version: int = 0
+    resolved_model_profile: dict[str, Any] | None = None
     skipped_reason: str | None = None
 
 
@@ -355,6 +356,8 @@ class AgentChatInput:
     session_title: str = "Workflow chat"
     timeout_seconds: int = 600
     skill: str | None = None
+    model_profile_id: str | None = None
+    resolved_model_profile: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -475,6 +478,9 @@ class ChatWorkerStepInvocation:
     #: is transcription rather than decision-making and may carry a different
     #: reasoning budget; carried for the same reason as ``model_spec``.
     summary_model_spec: dict[str, Any] = field(default_factory=dict)
+    # Full snapshot for descendant calls such as sandbox delegation. Workers
+    # never resolve the mutable profile row themselves.
+    resolved_model_profile: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

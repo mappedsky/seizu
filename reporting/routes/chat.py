@@ -20,7 +20,7 @@ from reporting.schema.chat import (
     CreateChatSessionRequest,
     UpdateChatSessionRequest,
 )
-from reporting.services import chat_turns, report_store, session_reaper
+from reporting.services import chat_turns, model_profiles, report_store, session_reaper
 from reporting.services.chat_graph import load_thread_messages
 from reporting.services.chat_messages import created_at, message_text
 
@@ -84,8 +84,15 @@ async def admit_chat_turn(
         # the conversation cannot be continued from the web UI.
         raise HTTPException(status_code=403, detail="Headless chat sessions are read-only")
 
+    selected_profile_id = (
+        body.model_profile_id if "model_profile_id" in body.model_fields_set else session.model_profile_id
+    )
     try:
-        admission = await chat_turns.start_turn(thread_id, body, current)
+        resolved_profile = await model_profiles.resolve(selected_profile_id)
+    except model_profiles.ModelProfileUnavailable as exc:
+        raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
+    try:
+        admission = await chat_turns.start_turn(thread_id, body, current, resolved_profile)
     except Exception as exc:
         # Admission is a store write, and a failure means we do not know whether
         # the conversation is being torn down underneath us. Refusing costs a
@@ -110,6 +117,32 @@ async def admit_chat_turn(
         raise HTTPException(status_code=503, detail="Could not start this turn; please try again")
     if admission.outcome == "existing":
         response.status_code = 200
+    admitted_profile = admission.turn.command.resolved_model_profile or resolved_profile
+    logger.info(
+        "Chat turn admitted",
+        extra={
+            "type": "AUDIT",
+            "thread_id": thread_id,
+            "turn_id": admission.turn.turn_id,
+            "user": current.user.user_id,
+            "model_profile_id": admitted_profile.profile_id,
+            "model_profile_name": admitted_profile.profile_name,
+            "model_profile_version": admitted_profile.profile_version,
+        },
+    )
+    if admission.outcome == "created" and admitted_profile.profile_id != session.model_profile_id:
+        try:
+            await report_store.update_chat_session_model_profile(
+                current.user.user_id, thread_id, admitted_profile.profile_id
+            )
+        except Exception:
+            # The immutable turn already carries the right snapshot. A failure
+            # to remember it must not turn a successful admission into an
+            # ambiguous client retry.
+            logger.exception(
+                "Could not remember admitted model profile",
+                extra={"thread_id": thread_id, "turn_id": admission.turn.turn_id},
+            )
     return ChatTurnAdmissionResponse(turn_id=admission.turn.turn_id, status=admission.outcome)
 
 
@@ -346,7 +379,14 @@ async def create_chat_session(
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatSessionItem:
     """Create a new chat session and return it."""
-    return await report_store.create_chat_session(current.user.user_id, body.title)
+    if body.model_profile_id:
+        try:
+            await model_profiles.resolve(body.model_profile_id)
+        except model_profiles.ModelProfileUnavailable as exc:
+            raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
+    return await report_store.create_chat_session(
+        current.user.user_id, body.title, model_profile_id=body.model_profile_id
+    )
 
 
 @router.get("/api/v1/chat/sessions/{thread_id}", response_model=ChatSessionItem)
@@ -367,8 +407,18 @@ async def update_chat_session(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatSessionItem:
-    """Rename a chat session."""
-    result = await report_store.update_chat_session_title(current.user.user_id, thread_id, body.title)
+    """Update a chat session's title or remembered model profile."""
+    if "model_profile_id" in body.model_fields_set:
+        if body.model_profile_id:
+            try:
+                await model_profiles.resolve(body.model_profile_id)
+            except model_profiles.ModelProfileUnavailable as exc:
+                raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
+        result = await report_store.update_chat_session_model_profile(
+            current.user.user_id, thread_id, body.model_profile_id
+        )
+    else:
+        result = await report_store.update_chat_session_title(current.user.user_id, thread_id, body.title or "")
     if result is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return result

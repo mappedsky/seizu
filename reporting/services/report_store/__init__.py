@@ -24,6 +24,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.model_profiles import ModelProfileItem, ModelProfileVersion
 from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
@@ -74,6 +75,39 @@ def is_initialized() -> bool:
 def generate_id() -> str:
     """Return a new Snowflake ID from the configured store backend."""
     return get_store().generate_id()
+
+
+async def list_model_profiles(*, enabled_only: bool = False) -> list[ModelProfileItem]:
+    return await get_store().list_model_profiles(enabled_only=enabled_only)
+
+
+async def get_model_profile(profile_id: str) -> ModelProfileItem | None:
+    return await get_store().get_model_profile(profile_id)
+
+
+async def create_model_profile(data: dict[str, Any], created_by: str) -> ModelProfileItem:
+    return await get_store().create_model_profile(data, created_by)
+
+
+async def update_model_profile(
+    profile_id: str,
+    data: dict[str, Any],
+    updated_by: str,
+    comment: str | None = None,
+) -> ModelProfileItem | None:
+    return await get_store().update_model_profile(profile_id, data, updated_by, comment)
+
+
+async def delete_model_profile(profile_id: str) -> bool:
+    return await get_store().delete_model_profile(profile_id)
+
+
+async def list_model_profile_versions(profile_id: str) -> list[ModelProfileVersion]:
+    return await get_store().list_model_profile_versions(profile_id)
+
+
+async def get_model_profile_version(profile_id: str, version: int) -> ModelProfileVersion | None:
+    return await get_store().get_model_profile_version(profile_id, version)
 
 
 async def list_reports(user_id: str | None = None) -> list[ReportListItem]:
@@ -1128,12 +1162,14 @@ async def create_chat_session(
     title: str,
     origin: str = "interactive",
     scheduled_chat_id: str | None = None,
+    model_profile_id: str | None = None,
 ) -> ChatSessionItem:
     return await get_store().create_chat_session(
         user_id,
         title,
         origin=origin,
         scheduled_chat_id=scheduled_chat_id,
+        model_profile_id=model_profile_id,
     )
 
 
@@ -1156,6 +1192,12 @@ async def complete_chat_session_run(
 
 async def update_chat_session_title(user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
     return await get_store().update_chat_session_title(user_id, thread_id, title)
+
+
+async def update_chat_session_model_profile(
+    user_id: str, thread_id: str, model_profile_id: str | None
+) -> ChatSessionItem | None:
+    return await get_store().update_chat_session_model_profile(user_id, thread_id, model_profile_id)
 
 
 async def delete_chat_session(user_id: str, thread_id: str) -> bool:
@@ -1242,10 +1284,12 @@ async def create_scheduled_chat(
     watch_scans: list[dict[str, Any]],
     enabled: bool,
     created_by: str,
+    model_profile_id: str | None = None,
 ) -> ScheduledChatItem:
     return await get_store().create_scheduled_chat(
         name=name,
         prompt=prompt,
+        model_profile_id=model_profile_id,
         schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,
@@ -1262,11 +1306,13 @@ async def update_scheduled_chat(
     enabled: bool,
     updated_by: str,
     comment: str | None = None,
+    model_profile_id: str | None = None,
 ) -> ScheduledChatItem | None:
     return await get_store().update_scheduled_chat(
         sc_id=sc_id,
         name=name,
         prompt=prompt,
+        model_profile_id=model_profile_id,
         schedule=schedule,
         watch_scans=watch_scans,
         enabled=enabled,

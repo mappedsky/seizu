@@ -41,7 +41,7 @@ Decisions: AGT-019 in ``docs/root/dev/decisions/chat-agent.md``.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from reporting import settings
@@ -96,6 +96,12 @@ class ModelSpec:
     #: Which stage of the loop asked for it. Diagnostics only -- two roles that
     #: resolve to the same model and limits share a cache entry, as they should.
     role: str = "default"
+    # Provenance is carried into audit/telemetry and Temporal payloads, but it
+    # does not change the model client. Excluding it from comparison lets two
+    # profiles with identical resolved settings share the same cached client.
+    profile_id: str = field(default="", compare=False)
+    profile_name: str = field(default="", compare=False)
+    profile_version: int = field(default=0, compare=False)
 
     def to_payload(self) -> dict[str, object]:
         """A plain-dict form for a Temporal payload or a stored command."""
@@ -104,6 +110,9 @@ class ModelSpec:
             "max_output_tokens": self.max_output_tokens,
             "reasoning_effort": self.reasoning_effort,
             "role": self.role,
+            "profile_id": self.profile_id,
+            "profile_name": self.profile_name,
+            "profile_version": self.profile_version,
         }
 
     @classmethod
@@ -123,6 +132,9 @@ class ModelSpec:
             max_output_tokens=max(0, int(data.get("max_output_tokens") or 0)),
             reasoning_effort=str(data.get("reasoning_effort") or ""),
             role=str(data.get("role") or "default"),
+            profile_id=str(data.get("profile_id") or ""),
+            profile_name=str(data.get("profile_name") or ""),
+            profile_version=max(0, int(data.get("profile_version") or 0)),
         )
 
 
@@ -383,6 +395,14 @@ def resolve(
     the deployment's settings, and they are where a user-selected model and
     effort will arrive. Nothing else needs to change to accept them.
     """
+    if not model_id and reasoning_effort is None:
+        # Set only while driving one admitted/run snapshot. Deferred import
+        # keeps the base resolver independent of the profile/store layer.
+        from reporting.services import model_profiles
+
+        captured = model_profiles.current_spec(role, economy=economy)
+        if captured is not None:
+            return captured
     resolved_id = (model_id or model_id_for_role(role, economy=economy)).strip()
     effort = (reasoning_effort if reasoning_effort is not None else _role_reasoning_effort(role)).strip()
     if effort and not capability(resolved_id).supports_reasoning:

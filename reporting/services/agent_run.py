@@ -19,7 +19,8 @@ from typing import Any, Literal
 from reporting.authnz import CurrentUser
 from reporting.authnz.headless import resolve_stored_user
 from reporting.authnz.permissions import Permission
-from reporting.services import headless_chat, mcp_runtime
+from reporting.schema.model_profiles import ResolvedModelProfile
+from reporting.services import headless_chat, mcp_runtime, model_profiles
 
 # Re-exported: the boundary moved to its own module so consumers across the
 # import graph can share it, but callers here still reach it through agent_run.
@@ -71,6 +72,8 @@ class AgentRunRequest:
     untrusted_tag: str = "untrusted_graph_data"
     skill: str | None = None
     skill_arguments: dict[str, str] = field(default_factory=dict)
+    model_profile_id: str | None = None
+    resolved_model_profile: ResolvedModelProfile | None = None
 
 
 def normalize_status(status: str) -> str:
@@ -128,6 +131,12 @@ async def run_agent_session(
     """
     current_user = await resolve_stored_user(request.creator_user_id)
     prompt, disclosed_tools = await _build_prompt(request, current_user)
+    if request.resolved_model_profile is not None:
+        resolved_profile = request.resolved_model_profile
+    elif request.model_profile_id is not None:
+        resolved_profile = await model_profiles.resolve(request.model_profile_id)
+    else:
+        resolved_profile = model_profiles.environment_snapshot()
 
     logger.info(
         "Starting headless agent run",
@@ -147,6 +156,7 @@ async def run_agent_session(
         on_chunk=on_progress,
         origin=request.origin,
         scheduled_chat_id=request.scheduled_chat_id,
+        resolved_model_profile=resolved_profile,
     )
     status = normalize_status(result.status)
     return AgentRunResult(

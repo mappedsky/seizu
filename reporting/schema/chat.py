@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.reporting_config import ScheduleSpec
 
 CHAT_THREAD_ID_PATTERN = r"^[0-9]+$"
@@ -23,6 +24,9 @@ class ChatTurnRequest(BaseModel):
     # chat:bypass_permissions permission (403 otherwise); every bypassed tool
     # execution is audit-logged.
     bypass_confirmations: bool = False
+    # An enabled admin-curated profile. None follows the current default (or
+    # the deployment environment while no database profiles exist).
+    model_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def require_message_or_resume(self) -> "ChatTurnRequest":
@@ -46,6 +50,7 @@ class ChatTurnCommand(BaseModel):
     bypass_confirmations: bool = False
     permission_cap: list[str] = Field(default_factory=list)
     timeout_seconds: int = Field(gt=0)
+    resolved_model_profile: ResolvedModelProfile | None = None
 
 
 class ChatTurnAdmissionResponse(BaseModel):
@@ -79,6 +84,7 @@ class ChatSessionItem(BaseModel):
     scheduled_chat_id: str | None = None
     run_status: str | None = None
     run_errors: list[str] = Field(default_factory=list)
+    model_profile_id: str | None = None
 
 
 class IdleChatSession(BaseModel):
@@ -102,10 +108,18 @@ class CreateChatSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(default="", max_length=200)
+    model_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class UpdateChatSessionRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    model_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def require_update(self) -> "UpdateChatSessionRequest":
+        if self.title is None and "model_profile_id" not in self.model_fields_set:
+            raise ValueError("title or model_profile_id is required")
+        return self
 
 
 # Bound each stored event batch so readers and writers never materialize an
@@ -225,6 +239,7 @@ class ScheduledChatItem(BaseModel):
     scheduled_chat_id: str
     name: str
     prompt: str
+    model_profile_id: str | None = None
     # When to run (hourly/daily/monthly), or None when watch_scans is used.
     schedule: ChatScheduleSpec | None = None
     # SyncMetadata filters (same shape as scheduled query watch_scans): run
@@ -257,6 +272,7 @@ class ScheduledChatVersion(BaseModel):
     version: int
     name: str
     prompt: str
+    model_profile_id: str | None = None
     schedule: ChatScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True
@@ -270,6 +286,7 @@ class CreateScheduledChatRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=32000)
+    model_profile_id: str | None = None
     schedule: ChatScheduleSpec | None = None
     watch_scans: list[dict[str, Any]] = Field(default_factory=list)
     enabled: bool = True

@@ -50,6 +50,7 @@ from reporting.services import (
     chat_context,
     chat_models,
     episodic_memory,
+    model_profiles,
     report_store,
     sandbox_session,
     telemetry,
@@ -1111,6 +1112,7 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
         # cost were absent from the trace while sitting in the ledger (AGT-026).
         scope = chat_budget.current_budget_scope()
         phase = f"{scope}:{_SANDBOX_BUDGET_PHASE}" if scope else _SANDBOX_BUDGET_PHASE
+        profile_spec = model_profiles.current_spec(_SANDBOX_BUDGET_PHASE)
         with telemetry.span(
             f"llm {phase}",
             phase=phase,
@@ -1120,6 +1122,9 @@ class _ToolMessageNormalizingModel(Runnable):  # type: ignore[type-arg]
             # the attribute anyone checks to see what the sub-agent is actually
             # graded at, and it read `None` while the stage ran at `low`.
             reasoning_effort=chat_models.applied_reasoning_effort(self._model),
+            model_profile_id=profile_spec.profile_id if profile_spec else "",
+            model_profile_name=profile_spec.profile_name if profile_spec else "",
+            model_profile_version=profile_spec.profile_version if profile_spec else 0,
         ) as current:
             return await self._ainvoke_traced(input, config, current, scope, phase, **kwargs)
 

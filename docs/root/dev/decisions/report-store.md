@@ -151,3 +151,25 @@ the plugin is published from somewhere else in the meantime.
 
 **Don't:** resolve a retained digest against any blob in the table — scope it to
 the plugin, or a caller could attach content from a package it is not editing.
+
+## STO-011 — Model profiles are versioned records with one enabled default
+
+**Applies to:** `model_profiles`, `model_profile_versions`, migration `0010`,
+`chat_sessions.model_profile_id`, `scheduled_chats.model_profile_id`
+
+Model profiles use a mutable current record plus immutable version rows. A
+partial unique index permits at most one default, and store mutations preserve
+the stronger application invariant: when any enabled profiles exist, exactly
+one is enabled and default. The first enabled profile is promoted automatically;
+changing or deleting the current default is refused until another is selected.
+
+Chat sessions and scheduled chats store nullable profile IDs. Null means follow
+the current default; it means environment configuration only while the catalog
+has no enabled profiles. Run commands carry the resolved snapshot instead of a
+foreign-key lookup.
+
+**Why:** references need to survive a profile being disabled or deleted so the
+next attempted run can ask for an explicit replacement, while an admitted run
+must remain reproducible without depending on mutable catalog state. A database
+constraint closes the concurrent two-default race; store checks supply the
+exactly-one half that a partial index cannot express.

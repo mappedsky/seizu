@@ -88,6 +88,11 @@ class Permission(StrEnum):
     ROLES_WRITE = "roles:write"
     ROLES_DELETE = "roles:delete"
 
+    # Admin-managed chat model profiles
+    MODEL_PROFILES_READ = "model_profiles:read"
+    MODEL_PROFILES_WRITE = "model_profiles:write"
+    MODEL_PROFILES_DELETE = "model_profiles:delete"
+
     # Sandbox delegation
     SANDBOX_DELEGATE = "sandbox:delegate"
 
@@ -157,6 +162,9 @@ ADMIN_PERMISSIONS: frozenset[Permission] = frozenset(
         Permission.CHAT_SCHEDULE_READ_ALL,
         Permission.ROLES_WRITE,
         Permission.ROLES_DELETE,
+        Permission.MODEL_PROFILES_READ,
+        Permission.MODEL_PROFILES_WRITE,
+        Permission.MODEL_PROFILES_DELETE,
     }
 )
 

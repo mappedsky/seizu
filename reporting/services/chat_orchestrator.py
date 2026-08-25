@@ -56,6 +56,7 @@ from reporting.services import (
     external_mcp,
     mcp_builtins,
     mcp_runtime,
+    model_profiles,
     reporting_neo4j,
     sandbox_session,
     telemetry,
@@ -2146,6 +2147,9 @@ async def _dispatch_batch_distributed(
                 llm_call_grant=grant.llm_calls,
                 model_spec=model_spec,
                 summary_model_spec=summary_model_spec,
+                resolved_model_profile=(
+                    profile.model_dump(mode="json") if (profile := model_profiles.current()) is not None else {}
+                ),
             )
         )
 

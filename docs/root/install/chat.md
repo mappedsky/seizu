@@ -38,6 +38,30 @@ Chat history requires PostgreSQL checkpoint storage; the
 
 Tool and skill calls also require the *underlying* MCP permission (for example `tools:call` or `skills:render`) — chat never grants access the user's role doesn't already have.
 
+## Model profiles
+
+Admins manage model profiles from **Model Profiles** in the app sidebar. A
+profile names the primary and economy models, their reasoning effort, optional
+overrides for individual chat stages, and a per-run USD cost cap. Each save
+creates a version. `model_profiles:read`, `model_profiles:write`, and
+`model_profiles:delete` are granted to the built-in Admin role.
+
+Every user with `chat:use` can select any enabled profile. The selection is
+stored on the conversation and applies to its later turns until changed. If the
+selected profile is disabled or deleted, Seizu asks the user to choose another;
+it does not substitute a different profile. The full resolved choice is captured
+when a turn is admitted, so editing a profile does not alter a running turn.
+
+The first enabled profile becomes the default. When profiles exist, exactly one
+enabled profile must be the default. Seizu does not install built-in profiles:
+until an admin creates one, chat continues to use the `CHAT_LLM_*` environment
+settings. Router and verifier always use their environment-configured models;
+profiles cover the answer-producing stages.
+
+A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
+positive, the lower value applies. Set the global value to the deployment-wide
+hard ceiling and use profiles for smaller per-choice limits.
+
 ## Tool access and action confirmations
 
 Chat exposes a deliberately narrower tool surface than the MCP server:

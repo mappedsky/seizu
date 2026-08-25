@@ -24,6 +24,7 @@ from reporting.routes import config as config_routes
 from reporting.routes import confirmations as confirmations_routes
 from reporting.routes import graph as graph_routes
 from reporting.routes import me as me_routes
+from reporting.routes import model_profiles as model_profiles_routes
 from reporting.routes import plugins as plugins_routes
 from reporting.routes import query as query_routes
 from reporting.routes import query_history as query_history_routes
@@ -344,6 +345,7 @@ def create_app() -> FastAPI:
         confirmations_routes,
         graph_routes,
         me_routes,
+        model_profiles_routes,
         plugins_routes,
         query_routes,
         query_history_routes,

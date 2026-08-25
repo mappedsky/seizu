@@ -23,12 +23,14 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.headless import HeadlessIdentityError, resolve_stored_user
 from reporting.authnz.permissions import Permission
 from reporting.schema.chat import ScheduledChatItem
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.reporting_config import ScheduledQueryAction, ScheduledQueryWatchScan
 from reporting.services import (
     agent_run,
     chat_step_worker,
     chat_turns,
     github_checks,
+    model_profiles,
     report_store,
     sandbox_remediation,
     session_reaper,
@@ -372,7 +374,7 @@ async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
             max_rows=max_rows,
             max_bytes=settings.WORKFLOW_RESULT_MAX_BYTES,
         )
-    return spec.build_input(
+    built = spec.build_input(
         WorkflowInputContext(
             scheduled_query_id=input.workflow_id,
             creator_user_id=input.creator_user_id,
@@ -381,6 +383,13 @@ async def build_code_workflow_input(input: CodeWorkflowInputRequest) -> Any:
             action_config=input.parameters,
         )
     )
+    if isinstance(built, AgentChatInput):
+        try:
+            profile = await model_profiles.resolve(built.model_profile_id)
+        except model_profiles.ModelProfileUnavailable as exc:
+            raise ApplicationError(str(exc), non_retryable=True) from exc
+        built.resolved_model_profile = profile.model_dump(mode="json")
+    return built
 
 
 @activity.defn
@@ -947,6 +956,11 @@ async def load_scheduled_chat(invocation: ScheduledChatInvocation) -> ScheduledC
         # clamp-to-last-day rule; drop the firings that don't apply this month.
         return _skipped("monthly candidate did not match")
 
+    try:
+        profile = await model_profiles.resolve(item.model_profile_id)
+    except model_profiles.ModelProfileUnavailable as exc:
+        raise ApplicationError(str(exc), non_retryable=True) from exc
+
     return ScheduledChatDefinition(
         scheduled_chat_id=invocation.scheduled_chat_id,
         creator_user_id=item.created_by,
@@ -954,6 +968,7 @@ async def load_scheduled_chat(invocation: ScheduledChatInvocation) -> ScheduledC
         prompt=item.prompt,
         timeout_seconds=settings.CHAT_SCHEDULE_TIMEOUT_SECONDS,
         version=item.current_version,
+        resolved_model_profile=profile.model_dump(mode="json"),
     )
 
 
@@ -983,6 +998,11 @@ async def run_scheduled_chat_session(definition: ScheduledChatDefinition) -> Sch
             timeout_seconds=definition.timeout_seconds,
             origin="scheduled",
             scheduled_chat_id=definition.scheduled_chat_id,
+            resolved_model_profile=(
+                ResolvedModelProfile.model_validate(definition.resolved_model_profile)
+                if definition.resolved_model_profile
+                else None
+            ),
         )
     )
     return ScheduledChatRunResult(
@@ -1020,6 +1040,12 @@ async def run_agent_chat_session(input: AgentChatInput) -> AgentChatResult:
             origin="workflow",
             rows=list(input.rows),
             skill=input.skill,
+            model_profile_id=input.model_profile_id,
+            resolved_model_profile=(
+                ResolvedModelProfile.model_validate(input.resolved_model_profile)
+                if input.resolved_model_profile
+                else None
+            ),
         )
     )
     return AgentChatResult(

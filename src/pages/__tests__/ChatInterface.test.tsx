@@ -2629,7 +2629,7 @@ describe('ChatInterface', () => {
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async (input) => {
-        attempts.push(String(input));
+        if (String(input).includes('/turns')) attempts.push(String(input));
         return new Response('{}', { status: 409 });
       });
 

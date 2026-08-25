@@ -20,7 +20,11 @@ import {
   Button,
   Card,
   Chip,
+  FormControl,
   IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -45,6 +49,10 @@ import { usePermissionState } from 'src/hooks/usePermissions';
 import { useChatHistory } from 'src/hooks/useChatHistory';
 import { useChatLocalStorage } from 'src/hooks/useChatLocalStorage';
 import { useChatSessions } from 'src/hooks/useChatSessions';
+import {
+  type SelectableModelProfile,
+  useSelectableModelProfiles,
+} from 'src/hooks/useModelProfilesApi';
 import {
   type ActionConfirmation,
   useConfirmationsApi,
@@ -149,6 +157,38 @@ type SeizuChatMessage = UIMessage<
 >;
 
 const CHAT_LANDING_PATH = '/app/chat';
+
+function ModelProfileSelect({
+  profiles,
+  value,
+  disabled,
+  onChange,
+}: {
+  profiles: SelectableModelProfile[];
+  value: string;
+  disabled: boolean;
+  onChange: (profileId: string) => void;
+}) {
+  if (profiles.length === 0) return null;
+  return (
+    <FormControl disabled={disabled} fullWidth size="small" sx={{ mb: 1 }}>
+      <InputLabel id="chat-model-profile-label">Model profile</InputLabel>
+      <Select
+        label="Model profile"
+        labelId="chat-model-profile-label"
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        {profiles.map((profile) => (
+          <MenuItem key={profile.profile_id} value={profile.profile_id}>
+            {profile.name}
+            {profile.is_default ? ' (default)' : ''}
+          </MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  );
+}
 
 function chatSessionPath(threadId: string): string {
   return `/app/chat/${encodeURIComponent(threadId)}`;
@@ -730,9 +770,25 @@ export default function ChatInterface() {
     createSession,
     getSession,
     updateSession,
+    updateSessionProfile = async () => {},
     deleteSession,
     touchSession,
   } = useChatSessions(sessionsFeedEnabled);
+  const {
+    profiles: modelProfiles,
+    defaultProfileId,
+    loading: modelProfilesLoading,
+    error: modelProfilesError,
+  } = useSelectableModelProfiles(sessionsFeedEnabled);
+  const [landingProfileId, setLandingProfileId] = useState('');
+  const [profileUpdateError, setProfileUpdateError] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!landingProfileId && defaultProfileId)
+      setLandingProfileId(defaultProfileId);
+  }, [defaultProfileId, landingProfileId]);
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -1286,7 +1342,10 @@ export default function ChatInterface() {
       setStartError(null);
       setCreatingSession(true);
       try {
-        const session = await createSession();
+        if (modelProfiles.length > 0 && !landingProfileId) {
+          throw new Error('Choose a model profile');
+        }
+        const session = await createSession('', landingProfileId || null);
         // Admitted before anything is navigated or re-keyed, so the question is
         // the server's before the UI has to be right about anything. If this
         // throws, the turn does not exist and the user still has their text.
@@ -1306,7 +1365,28 @@ export default function ChatInterface() {
         setCreatingSession(false);
       }
     },
-    [createSession, navigate, setMessages, setStoredActiveSessionId, transport],
+    [
+      createSession,
+      landingProfileId,
+      modelProfiles.length,
+      navigate,
+      setMessages,
+      setStoredActiveSessionId,
+      transport,
+    ],
+  );
+
+  const handleProfileChange = useCallback(
+    async (profileId: string) => {
+      if (!activeThreadId) return;
+      setProfileUpdateError(null);
+      try {
+        await updateSessionProfile(activeThreadId, profileId);
+      } catch {
+        setProfileUpdateError('Failed to change the model profile.');
+      }
+    },
+    [activeThreadId, updateSessionProfile],
   );
 
   const handleDeleteSession = useCallback(
@@ -1588,6 +1668,17 @@ export default function ChatInterface() {
                 {startError}
               </Alert>
             ) : null}
+            {modelProfilesError ? (
+              <Alert severity="error" sx={{ mb: 1 }}>
+                {modelProfilesError}
+              </Alert>
+            ) : null}
+            <ModelProfileSelect
+              disabled={creatingSession || modelProfilesLoading}
+              onChange={setLandingProfileId}
+              profiles={modelProfiles}
+              value={landingProfileId}
+            />
             <ChatInput
               // Disabled rather than busy while the session is being created:
               // busy turns the send button into a Stop, and there is nothing
@@ -2072,6 +2163,23 @@ export default function ChatInterface() {
             {confirmationError}
           </Alert>
         ) : null}
+
+        {profileUpdateError ? (
+          <Alert
+            severity="error"
+            onClose={() => setProfileUpdateError(null)}
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {profileUpdateError}
+          </Alert>
+        ) : null}
+
+        <ModelProfileSelect
+          disabled={busy || modelProfilesLoading}
+          onChange={(profileId) => void handleProfileChange(profileId)}
+          profiles={modelProfiles}
+          value={activeSession?.model_profile_id ?? defaultProfileId ?? ''}
+        />
 
         <ChatInput
           busy={busy}
