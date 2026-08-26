@@ -864,21 +864,7 @@ def _action_confirmation_from_record(record: ActionConfirmationRecord) -> Action
 
 def _stored_model_profile_config(value: dict[str, Any]) -> ModelProfileConfig:
     """Read current and pre-effort-selector profile JSON into the current shape."""
-    config = deepcopy(value)
-    for choice_name in ("primary", "economy"):
-        choice = config.get(choice_name)
-        if isinstance(choice, dict):
-            choice.pop("reasoning_effort", None)
-    overrides = config.get("stage_overrides")
-    if isinstance(overrides, dict):
-        for stage in overrides.values():
-            if not isinstance(stage, dict):
-                continue
-            for choice_name in ("primary", "economy"):
-                choice = stage.get(choice_name)
-                if isinstance(choice, dict):
-                    choice.pop("reasoning_effort", None)
-    return ModelProfileConfig.model_validate(config)
+    return ModelProfileConfig.model_validate(deepcopy(value))
 
 
 def _model_profile_from_record(record: ModelProfileRecord) -> ModelProfileItem:

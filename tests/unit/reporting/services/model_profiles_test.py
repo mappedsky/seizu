@@ -10,9 +10,18 @@ def _profile(**updates) -> ModelProfileItem:
         "description": "",
         "enabled": True,
         "is_default": True,
-        "primary": {"model_id": "openai/gpt-5"},
-        "economy": {"model_id": "openai/gpt-5-mini"},
-        "stage_overrides": {},
+        "primary": {"model_id": "openai/gpt-5", "reasoning_effort": "high"},
+        "economy": {"model_id": "openai/gpt-5-mini", "reasoning_effort": "low"},
+        "stage_overrides": {
+            "worker": {
+                "primary": {"model_id": "openai/gpt-5-worker"},
+                "allow_user_reasoning": True,
+            },
+            "worker_summary": {
+                "primary": {"reasoning_effort": "minimal"},
+                "allow_user_reasoning": False,
+            },
+        },
         "default_reasoning_effort": "medium",
         "run_cost_budget_usd": 1.5,
         "current_version": 3,
@@ -45,8 +54,10 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     assert result.profile_id == "profile-1"
     assert result.profile_version == 3
     assert result.cost_budget_usd == 1.5
-    assert result.primary_specs["worker"]["model_id"] == "openai/gpt-5"
-    assert result.primary_specs["worker_summary"]["reasoning_effort"] == "medium"
+    assert result.primary_specs["worker"]["model_id"] == "openai/gpt-5-worker"
+    assert result.primary_specs["worker"]["reasoning_effort"] == "medium"
+    assert result.primary_specs["worker_summary"]["reasoning_effort"] == "minimal"
+    assert result.economy_specs["worker_summary"]["reasoning_effort"] == "low"
     assert result.economy_specs["worker"]["model_id"] == "openai/gpt-5-mini"
     assert result.primary_specs["router"]["model_id"] == "environment/router"
     assert result.primary_specs["worker"]["profile_name"] == "Accurate"
@@ -55,6 +66,7 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     assert high.reasoning_effort == "high"
     assert high.primary_specs["planner"]["reasoning_effort"] == "high"
     assert high.economy_specs["synthesizer"]["reasoning_effort"] == "high"
+    assert high.primary_specs["worker_summary"]["reasoning_effort"] == "minimal"
 
 
 async def test_explicit_unavailable_profile_never_falls_back(mocker):

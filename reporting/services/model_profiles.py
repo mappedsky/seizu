@@ -57,7 +57,22 @@ def _choice_for(profile: ModelProfileItem, role: str, *, economy: bool) -> Model
     selected = (override.economy if economy else override.primary) if override else None
     if selected is None:
         return base
-    return ModelChoice(model_id=selected.model_id or base.model_id)
+    return ModelChoice(
+        model_id=selected.model_id or base.model_id,
+        reasoning_effort=base.reasoning_effort if selected.reasoning_effort is None else selected.reasoning_effort,
+    )
+
+
+def _reasoning_for(
+    profile: ModelProfileItem,
+    role: str,
+    choice: ModelChoice,
+    user_reasoning_effort: SelectableReasoningEffort,
+) -> str:
+    override = profile.stage_overrides.get(_CONTROLLED_ROLES[role])
+    if override is None or override.allow_user_reasoning:
+        return user_reasoning_effort
+    return choice.reasoning_effort
 
 
 def _profile_snapshot(
@@ -78,12 +93,12 @@ def _profile_snapshot(
             normal = chat_models.resolve(
                 role,
                 model_id=normal_choice.model_id,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=_reasoning_for(profile, role, normal_choice, reasoning_effort),
             )
             cheap = chat_models.resolve(
                 role,
                 model_id=economy_choice.model_id,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=_reasoning_for(profile, role, economy_choice, reasoning_effort),
             )
         else:
             normal = chat_models.resolve(role)

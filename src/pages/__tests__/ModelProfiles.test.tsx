@@ -82,11 +82,23 @@ describe('ModelProfiles', () => {
     const modelIds = screen.getAllByRole('textbox', { name: /Model ID/ });
     fireEvent.change(modelIds[0], { target: { value: 'primary-model' } });
     fireEvent.change(modelIds[1], { target: { value: 'economy-model' } });
+    fireEvent.click(
+      screen.getByRole('checkbox', {
+        name: "Use the user's selected reasoning level for worker summary",
+      }),
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
       expect(create).toHaveBeenCalledWith(
-        expect.objectContaining({ run_cost_budget_usd: 2.5 }),
+        expect.objectContaining({
+          run_cost_budget_usd: 2.5,
+          stage_overrides: expect.objectContaining({
+            worker_summary: expect.objectContaining({
+              allow_user_reasoning: false,
+            }),
+          }),
+        }),
       ),
     );
   });
@@ -100,9 +112,20 @@ describe('ModelProfiles', () => {
           description: 'A model profile',
           enabled: true,
           is_default: true,
-          primary: { model_id: 'primary-model' },
-          economy: { model_id: 'economy-model' },
-          stage_overrides: {},
+          primary: {
+            model_id: 'primary-model',
+            reasoning_effort: 'high',
+          },
+          economy: {
+            model_id: 'economy-model',
+            reasoning_effort: 'low',
+          },
+          stage_overrides: {
+            worker_summary: {
+              primary: { reasoning_effort: 'minimal' },
+              allow_user_reasoning: false,
+            },
+          },
           default_reasoning_effort: 'medium',
           run_cost_budget_usd: 2.5,
           current_version: 3,
@@ -120,6 +143,16 @@ describe('ModelProfiles', () => {
     render(<ModelProfiles />);
     expect(screen.getByText('Limited to $1 globally')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit Careful' }));
+    expect(
+      screen.getByRole('checkbox', {
+        name: "Use the user's selected reasoning level for worker summary",
+      }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('combobox', {
+        name: 'worker summary primary reasoning',
+      }),
+    ).toHaveTextContent('minimal');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
@@ -128,6 +161,11 @@ describe('ModelProfiles', () => {
       expect.objectContaining({
         name: 'Careful',
         run_cost_budget_usd: 2.5,
+        stage_overrides: expect.objectContaining({
+          worker_summary: expect.objectContaining({
+            allow_user_reasoning: false,
+          }),
+        }),
       }),
     );
     const payload = update.mock.calls[0][1];

@@ -1,8 +1,9 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SelectableReasoningEffort = Literal["low", "medium", "high"]
+ConfiguredReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high"]
 PROFILE_STAGES = frozenset(
     {
         "assistant",
@@ -19,12 +20,14 @@ class ModelChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=300)
+    reasoning_effort: ConfiguredReasoningEffort = ""
 
 
 class ModelChoiceOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_effort: ConfiguredReasoningEffort | None = None
 
 
 class StageModelOverride(BaseModel):
@@ -32,6 +35,18 @@ class StageModelOverride(BaseModel):
 
     primary: ModelChoiceOverride | None = None
     economy: ModelChoiceOverride | None = None
+    allow_user_reasoning: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_static_reasoning_overrides(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "allow_user_reasoning" in value:
+            return value
+        has_reasoning_override = any(
+            isinstance(value.get(choice_name), dict) and "reasoning_effort" in value[choice_name]
+            for choice_name in ("primary", "economy")
+        )
+        return {**value, "allow_user_reasoning": not has_reasoning_override}
 
 
 class ModelProfileConfig(BaseModel):

@@ -2705,8 +2705,10 @@ be restarted under a new profile.
 
 A profile controls the models for assistant, planner, worker, worker-summary,
 sandbox-subagent, and synthesizer phases, with separate primary and economy
-choices. The user's reasoning level applies to those phases. Router and verifier
-continue to resolve from deployment settings. The run cost ceiling is the lower positive value of the profile cap and
+choices. Each choice has an admin-configured reasoning default, and each stage
+explicitly decides whether the user's selected level replaces that configured
+value. Router and verifier continue to resolve from deployment settings. The
+run cost ceiling is the lower positive value of the profile cap and
 `CHAT_RUN_COST_BUDGET_USD`.
 
 **Why:** changing effort keeps the same model family, while changing profile
@@ -2714,8 +2716,11 @@ families moves the request to another model and guarantees that the next turn
 cannot reuse that model's prior cached prefix; its carried context is uncached
 input. A new conversation makes that cost boundary explicit. Capturing the expanded specs at admission keeps a profile
 edit or effort change from changing a running turn or one of its distributed
-workers. Router and verifier are structural classifiers, so a request for a
-stronger answer should not silently move them to a more expensive model.
+workers. A single user level cannot safely flatten the profile: stages such as
+worker-summary are transcription passes where extra thinking crowds out the
+answer, while planner and worker may benefit from it (AGT-019). Router and
+verifier are structural classifiers, so a request for a stronger answer should
+not silently move them to a more expensive model.
 
 No profiles are seeded. Until an admin creates the first enabled profile, chat
 uses the environment configuration unchanged; the first enabled profile becomes

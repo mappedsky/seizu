@@ -3523,7 +3523,18 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
 
     updated = await store.update_model_profile(
         second.profile_id,
-        _model_profile_data(name="Fast", is_default=True, run_cost_budget_usd=0.5),
+        _model_profile_data(
+            name="Fast",
+            is_default=True,
+            primary={"model_id": "openai/gpt-5", "reasoning_effort": "high"},
+            stage_overrides={
+                "worker_summary": {
+                    "primary": {"reasoning_effort": "minimal"},
+                    "allow_user_reasoning": False,
+                }
+            },
+            run_cost_budget_usd=0.5,
+        ),
         "admin",
         "Lower cap",
     )
@@ -3533,6 +3544,8 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
     assert [version.version for version in versions] == [2, 1]
     assert versions[0].comment == "Lower cap"
     assert versions[0].run_cost_budget_usd == 0.5
+    assert versions[0].primary.reasoning_effort == "high"
+    assert versions[0].stage_overrides["worker_summary"].allow_user_reasoning is False
 
 
 async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_history(store):
@@ -3564,11 +3577,30 @@ async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_his
     assert loaded is not None
     assert loaded.default_reasoning_effort == "medium"
     assert loaded.primary.model_id == "openai/gpt-5"
+    assert loaded.primary.reasoning_effort == "high"
     assert versions[0].primary.model_id == "openai/gpt-5"
+    assert versions[0].primary.reasoning_effort == "high"
     async with AsyncSession(sql_module._get_engine()) as session:
         unchanged = await session.get(sql_module.ModelProfileVersionRecord, version_id)
         assert unchanged is not None
         assert unchanged.config["primary"]["reasoning_effort"] == "high"
+
+
+async def test_model_profiles_treat_legacy_stage_reasoning_as_fixed(store):
+    created = await store.create_model_profile(_model_profile_data(), "admin")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        current = await session.get(sql_module.ModelProfileRecord, created.profile_id)
+        assert current is not None
+        legacy_config = dict(current.config)
+        legacy_config["stage_overrides"] = {"worker_summary": {"primary": {"reasoning_effort": "minimal"}}}
+        current.config = legacy_config
+        session.add(current)
+        await session.commit()
+
+    loaded = await store.get_model_profile(created.profile_id)
+
+    assert loaded is not None
+    assert loaded.stage_overrides["worker_summary"].allow_user_reasoning is False
 
 
 async def test_model_profile_default_cannot_be_disabled_without_replacement(store):
