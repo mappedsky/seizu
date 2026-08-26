@@ -653,7 +653,8 @@ CHAT_LLM_MAX_TOKENS = int_env("CHAT_LLM_MAX_TOKENS", 0)
 # min(this, the model's ceiling) and no per-model configuration is needed.
 CHAT_LLM_MAX_OUTPUT_TOKENS_CAP = int_env("CHAT_LLM_MAX_OUTPUT_TOKENS_CAP", 32_768)
 # How much of the output allowance a reasoning model may spend thinking:
-# "none", "minimal", "low", "medium", "high", or "" for the provider's default.
+# LiteLLM's fixed vocabulary: "default", "none", "minimal", "low", "medium",
+# "high", or "xhigh". Empty also uses the provider's default.
 # LiteLLM translates this into each provider's native shape (Anthropic/DeepSeek
 # `thinking`, Gemini `thinkingConfig`, OpenAI `reasoning_effort`), so this stays
 # the one portable knob; sending a provider-native parameter instead would

@@ -44,14 +44,23 @@ const stages = [
   'sandbox_subagent',
   'synthesizer',
 ] as const;
-const efforts = ['low', 'medium', 'high'] as const;
-const configuredEfforts: ConfiguredReasoningEffort[] = [
-  '',
+const efforts = [
+  'default',
   'none',
   'minimal',
   'low',
   'medium',
   'high',
+  'xhigh',
+] as const;
+const configuredEfforts: ConfiguredReasoningEffort[] = [
+  'default',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
 ];
 
 function formatUsd(value: number): string {
@@ -64,7 +73,7 @@ function emptyPayload(): ModelProfilePayload {
     description: '',
     enabled: true,
     is_default: false,
-    primary: { model_id: '', reasoning_effort: 'medium' },
+    primary: { model_id: '' },
     economy: { model_id: '', reasoning_effort: 'medium' },
     stage_overrides: {},
     default_reasoning_effort: 'medium',
@@ -118,49 +127,25 @@ function ProfileDialog({
     runCostBudgetValid &&
     globalRunCostBudgetUsd > 0 &&
     runCostBudgetUsd > globalRunCostBudgetUsd;
-  const updateChoice = (
-    kind: 'primary' | 'economy',
-    field: 'model_id' | 'reasoning_effort',
-    fieldValue: string,
-  ) =>
-    setValue((current) => ({
-      ...current,
-      [kind]: { ...current[kind], [field]: fieldValue },
-    }));
   const updateOverride = (
     stage: string,
-    kind: 'primary' | 'economy',
     field: 'model_id' | 'reasoning_effort',
     fieldValue: string,
   ) =>
     setValue((current) => {
-      const stageValue = current.stage_overrides[stage] ?? {
-        allow_user_reasoning: true,
-      };
-      const choice = stageValue[kind] ?? {};
-      const nextChoice = {
-        ...choice,
+      const stageValue = current.stage_overrides[stage] ?? {};
+      const nextStage = {
+        ...stageValue,
         [field]: fieldValue === '__inherit__' ? null : fieldValue || null,
       };
       return {
         ...current,
         stage_overrides: {
           ...current.stage_overrides,
-          [stage]: { ...stageValue, [kind]: nextChoice },
+          [stage]: nextStage,
         },
       };
     });
-  const updateUserReasoningPolicy = (stage: string, allowed: boolean) =>
-    setValue((current) => ({
-      ...current,
-      stage_overrides: {
-        ...current.stage_overrides,
-        [stage]: {
-          ...(current.stage_overrides[stage] ?? {}),
-          allow_user_reasoning: allowed,
-        },
-      },
-    }));
   const submit = async () => {
     setSaving(true);
     setError(null);
@@ -231,49 +216,73 @@ function ProfileDialog({
             }
             sx={{ gridColumn: { md: '1 / -1' } }}
           />
-          {(['primary', 'economy'] as const).map((kind) => (
-            <Box key={kind} sx={{ display: 'grid', gap: 1 }}>
-              <Typography variant="subtitle2">Base {kind} model</Typography>
-              <TextField
-                label="Model ID"
-                required
-                value={value[kind].model_id}
-                onChange={(e) => updateChoice(kind, 'model_id', e.target.value)}
-              />
-              <TextField
-                select
-                label="Configured reasoning"
-                value={value[kind].reasoning_effort}
-                onChange={(e) =>
-                  updateChoice(kind, 'reasoning_effort', e.target.value)
-                }
-              >
-                {configuredEfforts.map((effort) => (
-                  <MenuItem key={effort || 'provider'} value={effort}>
-                    {effort || 'Provider default'}
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Box>
-          ))}
-          <TextField
-            select
-            label="Default user reasoning level"
-            value={value.default_reasoning_effort}
-            onChange={(e) =>
-              setValue({
-                ...value,
-                default_reasoning_effort: e.target
-                  .value as ModelProfilePayload['default_reasoning_effort'],
-              })
-            }
-          >
-            {efforts.map((effort) => (
-              <MenuItem key={effort} value={effort}>
-                {effort}
-              </MenuItem>
-            ))}
-          </TextField>
+          <Box sx={{ display: 'grid', gap: 1 }}>
+            <Typography variant="subtitle2">Base primary model</Typography>
+            <TextField
+              label="Primary model ID"
+              required
+              value={value.primary.model_id}
+              onChange={(e) =>
+                setValue({
+                  ...value,
+                  primary: { model_id: e.target.value },
+                })
+              }
+            />
+            <TextField
+              select
+              label="Default user reasoning"
+              value={value.default_reasoning_effort}
+              onChange={(e) =>
+                setValue({
+                  ...value,
+                  default_reasoning_effort: e.target
+                    .value as ModelProfilePayload['default_reasoning_effort'],
+                })
+              }
+            >
+              {efforts.map((effort) => (
+                <MenuItem key={effort} value={effort}>
+                  {effort}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Box>
+          <Box sx={{ display: 'grid', gap: 1 }}>
+            <Typography variant="subtitle2">Economy fallback</Typography>
+            <TextField
+              label="Economy model ID"
+              required
+              value={value.economy.model_id}
+              onChange={(e) =>
+                setValue({
+                  ...value,
+                  economy: { ...value.economy, model_id: e.target.value },
+                })
+              }
+            />
+            <TextField
+              select
+              label="Economy reasoning"
+              value={value.economy.reasoning_effort}
+              onChange={(e) =>
+                setValue({
+                  ...value,
+                  economy: {
+                    ...value.economy,
+                    reasoning_effort: e.target
+                      .value as ConfiguredReasoningEffort,
+                  },
+                })
+              }
+            >
+              {configuredEfforts.map((effort) => (
+                <MenuItem key={effort || 'provider'} value={effort}>
+                  {effort || 'Provider default'}
+                </MenuItem>
+              ))}
+            </TextField>
+          </Box>
           <Box sx={{ gridColumn: { md: '1 / -1' } }}>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
               Stage overrides
@@ -285,93 +294,48 @@ function ProfileDialog({
               <Box
                 key={stage}
                 sx={{
-                  border: 1,
-                  borderColor: 'divider',
-                  borderRadius: 1,
-                  mb: 1.5,
-                  p: 1.5,
+                  alignItems: 'center',
+                  display: 'grid',
+                  gap: 1,
+                  gridTemplateColumns: {
+                    xs: '1fr',
+                    sm: '150px 1fr 220px',
+                  },
+                  mb: 1,
                 }}
               >
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                <Typography variant="body2">
                   {stage.replaceAll('_', ' ')}
                 </Typography>
-                <Box
-                  sx={{
-                    display: 'grid',
-                    gap: 1,
-                    gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
-                  }}
-                >
-                  {(['primary', 'economy'] as const).map((kind) => (
-                    <Box
-                      key={kind}
-                      sx={{
-                        display: 'grid',
-                        gap: 1,
-                        gridTemplateColumns: { sm: '1fr 180px' },
-                      }}
-                    >
-                      <TextField
-                        size="small"
-                        label={`${stage.replaceAll('_', ' ')} ${kind} model`}
-                        value={
-                          value.stage_overrides[stage]?.[kind]?.model_id ?? ''
-                        }
-                        onChange={(e) =>
-                          updateOverride(
-                            stage,
-                            kind,
-                            'model_id',
-                            e.target.value,
-                          )
-                        }
-                      />
-                      <TextField
-                        size="small"
-                        select
-                        disabled={
-                          value.stage_overrides[stage]?.allow_user_reasoning ??
-                          true
-                        }
-                        label={`${stage.replaceAll('_', ' ')} ${kind} reasoning`}
-                        value={
-                          value.stage_overrides[stage]?.[kind]
-                            ?.reasoning_effort ?? '__inherit__'
-                        }
-                        onChange={(e) =>
-                          updateOverride(
-                            stage,
-                            kind,
-                            'reasoning_effort',
-                            e.target.value,
-                          )
-                        }
-                      >
-                        <MenuItem value="__inherit__">Inherit base</MenuItem>
-                        {configuredEfforts.map((effort) => (
-                          <MenuItem key={effort || 'provider'} value={effort}>
-                            {effort || 'Provider default'}
-                          </MenuItem>
-                        ))}
-                      </TextField>
-                    </Box>
-                  ))}
-                </Box>
-                <FormControlLabel
-                  sx={{ mt: 1 }}
-                  control={
-                    <Checkbox
-                      checked={
-                        value.stage_overrides[stage]?.allow_user_reasoning ??
-                        true
-                      }
-                      onChange={(e) =>
-                        updateUserReasoningPolicy(stage, e.target.checked)
-                      }
-                    />
+                <TextField
+                  size="small"
+                  label={`${stage.replaceAll('_', ' ')} model`}
+                  value={value.stage_overrides[stage]?.model_id ?? ''}
+                  onChange={(e) =>
+                    updateOverride(stage, 'model_id', e.target.value)
                   }
-                  label={`Use the user's selected reasoning level for ${stage.replaceAll('_', ' ')}`}
                 />
+                <TextField
+                  size="small"
+                  select
+                  label={`${stage.replaceAll('_', ' ')} reasoning`}
+                  value={
+                    value.stage_overrides[stage]?.reasoning_effort ??
+                    '__inherit__'
+                  }
+                  onChange={(e) =>
+                    updateOverride(stage, 'reasoning_effort', e.target.value)
+                  }
+                >
+                  <MenuItem value="__inherit__">
+                    Inherit base (user selected)
+                  </MenuItem>
+                  {configuredEfforts.map((effort) => (
+                    <MenuItem key={effort || 'provider'} value={effort}>
+                      {effort || 'Provider default'}
+                    </MenuItem>
+                  ))}
+                </TextField>
               </Box>
             ))}
           </Box>

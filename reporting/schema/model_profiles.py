@@ -1,9 +1,9 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SelectableReasoningEffort = Literal["low", "medium", "high"]
-ConfiguredReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high"]
+SelectableReasoningEffort = Literal["default", "none", "minimal", "low", "medium", "high", "xhigh"]
+ConfiguredReasoningEffort = SelectableReasoningEffort
 PROFILE_STAGES = frozenset(
     {
         "assistant",
@@ -20,43 +20,66 @@ class ModelChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=300)
-    reasoning_effort: ConfiguredReasoningEffort = ""
 
 
-class ModelChoiceOverride(BaseModel):
+class EconomyModelChoice(ModelChoice):
     model_config = ConfigDict(extra="forbid")
 
-    model_id: str | None = Field(default=None, min_length=1, max_length=300)
-    reasoning_effort: ConfiguredReasoningEffort | None = None
+    reasoning_effort: ConfiguredReasoningEffort = "default"
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def read_legacy_provider_default(cls, value: Any) -> Any:
+        return "default" if value == "" else value
 
 
 class StageModelOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    primary: ModelChoiceOverride | None = None
-    economy: ModelChoiceOverride | None = None
-    allow_user_reasoning: bool = True
+    model_id: str | None = Field(default=None, min_length=1, max_length=300)
+    reasoning_effort: ConfiguredReasoningEffort | None = None
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def read_legacy_provider_default(cls, value: Any) -> Any:
+        return "default" if value == "" else value
 
     @model_validator(mode="before")
     @classmethod
-    def preserve_static_reasoning_overrides(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "allow_user_reasoning" in value:
+    def read_nested_choice_override(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or ("primary" not in value and "economy" not in value):
             return value
-        has_reasoning_override = any(
-            isinstance(value.get(choice_name), dict) and "reasoning_effort" in value[choice_name]
-            for choice_name in ("primary", "economy")
-        )
-        return {**value, "allow_user_reasoning": not has_reasoning_override}
+        primary = value.get("primary")
+        primary = primary if isinstance(primary, dict) else {}
+        return {
+            "model_id": primary.get("model_id"),
+            "reasoning_effort": (
+                None if value.get("allow_user_reasoning") is True else primary.get("reasoning_effort")
+            ),
+        }
 
 
 class ModelProfileConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     primary: ModelChoice
-    economy: ModelChoice
+    economy: EconomyModelChoice
     stage_overrides: dict[str, StageModelOverride] = Field(default_factory=dict)
     default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_reasoning_from_legacy_choices(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        primary = normalized.get("primary")
+        if isinstance(primary, dict) and "reasoning_effort" in primary:
+            primary = dict(primary)
+            primary.pop("reasoning_effort", None)
+            normalized["primary"] = primary
+        return normalized
 
     @model_validator(mode="after")
     def validate_stage_names(self) -> "ModelProfileConfig":
@@ -117,7 +140,15 @@ class SelectableModelProfile(BaseModel):
     description: str
     is_default: bool
     default_reasoning_effort: SelectableReasoningEffort
-    reasoning_efforts: tuple[SelectableReasoningEffort, ...] = ("low", "medium", "high")
+    reasoning_efforts: tuple[SelectableReasoningEffort, ...] = (
+        "default",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )
     run_cost_budget_usd: float
     effective_cost_budget_usd: float
 

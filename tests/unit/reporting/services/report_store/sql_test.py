@@ -3526,13 +3526,8 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
         _model_profile_data(
             name="Fast",
             is_default=True,
-            primary={"model_id": "openai/gpt-5", "reasoning_effort": "high"},
-            stage_overrides={
-                "worker_summary": {
-                    "primary": {"reasoning_effort": "minimal"},
-                    "allow_user_reasoning": False,
-                }
-            },
+            economy={"model_id": "openai/gpt-5-mini", "reasoning_effort": "minimal"},
+            stage_overrides={"worker_summary": {"reasoning_effort": "none"}},
             run_cost_budget_usd=0.5,
         ),
         "admin",
@@ -3544,8 +3539,8 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
     assert [version.version for version in versions] == [2, 1]
     assert versions[0].comment == "Lower cap"
     assert versions[0].run_cost_budget_usd == 0.5
-    assert versions[0].primary.reasoning_effort == "high"
-    assert versions[0].stage_overrides["worker_summary"].allow_user_reasoning is False
+    assert versions[0].economy.reasoning_effort == "minimal"
+    assert versions[0].stage_overrides["worker_summary"].reasoning_effort == "none"
 
 
 async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_history(store):
@@ -3577,9 +3572,7 @@ async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_his
     assert loaded is not None
     assert loaded.default_reasoning_effort == "medium"
     assert loaded.primary.model_id == "openai/gpt-5"
-    assert loaded.primary.reasoning_effort == "high"
     assert versions[0].primary.model_id == "openai/gpt-5"
-    assert versions[0].primary.reasoning_effort == "high"
     async with AsyncSession(sql_module._get_engine()) as session:
         unchanged = await session.get(sql_module.ModelProfileVersionRecord, version_id)
         assert unchanged is not None
@@ -3600,7 +3593,7 @@ async def test_model_profiles_treat_legacy_stage_reasoning_as_fixed(store):
     loaded = await store.get_model_profile(created.profile_id)
 
     assert loaded is not None
-    assert loaded.stage_overrides["worker_summary"].allow_user_reasoning is False
+    assert loaded.stage_overrides["worker_summary"].reasoning_effort == "minimal"
 
 
 async def test_model_profile_default_cannot_be_disabled_without_replacement(store):

@@ -225,6 +225,7 @@ def _spec(model_id: str, effort: str, max_output: int = 32_768) -> chat_models.M
         # Graded natively; litellm maps the level correctly.
         ("openai/gpt-5", "low", {"reasoning_effort": "low"}),
         ("gemini/gemini-2.5-pro", "high", {"reasoning_effort": "high"}),
+        ("openai/gpt-5", "xhigh", {"reasoning_effort": "xhigh"}),
         # Not graded by litellm's mapping -- it collapses every level to one
         # value -- so the level is rendered into the provider's own parameter.
         ("deepseek/deepseek-v4-pro", "high", {"extra_body": {"reasoning_effort": "high"}}),
@@ -234,6 +235,7 @@ def _spec(model_id: str, effort: str, max_output: int = 32_768) -> chat_models.M
         ("openai/gpt-5", "none", {"reasoning_effort": "none"}),
         # Nothing configured sends nothing.
         ("openai/gpt-5", "", {}),
+        ("openai/gpt-5", "default", {}),
     ],
 )
 def test_effort_renders_into_the_providers_own_parameters(model_id, effort, expected):

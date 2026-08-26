@@ -10,17 +10,11 @@ def _profile(**updates) -> ModelProfileItem:
         "description": "",
         "enabled": True,
         "is_default": True,
-        "primary": {"model_id": "openai/gpt-5", "reasoning_effort": "high"},
+        "primary": {"model_id": "openai/gpt-5"},
         "economy": {"model_id": "openai/gpt-5-mini", "reasoning_effort": "low"},
         "stage_overrides": {
-            "worker": {
-                "primary": {"model_id": "openai/gpt-5-worker"},
-                "allow_user_reasoning": True,
-            },
-            "worker_summary": {
-                "primary": {"reasoning_effort": "minimal"},
-                "allow_user_reasoning": False,
-            },
+            "worker": {"model_id": "openai/gpt-5-worker"},
+            "worker_summary": {"reasoning_effort": "minimal"},
         },
         "default_reasoning_effort": "medium",
         "run_cost_budget_usd": 1.5,
@@ -61,11 +55,13 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     assert result.economy_specs["worker"]["model_id"] == "openai/gpt-5-mini"
     assert result.primary_specs["router"]["model_id"] == "environment/router"
     assert result.primary_specs["worker"]["profile_name"] == "Accurate"
+    with model_profiles.use(result):
+        assert model_profiles.current_spec("assistant") == model_profiles.current_spec("default")
 
     high = await model_profiles.resolve("profile-1", "high")
     assert high.reasoning_effort == "high"
     assert high.primary_specs["planner"]["reasoning_effort"] == "high"
-    assert high.economy_specs["synthesizer"]["reasoning_effort"] == "high"
+    assert high.economy_specs["synthesizer"]["reasoning_effort"] == "low"
     assert high.primary_specs["worker_summary"]["reasoning_effort"] == "minimal"
 
 
@@ -96,6 +92,25 @@ async def test_empty_catalog_uses_environment_snapshot(mocker):
 
     assert result.source == "environment"
     assert result.profile_id is None
+
+
+async def test_selectable_profiles_expose_litellm_reasoning_vocabulary(mocker):
+    mocker.patch(
+        "reporting.services.model_profiles.report_store.list_model_profiles",
+        mocker.AsyncMock(return_value=[_profile()]),
+    )
+
+    [profile] = await model_profiles.selectable_profiles()
+
+    assert profile.reasoning_efforts == (
+        "default",
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )
 
 
 def test_global_cost_cap_remains_the_hard_ceiling(mocker):

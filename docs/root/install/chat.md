@@ -41,20 +41,23 @@ Tool and skill calls also require the *underlying* MCP permission (for example `
 ## Model profiles
 
 Admins manage model profiles from **Model Profiles** in the app sidebar. A
-profile names the primary and economy models and their configured reasoning
-levels, optional model and reasoning overrides for individual chat stages, a
-default user reasoning level, and a per-run USD cost cap. For each stage, the
-admin chooses whether the user's selected level replaces its configured
-reasoning. Each save creates a version. `model_profiles:read`,
+profile names a base primary model and default user reasoning level, one economy
+fallback model and reasoning level, optional primary model and reasoning
+overrides for individual chat stages, and a per-run USD cost cap. A stage whose
+reasoning is **Inherit base** uses the user's selected level; selecting an
+explicit value fixes that stage to the admin's value. Each save creates a
+version. `model_profiles:read`,
 `model_profiles:write`, and `model_profiles:delete` are granted to the built-in
 Admin role.
 
-Every user with `chat:use` selects `low`, `medium`, or `high` beneath an enabled
-profile. The first admitted turn locks that conversation to the profile, while
+Every user with `chat:use` selects one of LiteLLM's `default`, `none`, `minimal`,
+`low`, `medium`, `high`, or `xhigh` levels beneath an enabled profile. The first
+admitted turn locks that conversation to the profile, while
 the reasoning level remains changeable between turns. The selection affects
-only stages the admin marked user-adjustable; fixed stages retain their
-configured reasoning. Start a new conversation to use another profile. If a
-locked conversation's profile is later disabled or deleted, start a new
+stages whose reasoning inherits the base; fixed stage overrides and the economy
+fallback retain their configured reasoning. Start a new conversation to use
+another profile. If a locked conversation's profile is later disabled or
+deleted, start a new
 conversation; Seizu does not substitute another profile. The full resolved
 choice is captured when a turn is admitted, so editing a profile does not alter
 a running turn.
@@ -219,8 +222,9 @@ the derived value unless you have a reason to pin.
 ```
 
 `CHAT_LLM_REASONING_EFFORT` bounds how much of that allowance a model may spend
-thinking: `none`, `minimal`, `low`, `medium`, `high`, or empty for the provider's
-own default. Seizu renders it into each provider's native parameter —
+thinking: `default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`;
+empty also uses the provider's default. This is LiteLLM's fixed vocabulary.
+Seizu renders it into each provider's native parameter —
 `reasoning_effort` for OpenAI and Gemini, `thinking.budget_tokens` for Anthropic
 (a share of the call's ceiling), `extra_body` for DeepSeek — and never sends it
 to a model that does not support reasoning.

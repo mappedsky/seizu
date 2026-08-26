@@ -48,9 +48,9 @@ from reporting import settings
 
 logger = logging.getLogger(__name__)
 
-#: Effort levels LiteLLM accepts for every provider we checked. ``""`` leaves
-#: the provider's own default in place and sends nothing.
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high")
+#: LiteLLM's completion-level effort vocabulary. Individual models may support
+#: only a subset; ``"default"`` and ``""`` leave the provider's default in place.
+REASONING_EFFORTS = ("default", "none", "minimal", "low", "medium", "high", "xhigh")
 
 
 @dataclass(frozen=True)
@@ -256,7 +256,7 @@ def _role_reasoning_effort(stage: str) -> str:
 #: How much of the output allowance each level gives to thinking, for providers
 #: that take a number rather than a word. Fractions of the call's own ceiling, so
 #: they scale with the model instead of needing a table per model.
-_EFFORT_BUDGET_SHARE = {"minimal": 0.05, "low": 0.15, "medium": 0.35, "high": 0.6}
+_EFFORT_BUDGET_SHARE = {"minimal": 0.05, "low": 0.15, "medium": 0.35, "high": 0.6, "xhigh": 0.8}
 #: Anthropic's floor for `budget_tokens`; below it the request is rejected.
 _MIN_THINKING_BUDGET = 1_024
 
@@ -292,7 +292,7 @@ def reasoning_kwargs(spec: "ModelSpec") -> dict[str, object]:
     Rendering it here keeps the provider knowledge in the one place that already
     knows the model, so no call site learns a provider name.
     """
-    if not spec.reasoning_effort:
+    if not spec.reasoning_effort or spec.reasoning_effort == "default":
         return {}
     provider = capability(spec.model_id).provider
     if spec.reasoning_effort == "none":
@@ -352,7 +352,7 @@ def temperature_for(spec: "ModelSpec") -> float | None:
     """
     if not capability(spec.model_id).supports_temperature:
         return None
-    if spec.reasoning_effort and spec.reasoning_effort != "none":
+    if spec.reasoning_effort not in ("", "default", "none"):
         if capability(spec.model_id).provider == "anthropic":
             # Extended thinking fixes it at 1; anything else is refused.
             return 1.0

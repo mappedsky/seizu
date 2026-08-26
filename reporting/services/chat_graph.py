@@ -755,6 +755,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 available_specs,
                 config,
                 turn_writer,
+                phase="assistant",
                 # A post-action turn ships no prose, but it still thinks -- and
                 # it is the turn a viewer waits longest through. Details are the
                 # one thing it can show without shipping text it may retract.
@@ -925,7 +926,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # all about the work it did.
         try:
             turn_result = await _run_llm_tool_turn(
-                model, synthesis_system_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
+                model,
+                synthesis_system_prompt,
+                messages,
+                [],
+                config,
+                None,
+                detail_writer=writer,
+                allow_reserve=True,
+                phase="assistant",
             )
             final_message = turn_result.message
             streamed_in_last_turn = turn_result.streamed
@@ -943,7 +952,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             )
             try:
                 turn_result = await _run_llm_tool_turn(
-                    model, retry_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
+                    model,
+                    retry_prompt,
+                    messages,
+                    [],
+                    config,
+                    None,
+                    detail_writer=writer,
+                    allow_reserve=True,
+                    phase="assistant",
                 )
                 final_message = turn_result.message
                 streamed_in_last_turn = turn_result.streamed
@@ -1216,7 +1233,7 @@ async def _auto_continue_answer(
                 config,
                 stitch_writer,
                 allow_reserve=allow_reserve,
-                phase="continuation",
+                phase="assistant:continuation",
                 # Request the cap explicitly rather than inheriting the provider's
                 # default: it is what the budget already reserves for this turn, and
                 # a known cap is what lets _effective_finish_reason tell a
@@ -1444,7 +1461,7 @@ async def _resume_confirmed_tool_turn(
             id=f"msg_{uuid.uuid4().hex}",
         ),
     ]
-    turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer)
+    turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer, phase="assistant")
     detail_events.extend(turn_result.details)
     response = message_text(turn_result.message.content) or (
         "Approved action(s) completed.\n\nResult:\n"

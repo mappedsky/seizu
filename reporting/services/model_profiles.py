@@ -7,7 +7,6 @@ from dataclasses import replace
 
 from reporting import settings
 from reporting.schema.model_profiles import (
-    ModelChoice,
     ModelProfileItem,
     ResolvedModelProfile,
     SelectableModelProfile,
@@ -50,29 +49,15 @@ def environment_snapshot() -> ResolvedModelProfile:
     )
 
 
-def _choice_for(profile: ModelProfileItem, role: str, *, economy: bool) -> ModelChoice:
-    stage = _CONTROLLED_ROLES[role]
-    base = profile.economy if economy else profile.primary
-    override = profile.stage_overrides.get(stage)
-    selected = (override.economy if economy else override.primary) if override else None
-    if selected is None:
-        return base
-    return ModelChoice(
-        model_id=selected.model_id or base.model_id,
-        reasoning_effort=base.reasoning_effort if selected.reasoning_effort is None else selected.reasoning_effort,
-    )
-
-
-def _reasoning_for(
+def _primary_choice_for(
     profile: ModelProfileItem,
     role: str,
-    choice: ModelChoice,
     user_reasoning_effort: SelectableReasoningEffort,
-) -> str:
+) -> tuple[str, str]:
     override = profile.stage_overrides.get(_CONTROLLED_ROLES[role])
-    if override is None or override.allow_user_reasoning:
-        return user_reasoning_effort
-    return choice.reasoning_effort
+    model_id = override.model_id if override and override.model_id else profile.primary.model_id
+    configured_reasoning = override.reasoning_effort if override else None
+    return model_id, configured_reasoning if configured_reasoning is not None else user_reasoning_effort
 
 
 def _profile_snapshot(
@@ -88,17 +73,16 @@ def _profile_snapshot(
     economy: dict[str, dict[str, object]] = {}
     for role in _ALL_ROLES:
         if role in _CONTROLLED_ROLES:
-            normal_choice = _choice_for(profile, role, economy=False)
-            economy_choice = _choice_for(profile, role, economy=True)
+            primary_model_id, primary_reasoning = _primary_choice_for(profile, role, reasoning_effort)
             normal = chat_models.resolve(
                 role,
-                model_id=normal_choice.model_id,
-                reasoning_effort=_reasoning_for(profile, role, normal_choice, reasoning_effort),
+                model_id=primary_model_id,
+                reasoning_effort=primary_reasoning,
             )
             cheap = chat_models.resolve(
                 role,
-                model_id=economy_choice.model_id,
-                reasoning_effort=_reasoning_for(profile, role, economy_choice, reasoning_effort),
+                model_id=profile.economy.model_id,
+                reasoning_effort=profile.economy.reasoning_effort,
             )
         else:
             normal = chat_models.resolve(role)
@@ -165,7 +149,7 @@ def current_spec(role: str, *, economy: bool = False) -> chat_models.ModelSpec |
     if resolved is None:
         return None
     payloads = resolved.economy_specs if economy else resolved.primary_specs
-    payload = payloads.get(role)
+    payload = payloads.get("default" if role == "assistant" else role)
     if payload is None and role == "worker_summary_retry":
         payload = payloads.get("worker_summary")
     return chat_models.ModelSpec.from_payload(payload)

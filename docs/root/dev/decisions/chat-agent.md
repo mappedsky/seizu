@@ -2703,13 +2703,19 @@ explicit choice never silently falls through to another profile: schedules and
 workflows require a replacement, while a locked interactive conversation must
 be restarted under a new profile.
 
-A profile controls the models for assistant, planner, worker, worker-summary,
-sandbox-subagent, and synthesizer phases, with separate primary and economy
-choices. Each choice has an admin-configured reasoning default, and each stage
-explicitly decides whether the user's selected level replaces that configured
-value. Router and verifier continue to resolve from deployment settings. The
-run cost ceiling is the lower positive value of the profile cap and
-`CHAT_RUN_COST_BUDGET_USD`.
+A profile controls the primary models for assistant, planner, worker,
+worker-summary, sandbox-subagent, and synthesizer phases. Each stage may
+override the base primary model and may either inherit the user's selected
+reasoning level or fix an admin-configured value. One economy model and
+reasoning value applies wherever budget degradation needs the fallback; it is
+not duplicated per stage. Router and verifier continue to resolve from
+deployment settings. The run cost ceiling is the lower positive value of the
+profile cap and `CHAT_RUN_COST_BUDGET_USD`.
+
+The selectable vocabulary is LiteLLM's fixed `default`, `none`, `minimal`,
+`low`, `medium`, `high`, and `xhigh` set. `default` is rendered by omitting an
+effort so it remains safe for provider adapters whose nominal `default` mapping
+is not accepted by every underlying model.
 
 **Why:** changing effort keeps the same model family, while changing profile
 families moves the request to another model and guarantees that the next turn

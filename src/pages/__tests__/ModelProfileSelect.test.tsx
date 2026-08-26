@@ -16,7 +16,15 @@ const profiles: SelectableModelProfile[] = [
     description: '',
     is_default: true,
     default_reasoning_effort: 'medium',
-    reasoning_efforts: ['low', 'medium', 'high'],
+    reasoning_efforts: [
+      'default',
+      'none',
+      'minimal',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+    ],
     run_cost_budget_usd: 2,
     effective_cost_budget_usd: 2,
   },
@@ -71,6 +79,9 @@ it('groups reasoning levels by profile and locks other profile families', () => 
   const listbox = screen.getByRole('listbox');
   expect(within(listbox).getByText('Anthropic (default)')).toBeInTheDocument();
   expect(within(listbox).getByText('DeepSeek')).toBeInTheDocument();
+  expect(
+    within(listbox).getByRole('option', { name: 'Xhigh' }),
+  ).toBeInTheDocument();
   const highOptions = within(listbox).getAllByRole('option', { name: 'High' });
   expect(highOptions[0]).not.toHaveAttribute('aria-disabled', 'true');
   expect(highOptions[1]).toHaveAttribute('aria-disabled', 'true');
