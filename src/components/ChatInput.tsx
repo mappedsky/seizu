@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   memo,
   useCallback,
   useRef,
@@ -25,6 +26,9 @@ interface ChatInputProps {
   disabled: boolean;
   onSubmit: (text: string) => void;
   onStop: () => void;
+  /** Optional controls shown on the left side of the composer footer. Keep the
+   *  node referentially stable while streaming so this component stays memoized. */
+  footerControls?: ReactNode;
   /** Whether the caller may bypass confirmations at all; hides the control when
    *  false. Passed as flags rather than a rendered node so this stays memoized
    *  against a parent that re-renders on every streamed frame. */
@@ -38,6 +42,7 @@ export default memo(function ChatInput({
   disabled,
   onSubmit,
   onStop,
+  footerControls,
   showBypassConfirmations = false,
   bypassConfirmations = false,
   onBypassConfirmationsChange,
@@ -183,32 +188,39 @@ export default memo(function ChatInput({
                 },
               }}
             />
-            {showBypassConfirmations ? (
-              // In the composer rather than above it: it is a property of the
-              // message about to be sent, and a control floating between the
-              // conversation and the box reads as neither.
+            {footerControls || showBypassConfirmations ? (
               <Box
-                sx={{ display: 'flex', justifyContent: 'flex-end', mt: 0.5 }}
+                sx={{
+                  alignItems: 'center',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 1,
+                  justifyContent: 'space-between',
+                  mt: 0.5,
+                }}
               >
-                <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={bypassConfirmations}
-                        onChange={(event) =>
-                          onBypassConfirmationsChange?.(event.target.checked)
-                        }
-                        size="small"
-                      />
-                    }
-                    label={
-                      <Typography color="text.secondary" variant="caption">
-                        Bypass confirmations
-                      </Typography>
-                    }
-                    sx={{ mr: 0 }}
-                  />
-                </Tooltip>
+                {footerControls}
+                {showBypassConfirmations ? (
+                  <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={bypassConfirmations}
+                          onChange={(event) =>
+                            onBypassConfirmationsChange?.(event.target.checked)
+                          }
+                          size="small"
+                        />
+                      }
+                      label={
+                        <Typography color="text.secondary" variant="caption">
+                          Bypass confirmations
+                        </Typography>
+                      }
+                      sx={{ ml: 'auto', mr: 0 }}
+                    />
+                  </Tooltip>
+                ) : null}
               </Box>
             ) : null}
           </CardContent>

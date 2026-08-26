@@ -6,6 +6,7 @@ import {
   within,
 } from '@testing-library/react';
 import { ModelProfileSelect } from 'src/pages/ChatInterface';
+import ChatInput from 'src/components/ChatInput';
 import type { SelectableModelProfile } from 'src/hooks/useModelProfilesApi';
 
 const profiles: SelectableModelProfile[] = [
@@ -36,20 +37,31 @@ afterEach(cleanup);
 it('groups reasoning levels by profile and locks other profile families', () => {
   const onChange = jest.fn();
   render(
-    <ModelProfileSelect
+    <ChatInput
+      busy={false}
+      bypassConfirmations={false}
       disabled={false}
-      lockedProfileId="anthropic"
-      onChange={onChange}
-      profileId="anthropic"
-      profiles={profiles}
-      reasoningEffort="medium"
+      footerControls={
+        <ModelProfileSelect
+          disabled={false}
+          lockedProfileId="anthropic"
+          onChange={onChange}
+          profileId="anthropic"
+          profiles={profiles}
+          reasoningEffort="medium"
+        />
+      }
+      onBypassConfirmationsChange={() => {}}
+      onStop={() => {}}
+      onSubmit={() => {}}
+      showBypassConfirmations
     />,
   );
-  expect(
-    screen.getByText(
-      'Model profile is locked for this conversation; reasoning may still change.',
-    ),
-  ).toBeInTheDocument();
+  expect(screen.queryByText(/Model profile is locked/)).not.toBeInTheDocument();
+  const composer = screen.getByPlaceholderText('Ask Seizu...').closest('form');
+  expect(composer).not.toBeNull();
+  expect(within(composer!).getByRole('combobox')).toBeInTheDocument();
+  expect(within(composer!).getByRole('switch')).toBeInTheDocument();
 
   fireEvent.mouseDown(
     screen.getByRole('combobox', { name: 'Model and reasoning' }),

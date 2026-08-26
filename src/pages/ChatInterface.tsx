@@ -21,7 +21,6 @@ import {
   Card,
   Chip,
   FormControl,
-  FormHelperText,
   IconButton,
   InputLabel,
   ListSubheader,
@@ -187,7 +186,11 @@ export function ModelProfileSelect({
   const value =
     profileId && reasoningEffort ? `${profileId}:${reasoningEffort}` : '';
   return (
-    <FormControl disabled={disabled} fullWidth size="small" sx={{ mb: 1 }}>
+    <FormControl
+      disabled={disabled}
+      size="small"
+      sx={{ maxWidth: '100%', minWidth: { xs: 200, sm: 260 } }}
+    >
       <InputLabel id="chat-model-profile-label">Model and reasoning</InputLabel>
       <Select
         label="Model and reasoning"
@@ -218,12 +221,6 @@ export function ModelProfileSelect({
           )),
         ])}
       </Select>
-      {lockedProfileId ? (
-        <FormHelperText>
-          Model profile is locked for this conversation; reasoning may still
-          change.
-        </FormHelperText>
-      ) : null}
     </FormControl>
   );
 }
@@ -1447,6 +1444,14 @@ export default function ChatInterface() {
     [activeThreadId, updateSessionProfile],
   );
 
+  const handleLandingProfileChange = useCallback(
+    (profileId: string, reasoningEffort: ReasoningEffort) => {
+      setLandingProfileId(profileId);
+      setLandingReasoningEffort(reasoningEffort);
+    },
+    [],
+  );
+
   const handleDeleteSession = useCallback(
     async (threadId: string) => {
       await deleteSession(threadId);
@@ -1604,6 +1609,59 @@ export default function ChatInterface() {
     [activeThreadId, busy, sendMessage, touchSession],
   );
 
+  const landingProfileControl = useMemo(
+    () => (
+      <ModelProfileSelect
+        disabled={creatingSession || modelProfilesLoading}
+        onChange={handleLandingProfileChange}
+        profiles={modelProfiles}
+        profileId={landingProfileId}
+        reasoningEffort={landingReasoningEffort}
+      />
+    ),
+    [
+      creatingSession,
+      handleLandingProfileChange,
+      landingProfileId,
+      landingReasoningEffort,
+      modelProfiles,
+      modelProfilesLoading,
+    ],
+  );
+
+  const activeProfileId =
+    activeSession?.model_profile_id ?? defaultProfileId ?? '';
+  const activeReasoningEffort =
+    activeSession?.model_reasoning_effort ??
+    modelProfiles.find((profile) => profile.profile_id === activeProfileId)
+      ?.default_reasoning_effort ??
+    '';
+  const lockedProfileId =
+    activeSession?.model_profile_locked || messages.length > 0
+      ? (activeSession?.model_profile_id ?? null)
+      : null;
+  const activeProfileControl = useMemo(
+    () => (
+      <ModelProfileSelect
+        disabled={busy || modelProfilesLoading}
+        lockedProfileId={lockedProfileId}
+        onChange={handleProfileChange}
+        profiles={modelProfiles}
+        profileId={activeProfileId}
+        reasoningEffort={activeReasoningEffort}
+      />
+    ),
+    [
+      activeProfileId,
+      activeReasoningEffort,
+      busy,
+      handleProfileChange,
+      lockedProfileId,
+      modelProfiles,
+      modelProfilesLoading,
+    ],
+  );
+
   if (!chatEnabled) {
     return (
       <Box sx={pageContentSx}>
@@ -1731,22 +1789,13 @@ export default function ChatInterface() {
                 {modelProfilesError}
               </Alert>
             ) : null}
-            <ModelProfileSelect
-              disabled={creatingSession || modelProfilesLoading}
-              onChange={(profileId, reasoningEffort) => {
-                setLandingProfileId(profileId);
-                setLandingReasoningEffort(reasoningEffort);
-              }}
-              profiles={modelProfiles}
-              profileId={landingProfileId}
-              reasoningEffort={landingReasoningEffort}
-            />
             <ChatInput
               // Disabled rather than busy while the session is being created:
               // busy turns the send button into a Stop, and there is nothing
               // here to stop.
               busy={false}
               disabled={creatingSession}
+              footerControls={landingProfileControl}
               onSubmit={(text) => void handleStartSession(text)}
               onStop={() => {}}
             />
@@ -2236,33 +2285,11 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
-        <ModelProfileSelect
-          disabled={busy || modelProfilesLoading}
-          lockedProfileId={
-            activeSession?.model_profile_locked || messages.length > 0
-              ? (activeSession?.model_profile_id ?? null)
-              : null
-          }
-          onChange={(profileId, reasoningEffort) =>
-            void handleProfileChange(profileId, reasoningEffort)
-          }
-          profiles={modelProfiles}
-          profileId={activeSession?.model_profile_id ?? defaultProfileId ?? ''}
-          reasoningEffort={
-            activeSession?.model_reasoning_effort ??
-            modelProfiles.find(
-              (profile) =>
-                profile.profile_id ===
-                (activeSession?.model_profile_id ?? defaultProfileId),
-            )?.default_reasoning_effort ??
-            ''
-          }
-        />
-
         <ChatInput
           busy={busy}
           bypassConfirmations={bypassConfirmations}
           disabled={disabled}
+          footerControls={activeProfileControl}
           onBypassConfirmationsChange={setBypassConfirmations}
           onStop={handleStop}
           onSubmit={handleSubmit}
