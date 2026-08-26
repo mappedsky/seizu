@@ -1,22 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
 
-export type ReasoningEffort =
-  | ''
-  | 'none'
-  | 'minimal'
-  | 'low'
-  | 'medium'
-  | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 export interface ModelChoice {
   model_id: string;
-  reasoning_effort: ReasoningEffort;
 }
 
 export interface ModelChoiceOverride {
   model_id?: string | null;
-  reasoning_effort?: ReasoningEffort | null;
 }
 
 export interface StageModelOverride {
@@ -32,6 +24,7 @@ export interface ModelProfilePayload {
   primary: ModelChoice;
   economy: ModelChoice;
   stage_overrides: Record<string, StageModelOverride>;
+  default_reasoning_effort: ReasoningEffort;
   run_cost_budget_usd: number;
 }
 
@@ -57,6 +50,8 @@ export interface SelectableModelProfile {
   name: string;
   description: string;
   is_default: boolean;
+  default_reasoning_effort: ReasoningEffort;
+  reasoning_efforts: ReasoningEffort[];
   run_cost_budget_usd: number;
   effective_cost_budget_usd: number;
 }

@@ -1163,6 +1163,7 @@ async def create_chat_session(
     origin: str = "interactive",
     scheduled_chat_id: str | None = None,
     model_profile_id: str | None = None,
+    model_reasoning_effort: str | None = None,
 ) -> ChatSessionItem:
     return await get_store().create_chat_session(
         user_id,
@@ -1170,6 +1171,7 @@ async def create_chat_session(
         origin=origin,
         scheduled_chat_id=scheduled_chat_id,
         model_profile_id=model_profile_id,
+        model_reasoning_effort=model_reasoning_effort,
     )
 
 
@@ -1195,9 +1197,17 @@ async def update_chat_session_title(user_id: str, thread_id: str, title: str) ->
 
 
 async def update_chat_session_model_profile(
-    user_id: str, thread_id: str, model_profile_id: str | None
+    user_id: str,
+    thread_id: str,
+    model_profile_id: str | None,
+    model_reasoning_effort: str | None = None,
 ) -> ChatSessionItem | None:
-    return await get_store().update_chat_session_model_profile(user_id, thread_id, model_profile_id)
+    return await get_store().update_chat_session_model_profile(
+        user_id,
+        thread_id,
+        model_profile_id,
+        model_reasoning_effort,
+    )
 
 
 async def delete_chat_session(user_id: str, thread_id: str) -> bool:

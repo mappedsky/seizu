@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -444,6 +445,8 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     run_status: str | None = None
     run_errors: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
     model_profile_id: str | None = None
+    model_reasoning_effort: str | None = None
+    model_profile_locked: bool = False
     # Set by the reaper's claim (SBX-011); a claimed session is closed to every
     # other writer until its checkpoint and sandbox are gone.
     retiring_at: str | None = None
@@ -859,8 +862,27 @@ def _action_confirmation_from_record(record: ActionConfirmationRecord) -> Action
     )
 
 
+def _stored_model_profile_config(value: dict[str, Any]) -> ModelProfileConfig:
+    """Read current and pre-effort-selector profile JSON into the current shape."""
+    config = deepcopy(value)
+    for choice_name in ("primary", "economy"):
+        choice = config.get(choice_name)
+        if isinstance(choice, dict):
+            choice.pop("reasoning_effort", None)
+    overrides = config.get("stage_overrides")
+    if isinstance(overrides, dict):
+        for stage in overrides.values():
+            if not isinstance(stage, dict):
+                continue
+            for choice_name in ("primary", "economy"):
+                choice = stage.get(choice_name)
+                if isinstance(choice, dict):
+                    choice.pop("reasoning_effort", None)
+    return ModelProfileConfig.model_validate(config)
+
+
 def _model_profile_from_record(record: ModelProfileRecord) -> ModelProfileItem:
-    config = ModelProfileConfig.model_validate(record.config)
+    config = _stored_model_profile_config(record.config)
     return ModelProfileItem(
         profile_id=record.profile_id,
         name=record.name,
@@ -877,7 +899,7 @@ def _model_profile_from_record(record: ModelProfileRecord) -> ModelProfileItem:
 
 
 def _model_profile_version_from_record(record: ModelProfileVersionRecord) -> ModelProfileVersion:
-    config = ModelProfileConfig.model_validate(record.config)
+    config = _stored_model_profile_config(record.config)
     return ModelProfileVersion(
         profile_id=record.profile_id,
         version=record.version,
@@ -918,6 +940,8 @@ def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionIte
         run_status=record.run_status,
         run_errors=record.run_errors or [],
         model_profile_id=record.model_profile_id,
+        model_reasoning_effort=record.model_reasoning_effort,
+        model_profile_locked=record.model_profile_locked,
     )
 
 
@@ -3883,6 +3907,7 @@ class SQLModelReportStore(ReportStore):
                 "primary": data["primary"],
                 "economy": data["economy"],
                 "stage_overrides": data.get("stage_overrides") or {},
+                "default_reasoning_effort": data.get("default_reasoning_effort", "medium"),
                 "run_cost_budget_usd": data["run_cost_budget_usd"],
             }
         ).model_dump(mode="json")
@@ -4147,6 +4172,7 @@ class SQLModelReportStore(ReportStore):
         origin: str = "interactive",
         scheduled_chat_id: str | None = None,
         model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem:
         thread_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -4162,6 +4188,7 @@ class SQLModelReportStore(ReportStore):
                 run_status="running" if origin != "interactive" else None,
                 run_errors=[],
                 model_profile_id=model_profile_id,
+                model_reasoning_effort=model_reasoning_effort,
             )
             session.add(record)
             await session.commit()
@@ -4175,6 +4202,8 @@ class SQLModelReportStore(ReportStore):
                 run_status="running" if origin != "interactive" else None,
                 run_errors=[],
                 model_profile_id=model_profile_id,
+                model_reasoning_effort=model_reasoning_effort,
+                model_profile_locked=False,
             )
 
     async def list_scheduled_chat_sessions(
@@ -4252,9 +4281,36 @@ class SQLModelReportStore(ReportStore):
         return await self._update_unretired_chat_session(user_id, thread_id, {"title": title})
 
     async def update_chat_session_model_profile(
-        self, user_id: str, thread_id: str, model_profile_id: str | None
+        self,
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem | None:
-        return await self._update_unretired_chat_session(user_id, thread_id, {"model_profile_id": model_profile_id})
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                await session.execute(
+                    select(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                        col(ChatSessionRecord.retiring_at).is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                return None
+            if record.model_profile_locked and record.model_profile_id != model_profile_id:
+                raise ValueError("the model profile is locked for this conversation")
+            record.model_profile_id = model_profile_id
+            record.model_reasoning_effort = model_reasoning_effort
+            record.updated_at = now
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _chat_session_from_sql_record(record)
 
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
@@ -4318,21 +4374,33 @@ class SQLModelReportStore(ReportStore):
             if already is not None:
                 return resolve_chat_turn_for_key(_chat_turn_from_record(already))
 
-            # Admission and creation commit together, so a delete cannot slip
-            # between them: the session is closed to new turns the moment it is
-            # claimed, and this update is what observes that.
-            admitted = await session.execute(
-                update(ChatSessionRecord)
-                .where(
-                    col(ChatSessionRecord.user_id) == user_id,
-                    col(ChatSessionRecord.thread_id) == thread_id,
-                    col(ChatSessionRecord.retiring_at).is_(None),
+            # Admission and session selection commit together. Locking the row
+            # prevents a concurrent profile change from crossing the first
+            # turn that makes the profile family immutable.
+            chat_session = (
+                await session.execute(
+                    select(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                        col(ChatSessionRecord.retiring_at).is_(None),
+                    )
+                    .with_for_update()
                 )
-                .values(updated_at=now_iso)
-            )
-            if admitted.rowcount == 0:
+            ).scalar_one_or_none()
+            if chat_session is None:
                 await session.rollback()
                 return ChatTurnAdmission(outcome="retired")
+            resolved_profile = command.resolved_model_profile
+            if resolved_profile and resolved_profile.source == "profile":
+                if chat_session.model_profile_locked and chat_session.model_profile_id != resolved_profile.profile_id:
+                    await session.rollback()
+                    return ChatTurnAdmission(outcome="profile_locked")
+                chat_session.model_profile_id = resolved_profile.profile_id
+                chat_session.model_reasoning_effort = resolved_profile.reasoning_effort
+                chat_session.model_profile_locked = True
+            chat_session.updated_at = now_iso
+            session.add(chat_session)
 
             # Retire a turn whose lease has lapsed, in the same transaction as
             # the insert. Its producer is gone, so it must not keep holding the

@@ -992,6 +992,7 @@ class ReportStore(ABC):
         origin: str = "interactive",
         scheduled_chat_id: str | None = None,
         model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem:
         """Create a new chat session with a store-generated ID.
 
@@ -1056,9 +1057,13 @@ class ReportStore(ABC):
 
     @abstractmethod
     async def update_chat_session_model_profile(
-        self, user_id: str, thread_id: str, model_profile_id: str | None
+        self,
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem | None:
-        """Remember the profile choice for future turns in a conversation."""
+        """Remember a profile and effort, refusing a family change after admission."""
 
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:

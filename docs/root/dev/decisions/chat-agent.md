@@ -2678,31 +2678,36 @@ is one `ainvoke` and yields no reasoning chunks, so the planner's entry appears
 only on the JSON-prompt fallback. Do not stream the structured runnable to get
 one: it yields parsed objects, not chunks.
 
-## AGT-045 — Model profiles are curated run snapshots, sticky by conversation
+## AGT-045 — Model families lock on first use; reasoning remains selectable
 
 **Applies to:** `model_profiles.py`, `chat_models.ModelSpec`,
 `ChatTurnCommand.resolved_model_profile`, `ChatInterface.tsx`
 
 Admins manage versioned model profiles in the database. Every holder of
-`chat:use` may select an enabled profile; the choice is stored on the chat
-session and copied as a complete resolved snapshot into each admitted turn.
+`chat:use` selects a profile plus `low`, `medium`, or `high`; the UI groups those
+levels beneath each profile. The first admitted turn atomically locks the
+profile family on the session, while its reasoning level remains selectable
+between turns. The resolved pair is copied as a complete snapshot into each
+admitted turn.
 Scheduled chats and `agent_chat` workflow activities use the same catalog and
 snapshot their selection before Temporal dispatch. A deleted or disabled
-explicit choice must be replaced; it never silently falls through to another
-profile.
+explicit choice never silently falls through to another profile: schedules and
+workflows require a replacement, while a locked interactive conversation must
+be restarted under a new profile.
 
-A profile controls assistant, planner, worker, worker-summary,
+A profile controls the models for assistant, planner, worker, worker-summary,
 sandbox-subagent, and synthesizer phases, with separate primary and economy
-choices. Router and verifier continue to resolve from deployment settings. The
-run cost ceiling is the lower positive value of the profile cap and
+choices. The user's reasoning level applies to those phases. Router and verifier
+continue to resolve from deployment settings. The run cost ceiling is the lower positive value of the profile cap and
 `CHAT_RUN_COST_BUDGET_USD`.
 
-**Why:** a profile is a curated spend decision, while a conversation is the
-stable user-visible scope for that decision. Capturing the expanded specs at
-admission keeps a profile edit from changing a running turn or one of its
-distributed workers. Router and verifier are structural classifiers, so a
-request for a stronger answer should not silently move them to a more expensive
-model.
+**Why:** changing effort keeps the same model family, while changing profile
+families moves the request to another model and guarantees that the next turn
+cannot reuse that model's prior cached prefix; its carried context is uncached
+input. A new conversation makes that cost boundary explicit. Capturing the expanded specs at admission keeps a profile
+edit or effort change from changing a running turn or one of its distributed
+workers. Router and verifier are structural classifiers, so a request for a
+stronger answer should not silently move them to a more expensive model.
 
 No profiles are seeded. Until an admin creates the first enabled profile, chat
 uses the environment configuration unchanged; the first enabled profile becomes

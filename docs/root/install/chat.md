@@ -41,16 +41,18 @@ Tool and skill calls also require the *underlying* MCP permission (for example `
 ## Model profiles
 
 Admins manage model profiles from **Model Profiles** in the app sidebar. A
-profile names the primary and economy models, their reasoning effort, optional
-overrides for individual chat stages, and a per-run USD cost cap. Each save
-creates a version. `model_profiles:read`, `model_profiles:write`, and
+profile names the primary and economy models, optional model overrides for
+individual chat stages, a default reasoning level, and a per-run USD cost cap.
+Each save creates a version. `model_profiles:read`, `model_profiles:write`, and
 `model_profiles:delete` are granted to the built-in Admin role.
 
-Every user with `chat:use` can select any enabled profile. The selection is
-stored on the conversation and applies to its later turns until changed. If the
-selected profile is disabled or deleted, Seizu asks the user to choose another;
-it does not substitute a different profile. The full resolved choice is captured
-when a turn is admitted, so editing a profile does not alter a running turn.
+Every user with `chat:use` selects `low`, `medium`, or `high` beneath an enabled
+profile. The first admitted turn locks that conversation to the profile, while
+the reasoning level remains changeable between turns. Start a new conversation
+to use another profile. If a locked conversation's profile is later disabled or
+deleted, start a new conversation; Seizu does not substitute another profile.
+The full resolved choice is captured when a turn is admitted, so editing a
+profile does not alter a running turn.
 
 The first enabled profile becomes the default. When profiles exist, exactly one
 enabled profile must be the default. Seizu does not install built-in profiles:

@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-ReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high"]
+SelectableReasoningEffort = Literal["low", "medium", "high"]
 PROFILE_STAGES = frozenset(
     {
         "assistant",
@@ -19,14 +19,12 @@ class ModelChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=300)
-    reasoning_effort: ReasoningEffort = ""
 
 
 class ModelChoiceOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_id: str | None = Field(default=None, min_length=1, max_length=300)
-    reasoning_effort: ReasoningEffort | None = None
 
 
 class StageModelOverride(BaseModel):
@@ -42,6 +40,7 @@ class ModelProfileConfig(BaseModel):
     primary: ModelChoice
     economy: ModelChoice
     stage_overrides: dict[str, StageModelOverride] = Field(default_factory=dict)
+    default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)
 
     @model_validator(mode="after")
@@ -101,6 +100,8 @@ class SelectableModelProfile(BaseModel):
     name: str
     description: str
     is_default: bool
+    default_reasoning_effort: SelectableReasoningEffort
+    reasoning_efforts: tuple[SelectableReasoningEffort, ...] = ("low", "medium", "high")
     run_cost_budget_usd: float
     effective_cost_budget_usd: float
 
@@ -117,6 +118,7 @@ class ResolvedModelProfile(BaseModel):
     profile_id: str | None = None
     profile_name: str | None = None
     profile_version: int | None = None
+    reasoning_effort: SelectableReasoningEffort | None = None
     cost_budget_usd: float = 0.0
     primary_specs: dict[str, dict[str, object]] = Field(default_factory=dict)
     economy_specs: dict[str, dict[str, object]] = Field(default_factory=dict)

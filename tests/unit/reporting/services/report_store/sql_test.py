@@ -22,6 +22,7 @@ from reporting import settings
 from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.plugins import PluginFile
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
@@ -37,9 +38,10 @@ def _model_profile_data(**updates):
         "description": "Measured profile",
         "enabled": True,
         "is_default": False,
-        "primary": {"model_id": "openai/gpt-5", "reasoning_effort": "high"},
-        "economy": {"model_id": "openai/gpt-5-mini", "reasoning_effort": "low"},
+        "primary": {"model_id": "openai/gpt-5"},
+        "economy": {"model_id": "openai/gpt-5-mini"},
         "stage_overrides": {},
+        "default_reasoning_effort": "medium",
         "run_cost_budget_usd": 1.0,
     }
     data.update(updates)
@@ -556,6 +558,22 @@ def _turn_command(message: str = "hello") -> ChatTurnCommand:
     )
 
 
+def _profile_turn_command(profile_id: str, effort: str) -> ChatTurnCommand:
+    return ChatTurnCommand(
+        message="hello",
+        permission_cap=[],
+        timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+        resolved_model_profile=ResolvedModelProfile(
+            source="profile",
+            profile_id=profile_id,
+            profile_name=profile_id,
+            profile_version=1,
+            reasoning_effort=effort,
+            cost_budget_usd=1,
+        ),
+    )
+
+
 async def _admit(store, user_id: str = "user-1", thread_id: str = "1001", key: str | None = None):
     await _ensure_session(user_id, thread_id)
     key = key or f"ik_test_{next(_TURN_KEYS)}"
@@ -600,6 +618,31 @@ async def test_admission_reports_what_it_did(store):
 
     assert admission.outcome == "created"
     assert admission.turn is not None
+
+
+async def test_first_admission_locks_profile_but_not_reasoning_effort(store):
+    await _ensure_session()
+    admission = await store.admit_chat_turn(
+        "user-1",
+        "1001",
+        "msg_1",
+        "text_1",
+        "ik_profile1",
+        _profile_turn_command("anthropic", "medium"),
+    )
+    assert admission.outcome == "created"
+
+    session = await store.get_chat_session("user-1", "1001")
+    assert session is not None
+    assert session.model_profile_id == "anthropic"
+    assert session.model_reasoning_effort == "medium"
+    assert session.model_profile_locked is True
+
+    changed = await store.update_chat_session_model_profile("user-1", "1001", "anthropic", "high")
+    assert changed is not None
+    assert changed.model_reasoning_effort == "high"
+    with pytest.raises(ValueError, match="profile is locked"):
+        await store.update_chat_session_model_profile("user-1", "1001", "openai", "high")
 
 
 async def test_a_repeat_of_a_request_resolves_to_the_turn_it_made(store):
@@ -3490,6 +3533,42 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
     assert [version.version for version in versions] == [2, 1]
     assert versions[0].comment == "Lower cap"
     assert versions[0].run_cost_budget_usd == 0.5
+
+
+async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_history(store):
+    created = await store.create_model_profile(_model_profile_data(), "admin")
+    async with AsyncSession(sql_module._get_engine()) as session:
+        current = await session.get(sql_module.ModelProfileRecord, created.profile_id)
+        assert current is not None
+        legacy_config = dict(current.config)
+        legacy_config["primary"] = {
+            **legacy_config["primary"],
+            "reasoning_effort": "high",
+        }
+        current.config = legacy_config
+        session.add(current)
+        version = (
+            await session.execute(
+                select(sql_module.ModelProfileVersionRecord).where(
+                    sql_module.ModelProfileVersionRecord.profile_id == created.profile_id
+                )
+            )
+        ).scalar_one()
+        version.config = legacy_config
+        version_id = version.id
+        session.add(version)
+        await session.commit()
+
+    loaded = await store.get_model_profile(created.profile_id)
+    versions = await store.list_model_profile_versions(created.profile_id)
+    assert loaded is not None
+    assert loaded.default_reasoning_effort == "medium"
+    assert loaded.primary.model_id == "openai/gpt-5"
+    assert versions[0].primary.model_id == "openai/gpt-5"
+    async with AsyncSession(sql_module._get_engine()) as session:
+        unchanged = await session.get(sql_module.ModelProfileVersionRecord, version_id)
+        assert unchanged is not None
+        assert unchanged.config["primary"]["reasoning_effort"] == "high"
 
 
 async def test_model_profile_default_cannot_be_disabled_without_replacement(store):

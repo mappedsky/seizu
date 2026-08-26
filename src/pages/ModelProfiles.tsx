@@ -30,7 +30,6 @@ import {
   type ModelProfile,
   type ModelProfilePayload,
   type ModelProfileVersion,
-  type ReasoningEffort,
   useModelProfileMutations,
   useModelProfilesList,
 } from 'src/hooks/useModelProfilesApi';
@@ -44,14 +43,7 @@ const stages = [
   'sandbox_subagent',
   'synthesizer',
 ] as const;
-const efforts: ReasoningEffort[] = [
-  '',
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-];
+const efforts = ['low', 'medium', 'high'] as const;
 
 function emptyPayload(): ModelProfilePayload {
   return {
@@ -59,9 +51,10 @@ function emptyPayload(): ModelProfilePayload {
     description: '',
     enabled: true,
     is_default: false,
-    primary: { model_id: '', reasoning_effort: '' },
-    economy: { model_id: '', reasoning_effort: '' },
+    primary: { model_id: '' },
+    economy: { model_id: '' },
     stage_overrides: {},
+    default_reasoning_effort: 'medium',
     run_cost_budget_usd: 1,
   };
 }
@@ -76,6 +69,7 @@ function editablePayload(profile: ModelProfile | null): ModelProfilePayload {
     primary: profile.primary,
     economy: profile.economy,
     stage_overrides: profile.stage_overrides,
+    default_reasoning_effort: profile.default_reasoning_effort,
     run_cost_budget_usd: profile.run_cost_budget_usd,
   };
 }
@@ -105,29 +99,20 @@ function ProfileDialog({
     Number.isFinite(runCostBudgetUsd) &&
     runCostBudgetUsd > 0 &&
     runCostBudgetUsd <= 10_000;
-  const updateChoice = (
-    kind: 'primary' | 'economy',
-    field: 'model_id' | 'reasoning_effort',
-    fieldValue: string,
-  ) =>
+  const updateChoice = (kind: 'primary' | 'economy', fieldValue: string) =>
     setValue((current) => ({
       ...current,
-      [kind]: { ...current[kind], [field]: fieldValue },
+      [kind]: { model_id: fieldValue },
     }));
   const updateOverride = (
     stage: string,
     kind: 'primary' | 'economy',
-    field: 'model_id' | 'reasoning_effort',
     fieldValue: string,
   ) =>
     setValue((current) => {
       const stageValue = current.stage_overrides[stage] ?? {};
       const choice = stageValue[kind] ?? {};
-      let overrideValue: string | null = fieldValue || null;
-      if (field === 'reasoning_effort') {
-        overrideValue = fieldValue === '__inherit__' ? null : fieldValue;
-      }
-      const nextChoice = { ...choice, [field]: overrideValue };
+      const nextChoice = { ...choice, model_id: fieldValue || null };
       return {
         ...current,
         stage_overrides: {
@@ -205,24 +190,28 @@ function ProfileDialog({
                 label="Model ID"
                 required
                 value={value[kind].model_id}
-                onChange={(e) => updateChoice(kind, 'model_id', e.target.value)}
+                onChange={(e) => updateChoice(kind, e.target.value)}
               />
-              <TextField
-                select
-                label="Reasoning effort"
-                value={value[kind].reasoning_effort}
-                onChange={(e) =>
-                  updateChoice(kind, 'reasoning_effort', e.target.value)
-                }
-              >
-                {efforts.map((effort) => (
-                  <MenuItem key={effort || 'provider'} value={effort}>
-                    {effort || 'Provider default'}
-                  </MenuItem>
-                ))}
-              </TextField>
             </Box>
           ))}
+          <TextField
+            select
+            label="Default reasoning level"
+            value={value.default_reasoning_effort}
+            onChange={(e) =>
+              setValue({
+                ...value,
+                default_reasoning_effort: e.target
+                  .value as ModelProfilePayload['default_reasoning_effort'],
+              })
+            }
+          >
+            {efforts.map((effort) => (
+              <MenuItem key={effort} value={effort}>
+                {effort}
+              </MenuItem>
+            ))}
+          </TextField>
           <Box sx={{ gridColumn: { md: '1 / -1' } }}>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
               Stage overrides
@@ -238,7 +227,7 @@ function ProfileDialog({
                   gap: 1,
                   gridTemplateColumns: {
                     xs: '1fr',
-                    md: '150px 1fr 150px 1fr 150px',
+                    md: '150px 1fr 1fr',
                   },
                   mb: 1,
                   alignItems: 'center',
@@ -248,42 +237,15 @@ function ProfileDialog({
                   {stage.replaceAll('_', ' ')}
                 </Typography>
                 {(['primary', 'economy'] as const).map((kind) => (
-                  <Box key={kind} sx={{ display: 'contents' }}>
-                    <TextField
-                      size="small"
-                      label={`${kind} model`}
-                      value={
-                        value.stage_overrides[stage]?.[kind]?.model_id ?? ''
-                      }
-                      onChange={(e) =>
-                        updateOverride(stage, kind, 'model_id', e.target.value)
-                      }
-                    />
-                    <TextField
-                      size="small"
-                      select
-                      label={`${kind} effort`}
-                      value={
-                        value.stage_overrides[stage]?.[kind]
-                          ?.reasoning_effort ?? '__inherit__'
-                      }
-                      onChange={(e) =>
-                        updateOverride(
-                          stage,
-                          kind,
-                          'reasoning_effort',
-                          e.target.value,
-                        )
-                      }
-                    >
-                      <MenuItem value="__inherit__">Inherit</MenuItem>
-                      {efforts.map((effort) => (
-                        <MenuItem key={effort || 'provider'} value={effort}>
-                          {effort || 'Provider default'}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                  </Box>
+                  <TextField
+                    key={kind}
+                    size="small"
+                    label={`${kind} model`}
+                    value={value.stage_overrides[stage]?.[kind]?.model_id ?? ''}
+                    onChange={(e) =>
+                      updateOverride(stage, kind, e.target.value)
+                    }
+                  />
                 ))}
               </Box>
             ))}

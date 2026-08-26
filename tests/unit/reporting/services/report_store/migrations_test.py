@@ -6,6 +6,8 @@ that already has the tables and columns it wants to add. Unguarded DDL there
 fails on every new install.
 """
 
+import json
+
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -164,5 +166,51 @@ async def test_chat_turn_migration_creates_the_current_schema_after_0006(tmp_pat
             "uq_chat_turns_one_running",
             "uq_chat_turns_idempotency_key",
         } <= indexes
+    finally:
+        await engine.dispose()
+
+
+async def test_reasoning_migration_adds_session_selection_without_rewriting_profiles(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reasoning-upgrade.db'}")
+    old_config = {
+        "primary": {"model_id": "anthropic/primary", "reasoning_effort": "high"},
+        "economy": {"model_id": "anthropic/economy", "reasoning_effort": "low"},
+        "stage_overrides": {"worker": {"primary": {"model_id": None, "reasoning_effort": "medium"}}},
+        "run_cost_budget_usd": 2,
+    }
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('0010_model_profiles')"))
+            await conn.execute(sa.text("CREATE TABLE chat_sessions (id INTEGER PRIMARY KEY, model_profile_id VARCHAR)"))
+            await conn.execute(
+                sa.text("CREATE TABLE model_profiles (profile_id VARCHAR PRIMARY KEY, config JSON NOT NULL)")
+            )
+            await conn.execute(
+                sa.text(
+                    "CREATE TABLE model_profile_versions ("
+                    "id INTEGER PRIMARY KEY, profile_id VARCHAR, version INTEGER, config JSON NOT NULL)"
+                )
+            )
+            await conn.execute(
+                sa.text("INSERT INTO model_profiles VALUES ('anthropic', :config)"),
+                {"config": json.dumps(old_config)},
+            )
+            await conn.execute(
+                sa.text("INSERT INTO model_profile_versions VALUES (1, 'anthropic', 1, :config)"),
+                {"config": json.dumps(old_config)},
+            )
+
+        await run_schema_migrations(engine)
+
+        columns = await _inspect(engine, lambda i: {c["name"] for c in i.get_columns("chat_sessions")})
+        assert {"model_reasoning_effort", "model_profile_locked"} <= columns
+        async with engine.connect() as conn:
+            current = json.loads((await conn.execute(sa.text("SELECT config FROM model_profiles"))).scalar_one())
+            version = json.loads(
+                (await conn.execute(sa.text("SELECT config FROM model_profile_versions"))).scalar_one()
+            )
+        assert current == old_config
+        assert version == old_config
     finally:
         await engine.dispose()

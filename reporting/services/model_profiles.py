@@ -11,6 +11,7 @@ from reporting.schema.model_profiles import (
     ModelProfileItem,
     ResolvedModelProfile,
     SelectableModelProfile,
+    SelectableReasoningEffort,
 )
 from reporting.services import chat_models, report_store
 
@@ -56,13 +57,13 @@ def _choice_for(profile: ModelProfileItem, role: str, *, economy: bool) -> Model
     selected = (override.economy if economy else override.primary) if override else None
     if selected is None:
         return base
-    return ModelChoice(
-        model_id=selected.model_id or base.model_id,
-        reasoning_effort=(base.reasoning_effort if selected.reasoning_effort is None else selected.reasoning_effort),
-    )
+    return ModelChoice(model_id=selected.model_id or base.model_id)
 
 
-def _profile_snapshot(profile: ModelProfileItem) -> ResolvedModelProfile:
+def _profile_snapshot(
+    profile: ModelProfileItem,
+    reasoning_effort: SelectableReasoningEffort,
+) -> ResolvedModelProfile:
     provenance = {
         "profile_id": profile.profile_id,
         "profile_name": profile.name,
@@ -77,12 +78,12 @@ def _profile_snapshot(profile: ModelProfileItem) -> ResolvedModelProfile:
             normal = chat_models.resolve(
                 role,
                 model_id=normal_choice.model_id,
-                reasoning_effort=normal_choice.reasoning_effort,
+                reasoning_effort=reasoning_effort,
             )
             cheap = chat_models.resolve(
                 role,
                 model_id=economy_choice.model_id,
-                reasoning_effort=economy_choice.reasoning_effort,
+                reasoning_effort=reasoning_effort,
             )
         else:
             normal = chat_models.resolve(role)
@@ -94,25 +95,29 @@ def _profile_snapshot(profile: ModelProfileItem) -> ResolvedModelProfile:
         profile_id=profile.profile_id,
         profile_name=profile.name,
         profile_version=profile.current_version,
+        reasoning_effort=reasoning_effort,
         cost_budget_usd=effective_cost_budget(profile.run_cost_budget_usd),
         primary_specs=primary,
         economy_specs=economy,
     )
 
 
-async def resolve(profile_id: str | None) -> ResolvedModelProfile:
+async def resolve(
+    profile_id: str | None,
+    reasoning_effort: SelectableReasoningEffort | None = None,
+) -> ResolvedModelProfile:
     enabled = await report_store.list_model_profiles(enabled_only=True)
     if profile_id:
         profile = next((item for item in enabled if item.profile_id == profile_id), None)
         if profile is None:
             raise ModelProfileUnavailable("The selected model profile is no longer available")
-        return _profile_snapshot(profile)
+        return _profile_snapshot(profile, reasoning_effort or profile.default_reasoning_effort)
     if not enabled:
         return environment_snapshot()
     default = next((item for item in enabled if item.is_default), None)
     if default is None:
         raise ModelProfileUnavailable("No default model profile is configured")
-    return _profile_snapshot(default)
+    return _profile_snapshot(default, reasoning_effort or default.default_reasoning_effort)
 
 
 async def selectable_profiles() -> list[SelectableModelProfile]:
@@ -123,6 +128,7 @@ async def selectable_profiles() -> list[SelectableModelProfile]:
             name=profile.name,
             description=profile.description,
             is_default=profile.is_default,
+            default_reasoning_effort=profile.default_reasoning_effort,
             run_cost_budget_usd=profile.run_cost_budget_usd,
             effective_cost_budget_usd=effective_cost_budget(profile.run_cost_budget_usd),
         )

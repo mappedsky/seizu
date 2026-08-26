@@ -401,7 +401,12 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
         return sessions.get((user_id, thread_id))
 
-    async def create_chat_session(user_id: str, title: str, model_profile_id: str | None = None) -> ChatSessionItem:
+    async def create_chat_session(
+        user_id: str,
+        title: str,
+        model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem:
         nonlocal id_counter
         id_counter += 1
         thread_id = str(id_counter)
@@ -412,6 +417,7 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
             created_at=now,
             updated_at=now,
             model_profile_id=model_profile_id,
+            model_reasoning_effort=model_reasoning_effort,
         )
         sessions[(user_id, thread_id)] = session
         return session
@@ -432,6 +438,27 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
         sessions[(user_id, thread_id)] = updated
         return updated
 
+    async def update_chat_session_model_profile(
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem | None:
+        existing_session = sessions.get((user_id, thread_id))
+        if existing_session is None:
+            return None
+        if existing_session.model_profile_locked and existing_session.model_profile_id != model_profile_id:
+            raise ValueError("the model profile is locked for this conversation")
+        updated = existing_session.model_copy(
+            update={
+                "model_profile_id": model_profile_id,
+                "model_reasoning_effort": model_reasoning_effort,
+                "updated_at": _now(),
+            }
+        )
+        sessions[(user_id, thread_id)] = updated
+        return updated
+
     async def delete_chat_session(user_id: str, thread_id: str) -> bool:
         return sessions.pop((user_id, thread_id), None) is not None
 
@@ -444,6 +471,10 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     mocker.patch("reporting.routes.chat.report_store.create_chat_session", create_chat_session)
     mocker.patch("reporting.routes.chat.report_store.touch_chat_session", touch_chat_session)
     mocker.patch("reporting.routes.chat.report_store.update_chat_session_title", update_chat_session_title)
+    mocker.patch(
+        "reporting.routes.chat.report_store.update_chat_session_model_profile",
+        update_chat_session_model_profile,
+    )
     mocker.patch("reporting.routes.chat.report_store.delete_chat_session", delete_chat_session)
     mocker.patch(
         "reporting.routes.chat.report_store.claim_chat_session_for_retirement",
@@ -1014,6 +1045,44 @@ async def test_chat_sessions_list_sorts_by_updated_at(mocker):
 
     assert response.status_code == 200
     assert [session["thread_id"] for session in response.json()["sessions"]] == [old_thread_id, new_thread_id]
+
+
+async def test_locked_session_can_change_reasoning_but_not_profile(mocker):
+    sessions = _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    sessions[("test-user-id", "1001")] = sessions[("test-user-id", "1001")].model_copy(
+        update={
+            "model_profile_id": "anthropic",
+            "model_reasoning_effort": "medium",
+            "model_profile_locked": True,
+        }
+    )
+
+    async def resolve(profile_id, reasoning_effort=None):
+        return ResolvedModelProfile(
+            source="profile",
+            profile_id=profile_id,
+            profile_name=profile_id,
+            profile_version=1,
+            reasoning_effort=reasoning_effort or "medium",
+            cost_budget_usd=1,
+        )
+
+    mocker.patch("reporting.routes.chat.model_profiles.resolve", side_effect=resolve)
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        effort = await client.patch(
+            "/api/v1/chat/sessions/1001",
+            json={"reasoning_effort": "high"},
+        )
+        profile = await client.patch(
+            "/api/v1/chat/sessions/1001",
+            json={"model_profile_id": "deepseek", "reasoning_effort": "high"},
+        )
+
+    assert effort.status_code == 200
+    assert effort.json()["model_reasoning_effort"] == "high"
+    assert profile.status_code == 409
+    assert "locked" in profile.json()["error"].lower()
 
 
 async def test_create_chat_session_rejects_client_thread_id(mocker):

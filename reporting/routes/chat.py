@@ -87,8 +87,16 @@ async def admit_chat_turn(
     selected_profile_id = (
         body.model_profile_id if "model_profile_id" in body.model_fields_set else session.model_profile_id
     )
+    selected_reasoning_effort = (
+        body.reasoning_effort if "reasoning_effort" in body.model_fields_set else session.model_reasoning_effort
+    )
+    if session.model_profile_locked and selected_profile_id != session.model_profile_id:
+        raise HTTPException(
+            status_code=409,
+            detail="MODEL_PROFILE_LOCKED: Start a new conversation to use a different model profile",
+        )
     try:
-        resolved_profile = await model_profiles.resolve(selected_profile_id)
+        resolved_profile = await model_profiles.resolve(selected_profile_id, selected_reasoning_effort)
     except model_profiles.ModelProfileUnavailable as exc:
         raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
     try:
@@ -113,6 +121,11 @@ async def admit_chat_turn(
         )
     if admission.outcome == "busy":
         raise HTTPException(status_code=409, detail="This conversation already has a turn in progress")
+    if admission.outcome == "profile_locked":
+        raise HTTPException(
+            status_code=409,
+            detail="MODEL_PROFILE_LOCKED: Start a new conversation to use a different model profile",
+        )
     if admission.turn is None:  # pragma: no cover - defensive
         raise HTTPException(status_code=503, detail="Could not start this turn; please try again")
     if admission.outcome == "existing":
@@ -128,21 +141,9 @@ async def admit_chat_turn(
             "model_profile_id": admitted_profile.profile_id,
             "model_profile_name": admitted_profile.profile_name,
             "model_profile_version": admitted_profile.profile_version,
+            "reasoning_effort": admitted_profile.reasoning_effort,
         },
     )
-    if admission.outcome == "created" and admitted_profile.profile_id != session.model_profile_id:
-        try:
-            await report_store.update_chat_session_model_profile(
-                current.user.user_id, thread_id, admitted_profile.profile_id
-            )
-        except Exception:
-            # The immutable turn already carries the right snapshot. A failure
-            # to remember it must not turn a successful admission into an
-            # ambiguous client retry.
-            logger.exception(
-                "Could not remember admitted model profile",
-                extra={"thread_id": thread_id, "turn_id": admission.turn.turn_id},
-            )
     return ChatTurnAdmissionResponse(turn_id=admission.turn.turn_id, status=admission.outcome)
 
 
@@ -381,11 +382,14 @@ async def create_chat_session(
     """Create a new chat session and return it."""
     if body.model_profile_id:
         try:
-            await model_profiles.resolve(body.model_profile_id)
+            await model_profiles.resolve(body.model_profile_id, body.reasoning_effort)
         except model_profiles.ModelProfileUnavailable as exc:
             raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
     return await report_store.create_chat_session(
-        current.user.user_id, body.title, model_profile_id=body.model_profile_id
+        current.user.user_id,
+        body.title,
+        model_profile_id=body.model_profile_id,
+        model_reasoning_effort=body.reasoning_effort,
     )
 
 
@@ -407,16 +411,31 @@ async def update_chat_session(
     thread_id: str = Path(min_length=1, max_length=32, pattern=CHAT_THREAD_ID_PATTERN),
     current: CurrentUser = Depends(require_permission(Permission.CHAT_USE)),
 ) -> ChatSessionItem:
-    """Update a chat session's title or remembered model profile."""
-    if "model_profile_id" in body.model_fields_set:
-        if body.model_profile_id:
+    """Update a chat session title or its profile reasoning selection."""
+    selection_fields = {"model_profile_id", "reasoning_effort"} & body.model_fields_set
+    if selection_fields:
+        existing = await report_store.get_chat_session(current.user.user_id, thread_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        profile_id = body.model_profile_id if "model_profile_id" in body.model_fields_set else existing.model_profile_id
+        reasoning_effort = (
+            body.reasoning_effort if "reasoning_effort" in body.model_fields_set else existing.model_reasoning_effort
+        )
+        if profile_id:
             try:
-                await model_profiles.resolve(body.model_profile_id)
+                resolved = await model_profiles.resolve(profile_id, reasoning_effort)
             except model_profiles.ModelProfileUnavailable as exc:
                 raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_UNAVAILABLE: {exc}") from exc
-        result = await report_store.update_chat_session_model_profile(
-            current.user.user_id, thread_id, body.model_profile_id
-        )
+            reasoning_effort = resolved.reasoning_effort
+        try:
+            result = await report_store.update_chat_session_model_profile(
+                current.user.user_id,
+                thread_id,
+                profile_id,
+                reasoning_effort,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"MODEL_PROFILE_LOCKED: {exc}") from exc
     else:
         result = await report_store.update_chat_session_title(current.user.user_id, thread_id, body.title or "")
     if result is None:

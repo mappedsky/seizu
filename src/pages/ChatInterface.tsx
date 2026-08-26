@@ -21,8 +21,10 @@ import {
   Card,
   Chip,
   FormControl,
+  FormHelperText,
   IconButton,
   InputLabel,
+  ListSubheader,
   MenuItem,
   Select,
   Tooltip,
@@ -50,6 +52,7 @@ import { useChatHistory } from 'src/hooks/useChatHistory';
 import { useChatLocalStorage } from 'src/hooks/useChatLocalStorage';
 import { useChatSessions } from 'src/hooks/useChatSessions';
 import {
+  type ReasoningEffort,
   type SelectableModelProfile,
   useSelectableModelProfiles,
 } from 'src/hooks/useModelProfilesApi';
@@ -158,34 +161,69 @@ type SeizuChatMessage = UIMessage<
 
 const CHAT_LANDING_PATH = '/app/chat';
 
-function ModelProfileSelect({
+export function ModelProfileSelect({
   profiles,
-  value,
+  profileId,
+  reasoningEffort,
+  lockedProfileId,
   disabled,
   onChange,
 }: {
   profiles: SelectableModelProfile[];
-  value: string;
+  profileId: string;
+  reasoningEffort: ReasoningEffort | '';
+  lockedProfileId?: string | null;
   disabled: boolean;
-  onChange: (profileId: string) => void;
+  onChange: (profileId: string, reasoningEffort: ReasoningEffort) => void;
 }) {
   if (profiles.length === 0) return null;
+  const options = profiles.flatMap((profile) =>
+    profile.reasoning_efforts.map((effort) => ({
+      effort,
+      key: `${profile.profile_id}:${effort}`,
+      profile,
+    })),
+  );
+  const value =
+    profileId && reasoningEffort ? `${profileId}:${reasoningEffort}` : '';
   return (
     <FormControl disabled={disabled} fullWidth size="small" sx={{ mb: 1 }}>
-      <InputLabel id="chat-model-profile-label">Model profile</InputLabel>
+      <InputLabel id="chat-model-profile-label">Model and reasoning</InputLabel>
       <Select
-        label="Model profile"
+        label="Model and reasoning"
         labelId="chat-model-profile-label"
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => {
+          const selected = options.find(
+            (option) => option.key === event.target.value,
+          );
+          if (selected) onChange(selected.profile.profile_id, selected.effort);
+        }}
         value={value}
       >
-        {profiles.map((profile) => (
-          <MenuItem key={profile.profile_id} value={profile.profile_id}>
+        {profiles.flatMap((profile) => [
+          <ListSubheader key={`${profile.profile_id}:group`}>
             {profile.name}
             {profile.is_default ? ' (default)' : ''}
-          </MenuItem>
-        ))}
+          </ListSubheader>,
+          ...profile.reasoning_efforts.map((effort) => (
+            <MenuItem
+              disabled={Boolean(
+                lockedProfileId && lockedProfileId !== profile.profile_id,
+              )}
+              key={`${profile.profile_id}:${effort}`}
+              value={`${profile.profile_id}:${effort}`}
+            >
+              {effort[0].toUpperCase() + effort.slice(1)}
+            </MenuItem>
+          )),
+        ])}
       </Select>
+      {lockedProfileId ? (
+        <FormHelperText>
+          Model profile is locked for this conversation; reasoning may still
+          change.
+        </FormHelperText>
+      ) : null}
     </FormControl>
   );
 }
@@ -781,14 +819,22 @@ export default function ChatInterface() {
     error: modelProfilesError,
   } = useSelectableModelProfiles(sessionsFeedEnabled);
   const [landingProfileId, setLandingProfileId] = useState('');
+  const [landingReasoningEffort, setLandingReasoningEffort] = useState<
+    ReasoningEffort | ''
+  >('');
   const [profileUpdateError, setProfileUpdateError] = useState<string | null>(
     null,
   );
 
   useEffect(() => {
-    if (!landingProfileId && defaultProfileId)
+    if (!landingProfileId && defaultProfileId) {
+      const profile = modelProfiles.find(
+        (item) => item.profile_id === defaultProfileId,
+      );
       setLandingProfileId(defaultProfileId);
-  }, [defaultProfileId, landingProfileId]);
+      setLandingReasoningEffort(profile?.default_reasoning_effort ?? 'medium');
+    }
+  }, [defaultProfileId, landingProfileId, modelProfiles]);
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -1342,10 +1388,17 @@ export default function ChatInterface() {
       setStartError(null);
       setCreatingSession(true);
       try {
-        if (modelProfiles.length > 0 && !landingProfileId) {
+        if (
+          modelProfiles.length > 0 &&
+          (!landingProfileId || !landingReasoningEffort)
+        ) {
           throw new Error('Choose a model profile');
         }
-        const session = await createSession('', landingProfileId || null);
+        const session = await createSession(
+          '',
+          landingProfileId || null,
+          landingReasoningEffort || null,
+        );
         // Admitted before anything is navigated or re-keyed, so the question is
         // the server's before the UI has to be right about anything. If this
         // throws, the turn does not exist and the user still has their text.
@@ -1368,6 +1421,7 @@ export default function ChatInterface() {
     [
       createSession,
       landingProfileId,
+      landingReasoningEffort,
       modelProfiles.length,
       navigate,
       setMessages,
@@ -1377,13 +1431,17 @@ export default function ChatInterface() {
   );
 
   const handleProfileChange = useCallback(
-    async (profileId: string) => {
+    async (profileId: string, reasoningEffort: ReasoningEffort) => {
       if (!activeThreadId) return;
       setProfileUpdateError(null);
       try {
-        await updateSessionProfile(activeThreadId, profileId);
-      } catch {
-        setProfileUpdateError('Failed to change the model profile.');
+        await updateSessionProfile(activeThreadId, profileId, reasoningEffort);
+      } catch (reason) {
+        setProfileUpdateError(
+          reason instanceof Error
+            ? reason.message
+            : 'Failed to change the model profile.',
+        );
       }
     },
     [activeThreadId, updateSessionProfile],
@@ -1675,9 +1733,13 @@ export default function ChatInterface() {
             ) : null}
             <ModelProfileSelect
               disabled={creatingSession || modelProfilesLoading}
-              onChange={setLandingProfileId}
+              onChange={(profileId, reasoningEffort) => {
+                setLandingProfileId(profileId);
+                setLandingReasoningEffort(reasoningEffort);
+              }}
               profiles={modelProfiles}
-              value={landingProfileId}
+              profileId={landingProfileId}
+              reasoningEffort={landingReasoningEffort}
             />
             <ChatInput
               // Disabled rather than busy while the session is being created:
@@ -2176,9 +2238,25 @@ export default function ChatInterface() {
 
         <ModelProfileSelect
           disabled={busy || modelProfilesLoading}
-          onChange={(profileId) => void handleProfileChange(profileId)}
+          lockedProfileId={
+            activeSession?.model_profile_locked || messages.length > 0
+              ? (activeSession?.model_profile_id ?? null)
+              : null
+          }
+          onChange={(profileId, reasoningEffort) =>
+            void handleProfileChange(profileId, reasoningEffort)
+          }
           profiles={modelProfiles}
-          value={activeSession?.model_profile_id ?? defaultProfileId ?? ''}
+          profileId={activeSession?.model_profile_id ?? defaultProfileId ?? ''}
+          reasoningEffort={
+            activeSession?.model_reasoning_effort ??
+            modelProfiles.find(
+              (profile) =>
+                profile.profile_id ===
+                (activeSession?.model_profile_id ?? defaultProfileId),
+            )?.default_reasoning_effort ??
+            ''
+          }
         />
 
         <ChatInput
