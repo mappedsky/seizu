@@ -174,8 +174,11 @@ export function ModelProfileSelect({
   disabled: boolean;
   onChange: (profileId: string, reasoningEffort: ReasoningEffort) => void;
 }) {
-  if (profiles.length === 0) return null;
-  const options = profiles.flatMap((profile) =>
+  const visibleProfiles = lockedProfileId
+    ? profiles.filter((profile) => profile.profile_id === lockedProfileId)
+    : profiles;
+  if (visibleProfiles.length === 0) return null;
+  const options = visibleProfiles.flatMap((profile) =>
     profile.reasoning_efforts.map((effort) => ({
       effort,
       key: `${profile.profile_id}:${effort}`,
@@ -203,26 +206,21 @@ export function ModelProfileSelect({
             (option) => option.key === selectedValue,
           );
           if (!selected) return '';
-          const effortLabel =
-            selected.effort[0].toUpperCase() + selected.effort.slice(1);
-          return `${selected.profile.name} · ${effortLabel}`;
+          return `${selected.profile.name} · ${selected.effort}`;
         }}
         value={value}
       >
-        {profiles.flatMap((profile) => [
+        {visibleProfiles.flatMap((profile) => [
           <ListSubheader key={`${profile.profile_id}:group`}>
             {profile.name}
             {profile.is_default ? ' (default)' : ''}
           </ListSubheader>,
           ...profile.reasoning_efforts.map((effort) => (
             <MenuItem
-              disabled={Boolean(
-                lockedProfileId && lockedProfileId !== profile.profile_id,
-              )}
               key={`${profile.profile_id}:${effort}`}
               value={`${profile.profile_id}:${effort}`}
             >
-              {effort[0].toUpperCase() + effort.slice(1)}
+              {effort}
             </MenuItem>
           )),
         ])}

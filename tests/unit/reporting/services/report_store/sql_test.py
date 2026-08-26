@@ -3528,6 +3528,7 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
             is_default=True,
             economy={"model_id": "openai/gpt-5-mini", "reasoning_effort": "minimal"},
             stage_overrides={"worker_summary": {"reasoning_effort": "none"}},
+            user_reasoning_efforts=["low", "medium"],
             run_cost_budget_usd=0.5,
         ),
         "admin",
@@ -3540,6 +3541,7 @@ async def test_model_profiles_are_versioned_and_keep_one_default(store):
     assert versions[0].comment == "Lower cap"
     assert versions[0].run_cost_budget_usd == 0.5
     assert versions[0].economy.reasoning_effort == "minimal"
+    assert versions[0].user_reasoning_efforts == ("low", "medium")
     assert versions[0].stage_overrides["worker_summary"].reasoning_effort == "none"
 
 
@@ -3549,6 +3551,7 @@ async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_his
         current = await session.get(sql_module.ModelProfileRecord, created.profile_id)
         assert current is not None
         legacy_config = dict(current.config)
+        legacy_config.pop("user_reasoning_efforts", None)
         legacy_config["primary"] = {
             **legacy_config["primary"],
             "reasoning_effort": "high",
@@ -3571,11 +3574,13 @@ async def test_model_profiles_read_legacy_static_reasoning_without_rewriting_his
     versions = await store.list_model_profile_versions(created.profile_id)
     assert loaded is not None
     assert loaded.default_reasoning_effort == "medium"
+    assert loaded.user_reasoning_efforts == ("low", "medium", "high")
     assert loaded.primary.model_id == "openai/gpt-5"
     assert versions[0].primary.model_id == "openai/gpt-5"
     async with AsyncSession(sql_module._get_engine()) as session:
         unchanged = await session.get(sql_module.ModelProfileVersionRecord, version_id)
         assert unchanged is not None
+        assert "user_reasoning_efforts" not in unchanged.config
         assert unchanged.config["primary"]["reasoning_effort"] == "high"
 
 

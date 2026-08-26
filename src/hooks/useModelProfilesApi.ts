@@ -32,6 +32,7 @@ export interface ModelProfilePayload {
   primary: ModelChoice;
   economy: EconomyModelChoice;
   stage_overrides: Record<string, StageModelOverride>;
+  user_reasoning_efforts: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort;
   run_cost_budget_usd: number;
 }

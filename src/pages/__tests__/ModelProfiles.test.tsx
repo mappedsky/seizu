@@ -87,12 +87,16 @@ describe('ModelProfiles', () => {
       screen.getByRole('textbox', { name: 'Economy model ID' }),
       { target: { value: 'economy-model' } },
     );
+    const none = screen.getByRole('checkbox', { name: 'none' });
+    expect(none).not.toBeChecked();
+    fireEvent.click(none);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() =>
       expect(create).toHaveBeenCalledWith(
         expect.objectContaining({
           run_cost_budget_usd: 2.5,
+          user_reasoning_efforts: ['none', 'low', 'medium', 'high'],
         }),
       ),
     );
@@ -119,6 +123,7 @@ describe('ModelProfiles', () => {
               reasoning_effort: 'minimal',
             },
           },
+          user_reasoning_efforts: ['low', 'medium', 'high'],
           default_reasoning_effort: 'medium',
           run_cost_budget_usd: 2.5,
           current_version: 3,

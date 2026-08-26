@@ -43,22 +43,24 @@ Tool and skill calls also require the *underlying* MCP permission (for example `
 Admins manage model profiles from **Model Profiles** in the app sidebar. A
 profile names a base primary model and default user reasoning level, one economy
 fallback model and reasoning level, optional primary model and reasoning
-overrides for individual chat stages, and a per-run USD cost cap. A stage whose
+overrides for individual chat stages, the reasoning levels users may select,
+and a per-run USD cost cap. A stage whose
 reasoning is **Inherit base** uses the user's selected level; selecting an
 explicit value fixes that stage to the admin's value. Each save creates a
 version. `model_profiles:read`,
 `model_profiles:write`, and `model_profiles:delete` are granted to the built-in
 Admin role.
 
-Every user with `chat:use` selects one of LiteLLM's `default`, `none`, `minimal`,
-`low`, `medium`, `high`, or `xhigh` levels beneath an enabled profile. The first
-admitted turn locks that conversation to the profile, while
-the reasoning level remains changeable between turns. The selection affects
+Every user with `chat:use` selects one of the levels the profile's admin made
+available; new profiles offer `low`, `medium`, and `high` by default. The full
+admin vocabulary is LiteLLM's `default`, `none`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`. The first admitted turn locks that conversation to the
+profile, while the reasoning level remains changeable between turns. The selector
+then shows only that profile and its allowed levels. The selection affects
 stages whose reasoning inherits the base; fixed stage overrides and the economy
 fallback retain their configured reasoning. Start a new conversation to use
 another profile. If a locked conversation's profile is later disabled or
-deleted, start a new
-conversation; Seizu does not substitute another profile. The full resolved
+deleted, start a new conversation; Seizu does not substitute another profile. The full resolved
 choice is captured when a turn is admitted, so editing a profile does not alter
 a running turn.
 

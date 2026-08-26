@@ -65,6 +65,9 @@ class ModelProfileConfig(BaseModel):
     primary: ModelChoice
     economy: EconomyModelChoice
     stage_overrides: dict[str, StageModelOverride] = Field(default_factory=dict)
+    user_reasoning_efforts: tuple[SelectableReasoningEffort, ...] = Field(
+        default=("low", "medium", "high"), min_length=1
+    )
     default_reasoning_effort: SelectableReasoningEffort = "medium"
     run_cost_budget_usd: float = Field(gt=0, le=10_000)
 
@@ -86,6 +89,10 @@ class ModelProfileConfig(BaseModel):
         unknown = set(self.stage_overrides) - PROFILE_STAGES
         if unknown:
             raise ValueError(f"unknown profile stages: {', '.join(sorted(unknown))}")
+        if len(set(self.user_reasoning_efforts)) != len(self.user_reasoning_efforts):
+            raise ValueError("user reasoning levels must be unique")
+        if self.default_reasoning_effort not in self.user_reasoning_efforts:
+            raise ValueError("default user reasoning must be user-selectable")
         return self
 
 
@@ -140,15 +147,7 @@ class SelectableModelProfile(BaseModel):
     description: str
     is_default: bool
     default_reasoning_effort: SelectableReasoningEffort
-    reasoning_efforts: tuple[SelectableReasoningEffort, ...] = (
-        "default",
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-    )
+    reasoning_efforts: tuple[SelectableReasoningEffort, ...]
     run_cost_budget_usd: float
     effective_cost_budget_usd: float
 

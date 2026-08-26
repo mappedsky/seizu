@@ -1,3 +1,5 @@
+import pytest
+
 from reporting.schema.model_profiles import ModelProfileItem
 from reporting.services import model_profiles
 from reporting.services.chat_models import ModelSpec
@@ -25,6 +27,11 @@ def _profile(**updates) -> ModelProfileItem:
     }
     data.update(updates)
     return ModelProfileItem.model_validate(data)
+
+
+def test_profile_default_reasoning_must_be_user_selectable():
+    with pytest.raises(ValueError, match="default user reasoning must be user-selectable"):
+        _profile(user_reasoning_efforts=("low", "high"))
 
 
 async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
@@ -94,7 +101,7 @@ async def test_empty_catalog_uses_environment_snapshot(mocker):
     assert result.profile_id is None
 
 
-async def test_selectable_profiles_expose_litellm_reasoning_vocabulary(mocker):
+async def test_selectable_profiles_expose_only_the_profiles_allowed_efforts(mocker):
     mocker.patch(
         "reporting.services.model_profiles.report_store.list_model_profiles",
         mocker.AsyncMock(return_value=[_profile()]),
@@ -102,15 +109,21 @@ async def test_selectable_profiles_expose_litellm_reasoning_vocabulary(mocker):
 
     [profile] = await model_profiles.selectable_profiles()
 
-    assert profile.reasoning_efforts == (
-        "default",
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh",
+    assert profile.reasoning_efforts == ("low", "medium", "high")
+
+
+async def test_profile_rejects_a_reasoning_level_the_admin_did_not_offer(mocker):
+    mocker.patch(
+        "reporting.services.model_profiles.report_store.list_model_profiles",
+        mocker.AsyncMock(return_value=[_profile(user_reasoning_efforts=("low", "medium"))]),
     )
+
+    try:
+        await model_profiles.resolve("profile-1", "high")
+    except model_profiles.ModelProfileUnavailable as exc:
+        assert "reasoning level is not available" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("an unavailable reasoning level was accepted")
 
 
 def test_global_cost_cap_remains_the_hard_ceiling(mocker):

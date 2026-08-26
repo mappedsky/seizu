@@ -110,13 +110,19 @@ async def resolve(
         profile = next((item for item in enabled if item.profile_id == profile_id), None)
         if profile is None:
             raise ModelProfileUnavailable("The selected model profile is no longer available")
-        return _profile_snapshot(profile, reasoning_effort or profile.default_reasoning_effort)
+        selected_effort = reasoning_effort or profile.default_reasoning_effort
+        if selected_effort not in profile.user_reasoning_efforts:
+            raise ModelProfileUnavailable("The selected reasoning level is not available for this model profile")
+        return _profile_snapshot(profile, selected_effort)
     if not enabled:
         return environment_snapshot()
     default = next((item for item in enabled if item.is_default), None)
     if default is None:
         raise ModelProfileUnavailable("No default model profile is configured")
-    return _profile_snapshot(default, reasoning_effort or default.default_reasoning_effort)
+    selected_effort = reasoning_effort or default.default_reasoning_effort
+    if selected_effort not in default.user_reasoning_efforts:
+        raise ModelProfileUnavailable("The selected reasoning level is not available for this model profile")
+    return _profile_snapshot(default, selected_effort)
 
 
 async def selectable_profiles() -> list[SelectableModelProfile]:
@@ -128,6 +134,7 @@ async def selectable_profiles() -> list[SelectableModelProfile]:
             description=profile.description,
             is_default=profile.is_default,
             default_reasoning_effort=profile.default_reasoning_effort,
+            reasoning_efforts=profile.user_reasoning_efforts,
             run_cost_budget_usd=profile.run_cost_budget_usd,
             effective_cost_budget_usd=effective_cost_budget(profile.run_cost_budget_usd),
         )

@@ -2692,11 +2692,12 @@ one: it yields parsed objects, not chunks.
 `ChatTurnCommand.resolved_model_profile`, `ChatInterface.tsx`
 
 Admins manage versioned model profiles in the database. Every holder of
-`chat:use` selects a profile plus `low`, `medium`, or `high`; the UI groups those
-levels beneath each profile. The first admitted turn atomically locks the
-profile family on the session, while its reasoning level remains selectable
-between turns. The resolved pair is copied as a complete snapshot into each
-admitted turn.
+`chat:use` selects a profile plus one of its admin-configured user reasoning
+levels; profiles default to `low`, `medium`, and `high`. The UI groups those
+levels beneath each profile, then shows only the locked profile after the first
+admitted turn atomically locks its family on the session. Its reasoning level
+remains selectable between turns. The resolved pair is copied as a complete
+snapshot into each admitted turn.
 Scheduled chats and `agent_chat` workflow activities use the same catalog and
 snapshot their selection before Temporal dispatch. A deleted or disabled
 explicit choice never silently falls through to another profile: schedules and
@@ -2712,10 +2713,10 @@ not duplicated per stage. Router and verifier continue to resolve from
 deployment settings. The run cost ceiling is the lower positive value of the
 profile cap and `CHAT_RUN_COST_BUDGET_USD`.
 
-The selectable vocabulary is LiteLLM's fixed `default`, `none`, `minimal`,
-`low`, `medium`, `high`, and `xhigh` set. `default` is rendered by omitting an
-effort so it remains safe for provider adapters whose nominal `default` mapping
-is not accepted by every underlying model.
+Admins choose the user-visible subset from LiteLLM's fixed `default`, `none`,
+`minimal`, `low`, `medium`, `high`, and `xhigh` vocabulary. `default` is
+rendered by omitting an effort so it remains safe for provider adapters whose
+nominal `default` mapping is not accepted by every underlying model.
 
 **Why:** changing effort keeps the same model family, while changing profile
 families moves the request to another model and guarantees that the next turn

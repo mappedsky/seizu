@@ -9,6 +9,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControlLabel,
+  FormGroup,
   IconButton,
   MenuItem,
   Paper,
@@ -76,6 +77,7 @@ function emptyPayload(): ModelProfilePayload {
     primary: { model_id: '' },
     economy: { model_id: '', reasoning_effort: 'medium' },
     stage_overrides: {},
+    user_reasoning_efforts: ['low', 'medium', 'high'],
     default_reasoning_effort: 'medium',
     run_cost_budget_usd: 1,
   };
@@ -91,6 +93,7 @@ function editablePayload(profile: ModelProfile | null): ModelProfilePayload {
     primary: profile.primary,
     economy: profile.economy,
     stage_overrides: profile.stage_overrides,
+    user_reasoning_efforts: profile.user_reasoning_efforts,
     default_reasoning_effort: profile.default_reasoning_effort,
     run_cost_budget_usd: profile.run_cost_budget_usd,
   };
@@ -144,6 +147,27 @@ function ProfileDialog({
           ...current.stage_overrides,
           [stage]: nextStage,
         },
+      };
+    });
+  const updateUserReasoningEffort = (
+    effort: ConfiguredReasoningEffort,
+    selected: boolean,
+  ) =>
+    setValue((current) => {
+      const nextEfforts = efforts.filter((candidate) =>
+        candidate === effort
+          ? selected
+          : current.user_reasoning_efforts.includes(candidate),
+      );
+      if (nextEfforts.length === 0) return current;
+      return {
+        ...current,
+        user_reasoning_efforts: nextEfforts,
+        default_reasoning_effort: nextEfforts.includes(
+          current.default_reasoning_effort,
+        )
+          ? current.default_reasoning_effort
+          : nextEfforts[0],
       };
     });
   const submit = async () => {
@@ -241,12 +265,37 @@ function ProfileDialog({
                 })
               }
             >
-              {efforts.map((effort) => (
+              {value.user_reasoning_efforts.map((effort) => (
                 <MenuItem key={effort} value={effort}>
                   {effort}
                 </MenuItem>
               ))}
             </TextField>
+            <Box>
+              <Typography variant="subtitle2">
+                User-selectable reasoning
+              </Typography>
+              <FormGroup row>
+                {efforts.map((effort) => (
+                  <FormControlLabel
+                    key={effort}
+                    control={
+                      <Checkbox
+                        checked={value.user_reasoning_efforts.includes(effort)}
+                        onChange={(event) =>
+                          updateUserReasoningEffort(
+                            effort,
+                            event.target.checked,
+                          )
+                        }
+                        size="small"
+                      />
+                    }
+                    label={effort}
+                  />
+                ))}
+              </FormGroup>
+            </Box>
           </Box>
           <Box sx={{ display: 'grid', gap: 1 }}>
             <Typography variant="subtitle2">Economy fallback</Typography>

@@ -37,6 +37,9 @@ interface ChatInputProps {
   onBypassConfirmationsChange?: (value: boolean) => void;
 }
 
+const DEFAULT_INPUT_HEIGHT = 140;
+const MAX_AUTO_INPUT_HEIGHT = DEFAULT_INPUT_HEIGHT * 2;
+
 export default memo(function ChatInput({
   busy,
   disabled,
@@ -48,22 +51,50 @@ export default memo(function ChatInput({
   onBypassConfirmationsChange,
 }: ChatInputProps) {
   const [input, setInput] = useState('');
-  const [inputHeight, setInputHeight] = useState(140);
+  const [inputHeight, setInputHeight] = useState(DEFAULT_INPUT_HEIGHT);
   const inputHeightRef = useRef(inputHeight);
   inputHeightRef.current = inputHeight;
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
+  const autoSizingEnabledRef = useRef(true);
+  const dragStartYRef = useRef(0);
+  const dragStartHeightRef = useRef(0);
 
   const handleInputChange = (
     event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
   ) => {
     setInput(event.target.value);
+    if (
+      !autoSizingEnabledRef.current ||
+      !(event.target instanceof HTMLTextAreaElement)
+    ) {
+      return;
+    }
+    const textarea = event.target;
+    const nonTextHeight = Math.max(
+      0,
+      inputHeightRef.current - textarea.clientHeight,
+    );
+    const previousHeight = textarea.style.getPropertyValue('height');
+    const previousPriority = textarea.style.getPropertyPriority('height');
+    textarea.style.setProperty('height', '0px', 'important');
+    const contentHeight = textarea.scrollHeight;
+    if (previousHeight) {
+      textarea.style.setProperty('height', previousHeight, previousPriority);
+    } else {
+      textarea.style.removeProperty('height');
+    }
+    setInputHeight(
+      Math.max(
+        DEFAULT_INPUT_HEIGHT,
+        Math.min(MAX_AUTO_INPUT_HEIGHT, contentHeight + nonTextHeight),
+      ),
+    );
   };
 
   const submitInput = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed || busy || disabled) return false;
     setInput('');
+    if (autoSizingEnabledRef.current) setInputHeight(DEFAULT_INPUT_HEIGHT);
     onSubmit(trimmed);
     return true;
   }, [busy, disabled, input, onSubmit]);
@@ -82,15 +113,16 @@ export default memo(function ChatInput({
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    dragStartY.current = e.clientY;
-    dragStartHeight.current = inputHeightRef.current;
+    autoSizingEnabledRef.current = false;
+    dragStartYRef.current = e.clientY;
+    dragStartHeightRef.current = inputHeightRef.current;
     document.body.style.cursor = 'ns-resize';
     document.body.style.userSelect = 'none';
 
     const handleMouseMove = (ev: MouseEvent) => {
-      const delta = dragStartY.current - ev.clientY;
+      const delta = dragStartYRef.current - ev.clientY;
       setInputHeight(
-        Math.max(100, Math.min(420, dragStartHeight.current + delta)),
+        Math.max(100, Math.min(420, dragStartHeightRef.current + delta)),
       );
     };
 
@@ -129,7 +161,11 @@ export default memo(function ChatInput({
           '&:hover::after': { bgcolor: 'primary.main' },
         }}
       />
-      <Box sx={{ flexShrink: 0, height: inputHeight }}>
+      <Box
+        data-testid="chat-composer"
+        style={{ height: inputHeight }}
+        sx={{ flexShrink: 0 }}
+      >
         <Card sx={{ height: '100%' }}>
           <CardContent
             component="form"

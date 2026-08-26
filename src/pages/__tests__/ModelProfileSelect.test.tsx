@@ -16,15 +16,7 @@ const profiles: SelectableModelProfile[] = [
     description: '',
     is_default: true,
     default_reasoning_effort: 'medium',
-    reasoning_efforts: [
-      'default',
-      'none',
-      'minimal',
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-    ],
+    reasoning_efforts: ['low', 'medium', 'high'],
     run_cost_budget_usd: 2,
     effective_cost_budget_usd: 2,
   },
@@ -42,7 +34,7 @@ const profiles: SelectableModelProfile[] = [
 
 afterEach(cleanup);
 
-it('groups reasoning levels by profile and locks other profile families', () => {
+it('shows only the locked profile with lowercase reasoning levels', () => {
   const onChange = jest.fn();
   render(
     <ChatInput
@@ -70,7 +62,7 @@ it('groups reasoning levels by profile and locks other profile families', () => 
   expect(composer).not.toBeNull();
   expect(within(composer!).getByRole('combobox')).toBeInTheDocument();
   expect(within(composer!).getByRole('switch')).toBeInTheDocument();
-  expect(screen.getByText('Anthropic · Medium')).toBeInTheDocument();
+  expect(screen.getByText('Anthropic · medium')).toBeInTheDocument();
   expect(screen.queryByText('Model and reasoning')).not.toBeInTheDocument();
 
   fireEvent.mouseDown(
@@ -78,14 +70,39 @@ it('groups reasoning levels by profile and locks other profile families', () => 
   );
   const listbox = screen.getByRole('listbox');
   expect(within(listbox).getByText('Anthropic (default)')).toBeInTheDocument();
-  expect(within(listbox).getByText('DeepSeek')).toBeInTheDocument();
+  expect(within(listbox).queryByText('DeepSeek')).not.toBeInTheDocument();
   expect(
-    within(listbox).getByRole('option', { name: 'Xhigh' }),
+    within(listbox).getByRole('option', { name: 'low' }),
   ).toBeInTheDocument();
-  const highOptions = within(listbox).getAllByRole('option', { name: 'High' });
-  expect(highOptions[0]).not.toHaveAttribute('aria-disabled', 'true');
-  expect(highOptions[1]).toHaveAttribute('aria-disabled', 'true');
+  expect(
+    within(listbox).getByRole('option', { name: 'medium' }),
+  ).toBeInTheDocument();
+  const highOption = within(listbox).getByRole('option', { name: 'high' });
 
-  fireEvent.click(highOptions[0]);
+  fireEvent.click(highOption);
   expect(onChange).toHaveBeenCalledWith('anthropic', 'high');
+});
+
+it('grows the chat composer with its text up to twice the default height', () => {
+  render(
+    <ChatInput
+      busy={false}
+      disabled={false}
+      onStop={() => {}}
+      onSubmit={() => {}}
+    />,
+  );
+  const textarea = screen.getByPlaceholderText('Ask Seizu...');
+  Object.defineProperty(textarea, 'clientHeight', {
+    configurable: true,
+    value: 80,
+  });
+  Object.defineProperty(textarea, 'scrollHeight', {
+    configurable: true,
+    value: 400,
+  });
+
+  fireEvent.change(textarea, { target: { value: 'A long question' } });
+
+  expect(screen.getByTestId('chat-composer')).toHaveStyle({ height: '280px' });
 });

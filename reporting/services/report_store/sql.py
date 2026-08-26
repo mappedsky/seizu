@@ -3893,6 +3893,7 @@ class SQLModelReportStore(ReportStore):
                 "primary": data["primary"],
                 "economy": data["economy"],
                 "stage_overrides": data.get("stage_overrides") or {},
+                "user_reasoning_efforts": data.get("user_reasoning_efforts", ("low", "medium", "high")),
                 "default_reasoning_effort": data.get("default_reasoning_effort", "medium"),
                 "run_cost_budget_usd": data["run_cost_budget_usd"],
             }
