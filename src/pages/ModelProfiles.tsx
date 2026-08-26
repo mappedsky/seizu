@@ -66,6 +66,20 @@ function emptyPayload(): ModelProfilePayload {
   };
 }
 
+function editablePayload(profile: ModelProfile | null): ModelProfilePayload {
+  if (!profile) return emptyPayload();
+  return {
+    name: profile.name,
+    description: profile.description,
+    enabled: profile.enabled,
+    is_default: profile.is_default,
+    primary: profile.primary,
+    economy: profile.economy,
+    stage_overrides: profile.stage_overrides,
+    run_cost_budget_usd: profile.run_cost_budget_usd,
+  };
+}
+
 function ProfileDialog({
   profile,
   onClose,
@@ -77,7 +91,7 @@ function ProfileDialog({
     payload: ModelProfilePayload & { comment?: string },
   ) => Promise<void>;
 }) {
-  const initialValue = profile ?? emptyPayload();
+  const initialValue = editablePayload(profile);
   const [value, setValue] = useState<ModelProfilePayload>(initialValue);
   const [runCostBudgetInput, setRunCostBudgetInput] = useState(
     String(initialValue.run_cost_budget_usd),

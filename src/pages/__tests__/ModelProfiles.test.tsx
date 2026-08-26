@@ -33,6 +33,7 @@ const useModelProfileMutations =
 
 describe('ModelProfiles', () => {
   const create = jest.fn().mockResolvedValue(undefined);
+  const update = jest.fn().mockResolvedValue(undefined);
   const refresh = jest.fn().mockResolvedValue(undefined);
 
   beforeEach(() => {
@@ -50,7 +51,7 @@ describe('ModelProfiles', () => {
     });
     useModelProfileMutations.mockReturnValue({
       create,
-      update: jest.fn(),
+      update,
       remove: jest.fn(),
       versions: jest.fn(),
     });
@@ -84,5 +85,50 @@ describe('ModelProfiles', () => {
         expect.objectContaining({ run_cost_budget_usd: 2.5 }),
       ),
     );
+  });
+
+  it('omits read-only record fields when updating a profile', async () => {
+    useModelProfilesList.mockReturnValue({
+      profiles: [
+        {
+          profile_id: 'profile-1',
+          name: 'Careful',
+          description: 'A model profile',
+          enabled: true,
+          is_default: true,
+          primary: { model_id: 'primary-model', reasoning_effort: 'high' },
+          economy: { model_id: 'economy-model', reasoning_effort: 'low' },
+          stage_overrides: {},
+          run_cost_budget_usd: 2.5,
+          current_version: 3,
+          created_at: '2026-08-25T00:00:00Z',
+          updated_at: '2026-08-26T00:00:00Z',
+          created_by: 'admin',
+          updated_by: 'admin',
+        },
+      ],
+      loading: false,
+      error: null,
+      refresh,
+    });
+    render(<ModelProfiles />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Careful' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update).toHaveBeenCalledWith(
+      'profile-1',
+      expect.objectContaining({
+        name: 'Careful',
+        run_cost_budget_usd: 2.5,
+      }),
+    );
+    const payload = update.mock.calls[0][1];
+    expect(payload).not.toHaveProperty('profile_id');
+    expect(payload).not.toHaveProperty('current_version');
+    expect(payload).not.toHaveProperty('created_at');
+    expect(payload).not.toHaveProperty('updated_at');
+    expect(payload).not.toHaveProperty('created_by');
+    expect(payload).not.toHaveProperty('updated_by');
   });
 });

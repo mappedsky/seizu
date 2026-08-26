@@ -63,9 +63,26 @@ export interface SelectableModelProfile {
 
 async function responseError(response: Response): Promise<Error> {
   const data = (await response.json().catch(() => null)) as {
-    error?: string;
+    error?: unknown;
+    detail?: unknown;
   } | null;
-  return new Error(data?.error || 'Model profile request failed');
+  if (typeof data?.error === 'string') return new Error(data.error);
+  if (typeof data?.detail === 'string') return new Error(data.detail);
+  if (Array.isArray(data?.detail)) {
+    const messages = data.detail
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+        if (typeof msg !== 'string') return null;
+        const path = Array.isArray(loc)
+          ? loc.filter((part) => part !== 'body').join('.')
+          : '';
+        return path ? `${path}: ${msg}` : msg;
+      })
+      .filter((message): message is string => message !== null);
+    if (messages.length > 0) return new Error(messages.join('; '));
+  }
+  return new Error(`Model profile request failed (${response.status})`);
 }
 
 export function useSelectableModelProfiles(enabled = true) {
