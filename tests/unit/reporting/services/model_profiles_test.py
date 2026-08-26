@@ -1,6 +1,6 @@
 import pytest
 
-from reporting.schema.model_profiles import ModelProfileItem
+from reporting.schema.model_profiles import ModelProfileItem, ResolvedModelProfile
 from reporting.services import model_profiles
 from reporting.services.chat_models import ModelSpec
 
@@ -34,6 +34,16 @@ def test_profile_default_reasoning_must_be_user_selectable():
         _profile(user_reasoning_efforts=("low", "high"))
 
 
+def test_a_resolved_profile_requires_every_runtime_stage():
+    with pytest.raises(ValueError, match="resolved model stages are incomplete"):
+        ResolvedModelProfile(source="environment", stages={})
+
+
+def test_runtime_model_access_requires_a_captured_configuration():
+    with pytest.raises(RuntimeError, match="outside a resolved run configuration"):
+        model_profiles.require_current_spec("worker")
+
+
 async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     mocker.patch(
         "reporting.services.model_profiles.report_store.list_model_profiles",
@@ -47,7 +57,7 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
             reasoning_effort=reasoning_effort or "",
         )
 
-    mocker.patch("reporting.services.model_profiles.chat_models.resolve", side_effect=resolve)
+    mocker.patch("reporting.services.model_profiles.chat_models.resolve_environment", side_effect=resolve)
     mocker.patch("reporting.services.model_profiles.settings.CHAT_RUN_COST_BUDGET_USD", 2.0)
 
     result = await model_profiles.resolve(None)
@@ -55,21 +65,21 @@ async def test_resolve_expands_profile_and_preserves_structural_roles(mocker):
     assert result.profile_id == "profile-1"
     assert result.profile_version == 3
     assert result.cost_budget_usd == 1.5
-    assert result.primary_specs["worker"]["model_id"] == "openai/gpt-5-worker"
-    assert result.primary_specs["worker"]["reasoning_effort"] == "medium"
-    assert result.primary_specs["worker_summary"]["reasoning_effort"] == "minimal"
-    assert result.economy_specs["worker_summary"]["reasoning_effort"] == "low"
-    assert result.economy_specs["worker"]["model_id"] == "openai/gpt-5-mini"
-    assert result.primary_specs["router"]["model_id"] == "environment/router"
-    assert result.primary_specs["worker"]["profile_name"] == "Accurate"
+    assert result.spec_for("worker").model_id == "openai/gpt-5-worker"
+    assert result.spec_for("worker").reasoning_effort == "medium"
+    assert result.spec_for("worker_summary").reasoning_effort == "minimal"
+    assert result.spec_for("worker_summary", economy=True).reasoning_effort == "low"
+    assert result.spec_for("worker", economy=True).model_id == "openai/gpt-5-mini"
+    assert result.spec_for("router").model_id == "environment/router"
+    assert result.spec_for("worker").profile_name == "Accurate"
     with model_profiles.use(result):
         assert model_profiles.current_spec("assistant") == model_profiles.current_spec("default")
 
     high = await model_profiles.resolve("profile-1", "high")
     assert high.reasoning_effort == "high"
-    assert high.primary_specs["planner"]["reasoning_effort"] == "high"
-    assert high.economy_specs["synthesizer"]["reasoning_effort"] == "low"
-    assert high.primary_specs["worker_summary"]["reasoning_effort"] == "minimal"
+    assert high.spec_for("planner").reasoning_effort == "high"
+    assert high.spec_for("synthesizer", economy=True).reasoning_effort == "low"
+    assert high.spec_for("worker_summary").reasoning_effort == "minimal"
 
 
 async def test_explicit_unavailable_profile_never_falls_back(mocker):
@@ -91,7 +101,7 @@ async def test_empty_catalog_uses_environment_snapshot(mocker):
         mocker.AsyncMock(return_value=[]),
     )
     mocker.patch(
-        "reporting.services.model_profiles.chat_models.resolve",
+        "reporting.services.model_profiles.chat_models.resolve_environment",
         return_value=ModelSpec(model_id="environment/model", max_output_tokens=1000),
     )
 

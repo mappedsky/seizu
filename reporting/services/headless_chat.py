@@ -87,7 +87,7 @@ async def run_headless_chat(
     budget_controller = BudgetController(
         initial_budget_ledger(
             cost_limit_usd=resolved_profile.cost_budget_usd,
-            model_specs=[*resolved_profile.primary_specs.values(), *resolved_profile.economy_specs.values()],
+            model_specs=resolved_profile.model_spec_payloads(),
         )
     )
     config = build_turn_config(

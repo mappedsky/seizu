@@ -7,8 +7,10 @@ from dataclasses import replace
 
 from reporting import settings
 from reporting.schema.model_profiles import (
+    RESOLVED_MODEL_STAGES,
     ModelProfileItem,
     ResolvedModelProfile,
+    ResolvedStageModels,
     SelectableModelProfile,
     SelectableReasoningEffort,
 )
@@ -21,16 +23,8 @@ class ModelProfileUnavailable(LookupError):
 
 _current_profile: ContextVar[ResolvedModelProfile | None] = ContextVar("chat_model_profile", default=None)
 
-_CONTROLLED_ROLES = {
-    "default": "assistant",
-    "planner": "planner",
-    "worker": "worker",
-    "worker_summary": "worker_summary",
-    "worker_summary_retry": "worker_summary",
-    "sandbox_subagent": "sandbox_subagent",
-    "synthesizer": "synthesizer",
-}
-_ALL_ROLES = (*_CONTROLLED_ROLES, "router", "verifier")
+_PROFILE_STAGES = frozenset({"assistant", "planner", "worker", "worker_summary", "sandbox_subagent", "synthesizer"})
+_RUNTIME_ROLE = {"assistant": "default"}
 
 
 def effective_cost_budget(profile_budget: float) -> float:
@@ -39,22 +33,26 @@ def effective_cost_budget(profile_budget: float) -> float:
 
 
 def environment_snapshot() -> ResolvedModelProfile:
-    primary = {role: chat_models.resolve(role).to_payload() for role in _ALL_ROLES}
-    economy = {role: chat_models.resolve(role, economy=True).to_payload() for role in _ALL_ROLES}
+    stages = {
+        stage: ResolvedStageModels(
+            primary=chat_models.resolve_environment(_RUNTIME_ROLE.get(stage, stage)).to_payload(),
+            economy=chat_models.resolve_environment(_RUNTIME_ROLE.get(stage, stage), economy=True).to_payload(),
+        )
+        for stage in RESOLVED_MODEL_STAGES
+    }
     return ResolvedModelProfile(
         source="environment",
         cost_budget_usd=max(0.0, settings.CHAT_RUN_COST_BUDGET_USD),
-        primary_specs=primary,
-        economy_specs=economy,
+        stages=stages,
     )
 
 
 def _primary_choice_for(
     profile: ModelProfileItem,
-    role: str,
+    stage: str,
     user_reasoning_effort: SelectableReasoningEffort,
 ) -> tuple[str, str]:
-    override = profile.stage_overrides.get(_CONTROLLED_ROLES[role])
+    override = profile.stage_overrides.get(stage)
     model_id = override.model_id if override and override.model_id else profile.primary.model_id
     configured_reasoning = override.reasoning_effort if override else None
     return model_id, configured_reasoning if configured_reasoning is not None else user_reasoning_effort
@@ -69,26 +67,28 @@ def _profile_snapshot(
         "profile_name": profile.name,
         "profile_version": profile.current_version,
     }
-    primary: dict[str, dict[str, object]] = {}
-    economy: dict[str, dict[str, object]] = {}
-    for role in _ALL_ROLES:
-        if role in _CONTROLLED_ROLES:
-            primary_model_id, primary_reasoning = _primary_choice_for(profile, role, reasoning_effort)
-            normal = chat_models.resolve(
+    stages: dict[str, ResolvedStageModels] = {}
+    for stage in RESOLVED_MODEL_STAGES:
+        role = _RUNTIME_ROLE.get(stage, stage)
+        if stage in _PROFILE_STAGES:
+            primary_model_id, primary_reasoning = _primary_choice_for(profile, stage, reasoning_effort)
+            normal = chat_models.resolve_environment(
                 role,
                 model_id=primary_model_id,
                 reasoning_effort=primary_reasoning,
             )
-            cheap = chat_models.resolve(
+            cheap = chat_models.resolve_environment(
                 role,
                 model_id=profile.economy.model_id,
                 reasoning_effort=profile.economy.reasoning_effort,
             )
         else:
-            normal = chat_models.resolve(role)
-            cheap = chat_models.resolve(role, economy=True)
-        primary[role] = replace(normal, **provenance).to_payload()
-        economy[role] = replace(cheap, **provenance).to_payload()
+            normal = chat_models.resolve_environment(role)
+            cheap = chat_models.resolve_environment(role, economy=True)
+        stages[stage] = ResolvedStageModels(
+            primary=replace(normal, **provenance).to_payload(),
+            economy=replace(cheap, **provenance).to_payload(),
+        )
     return ResolvedModelProfile(
         source="profile",
         profile_id=profile.profile_id,
@@ -96,8 +96,7 @@ def _profile_snapshot(
         profile_version=profile.current_version,
         reasoning_effort=reasoning_effort,
         cost_budget_usd=effective_cost_budget(profile.run_cost_budget_usd),
-        primary_specs=primary,
-        economy_specs=economy,
+        stages=stages,
     )
 
 
@@ -155,11 +154,15 @@ def current_spec(role: str, *, economy: bool = False) -> chat_models.ModelSpec |
     resolved = _current_profile.get()
     if resolved is None:
         return None
-    payloads = resolved.economy_specs if economy else resolved.primary_specs
-    payload = payloads.get("default" if role == "assistant" else role)
-    if payload is None and role == "worker_summary_retry":
-        payload = payloads.get("worker_summary")
-    return chat_models.ModelSpec.from_payload(payload)
+    return chat_models.ModelSpec.from_payload(resolved.spec_for(role, economy=economy).model_dump(mode="json"))
+
+
+def require_current_spec(role: str, *, economy: bool = False) -> chat_models.ModelSpec:
+    """Return a stage from the active immutable run configuration."""
+    resolved = current_spec(role, economy=economy)
+    if resolved is None:
+        raise RuntimeError("model stage requested outside a resolved run configuration")
+    return resolved
 
 
 def current() -> ResolvedModelProfile | None:

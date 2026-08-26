@@ -4268,14 +4268,8 @@ def build_chat_model(spec: chat_models.ModelSpec) -> ChatModel:
 
 
 def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
-    """Resolve this deployment's spec for a stage and build its model.
-
-    The convenience path for callers with no per-call choice to express. A
-    caller that *has* one -- notably a distributed plan step running on the spec
-    its turn was admitted with -- resolves the spec itself and calls
-    :func:`build_chat_model`.
-    """
-    return build_chat_model(chat_models.resolve(role, economy=economy))
+    """Build a stage model from the active immutable run configuration."""
+    return build_chat_model(model_profiles.require_current_spec(role, economy=economy))
 
 
 def _chat_provider() -> str:

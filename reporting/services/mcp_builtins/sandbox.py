@@ -1240,7 +1240,7 @@ def _get_sandbox_model() -> "_ToolMessageNormalizingModel":
     """
     from reporting.services.chat_graph import build_chat_model
 
-    return _ToolMessageNormalizingModel(build_chat_model(chat_models.resolve("sandbox_subagent")))
+    return _ToolMessageNormalizingModel(build_chat_model(model_profiles.require_current_spec("sandbox_subagent")))
 
 
 _SANDBOX_TITLE = "Tool: sandbox__delegate"

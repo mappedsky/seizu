@@ -19,11 +19,17 @@ from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
 from reporting.schema.chat import ChatTurnCommand, ChatTurnItem
 from reporting.schema.report_config import User
-from reporting.services import chat_orchestrator, chat_step_worker, episodic_memory
+from reporting.services import chat_orchestrator, chat_step_worker, episodic_memory, model_profiles
 from reporting.services.chat_budget import BudgetController, grant_ledger, initial_budget_ledger
 from reporting.temporal_workflows.shared import ChatStepFanoutResult, ChatWorkerStepOutcome
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _captured_model_profile(mocker):
+    mocker.patch.object(model_profiles, "current", return_value=resolved_model_profile())
 
 
 def _user(permissions: set[str] | None = None) -> CurrentUser:
@@ -437,7 +443,7 @@ async def test_a_worker_refuses_a_payload_newer_than_it_understands(mocker):
     """Misreading a field is worse than not running the step."""
     from reporting.temporal_workflows.shared import ChatWorkerStepInvocation
 
-    with pytest.raises(chat_step_worker.StepInvocationRejected, match="newer"):
+    with pytest.raises(chat_step_worker.StepInvocationRejected, match="not supported"):
         await chat_step_worker.run_distributed_step(
             ChatWorkerStepInvocation(version=chat_step_worker.SUPPORTED_INVOCATION_VERSION + 1)
         )
@@ -583,16 +589,7 @@ def test_the_fanout_discriminates_on_the_exception_not_the_result_type():
     assert "BaseException" in checks
 
 
-async def test_a_distributed_step_carries_its_summary_model_too(mocker):
-    """A summary pass is a different job with a possibly different reasoning
-    budget, but it must still run on the model the *turn* was admitted with --
-    re-resolving it worker-side would read that worker's settings instead.
-
-    The model is pinned rather than read from the environment: a deployment with
-    none configured resolves an empty id, and the assertion would then pass or
-    fail on whether a `.env` happened to be present.
-    """
-    mocker.patch.object(settings, "CHAT_LLM_MODEL", "some/model")
+async def test_a_distributed_step_carries_the_complete_turn_configuration(mocker):
     batch = [_step("s1"), _step("s2")]
     client = _fanout_client(
         mocker,
@@ -614,9 +611,21 @@ async def test_a_distributed_step_carries_its_summary_model_too(mocker):
     )
 
     invocation = client.start_workflow.await_args.args[1].steps[0]
-    assert invocation.model_spec.get("model_id")
-    assert invocation.summary_model_spec.get("model_id")
-    assert invocation.summary_model_spec["role"] == "worker_summary"
+    captured = invocation.resolved_model_profile
+    assert set(captured["stages"]) == {
+        "assistant",
+        "planner",
+        "worker",
+        "worker_summary",
+        "sandbox_subagent",
+        "synthesizer",
+        "router",
+        "verifier",
+    }
+    assert captured["stages"]["worker"]["primary"]["model_id"] == "primary/worker"
+    assert captured["stages"]["worker_summary"]["primary"]["role"] == "worker_summary"
+    assert invocation.model_spec == {}
+    assert invocation.summary_model_spec == {}
 
 
 def test_a_cost_budgeted_run_grants_tokens_without_a_ceiling(mocker):

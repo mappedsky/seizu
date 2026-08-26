@@ -51,7 +51,6 @@ from reporting.services import (
     chat_budget,
     chat_context,
     chat_graph,
-    chat_models,
     episodic_memory,
     external_mcp,
     mcp_builtins,
@@ -2108,14 +2107,11 @@ async def _dispatch_batch_distributed(
     ledger = episodic_memory.current_session_ledger()
     session_memory_json = json.dumps(ledger.to_state()) if ledger is not None else ""
     trimmed_plan = json.dumps(_trimmed_plan(plan))
-    # Resolved here, once, and carried: every step of the batch runs on the
-    # model this turn resolved rather than on whatever each worker's settings
-    # say (AGT-019).
+    profile = model_profiles.current()
+    if profile is None:
+        raise _FanoutUnavailable("a distributed batch needs the turn's resolved model configuration")
     degraded = bool(controller and controller.degraded)
-    model_spec = chat_models.resolve("worker", economy=degraded).to_payload()
-    # Carried, not re-resolved worker-side: a step's summary pass must run on
-    # the model its turn was admitted with, exactly like the step itself.
-    summary_model_spec = chat_models.resolve("worker_summary", economy=degraded).to_payload()
+    resolved_model_profile = profile.model_dump(mode="json")
 
     invocations: list[ChatWorkerStepInvocation] = []
     for step in batch:
@@ -2145,11 +2141,8 @@ async def _dispatch_batch_distributed(
                 cost_grant_usd=grant.cost_usd,
                 soft_cost_grant_usd=grant.soft_cost_usd,
                 llm_call_grant=grant.llm_calls,
-                model_spec=model_spec,
-                summary_model_spec=summary_model_spec,
-                resolved_model_profile=(
-                    profile.model_dump(mode="json") if (profile := model_profiles.current()) is not None else {}
-                ),
+                resolved_model_profile=resolved_model_profile,
+                economy=degraded,
             )
         )
 

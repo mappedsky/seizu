@@ -438,7 +438,7 @@ class ChatWorkerStepInvocation:
     never a resolved permission set.
     """
 
-    version: int = 1
+    version: int = 2
     turn_id: str = ""
     # Duplicated out of ``step_json`` so workflow code can name a step it could
     # not run without having to parse the plan.
@@ -468,19 +468,16 @@ class ChatWorkerStepInvocation:
     cost_grant_usd: float = 0.0
     soft_cost_grant_usd: float = 0.0
     llm_call_grant: int = 0
-    # The model the *turn* resolved, not a hint for the worker to re-resolve.
-    # This was a bare ``economy: bool`` because settings could only express a
-    # binary; once a model is a per-turn choice, re-resolving worker-side would
-    # run a different model than the turn was admitted with -- the same reason
-    # ``permission_cap`` travels rather than being re-derived (AGT-006/019).
+    # Decode-only fields from version 1. Version 2 derives both calls from the
+    # complete turn snapshot below; retain these defaults until old Temporal
+    # histories can no longer reach a new worker.
     model_spec: dict[str, Any] = field(default_factory=dict)
-    #: The model the step's *summary* passes run on. Separate because a summary
-    #: is transcription rather than decision-making and may carry a different
-    #: reasoning budget; carried for the same reason as ``model_spec``.
     summary_model_spec: dict[str, Any] = field(default_factory=dict)
-    # Full snapshot for descendant calls such as sandbox delegation. Workers
-    # never resolve the mutable profile row themselves.
+    # The complete admission-time configuration for this turn. ``economy``
+    # chooses the already-expanded side of every stage; workers never resolve
+    # the mutable profile row or their local deployment settings.
     resolved_model_profile: dict[str, Any] = field(default_factory=dict)
+    economy: bool = False
 
 
 @dataclass

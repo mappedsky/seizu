@@ -447,11 +447,13 @@ async def produce_turn(
             opening.append({"type": "text-delta", "id": turn.text_id, "delta": CONTINUATION_MARKDOC})
         await publisher.publish(opening)
 
-        resolved_profile = body.resolved_model_profile or await model_profiles.resolve(None)
+        if body.resolved_model_profile is None:
+            raise RuntimeError("admitted chat turn has no resolved model configuration")
+        resolved_profile = body.resolved_model_profile
         budget_controller = BudgetController(
             initial_budget_ledger(
                 cost_limit_usd=resolved_profile.cost_budget_usd,
-                model_specs=[*resolved_profile.primary_specs.values(), *resolved_profile.economy_specs.values()],
+                model_specs=resolved_profile.model_spec_payloads(),
             )
         )
         config = build_turn_config(

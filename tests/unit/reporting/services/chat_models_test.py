@@ -142,10 +142,14 @@ def test_a_spec_round_trips_through_a_payload(mocker):
 
 
 @pytest.mark.parametrize("payload", [None, {}, {"max_output_tokens": 10}, "nonsense", {"model_id": ""}])
-def test_an_unusable_payload_resolves_to_nothing(payload):
-    """The caller falls back to a local resolve, which runs the step rather than
-    failing it -- so this must report "unusable", never raise."""
-    assert chat_models.ModelSpec.from_payload(payload) is None
+def test_an_unusable_payload_fails_closed(payload):
+    with pytest.raises(ValueError, match="missing model_id"):
+        chat_models.ModelSpec.from_payload(payload)
+
+
+def test_a_payload_without_an_output_ceiling_fails_closed():
+    with pytest.raises(ValueError, match="missing max_output_tokens"):
+        chat_models.ModelSpec.from_payload({"model_id": "some/model"})
 
 
 def test_a_spec_is_hashable_so_it_can_key_the_model_cache(mocker):

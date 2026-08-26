@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 #: refuse a newer payload rather than read fields it would misinterpret; adding
 #: a field with a default does not change this number, changing what an existing
 #: field means does.
-SUPPORTED_INVOCATION_VERSION = 1
+SUPPORTED_INVOCATION_VERSION = 2
 
 
 class StepInvocationRejected(RuntimeError):
@@ -129,9 +129,9 @@ async def _check_turn(invocation: ChatWorkerStepInvocation) -> None:
 
 async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWorkerStepOutcome:
     """Run one plan step and report its result, spend, and session memory."""
-    if invocation.version > SUPPORTED_INVOCATION_VERSION:
+    if invocation.version != SUPPORTED_INVOCATION_VERSION:
         raise StepInvocationRejected(
-            f"chat worker step payload version {invocation.version} is newer than this worker understands"
+            f"chat worker step payload version {invocation.version} is not supported by this worker"
         )
     await _check_turn(invocation)
     current = await _resolve_identity(invocation)
@@ -180,20 +180,16 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
         # sandbox and is the only thing that may suspend it (SBX-015).
         sandbox_session.attach_sandbox_session(invocation.sandbox_id, thread=invocation.sandbox_thread)
 
-    # The turn's spec, not this worker's settings: a step must run on the model
-    # its turn was admitted with. Falling back to a local resolve keeps an older
-    # payload runnable rather than failing it.
-    spec = chat_models.ModelSpec.from_payload(invocation.model_spec) or chat_models.resolve("worker")
-    model = chat_graph.build_chat_model(spec)
-    summary_spec = chat_models.ModelSpec.from_payload(invocation.summary_model_spec) or spec
-    summary_model = chat_graph.build_chat_model(summary_spec)
-    captured_profile = (
-        ResolvedModelProfile.model_validate(invocation.resolved_model_profile)
-        if invocation.resolved_model_profile
-        else None
+    captured_profile = ResolvedModelProfile.model_validate(invocation.resolved_model_profile)
+    spec = chat_models.ModelSpec.from_payload(
+        captured_profile.spec_for("worker", economy=invocation.economy).model_dump(mode="json")
     )
-    profile_scope = model_profiles.use(captured_profile) if captured_profile else contextlib.nullcontext()
-    with profile_scope:
+    model = chat_graph.build_chat_model(spec)
+    summary_spec = chat_models.ModelSpec.from_payload(
+        captured_profile.spec_for("worker_summary", economy=invocation.economy).model_dump(mode="json")
+    )
+    summary_model = chat_graph.build_chat_model(summary_spec)
+    with model_profiles.use(captured_profile):
         tool_specs, skill_tools, skill_prompts = await chat_orchestrator._worker_tool_specs(current)
 
     # Watching for a stop is not optional here, and it is not the coordinator's
@@ -209,8 +205,7 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
         async with publisher, _DetailStream(publisher) as writer:
 
             async def _run_step() -> dict[str, Any]:
-                scope = model_profiles.use(captured_profile) if captured_profile else contextlib.nullcontext()
-                with scope:
+                with model_profiles.use(captured_profile):
                     return await chat_orchestrator._run_worker_step_with_session(
                         step,
                         plan=plan,

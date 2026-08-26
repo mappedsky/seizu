@@ -22,7 +22,6 @@ from reporting import settings
 from reporting.schema.chat import CHAT_TURN_MAX_BATCH_BYTES, ChatTurnCommand
 from reporting.schema.confirmations import ActionConfirmation
 from reporting.schema.mcp_config import SkillItem, SkillsetListItem, SkillsetVersion, SkillVersion
-from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.plugins import PluginFile
 from reporting.schema.report_config import ReportAccess, ReportListItem, ReportVersion, User
 from reporting.schema.space_config import SpaceConflictError, SpaceDeleteResult, SubspaceItem
@@ -30,6 +29,7 @@ from reporting.services.plugin_packages import legacy_skillset_package
 from reporting.services.report_store import sql as sql_module
 from reporting.services.report_store.base import PluginRevisionConflict
 from reporting.services.report_store.sql import SQLModelReportStore
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 
 def _model_profile_data(**updates):
@@ -563,14 +563,7 @@ def _profile_turn_command(profile_id: str, effort: str) -> ChatTurnCommand:
         message="hello",
         permission_cap=[],
         timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
-        resolved_model_profile=ResolvedModelProfile(
-            source="profile",
-            profile_id=profile_id,
-            profile_name=profile_id,
-            profile_version=1,
-            reasoning_effort=effort,
-            cost_budget_usd=1,
-        ),
+        resolved_model_profile=resolved_model_profile(source="profile", profile_id=profile_id, reasoning_effort=effort),
     )
 
 

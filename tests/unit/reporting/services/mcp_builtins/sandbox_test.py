@@ -1207,7 +1207,7 @@ def test_normalizing_model_bind_tools_returns_wrapped_model() -> None:
 
 
 def test_get_sandbox_model_is_built_from_the_resolved_stage_spec() -> None:
-    """The sub-agent's model comes from chat_models.resolve, and stays wrapped.
+    """The sub-agent's model comes from the turn snapshot, and stays wrapped.
 
     Building it directly is what made every reasoning-effort setting
     unreachable for the largest spender in a delegating turn: the effort is
@@ -1218,16 +1218,17 @@ def test_get_sandbox_model_is_built_from_the_resolved_stage_spec() -> None:
     passed only where a real provider happened to be configured.
     """
     built = MagicMock()
+    spec = chat_models.resolve("sandbox_subagent")
     with (
         patch("reporting.settings.SANDBOX_LLM_MODEL", ""),
+        patch("reporting.services.model_profiles.require_current_spec", return_value=spec),
         patch("reporting.services.chat_graph.build_chat_model", return_value=built) as build,
     ):
         model = _get_sandbox_model()
 
     assert isinstance(model, _ToolMessageNormalizingModel)
-    spec = build.call_args.args[0]
-    assert spec == chat_models.resolve("sandbox_subagent")
-    assert spec.role == "sandbox_subagent"
+    assert build.call_args.args[0] == spec
+    assert build.call_args.args[0].role == "sandbox_subagent"
 
 
 async def test_e2b_run_bash_streaming_passes_per_command_envs() -> None:

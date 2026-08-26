@@ -103,8 +103,8 @@ def initial_budget_ledger(
     if model_specs:
         from reporting.services.chat_models import ModelSpec, capability
 
-        resolved = [spec for payload in model_specs if (spec := ModelSpec.from_payload(payload)) is not None]
-        models_priced = bool(resolved) and all(capability(spec.model_id).priced for spec in resolved)
+        resolved = [ModelSpec.from_payload(payload) for payload in model_specs]
+        models_priced = all(capability(spec.model_id).priced for spec in resolved)
     cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD if cost_limit_usd is None else cost_limit_usd)
     token_limit = derived_token_ceiling(cost_limit_usd=cost_limit, models_priced=models_priced)
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)

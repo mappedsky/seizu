@@ -24,12 +24,12 @@ from reporting.schema.chat import (
     ChatTurnItem,
     ChatTurnRequest,
 )
-from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.schema.report_config import User
 from reporting.services import chat_turns
 from reporting.services.chat_budget import BudgetController
 from reporting.services.report_store import base as base_store
 from reporting.services.report_store.base import chat_turn_execution_bound_seconds
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _FAKE_USER = User(
     user_id="test-user-id",
@@ -102,12 +102,7 @@ def _chat_enabled(mocker):
 def _environment_model_profile(mocker):
     mocker.patch(
         "reporting.routes.chat.model_profiles.resolve",
-        AsyncMock(
-            return_value=ResolvedModelProfile(
-                source="environment",
-                cost_budget_usd=settings.CHAT_RUN_COST_BUDGET_USD,
-            )
-        ),
+        AsyncMock(return_value=resolved_model_profile()),
     )
 
 
@@ -123,6 +118,7 @@ def _command(message: str = "Hi") -> ChatTurnCommand:
         message=message,
         permission_cap=sorted(ALL_PERMISSIONS),
         timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+        resolved_model_profile=resolved_model_profile(),
     )
 
 
@@ -1079,13 +1075,10 @@ async def test_locked_session_can_change_reasoning_but_not_profile(mocker):
     )
 
     async def resolve(profile_id, reasoning_effort=None):
-        return ResolvedModelProfile(
+        return resolved_model_profile(
             source="profile",
             profile_id=profile_id,
-            profile_name=profile_id,
-            profile_version=1,
             reasoning_effort=reasoning_effort or "medium",
-            cost_budget_usd=1,
         )
 
     mocker.patch("reporting.routes.chat.model_profiles.resolve", side_effect=resolve)

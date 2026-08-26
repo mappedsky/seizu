@@ -2697,7 +2697,10 @@ levels; profiles default to `low`, `medium`, and `high`. The UI groups those
 levels beneath each profile, then shows only the locked profile after the first
 admitted turn atomically locks its family on the session. Its reasoning level
 remains selectable between turns. The resolved pair is copied as a complete
-snapshot into each admitted turn.
+snapshot into each admitted turn. Admission expands inheritance and deployment
+fallbacks into primary and economy specs for every runtime stage. Call sites
+only select the stage and whether the run is degraded; a missing stage or an
+incomplete spec is invalid and never falls back to a worker's environment.
 Scheduled chats and `agent_chat` workflow activities use the same catalog and
 snapshot their selection before Temporal dispatch. A deleted or disabled
 explicit choice never silently falls through to another profile: schedules and

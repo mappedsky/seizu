@@ -157,6 +157,46 @@ class SelectableModelProfilesResponse(BaseModel):
     default_profile_id: str | None = None
 
 
+RESOLVED_MODEL_STAGES = (
+    "assistant",
+    "planner",
+    "worker",
+    "worker_summary",
+    "sandbox_subagent",
+    "synthesizer",
+    "router",
+    "verifier",
+)
+_RESOLVED_ROLE_TO_STAGE = {
+    "default": "assistant",
+    "assistant": "assistant",
+    "worker_summary_retry": "worker_summary",
+}
+
+
+class ResolvedModelSpec(BaseModel):
+    """One fully expanded model call configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(min_length=1)
+    max_output_tokens: int = Field(gt=0)
+    reasoning_effort: str = ""
+    role: str
+    profile_id: str = ""
+    profile_name: str = ""
+    profile_version: int = Field(default=0, ge=0)
+
+
+class ResolvedStageModels(BaseModel):
+    """The normal and budget-degraded choices for one stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    primary: ResolvedModelSpec
+    economy: ResolvedModelSpec
+
+
 class ResolvedModelProfile(BaseModel):
     """The complete immutable model and spend choice for one run."""
 
@@ -166,5 +206,59 @@ class ResolvedModelProfile(BaseModel):
     profile_version: int | None = None
     reasoning_effort: SelectableReasoningEffort | None = None
     cost_budget_usd: float = 0.0
-    primary_specs: dict[str, dict[str, object]] = Field(default_factory=dict)
-    economy_specs: dict[str, dict[str, object]] = Field(default_factory=dict)
+    stages: dict[str, ResolvedStageModels]
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_legacy_spec_maps(cls, value: Any) -> Any:
+        """Read snapshots written before choices were paired by stage."""
+        if not isinstance(value, dict) or "stages" in value:
+            return value
+        primary = value.get("primary_specs")
+        economy = value.get("economy_specs")
+        if not isinstance(primary, dict) or not isinstance(economy, dict):
+            return value
+        legacy_keys = {"default" if stage == "assistant" else stage for stage in RESOLVED_MODEL_STAGES}
+        if not legacy_keys.issubset(primary) or not legacy_keys.issubset(economy):
+            raise ValueError("legacy resolved model configuration is incomplete")
+        normalized = dict(value)
+        normalized.pop("primary_specs", None)
+        normalized.pop("economy_specs", None)
+        normalized["stages"] = {
+            stage: {
+                "primary": primary["default" if stage == "assistant" else stage],
+                "economy": economy["default" if stage == "assistant" else stage],
+            }
+            for stage in RESOLVED_MODEL_STAGES
+        }
+        return normalized
+
+    @model_validator(mode="after")
+    def require_every_stage(self) -> "ResolvedModelProfile":
+        configured = set(self.stages)
+        required = set(RESOLVED_MODEL_STAGES)
+        if configured != required:
+            missing = ", ".join(sorted(required - configured))
+            unknown = ", ".join(sorted(configured - required))
+            details = "; ".join(
+                part
+                for part in (
+                    f"missing: {missing}" if missing else "",
+                    f"unknown: {unknown}" if unknown else "",
+                )
+                if part
+            )
+            raise ValueError(f"resolved model stages are incomplete ({details})")
+        return self
+
+    def spec_for(self, role: str, *, economy: bool = False) -> ResolvedModelSpec:
+        """Return the already-resolved choice for a runtime role."""
+        stage = _RESOLVED_ROLE_TO_STAGE.get(role, role)
+        configured = self.stages[stage]
+        return configured.economy if economy else configured.primary
+
+    def model_spec_payloads(self) -> list[dict[str, object]]:
+        """Return every configured model choice for budget capability checks."""
+        return [
+            spec.model_dump(mode="json") for stage in self.stages.values() for spec in (stage.primary, stage.economy)
+        ]
