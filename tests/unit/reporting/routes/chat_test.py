@@ -947,6 +947,27 @@ async def test_chat_history_round_trips_persisted_messages(mocker):
     assert all(message["id"] for message in messages)
 
 
+async def test_chat_history_includes_an_admitted_question_before_checkpoint(mocker):
+    """A queued worker must not make a durable admission look like an empty chat."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1014")])
+    mocker.patch("reporting.routes.chat.load_thread_messages", AsyncMock(return_value=[]))
+    turn = await _open_turn("test-user-id", "1014")
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        history = await client.get("/api/v1/chat/history", params={"thread_id": "1014"})
+
+    assert history.status_code == 200
+    assert history.json()["messages"] == [
+        {
+            "id": f"pending-{turn.turn_id}",
+            "role": "user",
+            "text": "Hi",
+            "metadata": {"created_at": turn.created_at},
+        }
+    ]
+
+
 async def test_chat_history_timestamps_both_turns(mocker):
     """Every persisted turn comes back with the time it was recorded."""
     from datetime import datetime

@@ -737,7 +737,8 @@ describe('ChatInterface', () => {
     await waitFor(() => {
       const built = mockUseChat.mock.calls
         .map(([options]) => options as { id?: string; messages?: unknown[] })
-        .find((options) => options.id === 'thread-new');
+        .filter((options) => options.id === 'thread-new')
+        .at(-1);
       expect(built?.messages).toEqual([
         expect.objectContaining({
           role: 'user',

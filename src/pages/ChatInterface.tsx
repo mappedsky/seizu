@@ -1151,6 +1151,9 @@ export default function ChatInterface() {
         void resumeStreamRef.current();
         return;
       }
+      setPendingAttach((current) =>
+        current?.threadId === activeThreadId ? null : current,
+      );
       // The turn is over, so it is no longer what Stop should reach: leaving it
       // pending means a Stop pressed during the *next* send -- before that one
       // is admitted -- cancels this finished turn and silently does nothing to
@@ -1500,11 +1503,11 @@ export default function ChatInterface() {
   );
 
   useEffect(() => {
-    // The chat for this thread has been built and seeded with the question, and
-    // `resume` has taken it from there. All that is left is to stop holding it:
-    // the URL-sync effect reads this to know a thread is mid-handover.
+    // The chat for this thread has been built and seeded with the question.
+    // Keep that seed until the turn finishes: useChat may re-read its options
+    // while reconnecting, and dropping the seed as soon as navigation settles
+    // makes the admitted question disappear before the worker checkpoints it.
     if (!pendingAttach || activeThreadId !== pendingAttach.threadId) return;
-    setPendingAttach(null);
     touchSession(activeThreadId);
   }, [pendingAttach, activeThreadId, touchSession]);
 

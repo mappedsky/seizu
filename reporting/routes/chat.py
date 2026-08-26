@@ -234,9 +234,25 @@ async def chat_history(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     messages = await load_thread_messages(current, thread_id, limit=limit)
-    return ChatHistoryResponse(
-        messages=[message for index, item in enumerate(messages) if (message := _to_history_message(item, index))]
-    )
+    history = [message for index, item in enumerate(messages) if (message := _to_history_message(item, index))]
+    active = await report_store.get_active_chat_turn(current.user.user_id, thread_id)
+    if active is not None and active.command.message:
+        # Admission is durable before a worker begins the checkpoint. Until it
+        # does, history must still expose the question the server accepted so a
+        # reload does not render a running turn as an empty conversation.
+        checkpoint_has_question = bool(
+            history and history[-1].role == "user" and history[-1].text == active.command.message
+        )
+        if not checkpoint_has_question:
+            history.append(
+                ChatHistoryMessage(
+                    id=f"pending-{active.turn_id}",
+                    role="user",
+                    text=active.command.message,
+                    metadata={"created_at": active.created_at},
+                )
+            )
+    return ChatHistoryResponse(messages=history)
 
 
 def _to_history_message(message: Any, index: int) -> ChatHistoryMessage | None:

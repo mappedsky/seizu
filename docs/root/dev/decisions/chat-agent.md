@@ -2030,7 +2030,15 @@ transport's pending slot, so `reconnectToStream` finds its id without probing.
 The question is put in the transcript by seeding `useChat({messages})`, which is
 read when the `Chat` for the new thread is *constructed*; writing it from an
 effect is always either too early for that construction or late enough to
-overwrite what the attach has already pushed.
+overwrite what the attach has already pushed. The seed remains until the turn
+finishes rather than being cleared when navigation settles, because the SDK may
+read the options again while reconnecting.
+
+Admission can also precede the worker's first checkpoint by an arbitrarily long
+queue delay. During that interval the history endpoint projects the active
+turn's immutable command as a pending user message unless the checkpoint already
+contains it. A reload must show the question the server accepted even when the
+producer has not emitted its first event yet.
 
 Related, and a hazard in its own right: `reconnectToStream` deletes this
 thread's pending slot on a 204, and a turn admitted while that probe was in
