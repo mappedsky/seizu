@@ -22,7 +22,6 @@ import {
   Chip,
   FormControl,
   IconButton,
-  InputLabel,
   ListSubheader,
   MenuItem,
   Select,
@@ -191,15 +190,22 @@ export function ModelProfileSelect({
       size="small"
       sx={{ maxWidth: '100%', minWidth: { xs: 200, sm: 260 } }}
     >
-      <InputLabel id="chat-model-profile-label">Model and reasoning</InputLabel>
       <Select
-        label="Model and reasoning"
-        labelId="chat-model-profile-label"
+        inputProps={{ 'aria-label': 'Model and reasoning' }}
         onChange={(event) => {
           const selected = options.find(
             (option) => option.key === event.target.value,
           );
           if (selected) onChange(selected.profile.profile_id, selected.effort);
+        }}
+        renderValue={(selectedValue) => {
+          const selected = options.find(
+            (option) => option.key === selectedValue,
+          );
+          if (!selected) return '';
+          const effortLabel =
+            selected.effort[0].toUpperCase() + selected.effort.slice(1);
+          return `${selected.profile.name} · ${effortLabel}`;
         }}
         value={value}
       >

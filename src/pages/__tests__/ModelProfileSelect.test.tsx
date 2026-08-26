@@ -62,6 +62,8 @@ it('groups reasoning levels by profile and locks other profile families', () => 
   expect(composer).not.toBeNull();
   expect(within(composer!).getByRole('combobox')).toBeInTheDocument();
   expect(within(composer!).getByRole('switch')).toBeInTheDocument();
+  expect(screen.getByText('Anthropic · Medium')).toBeInTheDocument();
+  expect(screen.queryByText('Model and reasoning')).not.toBeInTheDocument();
 
   fireEvent.mouseDown(
     screen.getByRole('combobox', { name: 'Model and reasoning' }),
