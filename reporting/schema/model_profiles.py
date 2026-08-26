@@ -85,6 +85,7 @@ class ModelProfileVersion(ModelProfileConfig):
 
 class ModelProfileListResponse(BaseModel):
     profiles: list[ModelProfileItem]
+    global_run_cost_budget_usd: float
 
 
 class ModelProfileVersionListResponse(BaseModel):

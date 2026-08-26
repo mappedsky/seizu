@@ -45,6 +45,10 @@ const stages = [
 ] as const;
 const efforts = ['low', 'medium', 'high'] as const;
 
+function formatUsd(value: number): string {
+  return `$${value}`;
+}
+
 function emptyPayload(): ModelProfilePayload {
   return {
     name: '',
@@ -76,10 +80,12 @@ function editablePayload(profile: ModelProfile | null): ModelProfilePayload {
 
 function ProfileDialog({
   profile,
+  globalRunCostBudgetUsd,
   onClose,
   onSave,
 }: {
   profile: ModelProfile | null;
+  globalRunCostBudgetUsd: number;
   onClose: () => void;
   onSave: (
     payload: ModelProfilePayload & { comment?: string },
@@ -99,6 +105,10 @@ function ProfileDialog({
     Number.isFinite(runCostBudgetUsd) &&
     runCostBudgetUsd > 0 &&
     runCostBudgetUsd <= 10_000;
+  const exceedsGlobalRunCostBudget =
+    runCostBudgetValid &&
+    globalRunCostBudgetUsd > 0 &&
+    runCostBudgetUsd > globalRunCostBudgetUsd;
   const updateChoice = (kind: 'primary' | 'economy', fieldValue: string) =>
     setValue((current) => ({
       ...current,
@@ -173,6 +183,14 @@ function ProfileDialog({
             onChange={(e) => setRunCostBudgetInput(e.target.value)}
             slotProps={{ htmlInput: { min: 0, max: 10_000, step: 'any' } }}
           />
+          {exceedsGlobalRunCostBudget ? (
+            <Alert severity="warning" sx={{ gridColumn: { md: '1 / -1' } }}>
+              This profile requests {formatUsd(runCostBudgetUsd)}, but the
+              deployment-wide run cost cap is{' '}
+              {formatUsd(globalRunCostBudgetUsd)}. Turns will be limited to{' '}
+              {formatUsd(globalRunCostBudgetUsd)}.
+            </Alert>
+          ) : null}
           <TextField
             label="Description"
             multiline
@@ -307,7 +325,8 @@ export default function ModelProfiles() {
   const canRead = hasPermission('model_profiles:read');
   const canWrite = hasPermission('model_profiles:write');
   const canDelete = hasPermission('model_profiles:delete');
-  const { profiles, loading, error, refresh } = useModelProfilesList(canRead);
+  const { profiles, globalRunCostBudgetUsd, loading, error, refresh } =
+    useModelProfilesList(canRead);
   const mutations = useModelProfileMutations();
   const [editing, setEditing] = useState<ModelProfile | 'new' | null>(null);
   const [versions, setVersions] = useState<ModelProfileVersion[] | null>(null);
@@ -388,7 +407,19 @@ export default function ModelProfiles() {
                 </TableCell>
                 <TableCell>{profile.primary.model_id}</TableCell>
                 <TableCell>{profile.economy.model_id}</TableCell>
-                <TableCell>${profile.run_cost_budget_usd}</TableCell>
+                <TableCell>
+                  {formatUsd(profile.run_cost_budget_usd)}
+                  {globalRunCostBudgetUsd > 0 &&
+                  profile.run_cost_budget_usd > globalRunCostBudgetUsd ? (
+                    <Typography
+                      color="warning.main"
+                      variant="caption"
+                      sx={{ display: 'block' }}
+                    >
+                      Limited to {formatUsd(globalRunCostBudgetUsd)} globally
+                    </Typography>
+                  ) : null}
+                </TableCell>
                 <TableCell>
                   {profile.enabled ? 'Enabled' : 'Disabled'}
                 </TableCell>
@@ -455,6 +486,7 @@ export default function ModelProfiles() {
         <ProfileDialog
           key={editing === 'new' ? 'new' : editing.profile_id}
           profile={editing === 'new' ? null : editing}
+          globalRunCostBudgetUsd={globalRunCostBudgetUsd}
           onClose={() => setEditing(null)}
           onSave={save}
         />

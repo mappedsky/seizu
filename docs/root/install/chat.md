@@ -62,7 +62,9 @@ profiles cover the answer-producing stages.
 
 A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
 positive, the lower value applies. Set the global value to the deployment-wide
-hard ceiling and use profiles for smaller per-choice limits.
+hard ceiling and use profiles for smaller per-choice limits. The Model Profiles
+page warns when a profile requests more than this ceiling; the profile remains
+valid, but turns use the lower global value.
 
 ## Tool access and action confirmations
 

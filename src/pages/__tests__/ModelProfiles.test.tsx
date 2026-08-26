@@ -45,6 +45,7 @@ describe('ModelProfiles', () => {
     });
     useModelProfilesList.mockReturnValue({
       profiles: [],
+      globalRunCostBudgetUsd: 1,
       loading: false,
       error: null,
       refresh,
@@ -71,6 +72,9 @@ describe('ModelProfiles', () => {
 
     fireEvent.change(costCap, { target: { value: '2.5' } });
     expect(costCap).toHaveValue(2.5);
+    expect(
+      screen.getByText(/deployment-wide run cost cap is \$1/),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('textbox', { name: /Name/ }), {
       target: { value: 'Careful' },
@@ -108,11 +112,13 @@ describe('ModelProfiles', () => {
           updated_by: 'admin',
         },
       ],
+      globalRunCostBudgetUsd: 1,
       loading: false,
       error: null,
       refresh,
     });
     render(<ModelProfiles />);
+    expect(screen.getByText('Limited to $1 globally')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Edit Careful' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 

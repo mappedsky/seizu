@@ -123,6 +123,7 @@ export function useSelectableModelProfiles(enabled = true) {
 export function useModelProfilesList(enabled = true) {
   const { authHeaders } = useAuthHeaders();
   const [profiles, setProfiles] = useState<ModelProfile[]>([]);
+  const [globalRunCostBudgetUsd, setGlobalRunCostBudgetUsd] = useState(0);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
@@ -133,9 +134,12 @@ export function useModelProfilesList(enabled = true) {
         headers: authHeaders(),
       });
       if (!response.ok) throw await responseError(response);
-      setProfiles(
-        ((await response.json()) as { profiles: ModelProfile[] }).profiles,
-      );
+      const data = (await response.json()) as {
+        profiles: ModelProfile[];
+        global_run_cost_budget_usd: number;
+      };
+      setProfiles(data.profiles);
+      setGlobalRunCostBudgetUsd(data.global_run_cost_budget_usd);
       setError(null);
     } catch (reason) {
       setError(
@@ -148,7 +152,7 @@ export function useModelProfilesList(enabled = true) {
     }
   }, [authHeaders, enabled]);
   useEffect(() => void refresh(), [refresh]);
-  return { profiles, loading, error, refresh };
+  return { profiles, globalRunCostBudgetUsd, loading, error, refresh };
 }
 
 export function useModelProfileMutations() {

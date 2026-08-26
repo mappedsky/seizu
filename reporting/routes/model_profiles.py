@@ -2,6 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from reporting import settings
 from reporting.authnz import CurrentUser, require_permission
 from reporting.authnz.permissions import Permission
 from reporting.schema.model_profiles import (
@@ -32,7 +33,10 @@ async def list_selectable_model_profiles(
 async def list_model_profiles(
     current: CurrentUser = Depends(require_permission(Permission.MODEL_PROFILES_READ)),
 ) -> ModelProfileListResponse:
-    return ModelProfileListResponse(profiles=await report_store.list_model_profiles())
+    return ModelProfileListResponse(
+        profiles=await report_store.list_model_profiles(),
+        global_run_cost_budget_usd=max(0.0, settings.CHAT_RUN_COST_BUDGET_USD),
+    )
 
 
 @router.post("/api/v1/model-profiles", response_model=ModelProfileItem, status_code=201)
