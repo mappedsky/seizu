@@ -196,7 +196,7 @@ export default memo(function ChatInput({
                   flexWrap: 'wrap',
                   gap: 1,
                   justifyContent: 'space-between',
-                  mt: 0.5,
+                  mt: 1.5,
                 }}
               >
                 {footerControls}

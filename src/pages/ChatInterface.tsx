@@ -1800,10 +1800,13 @@ export default function ChatInterface() {
               // busy turns the send button into a Stop, and there is nothing
               // here to stop.
               busy={false}
+              bypassConfirmations={bypassConfirmations}
               disabled={creatingSession}
               footerControls={landingProfileControl}
+              onBypassConfirmationsChange={setBypassConfirmations}
               onSubmit={(text) => void handleStartSession(text)}
               onStop={() => {}}
+              showBypassConfirmations={canBypassConfirmations}
             />
           </Box>
         </Box>

@@ -2337,6 +2337,27 @@ describe('ChatInterface', () => {
     expect(composer).not.toBeNull();
     expect(within(composer!).getByRole('switch')).toBe(toggle);
   });
+
+  it('shows the bypass confirmations toggle on the new-session composer', async () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
+        permission === 'chat:use' || permission === 'chat:bypass_permissions',
+      loading: false,
+      currentUser: null,
+    });
+
+    renderChat({ initialPath: '/app/chat' });
+    await act(async () => {});
+
+    const composer = screen
+      .getByPlaceholderText('Ask Seizu...')
+      .closest('form');
+    expect(composer).not.toBeNull();
+    expect(
+      within(composer!).getByText('Bypass confirmations'),
+    ).toBeInTheDocument();
+    expect(within(composer!).getByRole('switch')).not.toBeChecked();
+  });
   it('reattaches only once the real thread id is known, not to the placeholder', async () => {
     // useChat's resume effect depends on the flag, not on the chat id, so a
     // hardcoded `true` would fire once against the placeholder id and never
