@@ -25,7 +25,68 @@ For every production upgrade:
    database written by a newer one unless its upgrade procedure explicitly says
    that downgrade is supported.
 
-## Unreleased
+## 5.0.0
+
+### Standing up Temporal for chat
+
+Interactive chat turns, scheduled chats, and the session reaper all execute as
+Temporal workflows in this release. `CHAT_ENABLED=true` without a reachable
+Temporal server leaves chat unable to admit a turn.
+
+1. Provision a Temporal server and namespace reachable from both the web service
+   and `seizu-temporal-worker`, and set `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`,
+   and `TEMPORAL_TASK_QUEUE` identically on both.
+2. Give the worker the same chat configuration the web service has:
+   `CHAT_ENABLED`, `CHAT_SCHEDULES_ENABLED`, `CHAT_SCHEDULE_TIMEOUT_SECONDS`,
+   `CHAT_LLM_*`, `CHAT_CHECKPOINT_*`, the sandbox settings, and the external MCP
+   proxy definitions and token environment variables. A worker missing any of
+   these fails the turns that need them, not startup.
+3. Remove the `seizu-scheduled-chats` service and any supervisor entry for
+   `python -m reporting.scheduled_chats`; both are gone. Remove
+   `CHAT_SCHEDULES_POLL_SECONDS`.
+4. Update any client of `POST /api/v1/chat/stream` or
+   `GET /api/v1/chat/stream/{thread_id}` before deploying. Sending is now
+   admit-then-attach: `POST /api/v1/chat/threads/{thread_id}/turns` with an
+   idempotency key, then `GET /api/v1/chat/turns/{turn_id}/stream`, with
+   `POST /api/v1/chat/turns/{turn_id}/cancel` to stop and
+   `GET /api/v1/chat/threads/{thread_id}/turns/active` to reattach after a
+   reload.
+5. Size `TEMPORAL_MAX_CONCURRENT_ACTIVITIES` for the fleet before enabling
+   distributed plan steps at scale; `CHAT_ORCHESTRATOR_MAX_PARALLEL` bounds one
+   turn, this bounds the cluster.
+
+### Chat settings that changed meaning
+
+Apply these before starting the release; a stale value is silently the old
+intent, not an error.
+
+- `CHAT_LLM_CONTEXT_MAX_CHARS` is no longer read. Set
+  `CHAT_LLM_CONTEXT_MAX_TOKENS` (default 40,000) instead. Context is budgeted in
+  tokens against the model's own window.
+- `CHAT_RUN_COST_BUDGET_USD` now defaults to `2.00` where it was unlimited. This
+  is the runaway guard; raise it deliberately rather than discovering it in a
+  stopped run.
+- `CHAT_LLM_MAX_TOKENS`, `CHAT_ORCHESTRATOR_PLANNER_MAX_TOKENS`,
+  `CHAT_RUN_TOKEN_BUDGET`, and `CHAT_RUN_MAX_LLM_CALLS` now default to `0`,
+  meaning derive from the model and the plan. A value carried over from a
+  previous deployment still pins the old number — including
+  `CHAT_LLM_MAX_TOKENS=4096`, which starves the planner on a reasoning model and
+  silently collapses every plan to one step.
+- `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS` is replaced by
+  `SANDBOX_AGENT_CREDENTIAL_PROXY_REQUIREMENTS_FILE`, naming a hash lock. If you
+  set `SANDBOX_AGENT_CREDENTIAL_PROXY_TEMPLATE`, re-run
+  `make lock_proxy_requirements` and `make build_proxy_template`: a template is
+  now used as built and a run installs nothing over it.
+
+### Reviewing roles before the plugin permissions land
+
+`plugins:read` / `plugins:write` / `plugins:delete` imply the legacy
+`skillsets:*` and `skills:*` permissions, but the reverse now requires **both**
+legacy permissions. Audit user-defined roles that grant one and not the other:
+before this release such a role silently expanded to `plugins:write`, which
+grants package installation. Decide separately who should hold the new
+`model_profiles:read` / `:write` / `:delete` permissions, which the built-in
+Admin role receives.
 
 ### Migrating from DynamoDB to PostgreSQL
 
