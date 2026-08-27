@@ -104,6 +104,10 @@ def _environment_model_profile(mocker):
         "reporting.routes.chat.model_profiles.resolve",
         AsyncMock(return_value=resolved_model_profile()),
     )
+    mocker.patch(
+        "reporting.services.chat_turns.model_profiles.environment_snapshot",
+        return_value=resolved_model_profile(),
+    )
 
 
 #: Sessions the current test has, shared so admission can refuse a thread that

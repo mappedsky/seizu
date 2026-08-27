@@ -14,6 +14,13 @@ jest.mock('src/hooks/usePermissions', () => ({
 }));
 
 jest.mock('src/hooks/useModelProfilesApi', () => ({
+  useSelectableModelProfiles: jest.fn(() => ({
+    profiles: [],
+    defaultProfileId: null,
+    loading: false,
+    error: null,
+    refresh: jest.fn(),
+  })),
   useModelProfilesList: jest.fn(),
   useModelProfileMutations: jest.fn(),
 }));

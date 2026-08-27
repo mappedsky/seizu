@@ -16,6 +16,7 @@ import { FeaturesContext, DEFAULT_FEATURES } from 'src/features.context';
 import * as usePermissionsModule from 'src/hooks/usePermissions';
 import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
+import * as useModelProfilesApiModule from 'src/hooks/useModelProfilesApi';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
@@ -31,6 +32,10 @@ jest.mock('src/hooks/useChatHistory', () => ({
 
 jest.mock('src/hooks/useChatSessions', () => ({
   useChatSessions: jest.fn(),
+}));
+
+jest.mock('src/hooks/useModelProfilesApi', () => ({
+  useSelectableModelProfiles: jest.fn(),
 }));
 
 jest.mock('src/hooks/useConfirmationsApi', () => ({
@@ -52,6 +57,10 @@ const mockUseChatHistory =
 const mockUseChatSessions =
   useChatSessionsModule.useChatSessions as jest.MockedFunction<
     typeof useChatSessionsModule.useChatSessions
+  >;
+const mockUseSelectableModelProfiles =
+  useModelProfilesApiModule.useSelectableModelProfiles as jest.MockedFunction<
+    typeof useModelProfilesApiModule.useSelectableModelProfiles
   >;
 const mockUseConfirmationsApi =
   useConfirmationsApiModule.useConfirmationsApi as jest.MockedFunction<
@@ -192,6 +201,13 @@ describe('ChatInterface', () => {
     jest.clearAllMocks();
     window.localStorage.clear();
     mockUseChatHistory.mockReturnValue(() => Promise.resolve([]));
+    mockUseSelectableModelProfiles.mockReturnValue({
+      profiles: [],
+      defaultProfileId: null,
+      loading: false,
+      error: null,
+      refresh: jest.fn().mockResolvedValue(undefined),
+    });
     mockUseChatSessions.mockReturnValue({
       sessions: [
         {

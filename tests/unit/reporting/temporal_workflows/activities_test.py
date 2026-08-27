@@ -45,8 +45,17 @@ from reporting.temporal_workflows.shared import (
     RepoChatInput,
     TriggerConfiguredWorkflowsRequest,
 )
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _NOW = "2024-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _model_configuration(mocker):
+    mocker.patch(
+        "reporting.services.agent_run.model_profiles.environment_snapshot",
+        return_value=resolved_model_profile(),
+    )
 
 
 def _workflow_item(**updates):
