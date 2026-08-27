@@ -25,7 +25,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.permissions import Permission
-from reporting.services import report_store
+from reporting.schema.model_profiles import ResolvedModelProfile
+from reporting.services import model_profiles, report_store
 from reporting.services.chat_budget import BudgetController, initial_budget_ledger
 from reporting.services.chat_graph import (
     ChatState,
@@ -60,6 +61,7 @@ async def run_headless_chat(
     on_chunk: Callable[[], None] | None = None,
     origin: Literal["interactive", "scheduled", "workflow"] = "interactive",
     scheduled_chat_id: str | None = None,
+    resolved_model_profile: ResolvedModelProfile | None = None,
 ) -> HeadlessChatResult:
     """Drive one full agent turn for ``current_user`` and return its summary.
 
@@ -72,15 +74,22 @@ async def run_headless_chat(
     their schedule.
     """
     bypass = Permission.CHAT_BYPASS_PERMISSIONS.value in current_user.permissions
+    resolved_profile = resolved_model_profile or await model_profiles.resolve(None)
     session = await report_store.create_chat_session(
         current_user.user.user_id,
         title,
         origin=origin,
         scheduled_chat_id=scheduled_chat_id,
+        model_profile_id=resolved_profile.profile_id,
     )
 
     graph = get_chat_graph()
-    budget_controller = BudgetController(initial_budget_ledger())
+    budget_controller = BudgetController(
+        initial_budget_ledger(
+            cost_limit_usd=resolved_profile.cost_budget_usd,
+            model_specs=resolved_profile.model_spec_payloads(),
+        )
+    )
     config = build_turn_config(
         current_user,
         session.thread_id,
@@ -103,12 +112,15 @@ async def run_headless_chat(
                 "thread_id": session.thread_id,
                 "user": current_user.user.user_id,
                 "bypass_confirmations": bypass,
+                "model_profile_id": resolved_profile.profile_id,
+                "model_profile_version": resolved_profile.profile_version,
             },
         )
-        async with asyncio.timeout(timeout_seconds):
-            async for _chunk in graph.astream(graph_input, config, stream_mode="custom"):
-                if on_chunk is not None:
-                    on_chunk()
+        with model_profiles.use(resolved_profile):
+            async with asyncio.timeout(timeout_seconds):
+                async for _chunk in graph.astream(graph_input, config, stream_mode="custom"):
+                    if on_chunk is not None:
+                        on_chunk()
 
         final_message = await _final_assistant_message(current_user, session.thread_id)
         summary = message_text(final_message.content) if final_message is not None else ""

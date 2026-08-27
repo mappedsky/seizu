@@ -5,8 +5,17 @@ from reporting.schema.report_config import User
 from reporting.services import agent_run
 from reporting.services.headless_chat import HeadlessChatResult
 from reporting.services.mcp_runtime import ChatActionOutcome, ChatBlockReason
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _NOW = "2026-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _model_configuration(mocker):
+    mocker.patch(
+        "reporting.services.agent_run.model_profiles.environment_snapshot",
+        return_value=resolved_model_profile(),
+    )
 
 
 def _current_user() -> CurrentUser:

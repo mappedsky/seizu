@@ -16,6 +16,7 @@ import { FeaturesContext, DEFAULT_FEATURES } from 'src/features.context';
 import * as usePermissionsModule from 'src/hooks/usePermissions';
 import * as useChatHistoryModule from 'src/hooks/useChatHistory';
 import * as useChatSessionsModule from 'src/hooks/useChatSessions';
+import * as useModelProfilesApiModule from 'src/hooks/useModelProfilesApi';
 import * as useConfirmationsApiModule from 'src/hooks/useConfirmationsApi';
 import { useChat } from '@ai-sdk/react';
 import { type ChatOnFinishCallback, type UIMessage } from 'ai';
@@ -31,6 +32,10 @@ jest.mock('src/hooks/useChatHistory', () => ({
 
 jest.mock('src/hooks/useChatSessions', () => ({
   useChatSessions: jest.fn(),
+}));
+
+jest.mock('src/hooks/useModelProfilesApi', () => ({
+  useSelectableModelProfiles: jest.fn(),
 }));
 
 jest.mock('src/hooks/useConfirmationsApi', () => ({
@@ -52,6 +57,10 @@ const mockUseChatHistory =
 const mockUseChatSessions =
   useChatSessionsModule.useChatSessions as jest.MockedFunction<
     typeof useChatSessionsModule.useChatSessions
+  >;
+const mockUseSelectableModelProfiles =
+  useModelProfilesApiModule.useSelectableModelProfiles as jest.MockedFunction<
+    typeof useModelProfilesApiModule.useSelectableModelProfiles
   >;
 const mockUseConfirmationsApi =
   useConfirmationsApiModule.useConfirmationsApi as jest.MockedFunction<
@@ -192,6 +201,13 @@ describe('ChatInterface', () => {
     jest.clearAllMocks();
     window.localStorage.clear();
     mockUseChatHistory.mockReturnValue(() => Promise.resolve([]));
+    mockUseSelectableModelProfiles.mockReturnValue({
+      profiles: [],
+      defaultProfileId: null,
+      loading: false,
+      error: null,
+      refresh: jest.fn().mockResolvedValue(undefined),
+    });
     mockUseChatSessions.mockReturnValue({
       sessions: [
         {
@@ -737,7 +753,8 @@ describe('ChatInterface', () => {
     await waitFor(() => {
       const built = mockUseChat.mock.calls
         .map(([options]) => options as { id?: string; messages?: unknown[] })
-        .find((options) => options.id === 'thread-new');
+        .filter((options) => options.id === 'thread-new')
+        .at(-1);
       expect(built?.messages).toEqual([
         expect.objectContaining({
           role: 'user',
@@ -2337,6 +2354,27 @@ describe('ChatInterface', () => {
     expect(composer).not.toBeNull();
     expect(within(composer!).getByRole('switch')).toBe(toggle);
   });
+
+  it('shows the bypass confirmations toggle on the new-session composer', async () => {
+    mockUsePermissionState.mockReturnValue({
+      hasPermission: (permission: string) =>
+        permission === 'chat:use' || permission === 'chat:bypass_permissions',
+      loading: false,
+      currentUser: null,
+    });
+
+    renderChat({ initialPath: '/app/chat' });
+    await act(async () => {});
+
+    const composer = screen
+      .getByPlaceholderText('Ask Seizu...')
+      .closest('form');
+    expect(composer).not.toBeNull();
+    expect(
+      within(composer!).getByText('Bypass confirmations'),
+    ).toBeInTheDocument();
+    expect(within(composer!).getByRole('switch')).not.toBeChecked();
+  });
   it('reattaches only once the real thread id is known, not to the placeholder', async () => {
     // useChat's resume effect depends on the flag, not on the chat id, so a
     // hardcoded `true` would fire once against the placeholder id and never
@@ -2629,7 +2667,7 @@ describe('ChatInterface', () => {
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockImplementation(async (input) => {
-        attempts.push(String(input));
+        if (String(input).includes('/turns')) attempts.push(String(input));
         return new Response('{}', { status: 409 });
       });
 

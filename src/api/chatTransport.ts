@@ -275,6 +275,19 @@ export class SeizuChatTransport<
         );
       }
       if (admission.status === 409) {
+        const detail = (await admission.json().catch(() => null)) as {
+          error?: string;
+          detail?: string;
+        } | null;
+        const message = detail?.error ?? detail?.detail;
+        if (message?.startsWith('MODEL_PROFILE_UNAVAILABLE:')) {
+          throw new Error(
+            message.replace('MODEL_PROFILE_UNAVAILABLE:', '').trim(),
+          );
+        }
+        if (message?.startsWith('MODEL_PROFILE_LOCKED:')) {
+          throw new Error(message.replace('MODEL_PROFILE_LOCKED:', '').trim());
+        }
         throw new Error('This conversation already has a turn in progress');
       }
       if (admission.status === 404) {

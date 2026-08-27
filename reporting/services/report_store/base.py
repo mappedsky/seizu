@@ -30,6 +30,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.model_profiles import ModelProfileItem, ModelProfileVersion
 from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
@@ -990,6 +991,8 @@ class ReportStore(ABC):
         title: str,
         origin: str = "interactive",
         scheduled_chat_id: str | None = None,
+        model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem:
         """Create a new chat session with a store-generated ID.
 
@@ -1051,6 +1054,16 @@ class ReportStore(ABC):
     @abstractmethod
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
         """Update a session's title and updated_at. Returns None if the session is not found."""
+
+    @abstractmethod
+    async def update_chat_session_model_profile(
+        self,
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem | None:
+        """Remember a profile and effort, refusing a family change after admission."""
 
     @abstractmethod
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
@@ -1218,6 +1231,40 @@ class ReportStore(ABC):
         """IDs of turns whose ``expires_at`` has passed, oldest first."""
 
     # ------------------------------------------------------------------
+    # Model profiles
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_model_profiles(self, *, enabled_only: bool = False) -> list[ModelProfileItem]:
+        """Return model profiles, optionally limited to enabled choices."""
+
+    @abstractmethod
+    async def get_model_profile(self, profile_id: str) -> ModelProfileItem | None:
+        """Return a model profile by id."""
+
+    @abstractmethod
+    async def create_model_profile(self, data: dict[str, Any], created_by: str) -> ModelProfileItem:
+        """Create a model profile and its first immutable version."""
+
+    @abstractmethod
+    async def update_model_profile(
+        self, profile_id: str, data: dict[str, Any], updated_by: str, comment: str | None = None
+    ) -> ModelProfileItem | None:
+        """Replace a model profile and append an immutable version."""
+
+    @abstractmethod
+    async def delete_model_profile(self, profile_id: str) -> bool:
+        """Delete a profile and its versions."""
+
+    @abstractmethod
+    async def list_model_profile_versions(self, profile_id: str) -> list[ModelProfileVersion]:
+        """Return a profile's versions newest first."""
+
+    @abstractmethod
+    async def get_model_profile_version(self, profile_id: str, version: int) -> ModelProfileVersion | None:
+        """Return one model profile version."""
+
+    # ------------------------------------------------------------------
     # Scheduled chats
     # ------------------------------------------------------------------
 
@@ -1242,6 +1289,7 @@ class ReportStore(ABC):
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         created_by: str,
+        model_profile_id: str | None = None,
     ) -> ScheduledChatItem:
         """Create a scheduled chat owned by created_by."""
 
@@ -1256,6 +1304,7 @@ class ReportStore(ABC):
         enabled: bool,
         updated_by: str,
         comment: str | None = None,
+        model_profile_id: str | None = None,
     ) -> ScheduledChatItem | None:
         """Replace a scheduled chat's configuration, appending a new version.
 

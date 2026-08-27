@@ -27,6 +27,7 @@ jobs:
           uv run --frozen --no-sync pytest --strict --junitxml=coverage/unit.xml --cov=reporting --cov=seizu_schema --cov-report=html:coverage/cov_html --cov-report=xml:coverage/cov.xml --cov-report=term --no-cov-on-fail tests/unit
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read  # for actions/checkout
     steps:
@@ -41,7 +42,7 @@ jobs:
       - name: Type check
         run: bun run type-check
       - name: Run tests
-        run: bun test --watchAll=false --timeout 30000
+        run: bun run test:ci
   build-python-packages:
     runs-on: ubuntu-latest
     permissions:

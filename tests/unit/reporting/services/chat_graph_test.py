@@ -3221,6 +3221,8 @@ def test_get_chat_model_builds_litellm_streaming_client(mocker):
     mocker.patch("reporting.settings.CHAT_LLM_BASE_URL", "https://llm.example.com")
     chat_graph.build_chat_model.cache_clear()
     chat_models.capability.cache_clear()
+    spec = chat_models.resolve()
+    mocker.patch("reporting.services.chat_graph.model_profiles.require_current_spec", return_value=spec)
 
     try:
         assert chat_graph.get_chat_model() is model

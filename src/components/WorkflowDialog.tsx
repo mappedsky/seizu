@@ -39,6 +39,7 @@ import {
   WorkflowActivityDefinition,
 } from 'src/config.context';
 import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
+import { useSelectableModelProfiles } from 'src/hooks/useModelProfilesApi';
 import {
   WorkflowActivity,
   WorkflowItem,
@@ -180,10 +181,12 @@ function ConfigField({
   field,
   value,
   onChange,
+  optionLabels,
 }: {
   field: ActionConfigFieldDef;
   value: unknown;
   onChange: (value: unknown) => void;
+  optionLabels?: Record<string, string>;
 }) {
   if (field.type === 'parameters' || field.type === 'module_runs') return null;
   const label = field.required ? `${field.label} *` : field.label;
@@ -217,7 +220,7 @@ function ConfigField({
         >
           {(field.options ?? []).map((option) => (
             <MenuItem key={option} value={option}>
-              {option}
+              {optionLabels?.[option] ?? option}
             </MenuItem>
           ))}
         </Select>
@@ -275,6 +278,35 @@ function ConfigField({
     </Box>
   ) : (
     control
+  );
+}
+
+function ModelProfileConfigField({
+  field,
+  value,
+  onChange,
+}: {
+  field: ActionConfigFieldDef;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const { profiles } = useSelectableModelProfiles();
+  return (
+    <ConfigField
+      field={{
+        ...field,
+        type: 'select',
+        options: profiles.map((profile) => profile.profile_id),
+      }}
+      optionLabels={Object.fromEntries(
+        profiles.map((profile) => [
+          profile.profile_id,
+          `${profile.name}${profile.is_default ? ' (default)' : ''}`,
+        ]),
+      )}
+      value={value}
+      onChange={onChange}
+    />
   );
 }
 
@@ -1191,22 +1223,39 @@ export default function WorkflowDialog({
                             gap: 1.5,
                           }}
                         >
-                          {fields.map((field) => (
-                            <ConfigField
-                              key={field.name}
-                              field={field}
-                              value={activity.parameters[field.name]}
-                              onChange={(fieldValue) =>
-                                updateActivity(activity.editorId, (item) => ({
-                                  ...item,
-                                  parameters: {
-                                    ...item.parameters,
-                                    [field.name]: fieldValue,
-                                  },
-                                }))
-                              }
-                            />
-                          ))}
+                          {fields.map((field) =>
+                            field.name === 'model_profile_id' ? (
+                              <ModelProfileConfigField
+                                key={field.name}
+                                field={field}
+                                value={activity.parameters[field.name]}
+                                onChange={(fieldValue) =>
+                                  updateActivity(activity.editorId, (item) => ({
+                                    ...item,
+                                    parameters: {
+                                      ...item.parameters,
+                                      [field.name]: fieldValue,
+                                    },
+                                  }))
+                                }
+                              />
+                            ) : (
+                              <ConfigField
+                                key={field.name}
+                                field={field}
+                                value={activity.parameters[field.name]}
+                                onChange={(fieldValue) =>
+                                  updateActivity(activity.editorId, (item) => ({
+                                    ...item,
+                                    parameters: {
+                                      ...item.parameters,
+                                      [field.name]: fieldValue,
+                                    },
+                                  }))
+                                }
+                              />
+                            ),
+                          )}
                           {moduleRunsField && (
                             <Box>
                               <Box

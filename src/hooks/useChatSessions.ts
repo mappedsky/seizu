@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuthHeaders } from 'src/hooks/useAuthHeaders';
+import type { ReasoningEffort } from 'src/hooks/useModelProfilesApi';
 
 export interface ChatSession {
   thread_id: string;
   title: string;
   created_at: string;
   updated_at: string;
+  model_profile_id?: string | null;
+  model_reasoning_effort?: ReasoningEffort | null;
+  model_profile_locked?: boolean;
 }
 
 interface ChatSessionsResponse {
@@ -30,9 +34,18 @@ export function useChatSessions(enabled: boolean): {
   sessions: ChatSession[];
   loading: boolean;
   error: string | null;
-  createSession: (title?: string) => Promise<ChatSession>;
+  createSession: (
+    title?: string,
+    modelProfileId?: string | null,
+    reasoningEffort?: ReasoningEffort | null,
+  ) => Promise<ChatSession>;
   getSession: (threadId: string) => Promise<ChatSession | null>;
   updateSession: (threadId: string, title: string) => Promise<void>;
+  updateSessionProfile?: (
+    threadId: string,
+    modelProfileId: string | null,
+    reasoningEffort: ReasoningEffort,
+  ) => Promise<void>;
   deleteSession: (threadId: string) => Promise<void>;
   touchSession: (threadId: string) => void;
 } {
@@ -81,7 +94,11 @@ export function useChatSessions(enabled: boolean): {
   }, [enabled, fetchSessions]);
 
   const createSession = useCallback(
-    async (title = ''): Promise<ChatSession> => {
+    async (
+      title = '',
+      modelProfileId: string | null = null,
+      reasoningEffort: ReasoningEffort | null = null,
+    ): Promise<ChatSession> => {
       const res = await fetch('/api/v1/chat/sessions', {
         method: 'POST',
         headers: {
@@ -89,7 +106,11 @@ export function useChatSessions(enabled: boolean): {
           'X-Seizu-Csrf': '1',
           ...authHeaders(),
         },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({
+          title,
+          model_profile_id: modelProfileId,
+          reasoning_effort: reasoningEffort,
+        }),
       });
       if (!res.ok) throw new Error('Failed to create session');
       const session = (await res.json()) as ChatSession;
@@ -179,6 +200,44 @@ export function useChatSessions(enabled: boolean): {
     [authHeaders],
   );
 
+  const updateSessionProfile = useCallback(
+    async (
+      threadId: string,
+      modelProfileId: string | null,
+      reasoningEffort: ReasoningEffort,
+    ): Promise<void> => {
+      const response = await fetch(
+        `/api/v1/chat/sessions/${encodeURIComponent(threadId)}`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Seizu-Csrf': '1',
+            ...authHeaders(),
+          },
+          body: JSON.stringify({
+            model_profile_id: modelProfileId,
+            reasoning_effort: reasoningEffort,
+          }),
+        },
+      );
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as {
+          detail?: string;
+          error?: string;
+        } | null;
+        const message = data?.detail ?? data?.error;
+        throw new Error(
+          message?.replace(/^MODEL_PROFILE_(?:LOCKED|UNAVAILABLE):\s*/, '') ??
+            'Failed to update model profile',
+        );
+      }
+      const updated = (await response.json()) as ChatSession;
+      setSessions((previous) => upsertAndSortSession(previous, updated));
+    },
+    [authHeaders],
+  );
+
   const touchSession = useCallback((threadId: string): void => {
     const now = new Date().toISOString();
     setSessions((prev) =>
@@ -197,6 +256,7 @@ export function useChatSessions(enabled: boolean): {
     createSession,
     getSession,
     updateSession,
+    updateSessionProfile,
     deleteSession,
     touchSession,
   };

@@ -21,7 +21,7 @@ from reporting.schema.reporting_config import (
     WorkflowActivity,
     WorkflowStage,
 )
-from reporting.services import report_store, workflow_schedules
+from reporting.services import model_profiles, report_store, workflow_schedules
 from reporting.services.activity_config import config_json_schema, validate_config
 from reporting.services.query_validator import validate_query
 from reporting.temporal_workflows import (
@@ -435,6 +435,11 @@ async def validate_definition(body: CreateWorkflowRequest) -> str | None:
             validator = validators.get(activity.type)
             if validator is not None and (error := validator(activity.parameters)):
                 return f"{label}: {error}"
+            if activity.type == "agent_chat" and (profile_id := activity.parameters.get("model_profile_id")):
+                try:
+                    await model_profiles.resolve(str(profile_id))
+                except model_profiles.ModelProfileUnavailable as exc:
+                    return f"{label}: {exc}"
     return None
 
 

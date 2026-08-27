@@ -34,12 +34,14 @@ from reporting import settings
 from reporting.authnz import CurrentUser
 from reporting.authnz.headless import resolve_stored_user
 from reporting.authnz.permissions import Permission
+from reporting.schema.model_profiles import ResolvedModelProfile
 from reporting.services import (
     chat_budget,
     chat_models,
     chat_turns,
     episodic_memory,
     external_mcp,
+    model_profiles,
     report_store,
     sandbox_session,
 )
@@ -52,7 +54,7 @@ logger = logging.getLogger(__name__)
 #: refuse a newer payload rather than read fields it would misinterpret; adding
 #: a field with a default does not change this number, changing what an existing
 #: field means does.
-SUPPORTED_INVOCATION_VERSION = 1
+SUPPORTED_INVOCATION_VERSION = 2
 
 
 class StepInvocationRejected(RuntimeError):
@@ -127,9 +129,9 @@ async def _check_turn(invocation: ChatWorkerStepInvocation) -> None:
 
 async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWorkerStepOutcome:
     """Run one plan step and report its result, spend, and session memory."""
-    if invocation.version > SUPPORTED_INVOCATION_VERSION:
+    if invocation.version != SUPPORTED_INVOCATION_VERSION:
         raise StepInvocationRejected(
-            f"chat worker step payload version {invocation.version} is newer than this worker understands"
+            f"chat worker step payload version {invocation.version} is not supported by this worker"
         )
     await _check_turn(invocation)
     current = await _resolve_identity(invocation)
@@ -178,14 +180,17 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
         # sandbox and is the only thing that may suspend it (SBX-015).
         sandbox_session.attach_sandbox_session(invocation.sandbox_id, thread=invocation.sandbox_thread)
 
-    # The turn's spec, not this worker's settings: a step must run on the model
-    # its turn was admitted with. Falling back to a local resolve keeps an older
-    # payload runnable rather than failing it.
-    spec = chat_models.ModelSpec.from_payload(invocation.model_spec) or chat_models.resolve("worker")
+    captured_profile = ResolvedModelProfile.model_validate(invocation.resolved_model_profile)
+    spec = chat_models.ModelSpec.from_payload(
+        captured_profile.spec_for("worker", economy=invocation.economy).model_dump(mode="json")
+    )
     model = chat_graph.build_chat_model(spec)
-    summary_spec = chat_models.ModelSpec.from_payload(invocation.summary_model_spec) or spec
+    summary_spec = chat_models.ModelSpec.from_payload(
+        captured_profile.spec_for("worker_summary", economy=invocation.economy).model_dump(mode="json")
+    )
     summary_model = chat_graph.build_chat_model(summary_spec)
-    tool_specs, skill_tools, skill_prompts = await chat_orchestrator._worker_tool_specs(current)
+    with model_profiles.use(captured_profile):
+        tool_specs, skill_tools, skill_prompts = await chat_orchestrator._worker_tool_specs(current)
 
     # Watching for a stop is not optional here, and it is not the coordinator's
     # cancel to deliver. The coordinator asks the fan-out workflow to cancel, but
@@ -198,33 +203,36 @@ async def run_distributed_step(invocation: ChatWorkerStepInvocation) -> ChatWork
     result: dict[str, Any] = {}
     try:
         async with publisher, _DetailStream(publisher) as writer:
-            work = asyncio.create_task(
-                chat_orchestrator._run_worker_step_with_session(
-                    step,
-                    plan=plan,
-                    results=dependency_results,
-                    conversation_context=invocation.conversation_context,
-                    model=model,
-                    current_user=current,
-                    session_key=invocation.thread_id,
-                    config=config,
-                    tool_specs=tool_specs,
-                    disclosed_names=set(invocation.disclosed_tools),
-                    progressive=invocation.progressive,
-                    writer=writer,
-                    skill_tools=skill_tools,
-                    skill_prompts=skill_prompts,
-                    # The grant is the step's whole allowance: it cannot ask the
-                    # run's controller for more from another process (AGT-018).
-                    thresholds=chat_orchestrator._StepThresholds(
-                        soft_tokens=invocation.soft_token_grant or invocation.token_grant,
-                        ceiling_tokens=invocation.token_grant,
-                        soft_cost_usd=invocation.soft_cost_grant_usd or invocation.cost_grant_usd,
-                        ceiling_cost_usd=invocation.cost_grant_usd,
-                    ),
-                    summary_model=summary_model,
-                )
-            )
+
+            async def _run_step() -> dict[str, Any]:
+                with model_profiles.use(captured_profile):
+                    return await chat_orchestrator._run_worker_step_with_session(
+                        step,
+                        plan=plan,
+                        results=dependency_results,
+                        conversation_context=invocation.conversation_context,
+                        model=model,
+                        current_user=current,
+                        session_key=invocation.thread_id,
+                        config=config,
+                        tool_specs=tool_specs,
+                        disclosed_names=set(invocation.disclosed_tools),
+                        progressive=invocation.progressive,
+                        writer=writer,
+                        skill_tools=skill_tools,
+                        skill_prompts=skill_prompts,
+                        # The grant is the step's whole allowance: it cannot ask the
+                        # run's controller for more from another process (AGT-018).
+                        thresholds=chat_orchestrator._StepThresholds(
+                            soft_tokens=invocation.soft_token_grant or invocation.token_grant,
+                            ceiling_tokens=invocation.token_grant,
+                            soft_cost_usd=invocation.soft_cost_grant_usd or invocation.cost_grant_usd,
+                            ceiling_cost_usd=invocation.cost_grant_usd,
+                        ),
+                        summary_model=summary_model,
+                    )
+
+            work = asyncio.create_task(_run_step())
             stopped = asyncio.create_task(publisher.stopped.wait())
             done, _ = await asyncio.wait({work, stopped}, return_when=asyncio.FIRST_COMPLETED)
             stopped.cancel()

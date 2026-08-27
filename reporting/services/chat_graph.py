@@ -44,6 +44,7 @@ from reporting.services import (
     external_mcp,
     mcp_builtins,
     mcp_runtime,
+    model_profiles,
     report_store,
     sandbox_session,
     telemetry,
@@ -754,6 +755,7 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
                 available_specs,
                 config,
                 turn_writer,
+                phase="assistant",
                 # A post-action turn ships no prose, but it still thinks -- and
                 # it is the turn a viewer waits longest through. Details are the
                 # one thing it can show without shipping text it may retract.
@@ -924,7 +926,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
         # all about the work it did.
         try:
             turn_result = await _run_llm_tool_turn(
-                model, synthesis_system_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
+                model,
+                synthesis_system_prompt,
+                messages,
+                [],
+                config,
+                None,
+                detail_writer=writer,
+                allow_reserve=True,
+                phase="assistant",
             )
             final_message = turn_result.message
             streamed_in_last_turn = turn_result.streamed
@@ -942,7 +952,15 @@ async def chat_agent_node(state: ChatState, config: RunnableConfig) -> ChatState
             )
             try:
                 turn_result = await _run_llm_tool_turn(
-                    model, retry_prompt, messages, [], config, None, detail_writer=writer, allow_reserve=True
+                    model,
+                    retry_prompt,
+                    messages,
+                    [],
+                    config,
+                    None,
+                    detail_writer=writer,
+                    allow_reserve=True,
+                    phase="assistant",
                 )
                 final_message = turn_result.message
                 streamed_in_last_turn = turn_result.streamed
@@ -1215,7 +1233,7 @@ async def _auto_continue_answer(
                 config,
                 stitch_writer,
                 allow_reserve=allow_reserve,
-                phase="continuation",
+                phase="assistant:continuation",
                 # Request the cap explicitly rather than inheriting the provider's
                 # default: it is what the budget already reserves for this turn, and
                 # a known cap is what lets _effective_finish_reason tell a
@@ -1443,7 +1461,7 @@ async def _resume_confirmed_tool_turn(
             id=f"msg_{uuid.uuid4().hex}",
         ),
     ]
-    turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer)
+    turn_result = await _run_llm_tool_turn(model, system_prompt, context, [], config, writer, phase="assistant")
     detail_events.extend(turn_result.details)
     response = message_text(turn_result.message.content) or (
         "Approved action(s) completed.\n\nResult:\n"
@@ -1590,12 +1608,16 @@ async def _run_llm_tool_turn(
     context manager here closes the span on all of them. The figures it records
     are ones the result already carries (AGT-026).
     """
+    profile_spec = model_profiles.current_spec(phase.split(":")[0])
     with telemetry.span(
         f"llm {phase}",
         phase=phase,
         role=phase.split(":")[0],
         model=chat_context.model_name_of(model),
         tool_count=len(tools),
+        model_profile_id=profile_spec.profile_id if profile_spec else "",
+        model_profile_name=profile_spec.profile_name if profile_spec else "",
+        model_profile_version=profile_spec.profile_version if profile_spec else 0,
     ) as current:
         result = await _run_llm_tool_turn_inner(model, system_prompt, messages, tools, *args, phase=phase, **kwargs)
         telemetry.set_attributes(
@@ -4246,14 +4268,8 @@ def build_chat_model(spec: chat_models.ModelSpec) -> ChatModel:
 
 
 def get_chat_model(role: str = "default", economy: bool = False) -> ChatModel:
-    """Resolve this deployment's spec for a stage and build its model.
-
-    The convenience path for callers with no per-call choice to express. A
-    caller that *has* one -- notably a distributed plan step running on the spec
-    its turn was admitted with -- resolves the spec itself and calls
-    :func:`build_chat_model`.
-    """
-    return build_chat_model(chat_models.resolve(role, economy=economy))
+    """Build a stage model from the active immutable run configuration."""
+    return build_chat_model(model_profiles.require_current_spec(role, economy=economy))
 
 
 def _chat_provider() -> str:

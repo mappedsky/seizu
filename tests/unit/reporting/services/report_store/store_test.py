@@ -644,6 +644,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
     mock_store.create_scheduled_chat.assert_awaited_once_with(
         name="Digest",
         prompt="Summarize",
+        model_profile_id=None,
         schedule={"type": "hourly", "interval_hours": 4},
         watch_scans=[],
         enabled=True,
@@ -664,6 +665,7 @@ async def test_scheduled_chat_facade_delegates(mock_store):
         sc_id="sc1",
         name="Digest",
         prompt="Summarize",
+        model_profile_id=None,
         schedule=None,
         watch_scans=[{"grouptype": "CVEMetadata"}],
         enabled=False,

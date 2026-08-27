@@ -2030,7 +2030,15 @@ transport's pending slot, so `reconnectToStream` finds its id without probing.
 The question is put in the transcript by seeding `useChat({messages})`, which is
 read when the `Chat` for the new thread is *constructed*; writing it from an
 effect is always either too early for that construction or late enough to
-overwrite what the attach has already pushed.
+overwrite what the attach has already pushed. The seed remains until the turn
+finishes rather than being cleared when navigation settles, because the SDK may
+read the options again while reconnecting.
+
+Admission can also precede the worker's first checkpoint by an arbitrarily long
+queue delay. During that interval the history endpoint projects the active
+turn's immutable command as a pending user message unless the checkpoint already
+contains it. A reload must show the question the server accepted even when the
+producer has not emitted its first event yet.
 
 Related, and a hazard in its own right: `reconnectToStream` deletes this
 thread's pending slot on a 204, and a turn admitted while that probe was in
@@ -2677,3 +2685,57 @@ single-agent path and the synthesizer persist theirs, as they always have.
 is one `ainvoke` and yields no reasoning chunks, so the planner's entry appears
 only on the JSON-prompt fallback. Do not stream the structured runnable to get
 one: it yields parsed objects, not chunks.
+
+## AGT-045 — Model families lock on first use; reasoning remains selectable
+
+**Applies to:** `model_profiles.py`, `chat_models.ModelSpec`,
+`ChatTurnCommand.resolved_model_profile`, `ChatInterface.tsx`
+
+Admins manage versioned model profiles in the database. Every holder of
+`chat:use` selects a profile plus one of its admin-configured user reasoning
+levels; profiles default to `low`, `medium`, and `high`. The UI groups those
+levels beneath each profile, then shows only the locked profile after the first
+admitted turn atomically locks its family on the session. Its reasoning level
+remains selectable between turns. The resolved pair is copied as a complete
+snapshot into each admitted turn. Admission expands inheritance and deployment
+fallbacks into primary and economy specs for every runtime stage. Call sites
+only select the stage and whether the run is degraded; a missing stage or an
+incomplete spec is invalid and never falls back to a worker's environment.
+Scheduled chats and `agent_chat` workflow activities use the same catalog and
+snapshot their selection before Temporal dispatch. A deleted or disabled
+explicit choice never silently falls through to another profile: schedules and
+workflows require a replacement, while a locked interactive conversation must
+be restarted under a new profile.
+
+A profile controls the primary models for assistant, planner, worker,
+worker-summary, sandbox-subagent, and synthesizer phases. Each stage may
+override the base primary model and may either inherit the user's selected
+reasoning level or fix an admin-configured value. One economy model and
+reasoning value applies wherever budget degradation needs the fallback; it is
+not duplicated per stage. Router and verifier continue to resolve from
+deployment settings. The run cost ceiling is the lower positive value of the
+profile cap and `CHAT_RUN_COST_BUDGET_USD`.
+
+Admins choose the user-visible subset from LiteLLM's fixed `default`, `none`,
+`minimal`, `low`, `medium`, `high`, and `xhigh` vocabulary. `default` is
+rendered by omitting an effort so it remains safe for provider adapters whose
+nominal `default` mapping is not accepted by every underlying model.
+
+**Why:** changing effort keeps the same model family, while changing profile
+families moves the request to another model and guarantees that the next turn
+cannot reuse that model's prior cached prefix; its carried context is uncached
+input. A new conversation makes that cost boundary explicit. Capturing the expanded specs at admission keeps a profile
+edit or effort change from changing a running turn or one of its distributed
+workers. A single user level cannot safely flatten the profile: stages such as
+worker-summary are transcription passes where extra thinking crowds out the
+answer, while planner and worker may benefit from it (AGT-019). Router and
+verifier are structural classifiers, so a request for a stronger answer should
+not silently move them to a more expensive model.
+
+No profiles are seeded. Until an admin creates the first enabled profile, chat
+uses the environment configuration unchanged; the first enabled profile becomes
+the default. Once profiles exist, exactly one enabled profile is the default.
+
+**Why no built-ins:** unmeasured provider/model combinations would present an
+operational guess as a safe cost preset. The environment fallback preserves an
+existing deployment without making that claim.

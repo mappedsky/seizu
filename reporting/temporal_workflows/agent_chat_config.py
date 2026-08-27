@@ -27,6 +27,7 @@ class _ParsedConfig:
     session_title: str
     timeout_seconds: int
     skill: str | None
+    model_profile_id: str | None
 
 
 def config_fields() -> list[ActionConfigFieldDef]:
@@ -50,6 +51,13 @@ def config_fields() -> list[ActionConfigFieldDef]:
             required=False,
             default="Workflow chat",
             description="Prefix for the chat session each run creates.",
+        ),
+        ActionConfigFieldDef(
+            name="model_profile_id",
+            label="Model profile",
+            type="string",
+            required=False,
+            description="Model profile for this activity. Empty follows the current default profile.",
         ),
         ActionConfigFieldDef(
             name="skill",
@@ -116,6 +124,11 @@ def _parse_config(action_config: dict[str, Any]) -> tuple[_ParsedConfig | None, 
         elif _SKILL_SEPARATOR not in skill:
             errors.append("'skill' must be in the form 'skillset__skill'")
 
+    model_profile_id = action_config.get("model_profile_id") or None
+    if model_profile_id is not None and not isinstance(model_profile_id, str):
+        errors.append("'model_profile_id' must be a string")
+        model_profile_id = None
+
     timeout_minutes = action_config.get("timeout_minutes")
     timeout_seconds = settings.TEMPORAL_CHAT_ACTIVITY_TIMEOUT_SECONDS
     if timeout_minutes is not None:
@@ -140,6 +153,7 @@ def _parse_config(action_config: dict[str, Any]) -> tuple[_ParsedConfig | None, 
             session_title=session_title,
             timeout_seconds=timeout_seconds,
             skill=skill,
+            model_profile_id=model_profile_id,
         ),
         [],
     )
@@ -161,5 +175,6 @@ def build_input(context: WorkflowInputContext) -> AgentChatInput:
         session_title=parsed.session_title,
         timeout_seconds=parsed.timeout_seconds,
         skill=parsed.skill,
+        model_profile_id=parsed.model_profile_id,
         rows=list(context.rows),
     )

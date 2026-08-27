@@ -38,7 +38,7 @@ class BudgetReservation:
 _CALL_CEILING_BASE = 8
 
 
-def derived_call_ceiling(steps: int) -> int:
+def derived_call_ceiling(steps: int, *, models_priced: bool | None = None) -> int:
     """The call ceiling a plan of *steps* steps implies, or 0 when disabled.
 
     ``CHAT_RUN_MAX_LLM_CALLS`` overrides it when set (AGT-024).
@@ -59,14 +59,18 @@ def derived_call_ceiling(steps: int) -> int:
         return 0
     from reporting.services.chat_models import capability
 
-    priced = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) > 0 and capability(settings.CHAT_LLM_MODEL).priced
+    priced = (
+        models_priced
+        if models_priced is not None
+        else max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) > 0 and capability(settings.CHAT_LLM_MODEL).priced
+    )
     if not priced:
         tight = max(0, settings.CHAT_RUN_UNPRICED_LLM_CALLS_PER_STEP)
         per_step = min(per_step, tight) if tight else per_step
     return _CALL_CEILING_BASE + per_step * max(1, steps)
 
 
-def derived_token_ceiling() -> int:
+def derived_token_ceiling(*, cost_limit_usd: float | None = None, models_priced: bool | None = None) -> int:
     """The run's token ceiling, or 0 when cost is bound to do the bounding.
 
     ``CHAT_RUN_TOKEN_BUDGET`` pins it when set. Otherwise: a run budgeted in
@@ -78,23 +82,35 @@ def derived_token_ceiling() -> int:
     configured = max(0, settings.CHAT_RUN_TOKEN_BUDGET)
     if configured:
         return configured
-    if max(0.0, settings.CHAT_RUN_COST_BUDGET_USD) <= 0:
+    cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD if cost_limit_usd is None else cost_limit_usd)
+    if cost_limit <= 0:
         # Not budgeting on cost either: this is an explicit "no token limit".
         return 0
     from reporting.services.chat_models import capability
 
-    if capability(settings.CHAT_LLM_MODEL).priced:
+    priced = models_priced if models_priced is not None else capability(settings.CHAT_LLM_MODEL).priced
+    if priced:
         return 0
     return max(0, settings.CHAT_RUN_UNPRICED_TOKEN_BUDGET)
 
 
-def initial_budget_ledger() -> dict[str, Any]:
-    token_limit = derived_token_ceiling()
-    cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD)
+def initial_budget_ledger(
+    *,
+    cost_limit_usd: float | None = None,
+    model_specs: list[dict[str, object]] | None = None,
+) -> dict[str, Any]:
+    models_priced: bool | None = None
+    if model_specs:
+        from reporting.services.chat_models import ModelSpec, capability
+
+        resolved = [ModelSpec.from_payload(payload) for payload in model_specs]
+        models_priced = all(capability(spec.model_id).priced for spec in resolved)
+    cost_limit = max(0.0, settings.CHAT_RUN_COST_BUDGET_USD if cost_limit_usd is None else cost_limit_usd)
+    token_limit = derived_token_ceiling(cost_limit_usd=cost_limit, models_priced=models_priced)
     reserve_ratio = min(max(settings.CHAT_RUN_RESERVE_PERCENT / 100.0, 0.0), 0.9)
     # One step's worth until a plan exists: routing and planning happen before
     # there is anything to derive from.
-    max_calls = derived_call_ceiling(1)
+    max_calls = derived_call_ceiling(1, models_priced=models_priced)
     return {
         "enabled": token_limit > 0 or cost_limit > 0 or max_calls > 0,
         "token_limit": token_limit,
@@ -114,6 +130,7 @@ def initial_budget_ledger() -> dict[str, Any]:
         "cost_usd": 0.0,
         "llm_calls": 0,
         "max_llm_calls": max_calls,
+        "models_priced": models_priced,
         "reserve_llm_calls": min(2, max(0, max_calls - 1)),
         "usage_estimated": False,
         "mode": "normal",
@@ -436,7 +453,7 @@ class BudgetController:
         ceiling that fell below what a run had already spent would finalize it
         retroactively.
         """
-        derived = derived_call_ceiling(steps)
+        derived = derived_call_ceiling(steps, models_priced=self._ledger.get("models_priced"))
         if not derived or derived <= int(self._ledger.get("max_llm_calls") or 0):
             return
         self._ledger["max_llm_calls"] = derived

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Box,
@@ -11,9 +11,12 @@ import {
   FormControlLabel,
   FormLabel,
   IconButton,
+  InputLabel,
+  MenuItem,
   Radio,
   RadioGroup,
   Switch,
+  Select,
   TextField,
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircle';
@@ -28,6 +31,7 @@ import {
   ScheduledChatWatchScan,
 } from 'src/hooks/useChatSchedules';
 import { useSyncMetadataValues } from 'src/hooks/useSyncMetadataValues';
+import { useSelectableModelProfiles } from 'src/hooks/useModelProfilesApi';
 
 interface ScheduledChatDialogProps {
   open: boolean;
@@ -44,6 +48,14 @@ function ScheduledChatDialog({
 }: ScheduledChatDialogProps) {
   const [name, setName] = useState(initial?.name ?? '');
   const [prompt, setPrompt] = useState(initial?.prompt ?? '');
+  const {
+    profiles,
+    defaultProfileId,
+    loading: profilesLoading,
+  } = useSelectableModelProfiles(open);
+  const [modelProfileId, setModelProfileId] = useState(
+    initial?.model_profile_id ?? '',
+  );
   const [triggerType, setTriggerType] = useState<'schedule' | 'watch_scans'>(
     initial?.watch_scans?.length ? 'watch_scans' : 'schedule',
   );
@@ -58,6 +70,10 @@ function ScheduledChatDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const syncValues = useSyncMetadataValues(open);
+  useEffect(() => {
+    if (!modelProfileId && defaultProfileId)
+      setModelProfileId(defaultProfileId);
+  }, [defaultProfileId, modelProfileId]);
 
   const updateWatchScan = (
     index: number,
@@ -72,8 +88,14 @@ function ScheduledChatDialog({
   };
 
   const scheduleValid = triggerType !== 'schedule' || schedule !== null;
+  const modelProfileValid =
+    profiles.length === 0 ||
+    profiles.some((profile) => profile.profile_id === modelProfileId);
   const canSave =
-    Boolean(name.trim()) && Boolean(prompt.trim()) && scheduleValid;
+    Boolean(name.trim()) &&
+    Boolean(prompt.trim()) &&
+    scheduleValid &&
+    modelProfileValid;
 
   const handleSave = async () => {
     setSaving(true);
@@ -82,6 +104,7 @@ function ScheduledChatDialog({
       await onSave({
         name: name.trim(),
         prompt: prompt.trim(),
+        model_profile_id: modelProfileId || null,
         schedule: triggerType === 'schedule' ? schedule : null,
         watch_scans:
           triggerType === 'watch_scans'
@@ -130,6 +153,30 @@ function ScheduledChatDialog({
             minRows={4}
             helperText="Instructions for the agent. It runs headlessly as you, with your permissions, and can use tools to query the graph."
           />
+          {profiles.length > 0 ? (
+            <FormControl fullWidth size="small">
+              <InputLabel>Model profile</InputLabel>
+              <Select
+                disabled={profilesLoading}
+                label="Model profile"
+                value={
+                  profiles.some(
+                    (profile) => profile.profile_id === modelProfileId,
+                  )
+                    ? modelProfileId
+                    : ''
+                }
+                onChange={(event) => setModelProfileId(event.target.value)}
+              >
+                {profiles.map((profile) => (
+                  <MenuItem key={profile.profile_id} value={profile.profile_id}>
+                    {profile.name}
+                    {profile.is_default ? ' (default)' : ''}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          ) : null}
           <FormControl>
             <FormLabel sx={{ fontSize: 13 }}>Trigger</FormLabel>
             <RadioGroup

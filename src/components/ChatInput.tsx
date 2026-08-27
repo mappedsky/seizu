@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   memo,
   useCallback,
   useRef,
@@ -25,6 +26,9 @@ interface ChatInputProps {
   disabled: boolean;
   onSubmit: (text: string) => void;
   onStop: () => void;
+  /** Optional controls shown on the left side of the composer footer. Keep the
+   *  node referentially stable while streaming so this component stays memoized. */
+  footerControls?: ReactNode;
   /** Whether the caller may bypass confirmations at all; hides the control when
    *  false. Passed as flags rather than a rendered node so this stays memoized
    *  against a parent that re-renders on every streamed frame. */
@@ -33,32 +37,64 @@ interface ChatInputProps {
   onBypassConfirmationsChange?: (value: boolean) => void;
 }
 
+const DEFAULT_INPUT_HEIGHT = 140;
+const MAX_AUTO_INPUT_HEIGHT = DEFAULT_INPUT_HEIGHT * 2;
+
 export default memo(function ChatInput({
   busy,
   disabled,
   onSubmit,
   onStop,
+  footerControls,
   showBypassConfirmations = false,
   bypassConfirmations = false,
   onBypassConfirmationsChange,
 }: ChatInputProps) {
   const [input, setInput] = useState('');
-  const [inputHeight, setInputHeight] = useState(140);
+  const [inputHeight, setInputHeight] = useState(DEFAULT_INPUT_HEIGHT);
   const inputHeightRef = useRef(inputHeight);
   inputHeightRef.current = inputHeight;
-  const dragStartY = useRef(0);
-  const dragStartHeight = useRef(0);
+  const autoSizingEnabledRef = useRef(true);
+  const dragStartYRef = useRef(0);
+  const dragStartHeightRef = useRef(0);
 
   const handleInputChange = (
     event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
   ) => {
     setInput(event.target.value);
+    if (
+      !autoSizingEnabledRef.current ||
+      !(event.target instanceof HTMLTextAreaElement)
+    ) {
+      return;
+    }
+    const textarea = event.target;
+    const nonTextHeight = Math.max(
+      0,
+      inputHeightRef.current - textarea.clientHeight,
+    );
+    const previousHeight = textarea.style.getPropertyValue('height');
+    const previousPriority = textarea.style.getPropertyPriority('height');
+    textarea.style.setProperty('height', '0px', 'important');
+    const contentHeight = textarea.scrollHeight;
+    if (previousHeight) {
+      textarea.style.setProperty('height', previousHeight, previousPriority);
+    } else {
+      textarea.style.removeProperty('height');
+    }
+    setInputHeight(
+      Math.max(
+        DEFAULT_INPUT_HEIGHT,
+        Math.min(MAX_AUTO_INPUT_HEIGHT, contentHeight + nonTextHeight),
+      ),
+    );
   };
 
   const submitInput = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed || busy || disabled) return false;
     setInput('');
+    if (autoSizingEnabledRef.current) setInputHeight(DEFAULT_INPUT_HEIGHT);
     onSubmit(trimmed);
     return true;
   }, [busy, disabled, input, onSubmit]);
@@ -77,15 +113,16 @@ export default memo(function ChatInput({
 
   const handleDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    dragStartY.current = e.clientY;
-    dragStartHeight.current = inputHeightRef.current;
+    autoSizingEnabledRef.current = false;
+    dragStartYRef.current = e.clientY;
+    dragStartHeightRef.current = inputHeightRef.current;
     document.body.style.cursor = 'ns-resize';
     document.body.style.userSelect = 'none';
 
     const handleMouseMove = (ev: MouseEvent) => {
-      const delta = dragStartY.current - ev.clientY;
+      const delta = dragStartYRef.current - ev.clientY;
       setInputHeight(
-        Math.max(100, Math.min(420, dragStartHeight.current + delta)),
+        Math.max(100, Math.min(420, dragStartHeightRef.current + delta)),
       );
     };
 
@@ -124,7 +161,11 @@ export default memo(function ChatInput({
           '&:hover::after': { bgcolor: 'primary.main' },
         }}
       />
-      <Box sx={{ flexShrink: 0, height: inputHeight }}>
+      <Box
+        data-testid="chat-composer"
+        style={{ height: inputHeight }}
+        sx={{ flexShrink: 0 }}
+      >
         <Card sx={{ height: '100%' }}>
           <CardContent
             component="form"
@@ -183,32 +224,39 @@ export default memo(function ChatInput({
                 },
               }}
             />
-            {showBypassConfirmations ? (
-              // In the composer rather than above it: it is a property of the
-              // message about to be sent, and a control floating between the
-              // conversation and the box reads as neither.
+            {footerControls || showBypassConfirmations ? (
               <Box
-                sx={{ display: 'flex', justifyContent: 'flex-end', mt: 0.5 }}
+                sx={{
+                  alignItems: 'center',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: 1,
+                  justifyContent: 'space-between',
+                  mt: 1.5,
+                }}
               >
-                <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={bypassConfirmations}
-                        onChange={(event) =>
-                          onBypassConfirmationsChange?.(event.target.checked)
-                        }
-                        size="small"
-                      />
-                    }
-                    label={
-                      <Typography color="text.secondary" variant="caption">
-                        Bypass confirmations
-                      </Typography>
-                    }
-                    sx={{ mr: 0 }}
-                  />
-                </Tooltip>
+                {footerControls}
+                {showBypassConfirmations ? (
+                  <Tooltip title="Run actions without per-action confirmation prompts. Every bypassed action is audit-logged.">
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={bypassConfirmations}
+                          onChange={(event) =>
+                            onBypassConfirmationsChange?.(event.target.checked)
+                          }
+                          size="small"
+                        />
+                      }
+                      label={
+                        <Typography color="text.secondary" variant="caption">
+                          Bypass confirmations
+                        </Typography>
+                      }
+                      sx={{ ml: 'auto', mr: 0 }}
+                    />
+                  </Tooltip>
+                ) : null}
               </Box>
             ) : null}
           </CardContent>

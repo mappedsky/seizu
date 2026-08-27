@@ -86,4 +86,12 @@ def test_registry_entry_is_rowless_and_flags_unclean_runs():
 
 def test_config_fields_include_the_row_fields_rowless_specs_do_not_get():
     names = {field.name for field in config_fields()}
-    assert {"prompt", "session_title", "skill", "timeout_minutes", "max_rows", "query_return_attribute"} == names
+    assert {
+        "prompt",
+        "session_title",
+        "model_profile_id",
+        "skill",
+        "timeout_minutes",
+        "max_rows",
+        "query_return_attribute",
+    } == names

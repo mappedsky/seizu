@@ -103,6 +103,9 @@ async def run_now(sc_id: str, *, request_key: str | None = None) -> tuple[str, s
 
 
 async def create_managed(body: CreateScheduledChatRequest, owner_user_id: str) -> ScheduledChatItem:
+    profile_argument = (
+        {"model_profile_id": body.model_profile_id} if "model_profile_id" in body.model_fields_set else {}
+    )
     created = await report_store.create_scheduled_chat(
         name=body.name,
         prompt=body.prompt,
@@ -110,6 +113,7 @@ async def create_managed(body: CreateScheduledChatRequest, owner_user_id: str) -
         watch_scans=body.watch_scans,
         enabled=body.enabled,
         created_by=owner_user_id,
+        **profile_argument,
     )
     await reconcile_by_id(created.scheduled_chat_id)
     refreshed = await report_store.get_scheduled_chat(created.scheduled_chat_id)
@@ -121,6 +125,9 @@ async def update_managed(
     body: CreateScheduledChatRequest,
     updated_by: str,
 ) -> ScheduledChatItem:
+    profile_argument = (
+        {"model_profile_id": body.model_profile_id} if "model_profile_id" in body.model_fields_set else {}
+    )
     updated = await report_store.update_scheduled_chat(
         sc_id=sc_id,
         name=body.name,
@@ -130,6 +137,7 @@ async def update_managed(
         enabled=body.enabled,
         updated_by=updated_by,
         comment=body.comment,
+        **profile_argument,
     )
     if updated is None:
         raise ScheduledChatNotFoundError("Scheduled chat not found")

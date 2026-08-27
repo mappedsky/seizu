@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -47,6 +48,7 @@ from reporting.schema.mcp_config import (
     ToolsetVersion,
     ToolVersion,
 )
+from reporting.schema.model_profiles import ModelProfileConfig, ModelProfileItem, ModelProfileVersion
 from reporting.schema.plugins import PluginFile, PluginFileInfo, PluginListItem, PluginSkillItem, PluginVersion
 from reporting.schema.rbac import RoleItem, RoleVersion
 from reporting.schema.report_config import (
@@ -442,6 +444,9 @@ class ChatSessionRecord(SQLModel, table=True):  # type: ignore
     scheduled_chat_id: str | None = Field(default=None, index=True)
     run_status: str | None = None
     run_errors: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    model_profile_id: str | None = None
+    model_reasoning_effort: str | None = None
+    model_profile_locked: bool = False
     # Set by the reaper's claim (SBX-011); a claimed session is closed to every
     # other writer until its checkpoint and sandbox are gone.
     retiring_at: str | None = None
@@ -521,6 +526,7 @@ class ScheduledChatRecord(SQLModel, table=True):  # type: ignore
     scheduled_chat_id: str = Field(primary_key=True)
     name: str
     prompt: str
+    model_profile_id: str | None = Field(default=None, index=True)
     schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
@@ -547,6 +553,7 @@ class ScheduledChatVersionRecord(SQLModel, table=True):  # type: ignore
     version: int
     name: str
     prompt: str
+    model_profile_id: str | None = None
     schedule: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     watch_scans: list[dict[str, Any]] = Field(default=[], sa_column=Column(JSON, nullable=False))
     enabled: bool = True
@@ -636,6 +643,46 @@ class RoleVersionRecord(SQLModel, table=True):  # type: ignore
     name: str
     description: str = ""
     permissions: list[str] = Field(default=[], sa_column=Column(JSON, nullable=False))
+    created_at: str
+    created_by: str
+    comment: str | None = None
+
+
+class ModelProfileRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "model_profiles"
+    __table_args__ = (
+        Index(
+            "uq_model_profiles_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default = true"),
+            sqlite_where=text("is_default = 1"),
+        ),
+    )
+    profile_id: str = Field(primary_key=True)
+    name: str = Field(unique=True)
+    description: str = ""
+    enabled: bool = True
+    is_default: bool = False
+    config: dict[str, Any] = Field(default={}, sa_column=Column(JSON, nullable=False))
+    current_version: int = 1
+    created_at: str
+    updated_at: str
+    created_by: str
+    updated_by: str | None = None
+
+
+class ModelProfileVersionRecord(SQLModel, table=True):  # type: ignore
+    __tablename__ = "model_profile_versions"
+    __table_args__ = (UniqueConstraint("profile_id", "version"),)
+    id: int | None = Field(default=None, primary_key=True)
+    profile_id: str = Field(index=True)
+    version: int
+    name: str
+    description: str = ""
+    enabled: bool
+    is_default: bool
+    config: dict[str, Any] = Field(default={}, sa_column=Column(JSON, nullable=False))
     created_at: str
     created_by: str
     comment: str | None = None
@@ -815,6 +862,44 @@ def _action_confirmation_from_record(record: ActionConfirmationRecord) -> Action
     )
 
 
+def _stored_model_profile_config(value: dict[str, Any]) -> ModelProfileConfig:
+    """Read current and pre-effort-selector profile JSON into the current shape."""
+    return ModelProfileConfig.model_validate(deepcopy(value))
+
+
+def _model_profile_from_record(record: ModelProfileRecord) -> ModelProfileItem:
+    config = _stored_model_profile_config(record.config)
+    return ModelProfileItem(
+        profile_id=record.profile_id,
+        name=record.name,
+        description=record.description,
+        enabled=record.enabled,
+        is_default=record.is_default,
+        current_version=record.current_version,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        created_by=record.created_by,
+        updated_by=record.updated_by,
+        **config.model_dump(),
+    )
+
+
+def _model_profile_version_from_record(record: ModelProfileVersionRecord) -> ModelProfileVersion:
+    config = _stored_model_profile_config(record.config)
+    return ModelProfileVersion(
+        profile_id=record.profile_id,
+        version=record.version,
+        name=record.name,
+        description=record.description,
+        enabled=record.enabled,
+        is_default=record.is_default,
+        created_at=record.created_at,
+        created_by=record.created_by,
+        comment=record.comment,
+        **config.model_dump(),
+    )
+
+
 def _user_from_record(record: UserRecord) -> User:
     return User(
         user_id=record.user_id,
@@ -840,6 +925,9 @@ def _chat_session_from_sql_record(record: "ChatSessionRecord") -> ChatSessionIte
         scheduled_chat_id=record.scheduled_chat_id,
         run_status=record.run_status,
         run_errors=record.run_errors or [],
+        model_profile_id=record.model_profile_id,
+        model_reasoning_effort=record.model_reasoning_effort,
+        model_profile_locked=record.model_profile_locked,
     )
 
 
@@ -1630,6 +1718,7 @@ class SQLModelReportStore(ReportStore):
             scheduled_chat_id=record.scheduled_chat_id,
             name=record.name,
             prompt=record.prompt,
+            model_profile_id=record.model_profile_id,
             schedule=record.schedule,
             watch_scans=record.watch_scans or [],
             enabled=record.enabled,
@@ -1651,6 +1740,7 @@ class SQLModelReportStore(ReportStore):
             version=record.version,
             name=record.name,
             prompt=record.prompt,
+            model_profile_id=record.model_profile_id,
             schedule=record.schedule,
             watch_scans=record.watch_scans or [],
             enabled=record.enabled,
@@ -1682,6 +1772,7 @@ class SQLModelReportStore(ReportStore):
         watch_scans: list[dict[str, Any]],
         enabled: bool,
         created_by: str,
+        model_profile_id: str | None = None,
     ) -> ScheduledChatItem:
         sc_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -1691,6 +1782,7 @@ class SQLModelReportStore(ReportStore):
                 scheduled_chat_id=sc_id,
                 name=name,
                 prompt=prompt,
+                model_profile_id=model_profile_id,
                 schedule=schedule,
                 watch_scans=watch_scans,
                 enabled=enabled,
@@ -1707,6 +1799,7 @@ class SQLModelReportStore(ReportStore):
                     version=version,
                     name=name,
                     prompt=prompt,
+                    model_profile_id=model_profile_id,
                     schedule=schedule,
                     watch_scans=watch_scans,
                     enabled=enabled,
@@ -1729,6 +1822,7 @@ class SQLModelReportStore(ReportStore):
         enabled: bool,
         updated_by: str,
         comment: str | None = None,
+        model_profile_id: str | None = None,
     ) -> ScheduledChatItem | None:
         now = datetime.now(tz=UTC).isoformat()
         async with AsyncSession(_get_engine()) as session:
@@ -1738,6 +1832,7 @@ class SQLModelReportStore(ReportStore):
             version = record.current_version + 1
             record.name = name
             record.prompt = prompt
+            record.model_profile_id = model_profile_id
             record.schedule = schedule
             record.watch_scans = watch_scans
             record.enabled = enabled
@@ -1751,6 +1846,7 @@ class SQLModelReportStore(ReportStore):
                     version=version,
                     name=name,
                     prompt=prompt,
+                    model_profile_id=model_profile_id,
                     schedule=schedule,
                     watch_scans=watch_scans,
                     enabled=enabled,
@@ -3773,6 +3869,217 @@ class SQLModelReportStore(ReportStore):
             )
 
     # ------------------------------------------------------------------
+    # Model profiles
+    # ------------------------------------------------------------------
+
+    async def list_model_profiles(self, *, enabled_only: bool = False) -> list[ModelProfileItem]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = select(ModelProfileRecord)
+            if enabled_only:
+                stmt = stmt.where(col(ModelProfileRecord.enabled).is_(True))
+            stmt = stmt.order_by(col(ModelProfileRecord.is_default).desc(), col(ModelProfileRecord.name))
+            result = await session.execute(stmt)
+            return [_model_profile_from_record(row) for row in result.scalars().all()]
+
+    async def get_model_profile(self, profile_id: str) -> ModelProfileItem | None:
+        async with AsyncSession(_get_engine()) as session:
+            row = await session.get(ModelProfileRecord, profile_id)
+            return _model_profile_from_record(row) if row else None
+
+    @staticmethod
+    def _model_profile_config(data: dict[str, Any]) -> dict[str, Any]:
+        return ModelProfileConfig.model_validate(
+            {
+                "primary": data["primary"],
+                "economy": data["economy"],
+                "stage_overrides": data.get("stage_overrides") or {},
+                "user_reasoning_efforts": data.get("user_reasoning_efforts", ("low", "medium", "high")),
+                "default_reasoning_effort": data.get("default_reasoning_effort", "medium"),
+                "run_cost_budget_usd": data["run_cost_budget_usd"],
+            }
+        ).model_dump(mode="json")
+
+    async def create_model_profile(self, data: dict[str, Any], created_by: str) -> ModelProfileItem:
+        profile_id = generate_report_id()
+        now = datetime.now(tz=UTC).isoformat()
+        config = self._model_profile_config(data)
+        async with AsyncSession(_get_engine()) as session:
+            existing = (await session.execute(select(ModelProfileRecord).with_for_update())).scalars().all()
+            enabled = bool(data.get("enabled", True))
+            is_default = bool(data.get("is_default", False))
+            if is_default and not enabled:
+                raise ValueError("the default model profile must be enabled")
+            if enabled and not any(row.enabled for row in existing):
+                is_default = True
+            if is_default:
+                for row in existing:
+                    if row.is_default:
+                        row.is_default = False
+                        row.current_version += 1
+                        row.updated_at = now
+                        row.updated_by = created_by
+                        session.add(row)
+                        session.add(
+                            ModelProfileVersionRecord(
+                                profile_id=row.profile_id,
+                                version=row.current_version,
+                                name=row.name,
+                                description=row.description,
+                                enabled=row.enabled,
+                                is_default=False,
+                                config=row.config,
+                                created_at=now,
+                                created_by=created_by,
+                                comment=f"Default changed to {data['name']}",
+                            )
+                        )
+            record = ModelProfileRecord(
+                profile_id=profile_id,
+                name=str(data["name"]),
+                description=str(data.get("description") or ""),
+                enabled=enabled,
+                is_default=is_default,
+                config=config,
+                current_version=1,
+                created_at=now,
+                updated_at=now,
+                created_by=created_by,
+                updated_by=created_by,
+            )
+            session.add(record)
+            session.add(
+                ModelProfileVersionRecord(
+                    profile_id=profile_id,
+                    version=1,
+                    name=record.name,
+                    description=record.description,
+                    enabled=record.enabled,
+                    is_default=record.is_default,
+                    config=config,
+                    created_at=now,
+                    created_by=created_by,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError("a model profile with that name already exists") from exc
+            await session.refresh(record)
+            return _model_profile_from_record(record)
+
+    async def update_model_profile(
+        self,
+        profile_id: str,
+        data: dict[str, Any],
+        updated_by: str,
+        comment: str | None = None,
+    ) -> ModelProfileItem | None:
+        config = self._model_profile_config(data)
+        async with AsyncSession(_get_engine()) as session:
+            rows = (await session.execute(select(ModelProfileRecord).with_for_update())).scalars().all()
+            record = next((row for row in rows if row.profile_id == profile_id), None)
+            if record is None:
+                return None
+            now = datetime.now(tz=UTC).isoformat()
+            enabled = bool(data.get("enabled", True))
+            is_default = bool(data.get("is_default", False))
+            if is_default and not enabled:
+                raise ValueError("the default model profile must be enabled")
+            other_enabled = [row for row in rows if row.profile_id != profile_id and row.enabled]
+            if record.is_default and not is_default and (enabled or other_enabled):
+                raise ValueError("select another default profile before changing this default")
+            if enabled and not any(row.enabled for row in rows if row.profile_id != profile_id):
+                is_default = True
+            if is_default:
+                for row in rows:
+                    if row.profile_id != profile_id and row.is_default:
+                        row.is_default = False
+                        row.current_version += 1
+                        row.updated_at = now
+                        row.updated_by = updated_by
+                        session.add(row)
+                        session.add(
+                            ModelProfileVersionRecord(
+                                profile_id=row.profile_id,
+                                version=row.current_version,
+                                name=row.name,
+                                description=row.description,
+                                enabled=row.enabled,
+                                is_default=False,
+                                config=row.config,
+                                created_at=now,
+                                created_by=updated_by,
+                                comment=f"Default changed to {data['name']}",
+                            )
+                        )
+            version = record.current_version + 1
+            record.name = str(data["name"])
+            record.description = str(data.get("description") or "")
+            record.enabled = enabled
+            record.is_default = is_default
+            record.config = config
+            record.current_version = version
+            record.updated_at = now
+            record.updated_by = updated_by
+            session.add(record)
+            session.add(
+                ModelProfileVersionRecord(
+                    profile_id=profile_id,
+                    version=version,
+                    name=record.name,
+                    description=record.description,
+                    enabled=enabled,
+                    is_default=is_default,
+                    config=config,
+                    created_at=now,
+                    created_by=updated_by,
+                    comment=comment,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise ValueError("a model profile with that name already exists") from exc
+            await session.refresh(record)
+            return _model_profile_from_record(record)
+
+    async def delete_model_profile(self, profile_id: str) -> bool:
+        async with AsyncSession(_get_engine()) as session:
+            rows = (await session.execute(select(ModelProfileRecord).with_for_update())).scalars().all()
+            record = next((row for row in rows if row.profile_id == profile_id), None)
+            if record is None:
+                return False
+            if record.is_default and any(row.enabled for row in rows if row.profile_id != profile_id):
+                raise ValueError("select another default profile before deleting this default")
+            await session.execute(
+                delete(ModelProfileVersionRecord).where(col(ModelProfileVersionRecord.profile_id) == profile_id)
+            )
+            await session.delete(record)
+            await session.commit()
+            return True
+
+    async def list_model_profile_versions(self, profile_id: str) -> list[ModelProfileVersion]:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = (
+                select(ModelProfileVersionRecord)
+                .where(col(ModelProfileVersionRecord.profile_id) == profile_id)
+                .order_by(col(ModelProfileVersionRecord.version).desc())
+            )
+            result = await session.execute(stmt)
+            return [_model_profile_version_from_record(row) for row in result.scalars().all()]
+
+    async def get_model_profile_version(self, profile_id: str, version: int) -> ModelProfileVersion | None:
+        async with AsyncSession(_get_engine()) as session:
+            stmt = select(ModelProfileVersionRecord).where(
+                col(ModelProfileVersionRecord.profile_id) == profile_id,
+                col(ModelProfileVersionRecord.version) == version,
+            )
+            row = (await session.execute(stmt)).scalars().first()
+            return _model_profile_version_from_record(row) if row else None
+
+    # ------------------------------------------------------------------
     # Chat sessions
     # ------------------------------------------------------------------
 
@@ -3851,6 +4158,8 @@ class SQLModelReportStore(ReportStore):
         title: str,
         origin: str = "interactive",
         scheduled_chat_id: str | None = None,
+        model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
     ) -> ChatSessionItem:
         thread_id = generate_report_id()
         now = datetime.now(tz=UTC).isoformat()
@@ -3865,6 +4174,8 @@ class SQLModelReportStore(ReportStore):
                 scheduled_chat_id=scheduled_chat_id,
                 run_status="running" if origin != "interactive" else None,
                 run_errors=[],
+                model_profile_id=model_profile_id,
+                model_reasoning_effort=model_reasoning_effort,
             )
             session.add(record)
             await session.commit()
@@ -3877,6 +4188,9 @@ class SQLModelReportStore(ReportStore):
                 scheduled_chat_id=scheduled_chat_id,
                 run_status="running" if origin != "interactive" else None,
                 run_errors=[],
+                model_profile_id=model_profile_id,
+                model_reasoning_effort=model_reasoning_effort,
+                model_profile_locked=False,
             )
 
     async def list_scheduled_chat_sessions(
@@ -3953,6 +4267,38 @@ class SQLModelReportStore(ReportStore):
     async def update_chat_session_title(self, user_id: str, thread_id: str, title: str) -> ChatSessionItem | None:
         return await self._update_unretired_chat_session(user_id, thread_id, {"title": title})
 
+    async def update_chat_session_model_profile(
+        self,
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem | None:
+        now = datetime.now(tz=UTC).isoformat()
+        async with AsyncSession(_get_engine()) as session:
+            record = (
+                await session.execute(
+                    select(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                        col(ChatSessionRecord.retiring_at).is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                return None
+            if record.model_profile_locked and record.model_profile_id != model_profile_id:
+                raise ValueError("the model profile is locked for this conversation")
+            record.model_profile_id = model_profile_id
+            record.model_reasoning_effort = model_reasoning_effort
+            record.updated_at = now
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return _chat_session_from_sql_record(record)
+
     async def delete_chat_session(self, user_id: str, thread_id: str) -> bool:
         async with AsyncSession(_get_engine()) as session:
             stmt = delete(ChatSessionRecord).where(
@@ -4015,21 +4361,33 @@ class SQLModelReportStore(ReportStore):
             if already is not None:
                 return resolve_chat_turn_for_key(_chat_turn_from_record(already))
 
-            # Admission and creation commit together, so a delete cannot slip
-            # between them: the session is closed to new turns the moment it is
-            # claimed, and this update is what observes that.
-            admitted = await session.execute(
-                update(ChatSessionRecord)
-                .where(
-                    col(ChatSessionRecord.user_id) == user_id,
-                    col(ChatSessionRecord.thread_id) == thread_id,
-                    col(ChatSessionRecord.retiring_at).is_(None),
+            # Admission and session selection commit together. Locking the row
+            # prevents a concurrent profile change from crossing the first
+            # turn that makes the profile family immutable.
+            chat_session = (
+                await session.execute(
+                    select(ChatSessionRecord)
+                    .where(
+                        col(ChatSessionRecord.user_id) == user_id,
+                        col(ChatSessionRecord.thread_id) == thread_id,
+                        col(ChatSessionRecord.retiring_at).is_(None),
+                    )
+                    .with_for_update()
                 )
-                .values(updated_at=now_iso)
-            )
-            if admitted.rowcount == 0:
+            ).scalar_one_or_none()
+            if chat_session is None:
                 await session.rollback()
                 return ChatTurnAdmission(outcome="retired")
+            resolved_profile = command.resolved_model_profile
+            if resolved_profile and resolved_profile.source == "profile":
+                if chat_session.model_profile_locked and chat_session.model_profile_id != resolved_profile.profile_id:
+                    await session.rollback()
+                    return ChatTurnAdmission(outcome="profile_locked")
+                chat_session.model_profile_id = resolved_profile.profile_id
+                chat_session.model_reasoning_effort = resolved_profile.reasoning_effort
+                chat_session.model_profile_locked = True
+            chat_session.updated_at = now_iso
+            session.add(chat_session)
 
             # Retire a turn whose lease has lapsed, in the same transaction as
             # the insert. Its producer is gone, so it must not keep holding the

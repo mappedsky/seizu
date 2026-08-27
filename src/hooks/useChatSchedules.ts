@@ -16,6 +16,7 @@ export interface ScheduledChat {
   scheduled_chat_id: string;
   name: string;
   prompt: string;
+  model_profile_id?: string | null;
   schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
@@ -34,6 +35,7 @@ export interface ScheduledChatVersion {
   version: number;
   name: string;
   prompt: string;
+  model_profile_id?: string | null;
   schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;
@@ -54,6 +56,7 @@ export interface ScheduledChatSession {
 export interface ScheduledChatRequest {
   name: string;
   prompt: string;
+  model_profile_id?: string | null;
   schedule: ChatScheduleSpec | null;
   watch_scans: ScheduledChatWatchScan[];
   enabled: boolean;

@@ -79,6 +79,11 @@ recorded before this existed keep replaying deterministically as `success`.
 
 ## The agent_chat workflow
 
+The `agent_chat` activity includes a **Model profile** selector. Empty follows
+the current default; an explicit profile is validated when the workflow is
+saved. Each run snapshots the resolved profile before its child workflow is
+started, so later profile edits affect only later runs.
+
 The general-purpose AI activity: instead of a fixed task, you supply the
 prompt. Use it to run an agent step inside a larger pipeline — triage what a
 query returned, write a summary report, or act on another activity's output.

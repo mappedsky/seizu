@@ -20,7 +20,11 @@ import {
   Button,
   Card,
   Chip,
+  FormControl,
   IconButton,
+  ListSubheader,
+  MenuItem,
+  Select,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -45,6 +49,11 @@ import { usePermissionState } from 'src/hooks/usePermissions';
 import { useChatHistory } from 'src/hooks/useChatHistory';
 import { useChatLocalStorage } from 'src/hooks/useChatLocalStorage';
 import { useChatSessions } from 'src/hooks/useChatSessions';
+import {
+  type ReasoningEffort,
+  type SelectableModelProfile,
+  useSelectableModelProfiles,
+} from 'src/hooks/useModelProfilesApi';
 import {
   type ActionConfirmation,
   useConfirmationsApi,
@@ -149,6 +158,76 @@ type SeizuChatMessage = UIMessage<
 >;
 
 const CHAT_LANDING_PATH = '/app/chat';
+
+export function ModelProfileSelect({
+  profiles,
+  profileId,
+  reasoningEffort,
+  lockedProfileId,
+  disabled,
+  onChange,
+}: {
+  profiles: SelectableModelProfile[];
+  profileId: string;
+  reasoningEffort: ReasoningEffort | '';
+  lockedProfileId?: string | null;
+  disabled: boolean;
+  onChange: (profileId: string, reasoningEffort: ReasoningEffort) => void;
+}) {
+  const visibleProfiles = lockedProfileId
+    ? profiles.filter((profile) => profile.profile_id === lockedProfileId)
+    : profiles;
+  if (visibleProfiles.length === 0) return null;
+  const options = visibleProfiles.flatMap((profile) =>
+    profile.reasoning_efforts.map((effort) => ({
+      effort,
+      key: `${profile.profile_id}:${effort}`,
+      profile,
+    })),
+  );
+  const value =
+    profileId && reasoningEffort ? `${profileId}:${reasoningEffort}` : '';
+  return (
+    <FormControl
+      disabled={disabled}
+      size="small"
+      sx={{ maxWidth: '100%', minWidth: { xs: 200, sm: 260 } }}
+    >
+      <Select
+        inputProps={{ 'aria-label': 'Model and reasoning' }}
+        onChange={(event) => {
+          const selected = options.find(
+            (option) => option.key === event.target.value,
+          );
+          if (selected) onChange(selected.profile.profile_id, selected.effort);
+        }}
+        renderValue={(selectedValue) => {
+          const selected = options.find(
+            (option) => option.key === selectedValue,
+          );
+          if (!selected) return '';
+          return `${selected.profile.name} · ${selected.effort}`;
+        }}
+        value={value}
+      >
+        {visibleProfiles.flatMap((profile) => [
+          <ListSubheader key={`${profile.profile_id}:group`}>
+            {profile.name}
+            {profile.is_default ? ' (default)' : ''}
+          </ListSubheader>,
+          ...profile.reasoning_efforts.map((effort) => (
+            <MenuItem
+              key={`${profile.profile_id}:${effort}`}
+              value={`${profile.profile_id}:${effort}`}
+            >
+              {effort}
+            </MenuItem>
+          )),
+        ])}
+      </Select>
+    </FormControl>
+  );
+}
 
 function chatSessionPath(threadId: string): string {
   return `/app/chat/${encodeURIComponent(threadId)}`;
@@ -730,9 +809,33 @@ export default function ChatInterface() {
     createSession,
     getSession,
     updateSession,
+    updateSessionProfile = async () => {},
     deleteSession,
     touchSession,
   } = useChatSessions(sessionsFeedEnabled);
+  const {
+    profiles: modelProfiles,
+    defaultProfileId,
+    loading: modelProfilesLoading,
+    error: modelProfilesError,
+  } = useSelectableModelProfiles(sessionsFeedEnabled);
+  const [landingProfileId, setLandingProfileId] = useState('');
+  const [landingReasoningEffort, setLandingReasoningEffort] = useState<
+    ReasoningEffort | ''
+  >('');
+  const [profileUpdateError, setProfileUpdateError] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!landingProfileId && defaultProfileId) {
+      const profile = modelProfiles.find(
+        (item) => item.profile_id === defaultProfileId,
+      );
+      setLandingProfileId(defaultProfileId);
+      setLandingReasoningEffort(profile?.default_reasoning_effort ?? 'medium');
+    }
+  }, [defaultProfileId, landingProfileId, modelProfiles]);
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -1046,6 +1149,9 @@ export default function ChatInterface() {
         void resumeStreamRef.current();
         return;
       }
+      setPendingAttach((current) =>
+        current?.threadId === activeThreadId ? null : current,
+      );
       // The turn is over, so it is no longer what Stop should reach: leaving it
       // pending means a Stop pressed during the *next* send -- before that one
       // is admitted -- cancels this finished turn and silently does nothing to
@@ -1286,7 +1392,17 @@ export default function ChatInterface() {
       setStartError(null);
       setCreatingSession(true);
       try {
-        const session = await createSession();
+        if (
+          modelProfiles.length > 0 &&
+          (!landingProfileId || !landingReasoningEffort)
+        ) {
+          throw new Error('Choose a model profile');
+        }
+        const session = await createSession(
+          '',
+          landingProfileId || null,
+          landingReasoningEffort || null,
+        );
         // Admitted before anything is navigated or re-keyed, so the question is
         // the server's before the UI has to be right about anything. If this
         // throws, the turn does not exist and the user still has their text.
@@ -1306,7 +1422,41 @@ export default function ChatInterface() {
         setCreatingSession(false);
       }
     },
-    [createSession, navigate, setMessages, setStoredActiveSessionId, transport],
+    [
+      createSession,
+      landingProfileId,
+      landingReasoningEffort,
+      modelProfiles.length,
+      navigate,
+      setMessages,
+      setStoredActiveSessionId,
+      transport,
+    ],
+  );
+
+  const handleProfileChange = useCallback(
+    async (profileId: string, reasoningEffort: ReasoningEffort) => {
+      if (!activeThreadId) return;
+      setProfileUpdateError(null);
+      try {
+        await updateSessionProfile(activeThreadId, profileId, reasoningEffort);
+      } catch (reason) {
+        setProfileUpdateError(
+          reason instanceof Error
+            ? reason.message
+            : 'Failed to change the model profile.',
+        );
+      }
+    },
+    [activeThreadId, updateSessionProfile],
+  );
+
+  const handleLandingProfileChange = useCallback(
+    (profileId: string, reasoningEffort: ReasoningEffort) => {
+      setLandingProfileId(profileId);
+      setLandingReasoningEffort(reasoningEffort);
+    },
+    [],
   );
 
   const handleDeleteSession = useCallback(
@@ -1351,11 +1501,11 @@ export default function ChatInterface() {
   );
 
   useEffect(() => {
-    // The chat for this thread has been built and seeded with the question, and
-    // `resume` has taken it from there. All that is left is to stop holding it:
-    // the URL-sync effect reads this to know a thread is mid-handover.
+    // The chat for this thread has been built and seeded with the question.
+    // Keep that seed until the turn finishes: useChat may re-read its options
+    // while reconnecting, and dropping the seed as soon as navigation settles
+    // makes the admitted question disappear before the worker checkpoints it.
     if (!pendingAttach || activeThreadId !== pendingAttach.threadId) return;
-    setPendingAttach(null);
     touchSession(activeThreadId);
   }, [pendingAttach, activeThreadId, touchSession]);
 
@@ -1464,6 +1614,59 @@ export default function ChatInterface() {
       });
     },
     [activeThreadId, busy, sendMessage, touchSession],
+  );
+
+  const landingProfileControl = useMemo(
+    () => (
+      <ModelProfileSelect
+        disabled={creatingSession || modelProfilesLoading}
+        onChange={handleLandingProfileChange}
+        profiles={modelProfiles}
+        profileId={landingProfileId}
+        reasoningEffort={landingReasoningEffort}
+      />
+    ),
+    [
+      creatingSession,
+      handleLandingProfileChange,
+      landingProfileId,
+      landingReasoningEffort,
+      modelProfiles,
+      modelProfilesLoading,
+    ],
+  );
+
+  const activeProfileId =
+    activeSession?.model_profile_id ?? defaultProfileId ?? '';
+  const activeReasoningEffort =
+    activeSession?.model_reasoning_effort ??
+    modelProfiles.find((profile) => profile.profile_id === activeProfileId)
+      ?.default_reasoning_effort ??
+    '';
+  const lockedProfileId =
+    activeSession?.model_profile_locked || messages.length > 0
+      ? (activeSession?.model_profile_id ?? null)
+      : null;
+  const activeProfileControl = useMemo(
+    () => (
+      <ModelProfileSelect
+        disabled={busy || modelProfilesLoading}
+        lockedProfileId={lockedProfileId}
+        onChange={handleProfileChange}
+        profiles={modelProfiles}
+        profileId={activeProfileId}
+        reasoningEffort={activeReasoningEffort}
+      />
+    ),
+    [
+      activeProfileId,
+      activeReasoningEffort,
+      busy,
+      handleProfileChange,
+      lockedProfileId,
+      modelProfiles,
+      modelProfilesLoading,
+    ],
   );
 
   if (!chatEnabled) {
@@ -1588,14 +1791,23 @@ export default function ChatInterface() {
                 {startError}
               </Alert>
             ) : null}
+            {modelProfilesError ? (
+              <Alert severity="error" sx={{ mb: 1 }}>
+                {modelProfilesError}
+              </Alert>
+            ) : null}
             <ChatInput
               // Disabled rather than busy while the session is being created:
               // busy turns the send button into a Stop, and there is nothing
               // here to stop.
               busy={false}
+              bypassConfirmations={bypassConfirmations}
               disabled={creatingSession}
+              footerControls={landingProfileControl}
+              onBypassConfirmationsChange={setBypassConfirmations}
               onSubmit={(text) => void handleStartSession(text)}
               onStop={() => {}}
+              showBypassConfirmations={canBypassConfirmations}
             />
           </Box>
         </Box>
@@ -2073,10 +2285,21 @@ export default function ChatInterface() {
           </Alert>
         ) : null}
 
+        {profileUpdateError ? (
+          <Alert
+            severity="error"
+            onClose={() => setProfileUpdateError(null)}
+            sx={{ flexShrink: 0, my: 0.5 }}
+          >
+            {profileUpdateError}
+          </Alert>
+        ) : null}
+
         <ChatInput
           busy={busy}
           bypassConfirmations={bypassConfirmations}
           disabled={disabled}
+          footerControls={activeProfileControl}
           onBypassConfirmationsChange={setBypassConfirmations}
           onStop={handleStop}
           onSubmit={handleSubmit}

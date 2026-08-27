@@ -29,6 +29,7 @@ from reporting.services import chat_turns
 from reporting.services.chat_budget import BudgetController
 from reporting.services.report_store import base as base_store
 from reporting.services.report_store.base import chat_turn_execution_bound_seconds
+from tests.unit.reporting.model_profile_test_utils import resolved_model_profile
 
 _FAKE_USER = User(
     user_id="test-user-id",
@@ -97,6 +98,18 @@ def _chat_enabled(mocker):
     mocker.patch("reporting.settings.CHAT_ENABLED", True)
 
 
+@pytest.fixture(autouse=True)
+def _environment_model_profile(mocker):
+    mocker.patch(
+        "reporting.routes.chat.model_profiles.resolve",
+        AsyncMock(return_value=resolved_model_profile()),
+    )
+    mocker.patch(
+        "reporting.services.chat_turns.model_profiles.environment_snapshot",
+        return_value=resolved_model_profile(),
+    )
+
+
 #: Sessions the current test has, shared so admission can refuse a thread that
 #: has none -- the store makes that decision in the same write, so the fake has
 #: to as well.
@@ -109,6 +122,7 @@ def _command(message: str = "Hi") -> ChatTurnCommand:
         message=message,
         permission_cap=sorted(ALL_PERMISSIONS),
         timeout_seconds=settings.CHAT_TURN_TIMEOUT_SECONDS,
+        resolved_model_profile=resolved_model_profile(),
     )
 
 
@@ -387,12 +401,24 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     async def get_chat_session(user_id: str, thread_id: str) -> ChatSessionItem | None:
         return sessions.get((user_id, thread_id))
 
-    async def create_chat_session(user_id: str, title: str) -> ChatSessionItem:
+    async def create_chat_session(
+        user_id: str,
+        title: str,
+        model_profile_id: str | None = None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem:
         nonlocal id_counter
         id_counter += 1
         thread_id = str(id_counter)
         now = _now()
-        session = ChatSessionItem(thread_id=thread_id, title=title, created_at=now, updated_at=now)
+        session = ChatSessionItem(
+            thread_id=thread_id,
+            title=title,
+            created_at=now,
+            updated_at=now,
+            model_profile_id=model_profile_id,
+            model_reasoning_effort=model_reasoning_effort,
+        )
         sessions[(user_id, thread_id)] = session
         return session
 
@@ -412,6 +438,27 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
         sessions[(user_id, thread_id)] = updated
         return updated
 
+    async def update_chat_session_model_profile(
+        user_id: str,
+        thread_id: str,
+        model_profile_id: str | None,
+        model_reasoning_effort: str | None = None,
+    ) -> ChatSessionItem | None:
+        existing_session = sessions.get((user_id, thread_id))
+        if existing_session is None:
+            return None
+        if existing_session.model_profile_locked and existing_session.model_profile_id != model_profile_id:
+            raise ValueError("the model profile is locked for this conversation")
+        updated = existing_session.model_copy(
+            update={
+                "model_profile_id": model_profile_id,
+                "model_reasoning_effort": model_reasoning_effort,
+                "updated_at": _now(),
+            }
+        )
+        sessions[(user_id, thread_id)] = updated
+        return updated
+
     async def delete_chat_session(user_id: str, thread_id: str) -> bool:
         return sessions.pop((user_id, thread_id), None) is not None
 
@@ -424,6 +471,10 @@ def _patch_chat_sessions(mocker, existing: list[tuple[str, str]] | None = None):
     mocker.patch("reporting.routes.chat.report_store.create_chat_session", create_chat_session)
     mocker.patch("reporting.routes.chat.report_store.touch_chat_session", touch_chat_session)
     mocker.patch("reporting.routes.chat.report_store.update_chat_session_title", update_chat_session_title)
+    mocker.patch(
+        "reporting.routes.chat.report_store.update_chat_session_model_profile",
+        update_chat_session_model_profile,
+    )
     mocker.patch("reporting.routes.chat.report_store.delete_chat_session", delete_chat_session)
     mocker.patch(
         "reporting.routes.chat.report_store.claim_chat_session_for_retirement",
@@ -896,6 +947,27 @@ async def test_chat_history_round_trips_persisted_messages(mocker):
     assert all(message["id"] for message in messages)
 
 
+async def test_chat_history_includes_an_admitted_question_before_checkpoint(mocker):
+    """A queued worker must not make a durable admission look like an empty chat."""
+    _patch_chat_sessions(mocker, [("test-user-id", "1014")])
+    mocker.patch("reporting.routes.chat.load_thread_messages", AsyncMock(return_value=[]))
+    turn = await _open_turn("test-user-id", "1014")
+
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        history = await client.get("/api/v1/chat/history", params={"thread_id": "1014"})
+
+    assert history.status_code == 200
+    assert history.json()["messages"] == [
+        {
+            "id": f"pending-{turn.turn_id}",
+            "role": "user",
+            "text": "Hi",
+            "metadata": {"created_at": turn.created_at},
+        }
+    ]
+
+
 async def test_chat_history_timestamps_both_turns(mocker):
     """Every persisted turn comes back with the time it was recorded."""
     from datetime import datetime
@@ -994,6 +1066,41 @@ async def test_chat_sessions_list_sorts_by_updated_at(mocker):
 
     assert response.status_code == 200
     assert [session["thread_id"] for session in response.json()["sessions"]] == [old_thread_id, new_thread_id]
+
+
+async def test_locked_session_can_change_reasoning_but_not_profile(mocker):
+    sessions = _patch_chat_sessions(mocker, [("test-user-id", "1001")])
+    sessions[("test-user-id", "1001")] = sessions[("test-user-id", "1001")].model_copy(
+        update={
+            "model_profile_id": "anthropic",
+            "model_reasoning_effort": "medium",
+            "model_profile_locked": True,
+        }
+    )
+
+    async def resolve(profile_id, reasoning_effort=None):
+        return resolved_model_profile(
+            source="profile",
+            profile_id=profile_id,
+            reasoning_effort=reasoning_effort or "medium",
+        )
+
+    mocker.patch("reporting.routes.chat.model_profiles.resolve", side_effect=resolve)
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        effort = await client.patch(
+            "/api/v1/chat/sessions/1001",
+            json={"reasoning_effort": "high"},
+        )
+        profile = await client.patch(
+            "/api/v1/chat/sessions/1001",
+            json={"model_profile_id": "deepseek", "reasoning_effort": "high"},
+        )
+
+    assert effort.status_code == 200
+    assert effort.json()["model_reasoning_effort"] == "high"
+    assert profile.status_code == 409
+    assert "locked" in profile.json()["error"].lower()
 
 
 async def test_create_chat_session_rejects_client_thread_id(mocker):

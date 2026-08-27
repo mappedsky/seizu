@@ -38,6 +38,44 @@ Chat history requires PostgreSQL checkpoint storage; the
 
 Tool and skill calls also require the *underlying* MCP permission (for example `tools:call` or `skills:render`) — chat never grants access the user's role doesn't already have.
 
+## Model profiles
+
+Admins manage model profiles from **Model Profiles** in the app sidebar. A
+profile names a base primary model and default user reasoning level, one economy
+fallback model and reasoning level, optional primary model and reasoning
+overrides for individual chat stages, the reasoning levels users may select,
+and a per-run USD cost cap. A stage whose
+reasoning is **Inherit base** uses the user's selected level; selecting an
+explicit value fixes that stage to the admin's value. Each save creates a
+version. `model_profiles:read`,
+`model_profiles:write`, and `model_profiles:delete` are granted to the built-in
+Admin role.
+
+Every user with `chat:use` selects one of the levels the profile's admin made
+available; new profiles offer `low`, `medium`, and `high` by default. The full
+admin vocabulary is LiteLLM's `default`, `none`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`. The first admitted turn locks that conversation to the
+profile, while the reasoning level remains changeable between turns. The selector
+then shows only that profile and its allowed levels. The selection affects
+stages whose reasoning inherits the base; fixed stage overrides and the economy
+fallback retain their configured reasoning. Start a new conversation to use
+another profile. If a locked conversation's profile is later disabled or
+deleted, start a new conversation; Seizu does not substitute another profile. The full resolved
+choice is captured when a turn is admitted, so editing a profile does not alter
+a running turn.
+
+The first enabled profile becomes the default. When profiles exist, exactly one
+enabled profile must be the default. Seizu does not install built-in profiles:
+until an admin creates one, chat continues to use the `CHAT_LLM_*` environment
+settings. Router and verifier always use their environment-configured models;
+profiles cover the answer-producing stages.
+
+A profile's cost cap is bounded by `CHAT_RUN_COST_BUDGET_USD`: when both are
+positive, the lower value applies. Set the global value to the deployment-wide
+hard ceiling and use profiles for smaller per-choice limits. The Model Profiles
+page warns when a profile requests more than this ceiling; the profile remains
+valid, but turns use the lower global value.
+
 ## Tool access and action confirmations
 
 Chat exposes a deliberately narrower tool surface than the MCP server:
@@ -186,8 +224,9 @@ the derived value unless you have a reason to pin.
 ```
 
 `CHAT_LLM_REASONING_EFFORT` bounds how much of that allowance a model may spend
-thinking: `none`, `minimal`, `low`, `medium`, `high`, or empty for the provider's
-own default. Seizu renders it into each provider's native parameter —
+thinking: `default`, `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`;
+empty also uses the provider's default. This is LiteLLM's fixed vocabulary.
+Seizu renders it into each provider's native parameter —
 `reasoning_effort` for OpenAI and Gemini, `thinking.budget_tokens` for Anthropic
 (a share of the call's ceiling), `extra_body` for DeepSeek — and never sends it
 to a model that does not support reasoning.
